@@ -3606,41 +3606,15 @@ fn live_entry_text(
     }
 }
 
-/// How many ledger rows a collapsed card draws before it starts counting. A
-/// long turn runs hundreds of calls, and drawing them all under a card nobody
-/// opened rebuilds the wall of rows #3039 took out of the head.
-const LEDGER_TAIL: usize = 3;
-
-/// Below this width the card head stops trying to be one line (#3046). Split
-/// panes are where the report came from: the row's own children do not shrink,
-/// so at a few hundred pixels the tail of the head fell off the pane edge. At
-/// or above it the head keeps the one-line shape a full pane reads best.
-const HEAD_STACK_WIDTH: f32 = 560.0;
-
 /// The card's body: every exact entry keeps its own menu, while one shared
 /// selection row preserves drag offsets and receives mouse release (#2925).
 ///
-/// `limit` is how many trailing entries the body may draw: `None` draws the
-/// whole ledger, which is what an opened card shows. A collapsed card shows
-/// the tail only, with a muted marker naming the rows it left out, so a long
-/// turn reads as a short ledger under its head instead of as a wall of rows.
+/// The body draws the whole ledger, which is what an opened card shows (#3046).
 fn live_card_body(
-    mut lines: Vec<(usize, LiveCardLine)>,
+    lines: Vec<(usize, LiveCardLine)>,
     drag: Option<&Rc<CopyDrag>>,
     press: &HashMap<LiveRow, PressHandler>,
-    limit: Option<usize>,
 ) -> AnyElement {
-    // The rows left out, and the rows kept. The marker sits ABOVE the kept
-    // rows because the rows it counts happened earlier than the ones below
-    // it: the same reading order the ledger has when it is drawn whole.
-    let hidden = limit
-        .map(|n| lines.len().saturating_sub(n))
-        .unwrap_or(0);
-    let lines = if hidden > 0 {
-        lines.split_off(hidden)
-    } else {
-        lines
-    };
     let mut body = div()
         .flex()
         .flex_col()
@@ -3649,13 +3623,6 @@ fn live_card_body(
         .pb_1()
         .min_w_0()
         .overflow_hidden();
-    if hidden > 0 {
-        body = body.child(head_run(
-            format!("+{hidden} earlier call{}", if hidden == 1 { "" } else { "s" }),
-            palette::current().text_muted,
-            None,
-        ));
-    }
     // The copy string is built from the drawn slice, so it matches the pixels:
     // a collapsed card copies what it shows, never the rows it hid.
     let row_text = lines
@@ -3820,172 +3787,85 @@ fn live_card(
                     .position(|entry| matches!(entry, LiveEntry::Tool(index) if *index == tool))
             })
     };
-    // #2468: the head row owns the card's width and the lead takes the slack.
-    // Without a width of its own the row sized to its content, the content was
-    // the lead, and the lead was measured against the width it was about to
-    // define: gpui resolved that circle by giving the text one character of
-    // room, so the lead stacked vertically until a zoom forced a fresh measure.
+    // #2468: the head owns the card's width and each row takes it. Without a
+    // width of its own the row sized to its content, the content was the lead,
+    // and the lead was measured against the width it was about to define: gpui
+    // resolved that circle by giving the text one character of room, so the
+    // lead stacked vertically until a zoom forced a fresh measure.
     //
-    // The lead sits on ONE line with the sentence it explains (#3042), and
-    // neither of them wraps. The entries used to be full-width rows in a
-    // wrapping flex row, so the sentence claimed the whole line, the call fell
-    // under it, and the arrow (centred against a row several lines tall) ended
-    // up beside the prose instead of at the top of the card. A head that wraps
-    // is a head that reads as two items, which is exactly what the report
-    // showed: narration on top, tools below.
-    // A pane narrower than HEAD_STACK_WIDTH gets the stacked head (#3046). One
-    // row cannot hold a sentence, a call and four statistics at 400px: the row
-    // is built from `flex_shrink_0` children, so its tail was cut off at the
-    // pane edge and the stats came out clipped mid number. Stacked, the same
-    // pieces take two or three lines and every one of them stays readable.
-    let width = max_width.max(0.0);
-    let stacked = width > 0.0 && width < HEAD_STACK_WIDTH;
-    // Wide, the call may take half the row when a sentence precedes it. In a
-    // stacked head the call owns a line of its own and needs no cap.
-    let lead_cap = (width * 0.5).max(240.0);
-    let has_narration = narration.is_some();
-    // Whether the call leads the row, read before the row draws it: the entry
-    // that renders the call takes the string, and the head still asks whether
-    // it had one when it decides about its dot (#3046).
+    // Whether the call has anything to say, read before the row draws it: the
+    // entry that renders the call takes the string, and the head still asks
+    // whether it had one when it decides how many rows it has (#3046).
     let has_lead = !lead.is_empty();
     let footer = live_card_footer(live, ctx);
-    // One line on a wide head, two when it stacks: a narrow pane should read
-    // the sentence and the call, not two ellipsised stubs.
-    let clamp = if stacked { Some(2) } else { Some(1) };
+    // Every row is one line, ellipsised. The head is a status block, not a
+    // transcript: a sentence that wraps pushes the row under it out of shape,
+    // and a clipped one still reads.
+    let clamp = Some(1);
     let accent = palette::current().accent;
+    // Three rows, always in this order (#3046): the sentence the turn is
+    // speaking, the call it is running right now, and the numbers ending with
+    // the clock. One line each, so the block never grows past three, and one
+    // size throughout, because every row goes through `head_run` or
+    // `live_entry_text` at `SMALL_TEXT_SIZE`. A wide pane used to fold all
+    // three onto one row, which is where the numbers came out clipped mid
+    // figure and the sentence and the call ran together.
     let mut head = div()
         .flex()
-        .when(stacked, |d| d.flex_col().items_start())
-        .when(!stacked, |d| d.flex_row().items_center().overflow_hidden())
+        .flex_col()
+        .items_start()
         .gap_1()
         .w_full()
         .min_w_0()
         .px_2()
         .pt_1()
         .pb_1();
-    if stacked {
-        // Line one: the arrow, the spinner and the sentence it explains.
-        let mut top = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .w_full()
-            .min_w_0()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(16.0))
-                    .child(disclosure_icon(accent, 1.0)),
-            )
-            .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
-        if let Some((entry, paragraph)) = narration.as_ref() {
-            top = top.child(div().flex_1().min_w_0().child(live_entry_text(
-                format!("live-preview-{entry}"),
-                Some(*entry),
-                paragraph.clone(),
-                small_style(SMALL_TEXT_SIZE, accent),
-                clamp,
-                drag,
-                press,
-            )));
-        }
-        head = head.child(top);
-        // Line two: the call. Its own line, so a narrow pane wraps it instead
-        // of cutting it off at the edge.
-        if has_lead {
-            head = head.child(div().w_full().min_w_0().child(live_entry_text(
-                "live-activity".to_string(),
-                activity_entry,
-                lead,
-                small_style(SMALL_TEXT_SIZE, accent),
-                clamp,
-                drag,
-                press,
-            )));
-        }
-        // Line three: every statistic. No leading dot: a dot needs a word on
-        // its left, and this line starts with the hammer.
-        if let Some(footer) = footer {
-            head = head.child(head_run(footer, accent, clamp).w_full());
-        }
-    } else {
-        head = head
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(16.0))
-                    .child(disclosure_icon(accent, 1.0)),
-            )
-            .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
-        // The turn's last paragraph and the call it is about, side by side
-        // (#3039): the sentence first, then the call that follows it in time,
-        // both in the accent and both clipped to the one line (#3042). The
-        // sentence takes the slack; the call keeps up to half the row, so
-        // neither can starve the other.
-        let mut status = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_1()
-            .min_w_0();
-        if let Some((entry, paragraph)) = narration {
-            status = status.child(div().flex_1().min_w_0().child(live_entry_text(
-                format!("live-preview-{entry}"),
-                Some(entry),
-                paragraph,
-                small_style(SMALL_TEXT_SIZE, accent),
-                clamp,
-                drag,
-                press,
-            )));
-        }
-        if has_lead {
-            // The sentence and the call are two segments of one line (#3046).
-            // Without the dot the prose runs straight into the call and the two
-            // read as one broken sentence.
-            if has_narration {
-                status = status.child(head_dot(accent));
-            }
-            let arm = div().min_w_0();
-            let arm = if has_narration {
-                arm.flex_shrink_0().max_w(px(lead_cap))
-            } else {
-                arm.flex_1()
-            };
-            status = status.child(arm.child(live_entry_text(
-                "live-activity".to_string(),
-                activity_entry,
-                lead,
-                small_style(SMALL_TEXT_SIZE, accent),
-                clamp,
-                drag,
-                press,
-            )));
-        }
-        head = head.child(status);
-        // The count, the rate and the clock ride the arrow's own line (#3042).
-        // A running card that stacked them on a bar under the body read as two
-        // blocks, the status on top and loose numbers underneath, and it kept
-        // that shape for the moment after the turn settled, when the head had
-        // already turned into the tick. One line, one colour, exactly what the
-        // settled card draws when it replaces this one.
-        if let Some(footer) = footer {
-            // A dot needs a word on its left. A turn that has only streamed
-            // text so far has no lead and no preview, so its head is the frame
-            // and the clock, and a dot in front of the clock would read as a
-            // stray mark.
-            if has_narration || has_lead {
-                head = head.child(head_dot(accent));
-            }
-            head = head.child(
-                div()
-                    .flex_shrink()
-                    .min_w_0()
-                    .child(head_run(footer, accent, clamp).w_full()),
-            );
-        }
+    // Line one: the arrow, the spinner and the sentence it explains.
+    let mut top = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(16.0))
+                .child(disclosure_icon(accent, 1.0)),
+        )
+        .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
+    if let Some((entry, paragraph)) = narration.as_ref() {
+        top = top.child(div().flex_1().min_w_0().child(live_entry_text(
+            format!("live-preview-{entry}"),
+            Some(*entry),
+            paragraph.clone(),
+            small_style(SMALL_TEXT_SIZE, accent),
+            clamp,
+            drag,
+            press,
+        )));
+    }
+    head = head.child(top);
+    // Line two: the call running now. `live_activity` reads the newest running
+    // call every frame, so this row is the turn's live work, not a summary of
+    // it drawn once when the card opened.
+    if has_lead {
+        head = head.child(div().w_full().min_w_0().child(live_entry_text(
+            "live-activity".to_string(),
+            activity_entry,
+            lead,
+            small_style(SMALL_TEXT_SIZE, accent),
+            clamp,
+            drag,
+            press,
+        )));
+    }
+    // Line three: the count, the budget, the rate and the clock, which is
+    // where the statistics end. No leading dot: a dot needs a word on its
+    // left, and this line starts with the hammer.
+    if let Some(footer) = footer {
+        head = head.child(head_run(footer, accent, clamp).w_full());
     }
     let mut card = div()
         .id("live-card")
@@ -4004,16 +3884,15 @@ fn live_card(
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)));
     card = card.child(head);
-    // The ledger draws whether or not the card is open (#3046). It used to
-    // draw only inside `if expanded`, so a running turn was one strip with no
-    // row per call: the work a reader most wants to see vanished until they
-    // clicked a card that gave them no reason to click. A collapsed card shows
-    // the tail of the ledger; opening it draws every row.
-    if !lines.is_empty() {
-        let body = live_card_body(lines, drag, press, (!expanded).then_some(LEDGER_TAIL));
-        card = card.child(body);
-    }
+    // The ledger belongs to the OPENED card (#3046). A closed card is its head
+    // and nothing else: narration, the call, and the statistics, three lines at
+    // most. Drawing a tail of rows under a closed head made the block grow with
+    // the turn, and those rows are whole paragraphs of narration and reasoning,
+    // so three lines turned into a wall of prose nobody opened.
     if expanded {
+        if !lines.is_empty() {
+            card = card.child(live_card_body(lines, drag, press));
+        }
         card = card
             // An open card ends in the control that closes it: the head's
             // chevron keeps pointing down, so without this the only sign that
@@ -7528,8 +7407,9 @@ mod tests {
     }
 
     /// Both card states use the vector arrow instead of a tiny text triangle,
-    /// and the narrow pane keeps it on the first line of its stacked head
-    /// (#3046), so the live card holds one arrow per shape.
+    /// and the live card holds exactly one, on the first line of its head
+    /// (#3046): the three rows share one arrow, so the block reads as one
+    /// foldable item rather than three.
     #[test]
     fn the_fold_header_uses_the_vector_disclosure_arrow() {
         // Read the file up to its own test module. The whole-file scan counted
@@ -7543,8 +7423,8 @@ mod tests {
             .expect("the test module marker is still in the file");
         assert_eq!(
             body.matches("disclosure_icon(").count(),
-            3,
-            "the settled head and the live card's two shapes, one arrow each"
+            2,
+            "the settled head and the live head's first row, one arrow each"
         );
         assert!(!body.contains("fn fold_chevron("));
     }
@@ -7590,23 +7470,20 @@ mod tests {
         );
     }
 
-    /// #2468 with #3042: the live lead must never define its own width. It was
+    /// #2468 with #3046: the live lead must never define its own width. It was
     /// the only child of the head row that could shrink, and the row sized
     /// itself from the lead it was about to contain, so the text was measured
     /// against roughly one character and stacked vertically until a zoom forced
     /// a fresh measure. The card takes its width from the pane, the head owns
-    /// that width, and the entries share it.
+    /// that width, and each row takes it in turn.
     ///
-    /// The head never wraps: a wrapping head put the sentence on its own row
-    /// with the call under it, and the arrow, centred against the tall row,
-    /// ended up beside the prose. #3046 turns that into two deliberate shapes.
-    /// A wide pane keeps one line, both entries clamped once and ellipsised,
-    /// the sentence taking the slack and the call holding its half so neither
-    /// starves the other. A pane narrower than `HEAD_STACK_WIDTH` stacks the
-    /// head into a column and lets the sentence keep two lines, which is a
-    /// break the reader chose rather than a measure the row forced.
+    /// The head is three rows at most, in one order: the sentence the turn is
+    /// speaking, the call it is running right now, and the statistics ending
+    /// with the clock. Every row is one line and ellipsised, so a turn that
+    /// narrates paragraphs between tool calls still reads as one block of the
+    /// same shape instead of growing a wall of text.
     #[test]
-    fn the_head_keeps_the_sentence_and_the_call_together() {
+    fn the_head_is_three_rows_and_never_wraps() {
         const SRC: &str = include_str!("transcript.rs");
         // Substring scans, never byte offsets: this file is the thing being
         // read, so a hand-rolled index is one rustfmt pass away from a panic
@@ -7618,99 +7495,66 @@ mod tests {
             .split_once("fn live_card_footer(")
             .expect("the card footer")
             .0;
-        let head_and_else = card
+        let head = card
             .split_once("let mut head = div()")
             .expect("the head row")
-            .1;
-        let head = head_and_else
-            .split_once("let mut status = div()")
-            .expect("the status row")
-            .0;
-        let status_row = head_and_else
-            .split_once("let mut status = div()")
-            .expect("the status row")
             .1
-            .split_once("if let Some((entry, paragraph)) = narration {")
-            .expect("the narration arm")
-            .0;
-        let preview = head_and_else
-            .split_once("if let Some((entry, paragraph)) = narration {")
-            .expect("the narration arm")
-            .1
-            .split_once("if has_lead {")
-            .expect("the call arm")
-            .0;
-        let lead_arm = head_and_else
-            .split_once("if has_lead {")
-            .expect("the lead arm")
-            .1
-            .split_once("head = head.child(status)")
-            .expect("the row joins the head")
+            .split_once("let mut card = div()")
+            .expect("the card itself")
             .0;
         assert!(
-            card.contains(".w_full()"),
-            "the card takes the pane's width, not its own content's"
+            head.contains(".flex_col()"),
+            "the rows stack, so each one owns a line of its own"
+        );
+        assert_eq!(
+            head.matches("head = head.child(").count(),
+            3,
+            "three rows: the sentence, the call, the numbers, and no fourth"
         );
         assert!(
-            head.contains(".w_full()"),
-            "the head row owns the card's width"
+            card.contains("let clamp = Some(1);"),
+            "every row is one line, ellipsised, so the block never grows"
         );
         assert!(
-            status_row.contains(".flex_1()") || status_row.contains(".flex_grow()"),
-            "the status row takes the head's slack instead of hugging its content"
+            !head.contains(".flex_wrap()"),
+            "the head stacks deliberately, never by wrapping a row of shrinking children"
         );
         assert!(
-            !status_row.contains(".flex_wrap()") && !head.contains(".flex_wrap()"),
-            "the head breaks by stacking, never by wrapping a row of shrinking children"
-        );
-        assert!(
-            card.contains("width < HEAD_STACK_WIDTH") && head.contains(".flex_col()"),
-            "a narrow pane stacks the head into a column of its own accord"
-        );
-        assert!(
-            card.contains("let clamp = if stacked { Some(2) } else { Some(1) };"),
-            "the sentence gets one line on a wide head and two once it stacks"
-        );
-        assert!(
-            preview.contains("clamp,"),
-            "the sentence is clamped to the head it shares with the call"
-        );
-        assert!(
-            lead_arm.contains("live_entry_text(") && lead_arm.contains("clamp,"),
-            "the call is clamped to the same line instead of dropping under the prose"
-        );
-        assert!(
-            lead_arm.contains("flex_shrink_0()") && lead_arm.contains("max_w("),
-            "the call holds its half of the row so the sentence cannot squeeze it away"
+            src_at(head, "live-preview-{entry}") < src_at(head, "live-activity")
+                && src_at(head, "live-activity") < src_at(head, "head_run(footer"),
+            "the order is the turn's own: the sentence, then the call, then the numbers"
         );
     }
 
-    /// #3046: one line carrying several numbers is one line only while the
-    /// reader can tell where each starts. The heads divide their segments with
-    /// the same middle dot the Telegram footer uses, in the head's own accent,
-    /// so the count, the budget and the clock read as one sentence's clauses
-    /// instead of running together.
+    /// #3046: several numbers on one line are one line only while the reader
+    /// can tell where each starts. The live head's numbers arrive as the footer
+    /// string, whose clauses `stats_line` divides with the same middle dot the
+    /// Telegram footer uses, and the settled head divides its verdict from the
+    /// numbers the same way.
     #[test]
     fn the_head_segments_are_divided_by_the_accent_dot() {
         const SRC: &str = include_str!("transcript.rs");
-        let live = SRC
-            .split_once("fn live_card(")
-            .expect("the live card")
-            .1
+        let footer = SRC
             .split_once("fn live_card_footer(")
             .expect("the card footer")
+            .1
+            .split_once("/// One block, drawn.")
+            .expect("the footer's end")
             .0;
         assert!(
-            live.contains("status = status.child(head_dot(accent))"),
-            "the sentence and the call it explains are divided, not run together"
+            footer.contains("stats_line(parts)"),
+            "the count, the budget, the rate and the clock are one divided sentence"
         );
+        let stats = SRC
+            .split_once("fn stats_line(")
+            .expect("the stats line")
+            .1
+            .split_once("/// One conversation turn, folded")
+            .expect("the stats line's end")
+            .0;
         assert!(
-            live.contains("if has_narration || has_lead {"),
-            "the numbers wait for a word to stand on their left"
-        );
-        assert!(
-            live.contains("head = head.child(head_dot(accent))"),
-            "the numbers are divided from the status they follow"
+            stats.contains("\u{b7}"),
+            "the clauses are divided by the middle dot"
         );
         let settled = SRC
             .split_once("fn settled_card(")
@@ -7721,7 +7565,7 @@ mod tests {
             .0;
         assert!(
             settled.contains("head = head.child(head_dot(accent))"),
-            "the verdict and its numbers are divided on the finished card's one line"
+            "the verdict and its numbers are divided on the finished card's line"
         );
     }
 
@@ -7757,8 +7601,8 @@ mod tests {
                 "the {name} head must not set a size of its own, or it drifts off the line"
             );
             assert!(
-                head.matches("head_run(").count() >= 3,
-                "the {name} head draws every segment through head_run"
+                head.matches("head_run(").count() >= 2,
+                "the {name} head draws its spinner and its numbers through head_run"
             );
         }
         let run = production
@@ -8010,13 +7854,12 @@ mod tests {
         }
     }
 
-    /// #3046: the card draws its ledger whether or not it is open, and a
-    /// collapsed card draws only the tail of it. A turn with more calls than
-    /// `LEDGER_TAIL` names the ones it left out, or a reader counts three rows
-    /// under a head that says twelve.
+    /// #3046: a closed card is its head and nothing else. The ledger hangs off
+    /// the opened card, so a turn running six calls (and narrating between
+    /// them, at paragraph length) does not grow a wall of rows under a block
+    /// the reader never opened.
     #[test]
-    fn a_collapsed_card_draws_the_ledger_tail() {
-        assert_eq!(LEDGER_TAIL, 3, "a short ledger, not a wall of rows");
+    fn a_closed_card_draws_no_ledger() {
         let mut live = LiveTurn::default();
         live.begin("run them".into());
         for n in 0..6 {
@@ -8032,35 +7875,20 @@ mod tests {
             .split_once("fn live_card_footer(")
             .expect("the card footer")
             .0;
-        assert!(
-            card.contains("live_card_body(lines, drag, press, (!expanded).then_some(LEDGER_TAIL))"),
-            "the collapsed card asks the body for the tail, and only the tail"
-        );
-        let (before_fold, in_fold) = card
-            .split_once("if expanded {\n        card = card")
+        let (closed_head, opened) = card
+            .split_once("if expanded {\n        if !lines.is_empty() {")
             .expect("the fold's own branch");
         assert!(
-            before_fold.contains("live_card_body("),
-            "the ledger draws whether or not the card is open"
+            !closed_head.contains("live_card_body("),
+            "a closed card draws the head alone, never a ledger under it"
         );
         assert!(
-            !in_fold.contains("live_card_body("),
-            "opening the card changes the limit, never whether there is a ledger"
-        );
-        let body = SRC
-            .split_once("fn live_card_body(")
-            .expect("the card body")
-            .1
-            .split_once("fn live_card_line_text(")
-            .expect("the body's end")
-            .0;
-        assert!(
-            body.contains("format!(\"+{hidden} earlier call{}\""),
-            "the rows left out are named, above the ones kept"
+            opened.contains("live_card_body(lines, drag, press)"),
+            "the opened card draws the whole ledger"
         );
         assert!(
-            body.contains("lines.split_off(hidden)"),
-            "the body draws the last rows, not the first"
+            !card.contains("earlier call"),
+            "nothing counts rows the head never draws"
         );
     }
 
