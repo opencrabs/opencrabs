@@ -4159,6 +4159,10 @@ fn selection_rgba() -> u32 {
 /// What a successful copy tells the view that owns the composer (#2587).
 type CopiedListener = Rc<dyn Fn(&mut App)>;
 
+/// The dashboard owns local previews and external URL launches. The transcript
+/// reports the resolved target instead of choosing a platform opener itself.
+type OpenTargetListener = Rc<dyn Fn(ClickTarget, &mut App)>;
+
 /// The press that may turn into an open (#2317): the text under the pointer,
 /// the link labels on it, and the byte offset the press landed on.
 ///
@@ -4217,6 +4221,8 @@ pub struct CopyDrag {
     /// clipboard, so the composer can say so (#2587). Empty until the view
     /// that owns the composer hands one over.
     on_copied: RefCell<Option<CopiedListener>>,
+    /// Routes a resolved click through the window that owns this transcript.
+    on_open_target: RefCell<Option<OpenTargetListener>>,
 }
 
 impl CopyDrag {
@@ -4225,6 +4231,12 @@ impl CopyDrag {
     /// knows both halves of the gesture.
     pub fn set_copied_listener(&self, listener: CopiedListener) {
         *self.on_copied.borrow_mut() = Some(listener);
+    }
+
+    /// The window decides where a target opens: local files use its preview
+    /// overlay, while URLs retain the system handler.
+    pub fn set_open_target_listener(&self, listener: OpenTargetListener) {
+        *self.on_open_target.borrow_mut() = Some(listener);
     }
 
     /// Tell the owner a copy landed. Only call this after a successful write:
@@ -4281,18 +4293,18 @@ impl CopyDrag {
         } else {
             // Nothing was selected, so the press was a click: open whatever it
             // landed on. A drag that copied must never also launch (#2317).
-            self.open_clicked_target();
+            self.open_clicked_target(app);
         }
         window.refresh();
     }
 
-    /// Open the target the press under the pointer named (#2317). Returns
-    /// whether anything opened, so a caller can tell a miss from a hit.
+    /// Dispatch the target the press under the pointer named (#2317). Returns
+    /// whether the window accepted it, so a caller can tell a miss from a hit.
     ///
     /// The pending press is taken whether or not it resolves, so one press can
     /// never open twice and a stale candidate cannot survive to the next
     /// click.
-    pub fn open_clicked_target(&self) -> bool {
+    pub fn open_clicked_target(&self, app: &mut App) -> bool {
         let Some(pending) = self.pending_click.borrow_mut().take() else {
             return false;
         };
@@ -4307,10 +4319,11 @@ impl CopyDrag {
             return false;
         };
         crate::logging::info(&format!("transcript link: open {}", target.label()));
-        match &target {
-            ClickTarget::Url(url) => crate::preview::launch(&crate::preview::url_command(url)),
-            ClickTarget::File(path) => crate::preview::launch(&crate::preview::open_command(path)),
-        }
+        let Some(listener) = self.on_open_target.borrow().clone() else {
+            crate::logging::info("transcript link: no window listener attached");
+            return false;
+        };
+        listener(target, app);
         true
     }
 

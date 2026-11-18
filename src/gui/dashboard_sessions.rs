@@ -464,6 +464,21 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A transcript reports its resolved target here so local files share the
+    /// attachment overlay and only external destinations reach the OS opener.
+    pub(crate) fn open_transcript_target(
+        &mut self,
+        target: opencrabs::ui_core::links::ClickTarget,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            opencrabs::ui_core::links::ClickTarget::File(path) => self.open_preview(path, cx),
+            opencrabs::ui_core::links::ClickTarget::Url(url) => {
+                preview::launch(&preview::url_command(&url));
+            }
+        }
+    }
+
     /// Open a file a tile stands for. The overlay decides what to draw from the
     /// path alone, so this stays one assignment: no state is derived at click
     /// time that could disagree with what the overlay renders (#2395).

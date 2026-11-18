@@ -8,12 +8,17 @@
 //! link's destination, the press recording what it landed on, the release
 //! opening only after a copy found nothing) is read from source.
 
-use crate::ui_core::links::{ClickTarget, target_at_byte_with, target_at_with, target_for_click};
+use crate::ui_core::links::{
+    ClickTarget, target_at_byte_with, target_at_with, target_for_click, target_for_click_with,
+};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const MARKDOWN: &str = include_str!("../gui/markdown.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const MAIN: &str = include_str!("../gui/main.rs");
+const PANES: &str = include_str!("../gui/dashboard_panes.rs");
+const SESSIONS: &str = include_str!("../gui/dashboard_sessions.rs");
 
 /// A temp dir unique per test, holding the fixtures it names.
 struct Sandbox {
@@ -136,6 +141,58 @@ fn open_target_prefers_the_label_over_the_text_around_it() {
     );
 }
 
+/// An explicit local destination is a file when it exists relative to the
+/// selected cwd. A missing target stays inert instead of falling through to
+/// the browser.
+#[test]
+fn open_target_resolves_an_explicit_local_markdown_link() {
+    let box_ = Sandbox::new("markdown-file", &["notes.md"]);
+    let text = "read notes now";
+    let label = text.find("notes").expect("label");
+    let links = vec![(label..label + 5, "notes.md".to_string())];
+    assert_eq!(
+        target_for_click_with(text, &links, label + 1, &box_.dir, None),
+        Some(ClickTarget::File(box_.dir.join("notes.md")))
+    );
+
+    let missing = vec![(label..label + 5, "gone.md".to_string())];
+    assert_eq!(
+        target_for_click_with(text, &missing, label + 1, &box_.dir, None),
+        None
+    );
+}
+
+#[test]
+fn open_target_resolves_an_explicit_file_url() {
+    let box_ = Sandbox::new("file-url", &["notes.md"]);
+    let file = box_.dir.join("notes.md");
+    let text = "read notes now";
+    let label = text.find("notes").expect("label");
+    let links = vec![(
+        label..label + 5,
+        format!("file://{}", file.display()),
+    )];
+    assert_eq!(
+        target_for_click_with(text, &links, label + 1, &box_.dir, None),
+        Some(ClickTarget::File(file))
+    );
+}
+
+/// Explicit links historically accepted every URI scheme. Keep that behavior
+/// instead of applying the stricter host-shape check used for bare tokens.
+#[test]
+fn open_target_keeps_explicit_external_schemes() {
+    let text = "read docs now";
+    let label = text.find("docs").expect("label");
+    for dest in ["https://x", "mailto:docs@example.com", "ftp://example.com/file"] {
+        let links = vec![(label..label + 4, dest.to_string())];
+        assert_eq!(
+            target_for_click_with(text, &links, label + 1, Path::new("/nonexistent"), None),
+            Some(ClickTarget::Url(dest.to_string()))
+        );
+    }
+}
+
 /// Off the label the text is ordinary rendered text, so a link must not make
 /// its whole line clickable.
 #[test]
@@ -222,7 +279,7 @@ fn open_target_waits_for_the_copy_to_find_nothing() {
         .find("finish_copy(app)")
         .expect("the release copies first");
     let open = release
-        .find("open_clicked_target()")
+        .find("open_clicked_target(app)")
         .expect("the release opens a click");
     let guard = release
         .find("} else {")
@@ -262,21 +319,35 @@ fn open_target_press_on_padding_leaves_no_candidate() {
     );
 }
 
-/// A link split around a crab picture still opens from either side of it, and
-/// the launch goes through the same commands the attachment preview uses.
+/// A link split around a crab picture still opens from either side of it. The
+/// transcript dispatches the target to its window instead of choosing an OS
+/// opener for a local file itself.
 #[test]
-fn open_target_survives_a_split_and_launches_through_preview() {
+fn open_target_survives_a_split_and_routes_through_the_dashboard() {
     let split = body_of(TRANSCRIPT, "fn local_links(");
     assert!(
         split.contains("let from = span.start.max(range.start);")
             && split.contains("let to = span.end.min(range.end);"),
         "a link range is rebased onto the chunk that draws it"
     );
-    let open = body_of(TRANSCRIPT, "pub fn open_clicked_target(&self) -> bool");
+    let open = body_of(
+        TRANSCRIPT,
+        "pub fn open_clicked_target(&self, app: &mut App) -> bool",
+    );
     assert!(
-        open.contains("crate::preview::launch(&crate::preview::url_command(url))")
-            && open.contains("crate::preview::launch(&crate::preview::open_command(path))"),
-        "a url and a path go through the platform opener"
+        open.contains("listener(target, app);") && !open.contains("preview::open_command"),
+        "the transcript hands the target to its window"
+    );
+    assert!(
+        MAIN.contains("this.copy_drag.set_open_target_listener")
+            && PANES.contains("pane_copy.set_open_target_listener"),
+        "both the main transcript and every split pane attach the dashboard route"
+    );
+    let dashboard = body_of(SESSIONS, "pub(crate) fn open_transcript_target(");
+    assert!(
+        dashboard.contains("self.open_preview(path, cx)")
+            && dashboard.contains("preview::url_command(&url)"),
+        "files use the overlay while external URLs keep the system handler"
     );
     assert!(
         open.contains("transcript link: open {}"),

@@ -112,12 +112,57 @@ pub fn target_for_click(
     links: &[(Range<usize>, String)],
     offset: usize,
 ) -> Option<ClickTarget> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    target_for_click_with(text, links, offset, &cwd, dirs::home_dir().as_deref())
+}
+
+/// Injectable-cwd/home form of [`target_for_click`]. An explicit Markdown
+/// destination uses the same local-path rules as a bare token instead of
+/// assuming every label points at the web.
+pub fn target_for_click_with(
+    text: &str,
+    links: &[(Range<usize>, String)],
+    offset: usize,
+    cwd: &Path,
+    home: Option<&Path>,
+) -> Option<ClickTarget> {
     for (span, dest) in links {
         if span.contains(&offset) {
-            return Some(ClickTarget::Url(dest.clone()));
+            return classify_link(dest, cwd, home);
         }
     }
-    target_at_byte(text, offset)
+    target_at_byte_with(text, offset, cwd, home)
+}
+
+/// Classify an explicit Markdown destination. Non-file URI schemes retain the
+/// existing external-handler behavior; only a verified local path becomes a
+/// file target.
+fn classify_link(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
+    let token = clean_token(raw);
+    if token.is_empty() {
+        return None;
+    }
+    if token.to_ascii_lowercase().starts_with("file://") {
+        return resolve_path(token.get("file://".len()..)?, cwd, home);
+    }
+    if has_uri_scheme(token) {
+        return Some(ClickTarget::Url(token.to_string()));
+    }
+    resolve_path(token, cwd, home)
+}
+
+/// A URI scheme is `alpha *( alpha / digit / "+" / "-" / "." )` followed by
+/// `:`. One-letter schemes are left to path resolution so Windows drive paths
+/// such as `C:\\notes.md` remain files.
+fn has_uri_scheme(token: &str) -> bool {
+    let Some((scheme, _)) = token.split_once(':') else {
+        return false;
+    };
+    scheme.len() > 1
+        && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Expand from `col` to the token surrounding it. A click on whitespace or

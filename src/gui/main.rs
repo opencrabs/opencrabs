@@ -6212,6 +6212,22 @@ fn main() {
                         branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
                     }
                 });
+                // Local transcript targets open in this window's preview;
+                // external URLs keep the system handler. The weak backlink
+                // avoids a dashboard/copy-state ownership cycle.
+                {
+                    let dashboard = view.downgrade();
+                    view.update(cx, |this, _| {
+                        this.copy_drag.set_open_target_listener(Rc::new(move |target, cx| {
+                            if dashboard
+                                .update(cx, |this, cx| this.open_transcript_target(target, cx))
+                                .is_err()
+                            {
+                                logging::info("transcript link: window is gone");
+                            }
+                        }));
+                    });
+                }
                 // Custom icon images are read once at startup, not per paint
                 // (#2790): the stored values were loaded with the rest of the
                 // topic state above.

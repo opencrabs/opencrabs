@@ -540,6 +540,17 @@ impl Dashboard {
                 let _ = editor.update(cx, |editor, cx| editor.show_copied(cx));
             }));
         }
+        {
+            let dashboard = cx.entity().downgrade();
+            pane_copy.set_open_target_listener(Rc::new(move |target, cx| {
+                if dashboard
+                    .update(cx, |this, cx| this.open_transcript_target(target, cx))
+                    .is_err()
+                {
+                    logging::info("transcript link: window is gone");
+                }
+            }));
+        }
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
         agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
