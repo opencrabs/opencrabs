@@ -374,7 +374,12 @@ fn grouped_topics_are_compact_visible_pins_not_a_dropdown() {
         row.contains(".when_some(title_pin, |d, pin| d.child(pin))"),
         "full and grouped rows share one pin control in the trailing cluster"
     );
-    assert!(row.contains(".when(indented, |d| d.pl_4().pr_2().py_1())"));
+    assert!(row.contains(".when(indented, |d| d.pr_2().py_1())"));
+    assert!(
+        row.contains(".pl(px(row_left_pad(indented, bar)))"),
+        "the row inset is computed so every row and the brand logo share one \
+         media axis (#3013)"
+    );
     assert!(row.contains("title_text.text_xs()"));
     assert!(
         row.contains(".when(!indented, |d|"),
