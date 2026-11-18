@@ -737,6 +737,16 @@ Both surfaces keep what you typed. The rules are the same in the terminal and in
 
 History is one list, shared in real time. The terminal and the window read and write the same `~/.opencrabs/history.txt` (500 entries, consecutive duplicates collapsed), and inside the window the single composer and every split pane walk one in-memory list, so a message sent in a pane is recalled in the window and the other way round. A restart keeps the list.
 
+#### Voice messages
+
+The microphone sits at the right end of the composer and records a real message, not a dictation draft: click it, or press `ctrl+alt+r`, and one control takes over the row. While the microphone is open it counts the take, draws a wave of what the device is actually hearing, and turns its mark into the stop square, so the thing that started the recording is the thing that ends it. Escape stops it too, and a click on the square; every way out of a take goes through the same stop (#3044).
+
+A finished take is transcribed through whichever STT engine the profile is configured with, the same chain every channel uses, so nothing new to set up. The recording is encoded to OGG/Opus and written to `~/.opencrabs/voice/` as `voice-<milliseconds>.ogg`; the words go to the agent as an ordinary message and the clip rides along as `<<AUD:path>>`, which is how an image or a video already travels. The transcript strips the marker into a card that plays where it sits, with the clip's real length under the play glyph; while it plays the glyph becomes the stop square and the bars take the accent colour.
+
+When the answer settles, a turn that began as a recording is answered out loud. The reply goes through the same `synthesize` the channels call, the audio is saved beside the take as `reply-<milliseconds>.ogg`, and the marker goes on the answer row, so the same card plays the agent's voice back. Both are ordinary OGG/Opus files you can open from disk. Two things keep the loop honest: the reply and the take never share a name, so the player can tell them apart, and the marker is stripped before a stored row becomes model context, so the agent never reads a path it wrote itself.
+
+Speech needs a synthesis engine: with `tts_enabled` off or no TTS provider behind it, the answer arrives as text, exactly as a voice note does on Telegram. Transcription needs one too, and the built-in OpenCrabs provider transcribes out of the box.
+
 #### Theme modal
 
 `ctrl+shift+t` or `/theme` opens a centered card over the conversation, not a sidebar: four preview cards in the shape of Telegram's picker. A click on a card applies and saves it immediately, so there is no Keep button, and `esc`, the close line or a click on the scrim closes the card without undoing the choice. The arrows walk the four cards and Enter applies, so the picker works without a mouse.
