@@ -105,11 +105,23 @@ impl AgentContext {
             if db_msg.role == crate::services::message::TURN_STOPPED_ROLE {
                 continue;
             }
+            // An audio marker is a display cue, never something that was said
+            // (#3044). The window stores a voice turn's clip beside its words
+            // and keeps the marker in the row so the transcript can draw a
+            // player under them; replayed into context, the model would read
+            // its own marker back and start emitting ones nobody asked to be
+            // spoken. Stripped only when present, so every other row's text is
+            // untouched.
+            let text = if db_msg.content.contains("<<AUD:") {
+                crate::utils::extract_aud_markers(&db_msg.content).0
+            } else {
+                db_msg.content
+            };
             // Skip messages with empty content AND no captured reasoning —
             // Anthropic rejects empty text blocks. A non-empty thinking
             // column alone still justifies keeping the row so downstream
             // providers (e.g. Moonshot kimi) see the reasoning context.
-            let has_content = !db_msg.content.is_empty();
+            let has_content = !text.is_empty();
             let has_thinking = db_msg
                 .thinking
                 .as_deref()
@@ -141,9 +153,7 @@ impl AgentContext {
                 });
             }
             if has_content {
-                content.push(ContentBlock::Text {
-                    text: db_msg.content,
-                });
+                content.push(ContentBlock::Text { text });
             }
 
             let message = Message { role, content };

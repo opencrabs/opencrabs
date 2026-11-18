@@ -16,6 +16,18 @@ pub fn extract_vid_markers(text: &str) -> (String, Vec<String>) {
     extract_markers_with_prefix(text, "<<VID:")
 }
 
+/// Extract `<<AUD:path>>` markers from text — mirror of [`extract_img_markers`]
+/// for audio attachments.
+///
+/// The window keeps a voice turn's clip beside its words and stores the marker
+/// in the row so the transcript can draw a player under it (#3044). That marker
+/// is a display cue, never something that was said: history is cleaned with this
+/// before it becomes context, because a turn that read its own marker back would
+/// learn to emit one.
+pub fn extract_aud_markers(text: &str) -> (String, Vec<String>) {
+    extract_markers_with_prefix(text, "<<AUD:")
+}
+
 /// Extract `<<react:emoji>>` directive from text.
 ///
 /// Returns `(cleaned_text, Option<emoji>)` — valid directives are removed
