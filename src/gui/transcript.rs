@@ -3731,24 +3731,24 @@ fn live_card(
     max_width: f32,
 ) -> Stateful<Div> {
     // A stop ends the turn where it stood (#2811), and a finished turn shows
-    // the tick. While the turn runs the slot carries the clock instead of the
-    // spinning dot (#3046): a spinner says "busy" and nothing else, and the
-    // number the reader wants while waiting is how long it has been running.
-    // The clock leaves that slot the moment the turn ends and takes its final
-    // place at the end of the numbers, so the head ends on the verdict and the
-    // statistics end on the total.
+    // the tick. While the turn runs the slot carries the clock, and only while
+    // the clock is the whole line (#3046).
     //
-    // One decision, two consumers: `finished` drives the slot AND the total at
-    // the end of the numbers, because the two were worked out in separate
-    // places and could disagree, which is how the clock ended up counted in
-    // both at once. There is no path that prints it twice.
+    // It led a full turn once, where the spinning dot used to be, and that read
+    // wrong: it stayed in front of the sentence and the call after they
+    // arrived, so the reader kept meeting a stopwatch before the words. It
+    // leads only an empty line, counting from zero the moment the request goes
+    // out; the first tool call or the first narration fills the line and the
+    // clock moves to the end of the numbers, which is where the Telegram footer
+    // and the settled card keep it, and there it stays. One move, and it is the
+    // move from an empty line to a full one.
     let finished = live.stopped || live.settled.is_some();
-    let slot = if live.stopped {
-        "\u{23f9}".to_string()
+    let mut slot = if live.stopped {
+        Some("\u{23f9}".to_string())
     } else if finished {
-        "\u{2705}".to_string()
+        Some("\u{2705}".to_string())
     } else {
-        clock_glyph(live.elapsed_secs())
+        None
     };
     let (lead, _) = live_status_line(live);
     let lines = live_card_lines(live);
@@ -3805,6 +3805,9 @@ fn live_card(
     // whether it had one when it decides how many rows it has (#3046).
     let has_lead = !lead.is_empty();
     let footer = live_card_footer(live, ctx);
+    // Read before the footer moves into the line below: the clock's own gate
+    // asks whether there are any numbers yet.
+    let has_footer = footer.is_some();
     // One status line, dot-divided (#3046): the sentence the turn is speaking,
     // the call it is running right now, and the numbers, with the turn's total
     // closing them once the turn has ended. It went to three stacked rows to
@@ -3825,13 +3828,28 @@ fn live_card(
     if let Some(footer) = footer {
         segments.push(footer);
     }
-    // The total closes the numbers once the turn has ended (#3046), in the same
-    // clock the settled card prints, so finishing changes the verdict and
-    // nothing else. It reads the same `finished` flag as the glyph slot, so the
-    // two can never both count and the clock is written once, at the end.
-    let elapsed = live.elapsed_secs();
-    if finished && elapsed > 0 {
-        segments.push(clock_glyph(elapsed));
+    // The clock closes the numbers once there is anything to close (#3046). A
+    // line that has nothing to say yet has no end to close, so the clock takes
+    // the slot instead and the reader watches it count from zero where the dot
+    // used to spin; the first call, the first narration or the first number
+    // sends it back here, and here it stays. Written once either way, so the
+    // two places cannot disagree.
+    //
+    // The placeholder is not something to say. `live_status_line` answers
+    // "OpenCrabs is thinking..." while the turn has nothing at all, and that
+    // sentence sits beside the clock rather than in front of it, so the clock
+    // still leads the line a message begins on.
+    let idle = live.tools.is_empty()
+        && live.chunks == 0
+        && live.stream.is_empty()
+        && live.reasoning.is_empty()
+        && narration.is_none()
+        && !has_footer;
+    let clock = clock_glyph(live.elapsed_secs());
+    if idle && !finished {
+        slot = Some(clock);
+    } else {
+        segments.push(clock);
     }
     let status_line = segments.join(" \u{b7} ");
     let mut head = div()
@@ -3849,11 +3867,13 @@ fn live_card(
                 .flex_shrink_0()
                 .w(px(16.0))
                 .child(disclosure_icon(accent, 1.0)),
-        )
-        .child(head_run(slot, palette::current().text_muted, None).flex_shrink_0());
-    // The clock sits on the first line with the arrow, so it stays in place
-    // while the sentence under it grows and shrinks. When the turn ends that
-    // slot turns into the tick and the clock reappears in the numbers.
+        );
+    // The slot, on the arrow's own line: the clock while the turn has nothing
+    // to say, the verdict once it stops. A line with content starts on the
+    // sentence itself, so no number ever stands in front of the words.
+    if let Some(slot) = slot {
+        head = head.child(head_run(slot, palette::current().text_muted, None).flex_shrink_0());
+    }
     if !status_line.is_empty() {
         head = head.child(div().flex_1().min_w_0().child(live_entry_text(
             "live-head".to_string(),
@@ -3914,10 +3934,9 @@ fn live_card(
 /// the ctx budget and the rate it is streaming at. `None` before the turn has
 /// anything to say, so the head never ends in a dangling separator.
 ///
-/// The clock is not one of them (#3046). It belongs to the head's own slot
-/// while the turn runs, and `live_card` appends the total after these numbers
-/// once the turn ends, so the footers here stay one segment shorter and the
-/// clock is written in exactly one place.
+/// The clock is not one of them (#3046). `live_card` decides where it goes,
+/// because the empty line is the only case that puts it in front, and building
+/// it here too is what let the two places disagree.
 fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if !live.tools.is_empty() {
@@ -3937,10 +3956,9 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     if let Some(segment) = rate_segment(f64::from(live.tokens_per_sec())) {
         parts.push(segment);
     }
-    // No clock here (#3046). The turn's total is decided in `live_card`, beside
-    // the glyph it swaps for: while the turn runs the head's own slot is the
-    // only clock, and once it ends the same flag appends the total after these
-    // numbers. Building it here too is what let the two disagree.
+    // No clock here (#3046). The turn's total is decided in `live_card`, which
+    // is also the only place that knows whether the line is still empty.
+    // Building it here too is what let the two places disagree.
     stats_line(parts)
 }
 
@@ -7530,14 +7548,15 @@ mod tests {
         );
     }
 
-    /// #3046: while the turn runs, the head's glyph slot carries the clock
-    /// instead of the spinning dot. A spinner says "busy" and nothing else,
-    /// while the clock says how long this has been going. When the turn ends
-    /// the slot becomes the verdict and the clock takes its final place at the
-    /// end of the numbers, which is where the settled card keeps it: the total
-    /// is written in one place, and it moves there once.
+    /// #3046: the clock leads the head line only while the line is empty, and
+    /// closes the numbers from the first call or narration on. It led a whole
+    /// turn once, where the spinning dot used to be, and stayed in front of the
+    /// sentence and the call after they arrived. The rule is one move per turn:
+    /// count from zero in the arrow's slot until the card has something to say,
+    /// then sit at the end of the statistics, which is where the Telegram
+    /// footer and the settled card keep it.
     #[test]
-    fn the_head_slot_shows_the_clock_until_the_turn_ends() {
+    fn the_clock_leads_only_an_empty_head_line() {
         const SRC: &str = include_str!("transcript.rs");
         let card = SRC
             .split_once("fn live_card(")
@@ -7547,28 +7566,55 @@ mod tests {
             .expect("the numbers")
             .0;
         let slot = card
+            .split_once("let mut slot = if live.stopped {")
+            .expect("the finished flag")
+            .1
             .split_once("let (lead, _) = live_status_line(live);")
             .expect("the status line")
             .0;
         assert!(
-            slot.contains("clock_glyph(live.elapsed_secs())"),
-            "the running slot carries the clock"
+            !slot.contains("clock_glyph("),
+            "the slot is declared with the verdict only"
+        );
+        assert!(
+            slot.contains("\"\\u{2705}\""),
+            "a finished turn shows the tick"
         );
         assert!(
             !slot.contains("SPINNER_FRAMES"),
-            "the running slot no longer animates: the clock is the progress"
+            "and it never animates: the clock is the progress"
         );
-        // Both places read the same flag (#3046). The slot and the total used
-        // to be worked out separately, and a disagreement between them printed
-        // a running turn's clock at the end of the numbers as well as in the
-        // slot. One flag, and the total is appended under it.
+        // Written once, in one of the two places, decided together.
+        let segments = card
+            .split_once("let clock = clock_glyph(live.elapsed_secs());")
+            .expect("the clock")
+            .1
+            .split_once("let status_line = segments.join(")
+            .expect("the join")
+            .0;
         assert!(
-            slot.contains("let finished = live.stopped || live.settled.is_some();"),
-            "one flag decides the slot and the total"
+            segments.contains("let idle = live.tools.is_empty()"),
+            "nothing called yet is the only state that lets the clock lead"
         );
         assert!(
-            card.contains("if finished && elapsed > 0 {"),
-            "the total joins the numbers under that same flag"
+            segments.contains("narration.is_none()"),
+            "and nothing spoken yet"
+        );
+        assert!(
+            segments.contains("if idle && !finished {"),
+            "the clock leads only the line a message begins on"
+        );
+        assert!(
+            segments.contains("slot = Some(clock);"),
+            "that line puts the clock in the arrow's slot"
+        );
+        assert!(
+            segments.contains("segments.push(clock);"),
+            "the first call, narration or number ends the line on the clock"
+        );
+        assert!(
+            !segments.contains("live.elapsed_secs())"),
+            "built once, then moved: no second clock to disagree with the first"
         );
         let footer = SRC
             .split_once("fn live_card_footer(")
