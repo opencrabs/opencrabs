@@ -3755,7 +3755,9 @@ fn live_card(
                 .truncate()
                 .text_xs()
                 .text_color(rgb(palette::current().accent))
-                .children(footer.map(SharedString::from)),
+                // `footer` is already unwrapped here, so it is one string on
+                // the head's line, never an option to fan out.
+                .child(SharedString::from(footer)),
         );
     }
     card = card.child(head);
@@ -8153,12 +8155,18 @@ mod tests {
             .split_once("fn live_card_footer(")
             .expect("the card footer")
             .0;
+        // The footer is a plain string by the time the head draws it, so it is
+        // one child on the head's line. It joins the card BEFORE the head does,
+        // which is what keeps it off a bar of its own under the body.
+        let (head_first, under_body) = card
+            .split_once("card = card.child(head);")
+            .expect("the head joins the card");
         assert!(
-            card.contains(".children(footer.map(SharedString::from))"),
+            head_first.contains(".child(SharedString::from(footer))"),
             "the numbers join the head's line"
         );
         assert!(
-            !card.contains(".child(SharedString::from(footer))"),
+            !under_body.contains("SharedString::from(footer)"),
             "no bar is drawn under the body: the block ends at the arrow"
         );
     }
