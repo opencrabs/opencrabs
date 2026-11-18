@@ -67,6 +67,9 @@ actions!(
         Newline,
         /// Tab on a half-typed slash command: fill the name, do not run it.
         AcceptCommand,
+        /// The dictation toggle (#3044), so the microphone has a key and the
+        /// user never has to leave the keyboard to talk instead of type.
+        ToggleVoice,
     ]
 );
 
@@ -417,6 +420,19 @@ pub struct Editor {
     /// a new keystroke only refreshes the instant, so a fast typist never
     /// stacks timers.
     caret_looping: bool,
+    /// The microphone the composer is holding, if any (#3044). Dropping it is
+    /// what stops the capture, so this field is the whole life of a recording.
+    voice_capture: Option<voice_input::Capture>,
+    /// Whether the recording has been asked to stop and its WAV is on the way.
+    voice_finishing: bool,
+    /// The transcription in flight, if any.
+    voice_transcription: Option<voice_input::Transcription>,
+    /// Whether the dictation loop is already ticking. Same one-shot shape as
+    /// the caret blink: it ends the moment nothing is pending.
+    voice_looping: bool,
+    /// The whole second last painted in the recording counter, so a tick that
+    /// moved no digit leaves the frame alone.
+    voice_secs: u64,
 }
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
@@ -439,6 +455,26 @@ pub const NOTICE_TTL: Duration = Duration::from_secs(2);
 /// The caret's blink half-period, the Seeker's own number, so the two fields
 /// keep the same rhythm (#2745).
 const CARET_BLINK_MS: u64 = 530;
+
+/// How often the dictation loop drains the microphone and the transcription
+/// (#3044). Ten ticks a second is fine grain for a counter that reads whole
+/// seconds, and it lands a finished transcript without a second timer.
+const VOICE_TICK: Duration = Duration::from_millis(100);
+
+/// What the composer's microphone is doing (#3044). The row paints from this,
+/// never from the threads' state: one of them can be mid-handoff on a frame,
+/// and the button must not flicker because of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoicePhase {
+    /// Nothing in flight: the control starts a recording.
+    Idle,
+    /// The device is open and samples are arriving.
+    Recording,
+    /// The recording was asked to stop and the WAV is being built.
+    Finishing,
+    /// A WAV is on its way through the speech chain.
+    Transcribing,
+}
 
 /// What the composer says once a dragged range reaches the clipboard (#2587).
 /// The terminal prints these same words on its input border.
@@ -502,6 +538,11 @@ impl Editor {
             caret_on: true,
             caret_last_input: None,
             caret_looping: false,
+            voice_capture: None,
+            voice_finishing: false,
+            voice_transcription: None,
+            voice_looping: false,
+            voice_secs: 0,
         }
     }
 
@@ -550,6 +591,163 @@ impl Editor {
             }
         })
         .detach();
+    }
+
+    // Dictation ------------------------------------------------------------
+
+    /// The phase the microphone paints (#3044).
+    fn voice_phase(&self) -> VoicePhase {
+        if self.voice_transcription.is_some() {
+            VoicePhase::Transcribing
+        } else if self.voice_finishing {
+            VoicePhase::Finishing
+        } else if self.voice_capture.is_some() {
+            VoicePhase::Recording
+        } else {
+            VoicePhase::Idle
+        }
+    }
+
+    /// The dictation shortcut's action (#3044).
+    ///
+    /// It only forwards to `toggle_dictation`, the same call the microphone's
+    /// click makes, so the key and the button can never drift apart.
+    fn toggle_voice(&mut self, _: &ToggleVoice, _window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_dictation(cx);
+    }
+
+    /// What the microphone's click does: one control, two jobs.
+    ///
+    /// Silent starts the recording, recording asks the microphone for what it
+    /// has. A recording already closing or an answer already on its way is left
+    /// alone, so a double click cannot open a second device. Nothing here
+    /// touches config or the network: the two worker threads do that and the
+    /// tick collects what they say.
+    fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+        match self.voice_phase() {
+            VoicePhase::Idle => {
+                self.voice_capture = Some(voice_input::Capture::start());
+                self.voice_finishing = false;
+                self.voice_secs = 0;
+                self.pump_voice(cx);
+            }
+            VoicePhase::Recording => {
+                if let Some(capture) = self.voice_capture.as_ref() {
+                    capture.stop();
+                }
+                self.voice_finishing = true;
+            }
+            VoicePhase::Finishing | VoicePhase::Transcribing => {}
+        }
+        cx.notify();
+    }
+
+    /// One loop per recording, the caret blink's own shape: it ends the moment
+    /// there is nothing left to wait for, so a composer that is not dictating
+    /// runs no timer at all.
+    fn pump_voice(&mut self, cx: &mut Context<Self>) {
+        if self.voice_looping {
+            return;
+        }
+        self.voice_looping = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(VOICE_TICK).await;
+                let keep = this
+                    .update(cx, |editor, cx| editor.poll_voice(cx))
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Drain one tick of both workers and say whether anything is still
+    /// pending. The loop's exit lives here so the flag and the tick can never
+    /// disagree: the same update that finds nothing left clears it.
+    fn poll_voice(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        // Collect first, then drop the handle: the borrow of the capture must
+        // not outlive the assignment that ends it.
+        let mut events = Vec::new();
+        if let Some(capture) = self.voice_capture.as_ref() {
+            while let Some(event) = capture.try_next() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                voice_input::CaptureEvent::Started => {}
+                voice_input::CaptureEvent::Finished(answer) => {
+                    // The handle goes whatever the outcome: the thread is done
+                    // with the device either way.
+                    self.voice_capture = None;
+                    self.voice_finishing = false;
+                    changed = true;
+                    match answer {
+                        Ok(wav) => {
+                            self.voice_transcription = Some(voice_input::Transcription::start(wav));
+                        }
+                        Err(message) => self.show_notice(message, cx),
+                    }
+                }
+            }
+        }
+        // Take the answer out before touching the handle: the borrow that reads
+        // it must not overlap the assignment that clears it.
+        let answer = match self.voice_transcription.as_ref() {
+            Some(transcription) => transcription.try_take(),
+            None => None,
+        };
+        if let Some(answer) = answer {
+            self.voice_transcription = None;
+            changed = true;
+            match answer {
+                Ok(text) if text.trim().is_empty() => {
+                    self.show_notice("The microphone caught nothing.", cx);
+                }
+                Ok(text) => self.insert_dictation(&text, cx),
+                Err(message) => self.show_notice(message, cx),
+            }
+        }
+        // The counter moves once a second, so a tick that changed no digit
+        // leaves the frame alone instead of repainting ten times a second.
+        if let Some(capture) = self.voice_capture.as_ref() {
+            let secs = capture.elapsed().as_secs();
+            if secs != self.voice_secs {
+                self.voice_secs = secs;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+        let keep = self.voice_capture.is_some() || self.voice_transcription.is_some();
+        if !keep {
+            self.voice_looping = false;
+        }
+        keep
+    }
+
+    /// Put a finished dictation in the field at the caret (#3044).
+    ///
+    /// The same door a typed character takes, without the window the input
+    /// handler carries: the tick that delivers a transcript has no frame to
+    /// hand one. Whether a space goes in is `dictation_insertion`'s call.
+    fn insert_dictation(&mut self, text: &str, cx: &mut Context<Self>) {
+        let (next, caret) = dictation_insertion(&self.content, self.selected_range.clone(), text);
+        self.content = next;
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range.take();
+        // The draft changed, so a dismissed list is offered again, the same
+        // way a keystroke reopens it.
+        self.command_dismissed = false;
+        self.emoji_dismissed = false;
+        self.emoji_index = 0;
+        cx.notify();
     }
 
     /// Say one thing for a moment inside the composer. A newer notice replaces
@@ -2422,7 +2620,11 @@ impl Render for Editor {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .child(EditorElement { input: cx.entity() }),
-                ),
+                )
+                // The microphone closes the row (#3044), where the messaging
+                // apps put theirs: the paperclip attaches on the left, the
+                // voice control sits at the caret's own end.
+                .child(mic(self.voice_phase(), self.voice_secs, cx)),
         );
         let root = div()
             .relative()
@@ -2456,6 +2658,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::accept_command))
+            .on_action(cx.listener(Self::toggle_voice))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_press))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -2733,6 +2936,91 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         )
 }
 
+/// The draft a finished dictation makes, and where the caret lands (#3044).
+///
+/// A transcript is a sentence arriving inside a line that may already hold
+/// half of one, so the seam needs a space: "let me check" plus a spoken "the
+/// logs" must not read "checkthe logs". A head that already ends in whitespace,
+/// or an empty field, gets nothing added.
+fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (String, usize) {
+    let spoken = spoken.trim();
+    let head = content.get(..range.start).unwrap_or_default();
+    let tail = content.get(range.end..).unwrap_or_default();
+    let gap = match head.chars().next_back() {
+        Some(last) if !last.is_whitespace() => " ",
+        _ => "",
+    };
+    let mut next = String::with_capacity(content.len() + spoken.len() + gap.len());
+    next.push_str(head);
+    next.push_str(gap);
+    next.push_str(spoken);
+    next.push_str(tail);
+    // The caret goes after the spoken words and before whatever followed the
+    // selection, so a dictation into a selected phrase replaces it and the
+    // rest of the line stays where the user left it.
+    let caret = next.len() - tail.len();
+    (next, caret)
+}
+
+/// The microphone that closes the composer row (#3044): a themed mark in the
+/// paperclip's 1.8rem hit area, so the two ends of the field are one control
+/// line instead of a control and an afterthought.
+///
+/// It carries the phase itself. Idle is the quiet grey the paperclip wears;
+/// recording turns it red and puts the elapsed time beside it, because a
+/// control that just started the microphone has to say so; a WAV being built
+/// keeps the red, and the transcription turns amber, the same "working" tone
+/// the rest of the window uses. Like the paperclip, the colour goes into the
+/// vector and the hover raises the control's opacity.
+fn mic(phase: VoicePhase, secs: u64, cx: &mut Context<Editor>) -> impl IntoElement {
+    let palette = palette::current();
+    let colour = match phase {
+        VoicePhase::Idle => palette.text_muted,
+        VoicePhase::Recording | VoicePhase::Finishing => palette.red,
+        VoicePhase::Transcribing => palette.amber,
+    };
+    let mut control = div()
+        .id("editor-mic")
+        .flex()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .opacity(if phase == VoicePhase::Idle { 0.8 } else { 1.0 })
+        .hover(|d| d.opacity(1.0));
+    // The counter sits in the row, left of the mark: a red microphone alone
+    // says "something is happening", never "for how long", and the one thing
+    // a person wants to know mid-sentence is that the thing is still running.
+    if phase == VoicePhase::Recording {
+        control = control.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(palette.red))
+                .child(format!("{}:{:02}", secs / 60, secs % 60)),
+        );
+    }
+    control
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(gpui::rems(1.8))
+                .child(crate::icon::mic_icon(colour, 1.25)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_dictation(cx);
+            }),
+        )
+}
+
 /// The keybindings the editor needs, registered once on the App. They are
 /// global because the editor is the only `on_action` provider for them: an
 /// unmatched action with no focused listener is a no-op elsewhere.
@@ -2772,6 +3060,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-u", DeleteToLineStart, None),
         KeyBinding::new("ctrl-w", DeleteWordBack, None),
         KeyBinding::new("tab", AcceptCommand, None),
+        // Dictation (#3044). The chord the owner asked for, `alt+space+r`, is
+        // taken twice over: Alt+Space opens the window menu on Windows and
+        // Option+Space is the non-breaking space on macOS, claimed by input
+        // methods and launchers. Ctrl+Alt+R is free on both, and it is what
+        // the issue records.
+        KeyBinding::new("ctrl-alt-r", ToggleVoice, Some("Editor")),
     ]);
 }
 
@@ -4282,6 +4576,93 @@ mod tests {
         assert!(
             reply < files,
             "the reply sits above the field and ahead of file attachments"
+        );
+    }
+
+    /// The microphone closes the composer row (#3044).
+    ///
+    /// The paperclip leads it and the voice control ends it, which is where the
+    /// messaging apps place both. If the mark ever moves ahead of the input it
+    /// stops reading as the row's last control and crowds the text, so the
+    /// order is the thing worth pinning.
+    #[test]
+    fn the_microphone_closes_the_composer_row() {
+        let src = include_str!("editor.rs");
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("fn attachment_strip(").next())
+            .expect("editor render");
+        let input_at = render
+            .find(r#".id("composer-input")"#)
+            .expect("the row builds the input");
+        let clip_at = render
+            .find("child(paperclip(cx))")
+            .expect("the row builds the attachment control");
+        let mic_at = render
+            .find("child(mic(self.voice_phase(), self.voice_secs, cx))")
+            .expect("the row builds the dictation control");
+        assert!(
+            clip_at < input_at && input_at < mic_at,
+            "the paperclip leads, the input holds the middle, the microphone ends the row"
+        );
+    }
+
+    /// Dictation has a chord, and it is not the one that cannot work (#3044).
+    ///
+    /// `alt+space+r` was asked for, but Alt+Space opens the window menu on
+    /// Windows and Option+Space is the non-breaking space on macOS: on neither
+    /// platform does the chord reach an application binding. Ctrl+Alt+R is free
+    /// on both, so the binding has to stay on it and stay registered, or the
+    /// shortcut goes quiet with nothing reporting why.
+    #[test]
+    fn the_dictation_chord_is_bound_and_reachable() {
+        let src = include_str!("editor.rs");
+        let bindings = src
+            .split("pub fn bind_keys(")
+            .nth(1)
+            .and_then(|rest| rest.split("// Line math").next())
+            .expect("editor key bindings");
+        assert!(
+            bindings.contains("KeyBinding::new(\"ctrl-alt-r\", ToggleVoice"),
+            "the dictation toggle lost its chord"
+        );
+        assert!(
+            !bindings.contains("alt-space-r"),
+            "alt+space+r is the Windows system menu and the macOS non-breaking space"
+        );
+        assert!(
+            src.contains("on_action(cx.listener(Self::toggle_voice))"),
+            "a bound action with no listener is a chord that does nothing"
+        );
+    }
+
+    /// A transcript lands where the caret is, and the seam gets a space
+    /// (#3044). A recording dropped into a half-written line must not fuse with
+    /// the word before it, and a field that is empty or already ends in a space
+    /// must not gain one.
+    #[test]
+    fn a_dictation_lands_at_the_caret_with_a_space() {
+        let empty = dictation_insertion("", 0..0, "hello there");
+        assert_eq!(empty, ("hello there".to_string(), 11));
+        assert_eq!(
+            dictation_insertion("hello there", 11..11, "again"),
+            ("hello there again".to_string(), 17)
+        );
+        assert_eq!(
+            dictation_insertion("check ", 6..6, "  the logs  "),
+            ("check the logs".to_string(), 14),
+            "a trimmed transcript and an existing space do not double up"
+        );
+        assert_eq!(
+            dictation_insertion("let me check the logs and reply", 12..21, "the output"),
+            ("let me check the output and reply".to_string(), 23),
+            "a selection is replaced, and the rest of the line stays put"
+        );
+        assert_eq!(
+            dictation_insertion("and reply", 0..0, "here"),
+            ("hereand reply".to_string(), 4),
+            "text after the caret is left exactly as typed, never respaced"
         );
     }
 }

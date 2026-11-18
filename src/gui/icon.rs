@@ -151,6 +151,23 @@ pub fn paperclip_icon(colour: u32, size: f32) -> impl IntoElement {
     svg_icon(paperclip_svg(colour), size)
 }
 
+/// The composer's dictation control (#3044): the same monoline microphone the
+/// messaging apps put beside their field, at the paperclip's weight so the two
+/// ends of the row read as one line of controls. The capsule is the diaphragm,
+/// the arc is the pickup, the stem is the stand.
+fn mic_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><rect x="9" y="2" width="6" height="12" rx="3" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 10v1a7 7 0 0 1-14 0v-1" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 18v3" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The dictation microphone in `colour`, sized in rems.
+pub fn mic_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(mic_svg(colour), size)
+}
+
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an
 /// AppKit concept, and the ugly "exec" block is macOS's generic-executable
 /// icon. Runs on the main thread, right after `Application::run` starts.

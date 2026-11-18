@@ -7291,6 +7291,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "config",
+ "cpal",
  "criterion",
  "cron",
  "crossterm",

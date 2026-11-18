@@ -106,6 +106,7 @@ mod topic_icons;
 mod topic_tabs;
 mod transcript;
 mod usage_view;
+mod voice_input;
 mod window_controls;
 
 use crate::composer_view::{
