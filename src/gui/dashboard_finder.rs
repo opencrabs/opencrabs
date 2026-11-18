@@ -347,20 +347,26 @@ impl Dashboard {
     /// floats it as one bubble while the microphone is open, and fills its own
     /// field when the words come back.
     ///
-    /// One control, four states, the same four the composer's microphone has:
-    /// idle starts, recording stops, closing and transcribing wait. A second
-    /// click during the wait is ignored rather than opening a second device.
+    /// Two ways to end a take, and both come back here (#3044). The chord
+    /// presses again to send: the words land and the search runs at once, so
+    /// the card returns with results already on it. The bubble's own stop
+    /// button hands the words back instead: they land in the field and nothing
+    /// is searched, which is what "let me read and fix that" means. Closing and
+    /// transcribing wait; a second click during the wait is ignored rather than
+    /// opening a second device.
     pub(crate) fn seeker_dictate(&mut self, cx: &mut Context<Self>) {
         match self.seeker_voice_phase() {
             SeekerVoicePhase::Idle => {
                 self.seeker_voice_error = None;
                 self.seeker_capture = Some(voice_input::Capture::start());
                 self.seeker_voice_finishing = false;
+                self.seeker_voice_send = true;
                 self.seeker_voice_secs = 0;
                 self.seeker_voice_levels.clear();
                 self.pump_seeker_voice(cx);
             }
             SeekerVoicePhase::Recording => {
+                self.seeker_voice_send = true;
                 if let Some(capture) = self.seeker_capture.as_ref() {
                     capture.stop();
                 }
@@ -368,6 +374,24 @@ impl Dashboard {
             }
             SeekerVoicePhase::Finishing | SeekerVoicePhase::Transcribing => {}
         }
+        cx.notify();
+    }
+
+    /// End the take without sending it (#3044).
+    ///
+    /// The bubble's stop button. Same two threads as the chord, one flag apart:
+    /// the words land in the field and the search is left for the person to
+    /// start, so a query the transcriber half heard can be read and corrected
+    /// before it runs. A take that is already closing is left alone.
+    pub(crate) fn seeker_stop_for_edit(&mut self, cx: &mut Context<Self>) {
+        if self.seeker_voice_phase() != SeekerVoicePhase::Recording {
+            return;
+        }
+        self.seeker_voice_send = false;
+        if let Some(capture) = self.seeker_capture.as_ref() {
+            capture.stop();
+        }
+        self.seeker_voice_finishing = true;
         cx.notify();
     }
 
@@ -408,6 +432,7 @@ impl Dashboard {
         self.seeker_voice_levels.clear();
         self.seeker_voice_secs = 0;
         self.seeker_voice_finishing = false;
+        self.seeker_voice_send = false;
     }
 
     /// One loop per take, the composer's own shape: it ends the moment there is
@@ -480,39 +505,59 @@ impl Dashboard {
         if let Some(answer) = answer {
             self.seeker_transcription = None;
             changed = true;
+            // Read the flag before the match: sending is what the take was
+            // asked for when it ended, not something decided on arrival.
+            let send = self.seeker_voice_send;
             match answer {
                 Ok(spoken) if spoken.text.trim().is_empty() => {
                     self.seeker_voice_failed("The microphone caught nothing.".to_string())
                 }
-                Ok(spoken) => self.land_seeker_voice(&spoken.text, cx),
+                Ok(spoken) => self.land_seeker_voice(&spoken.text, send, cx),
                 Err(message) => self.seeker_voice_failed(message),
             }
         }
-        if !changed && self.seeker_voice_phase() == SeekerVoicePhase::Idle {
+        if changed {
+            cx.notify();
+        }
+        // The loop runs while something is still owed to the person: a device
+        // still open, or words still on their way (#3044). Returning `changed`
+        // here is what left the bubble green forever: the first quiet tick
+        // while the transcriber worked reported "nothing changed", the loop
+        // read that as "nothing left", and the answer that landed a second
+        // later was picked up by nobody. Two states, one flag.
+        let keep = self.seeker_capture.is_some() || self.seeker_transcription.is_some();
+        if !keep {
             self.seeker_voice_looping = false;
         }
-        cx.notify();
-        changed
+        keep
     }
 
     /// Put the words in the field the card is drawing, at the caret (#3044).
     ///
     /// The insertion goes through the shared text field, so a take replaces a
-    /// selection and lands where the person would have typed. The deep search
-    /// then runs the same way a keystroke starts it.
-    fn land_seeker_voice(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// selection and lands where the person would have typed. `send` decides
+    /// what happens next: a take ended by the chord runs the search the same
+    /// way a keystroke starts it, and a take ended by the bubble's stop button
+    /// leaves the words there to be read and corrected first.
+    ///
+    /// The card is reopened if it is gone: a take that outlived its surface
+    /// still belongs to the Seeker, never to the composer behind it, and the
+    /// field is the only place where the words can be seen and fixed.
+    fn land_seeker_voice(&mut self, text: &str, send: bool, cx: &mut Context<Self>) {
         let words = text.trim();
+        if self.finder.is_none() {
+            self.open_finder(cx);
+        }
         let Some(state) = self.finder.as_mut() else {
-            // The card closed while the take was in flight: the words are not
-            // thrown away, they go where the keyboard went.
-            let composer = self.composer_entity(cx);
-            let words = words.to_string();
-            composer.update(cx, |editor, cx| editor.dictate_words(&words, cx));
+            self.seeker_voice_failed("The words came back to a closed Seeker.".to_string());
             return;
         };
         state.field_mut().insert_text(words);
         self.seeker_voice_error = None;
-        self.seeker_find_if_changed(cx);
+        self.seeker_voice_send = false;
+        if send {
+            self.seeker_find_if_changed(cx);
+        }
         cx.notify();
     }
 

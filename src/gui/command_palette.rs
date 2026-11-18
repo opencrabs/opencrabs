@@ -480,9 +480,17 @@ fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
 /// second press land" before any words do, and the words come back into the
 /// field for editing and sending.
 ///
-/// The rim and the specular band are what make it read as glass: a dark
-/// translucent sphere with a wet top edge, not a second dialog.
-fn seeker_bubble(voice: &SeekerVoice) -> impl IntoElement {
+/// The bubble is a control, not a badge: it carries the same click the chord
+/// does, so stopping the take never depends on remembering a key (#3044). The
+/// button in its middle is the visible half of that, and the caption under it
+/// says the chord for anyone who would rather press that.
+///
+/// Four layers make it read as glass rather than a flat disc: a dark gradient
+/// sphere, an inner wall just inside the rim, a specular band across the top,
+/// and a halo in the state colour that swells on what the microphone just
+/// heard. GPUI has no backdrop blur, so this is glass drawn, not glass
+/// sampled.
+fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoElement {
     let theme = palette::current();
     let colour = if voice.recording {
         theme.amber
@@ -505,24 +513,55 @@ fn seeker_bubble(voice: &SeekerVoice) -> impl IntoElement {
         .rounded_full()
         .bg(linear_gradient(
             150.0,
-            linear_color_stop(rgba(0x23232ff2), 0.0),
-            linear_color_stop(rgba(0x0b0b11fa), 1.0),
+            linear_color_stop(rgba(0x2a2a38f2), 0.0),
+            linear_color_stop(rgba(0x08080dfa), 1.0),
         ))
         .border_1()
-        .border_color(rgba((colour << 8) | (0x66 + (heard * 0x55 as f32) as u32)))
+        .border_color(rgba((colour << 8) | (0x80 + (heard * 0x55 as f32) as u32)))
         .shadow_lg()
         .overflow_hidden()
+        .when(voice.recording, |d| d.cursor(CursorStyle::PointingHand))
+        .on_click(move |_ev, _window, cx| {
+            cx.stop_propagation();
+            let _ = view.update(cx, |this, cx| this.seeker_stop_for_edit(cx));
+        })
         .child(
-            // The specular band across the top third: the one thing that
+            // The inner wall: a second circle just inside the rim, which is
+            // what a thick glass shell looks like from the front.
+            div()
+                .absolute()
+                .top(px(7.0))
+                .left(px(7.0))
+                .right(px(7.0))
+                .bottom(px(7.0))
+                .rounded_full()
+                .border_1()
+                .border_color(rgba(0xffffff14)),
+        )
+        .child(
+            // The specular band across the top third: the highlight that
             // separates glass from a flat disc.
             div()
                 .absolute()
-                .top(px(12.0))
-                .left(px(26.0))
-                .right(px(26.0))
-                .h(px(26.0))
+                .top(px(14.0))
+                .left(px(30.0))
+                .right(px(30.0))
+                .h(px(22.0))
                 .rounded_full()
-                .bg(rgba(0xffffff16)),
+                .bg(rgba(0xffffff26)),
+        )
+        .child(
+            // The halo: the state colour under the content, swelling on the
+            // newest reading, so the sphere visibly breathes while the person
+            // talks. Six rem centred in a nine rem bubble is a rem and a half
+            // in from each edge, in rem so a scaled window keeps it centred.
+            div()
+                .absolute()
+                .top(rems(1.5))
+                .left(rems(1.5))
+                .size(rems(6.0))
+                .rounded_full()
+                .bg(rgba((colour << 8) | (0x0c + (heard * 0x30 as f32) as u32))),
         )
         .child(seeker_wave(&voice.levels, colour))
         .child(div().text_sm().text_color(rgb(colour)).child(format!(
@@ -530,6 +569,23 @@ fn seeker_bubble(voice: &SeekerVoice) -> impl IntoElement {
             voice.secs / 60,
             voice.secs % 60
         )))
+        .child(
+            // The button: a stop square while the device is open, the same
+            // square in green once the words are on their way. Sized for a
+            // thumb and drawn, not a glyph from the icon set, so the state
+            // colour is the only thing that has to change.
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(26.0))
+                .rounded_full()
+                .bg(rgba(0xffffff1c))
+                .border_1()
+                .border_color(rgba(0xffffff30))
+                .child(div().size(px(9.0)).rounded(px(2.0)).bg(rgb(colour))),
+        )
 }
 
 /// How many meter readings the bubble draws. Fewer than the composer's strip,
@@ -636,7 +692,11 @@ pub(super) fn overlay(
     // carries no flex gap, because the caret rides the shaped line and a gap
     // beside it would move the one thing that has to sit exactly where the text
     // does (#2531); the microphone brings its own inset instead.
+    // Two handles on the window: the microphone's click and the bubble's own
+    // stop button. The field's shaped line takes the original, so the copies
+    // have to be made before it does (#3044).
     let dictate = view.clone();
+    let bubble_view = view.clone();
     let mut pill = div()
         .flex()
         .flex_row()
@@ -901,7 +961,9 @@ pub(super) fn overlay(
     // anyway. Green here means the take was handed over and the wait is the
     // transcriber's, not the microphone's.
     if let Some(take) = voice.as_ref() {
-        return scrim.justify_center().child(seeker_bubble(take));
+        return scrim
+            .justify_center()
+            .child(seeker_bubble(take, bubble_view));
     }
     // Spotlight floats the card high, not centered: the eye reads it as
     // a command surface, not a dialog (#2491).
@@ -1114,7 +1176,7 @@ mod tests {
         let end = tail.find("\n}\n").expect("overlay closes");
         let body = tail.get(..end).expect("the body ends on a glyph");
         assert!(
-            body.contains("return scrim.justify_center().child(seeker_bubble(take));"),
+            body.contains(".child(seeker_bubble(take, bubble_view))"),
             "a live take is one bubble, centered, and overlay() returns before the shell is mounted"
         );
         let bubble = body
@@ -1146,6 +1208,18 @@ mod tests {
         assert!(
             drawn.contains(".size(rems(TAKE_BUBBLE))") && drawn.contains(".rounded_full()"),
             "the take is a sphere, not a bar"
+        );
+        assert!(
+            drawn.contains("this.seeker_stop_for_edit(cx)"),
+            "the bubble is a stop control, so ending a take never depends on remembering the chord"
+        );
+        assert!(
+            !drawn.contains("this.seeker_dictate(cx)"),
+            "the bubble hands the words back for editing; sending is the chord's job"
+        );
+        assert!(
+            drawn.contains(".size(px(26.0))"),
+            "the stop is a drawn button, not a caption nobody knows to click"
         );
     }
 

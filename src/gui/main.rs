@@ -678,6 +678,10 @@ struct Dashboard {
     seeker_voice_levels: Vec<f32>,
     /// The recording was asked to stop and its WAV is being built.
     seeker_voice_finishing: bool,
+    /// Whether the words this take produces should be run as a search the
+    /// moment they land, or only put in the field for editing (#3044). The
+    /// chord sends, the bubble's own stop button hands the words back.
+    seeker_voice_send: bool,
     /// Whether the Seeker's voice loop is already ticking. Same one-shot shape
     /// as the composer's: one loop per take, never one per frame.
     seeker_voice_looping: bool,
@@ -6137,6 +6141,7 @@ fn main() {
                         seeker_voice_secs: 0,
                         seeker_voice_levels: Vec::new(),
                         seeker_voice_finishing: false,
+                        seeker_voice_send: false,
                         seeker_voice_looping: false,
                         seeker_voice_error: None,
                         chip_channel_names: chip_names,
@@ -7429,8 +7434,8 @@ mod tests {
             production
                 .matches("self.seeker_find_if_changed(cx);")
                 .count(),
-            2,
-            "typing and the editing chords both schedule on a query change"
+            3,
+            "typing, the editing chords and a dictated take all schedule on a query change"
         );
         assert!(
             production.contains("this.seeker_find_gen == generation"),
@@ -7859,34 +7864,52 @@ mod tests {
             "the row starts the same loop the control and the chord start"
         );
 
-        // The field's own microphone (#3044): the card closes before it
-        // dictates. The take's counter, wave and stop are the composer's strip
-        // and the card paints over it, so a recording started with the card up
-        // would be invisible from its first second. One click, one door, and
-        // the surface that can show the take is the one that gets it.
-        let dictate = "fn seeker_dictate(";
+        // The field's own microphone (#3044): the card records in place. It
+        // owns the capture, so the words land in the field on screen instead of
+        // a composer hidden behind the card.
+        let dictate = "pub(crate) fn seeker_dictate(";
         let handler = code
             .find(dictate)
             .expect("the field's microphone has a handler");
         let tail = code.get(handler..).expect("the handler starts on a glyph");
         let body = tail.split("\n    }\n").next().expect("the handler body");
         assert!(
-            body.contains("self.close_finder(cx)"),
-            "the card leaves before the composer starts recording under it"
+            body.contains("voice_input::Capture::start()"),
+            "the card opens the device itself instead of handing the take to the composer"
         );
         assert!(
-            body.contains("editor.toggle_dictation(cx)"),
-            "the field's microphone starts the same loop as the row and the chord"
+            !body.contains("close_finder(cx)") && !body.contains("toggle_dictation"),
+            "the card stays up: a take handed to the composer records behind it, unseen"
         );
-        let before = body
-            .find("self.close_finder(cx)")
-            .expect("the close is in the handler");
-        let after = body
-            .find("editor.toggle_dictation(cx)")
-            .expect("the toggle is in the handler");
         assert!(
-            before < after,
-            "the card closes first: a take started behind it has nothing to show it"
+            body.contains("self.seeker_voice_send = true;"),
+            "the chord asks for the words to be searched the moment they land"
+        );
+
+        // The other way out of a take (#3044): the bubble's own stop button
+        // lands the words without searching them, so a half-heard query can be
+        // read and corrected first.
+        let edit = "pub(crate) fn seeker_stop_for_edit(";
+        let stop = code
+            .find(edit)
+            .expect("the bubble's stop button has a handler");
+        let tail = code.get(stop..).expect("the handler starts on a glyph");
+        let stop_body = tail.split("\n    }\n").next().expect("the stop body");
+        assert!(
+            stop_body.contains("self.seeker_voice_send = false;"),
+            "stopping from the bubble hands the words back instead of sending them"
+        );
+
+        // Both paths come back to the Seeker (#3044): the landing reopens the
+        // card rather than writing into the composer behind it.
+        let land = fn_body(code, "land_seeker_voice");
+        assert!(
+            land.contains("self.open_finder(cx)"),
+            "a take that outlived its card reopens the card"
+        );
+        assert!(
+            !land.contains("composer_entity"),
+            "the words never go to the composer: the Seeker is where they are read and sent"
         );
     }
 
