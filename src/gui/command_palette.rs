@@ -432,8 +432,8 @@ pub(crate) struct SeekerVoice {
 /// one control on two surfaces: a person who learned it in the field finds it
 /// in the card, and the hover says the same thing on both.
 ///
-/// It records here, in the card. The counter and the wave are drawn under the
-/// field by [`seeker_voice_strip`], and the words land in the field itself: a
+/// It records here, in the card. The counter and the meter ride inside the
+/// pill, to the left of this control, and the words land in the field itself: a
 /// search query has to end up in the box the person is looking at, which is
 /// why handing the job to the composer behind the card was the wrong shape.
 ///
@@ -460,6 +460,19 @@ fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl I
     } else {
         crate::icon::mic_icon(colour, 1.5).into_any_element()
     };
+    // While the take runs the tile wears a red pad whose strength follows the
+    // newest meter reading, so the control itself breathes with the voice
+    // instead of only changing colour (#3044). It costs no clock: the meter
+    // already repaints the card once per reading.
+    let heard = voice
+        .and_then(|v| v.levels.last().copied())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let pad = if recording {
+        rgba((theme.red << 8) | (0x1c + (heard * 0x54 as f32) as u32))
+    } else {
+        rgba(0x00000000)
+    };
     div()
         .id("seeker-mic")
         .flex()
@@ -469,6 +482,7 @@ fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl I
         .ml(px(FIELD_MIC_GAP))
         .size(rems(2.1))
         .rounded_sm()
+        .bg(pad)
         .cursor_pointer()
         .opacity(if recording { 1.0 } else { 0.8 })
         .hover(|d| d.opacity(1.0))
@@ -483,30 +497,27 @@ fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl I
         })
 }
 
-/// The recording strip under the field (#3044): the counter, the live meter,
-/// and the word that says the same key stops it.
+/// The running take, drawn inside the field's own row (#3044): the counter and
+/// the live meter, to the left of the microphone.
 ///
-/// It sits inside the card, under the pill, because that is where the person is
-/// looking. The composer's strip could not do this job: it draws behind this
-/// very card.
-fn seeker_voice_strip(voice: &SeekerVoice) -> impl IntoElement {
+/// It rides in the pill rather than under it. Below the field it read as a
+/// second card hanging off the first, and the person watching the counter is
+/// looking at the line they are about to search with. The word that the same
+/// key stops it is not lost: it lives on the microphone's hover, next to the
+/// chord, and the tile itself turns into the stop while the take runs.
+fn seeker_take(voice: &SeekerVoice) -> impl IntoElement {
     let theme = palette::current();
     let colour = if voice.recording {
         theme.red
     } else {
         theme.amber
     };
-    let word = if voice.recording {
-        "same key to stop"
-    } else {
-        "listening for the last words…"
-    };
     div()
         .flex()
+        .flex_none()
         .flex_row()
         .items_center()
         .gap_2()
-        .px(px(FIELD_PAD_X))
         .child(
             div()
                 .flex_none()
@@ -515,13 +526,6 @@ fn seeker_voice_strip(voice: &SeekerVoice) -> impl IntoElement {
                 .child(format!("{}:{:02}", voice.secs / 60, voice.secs % 60)),
         )
         .child(seeker_wave(&voice.levels, colour))
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(rgb(INK_MUTED))
-                .child(word),
-        )
 }
 
 /// How many meter readings the card's wave draws. The composer's own count, so
@@ -629,7 +633,7 @@ pub(super) fn overlay(
     // beside it would move the one thing that has to sit exactly where the text
     // does (#2531); the microphone brings its own inset instead.
     let dictate = view.clone();
-    let pill = div()
+    let mut pill = div()
         .flex()
         .flex_row()
         .items_center()
@@ -641,16 +645,15 @@ pub(super) fn overlay(
         .border_1()
         .border_color(rgba(0xffffff2e))
         .shadow_md()
-        .child(query_line(state, view, paint, caret_on))
-        .child(field_mic(dictate, voice.as_ref()));
-    shell = shell.child(pill);
-
-    // The take draws under the pill, inside the card (#3044): the counter, the
-    // meter and the word that the same key stops it. It has to live here
-    // because the composer's own strip draws behind this card.
+        .child(query_line(state, view, paint, caret_on));
+    // The take rides in the field's own row (#3044): counter and meter between
+    // the query and the microphone, so a running recording can never hang a
+    // second card off the bottom of the field.
     if let Some(take) = voice.as_ref() {
-        shell = shell.child(seeker_voice_strip(take));
+        pill = pill.child(seeker_take(take));
     }
+    pill = pill.child(field_mic(dictate, voice.as_ref()));
+    shell = shell.child(pill);
 
     // A failed take says so here, for the same reason: the composer's notice
     // sits behind the card and would be read by nobody (#3044).
@@ -996,7 +999,7 @@ mod tests {
             "no flex gap can insert phantom space beside the caret"
         );
         let pill = src
-            .find("let pill = div()")
+            .find("let mut pill = div()")
             .expect("the pill is drawn in overlay()");
         let pill_src = src.get(pill..).expect("the pill starts on a glyph");
         let pill_end = pill_src
@@ -1013,16 +1016,15 @@ mod tests {
 
     /// The field is a fat pill with the microphone on its right (#3044).
     ///
-    /// The card cannot run a recording itself: the counter, the wave and the
-    /// stop are the composer's strip, and the card paints over exactly that. So
-    /// the control hands the job to the window, and the pins here are the three
-    /// things a refactor can quietly undo: the glyph, the door the click walks,
-    /// and the pillow that makes the field read as Spotlight instead of a box.
+    /// The card runs its own recording, so the pins here are the things a
+    /// refactor can quietly undo: the glyph, the door the click walks, the tile
+    /// that matches the bigger line, and the pillow that makes the field read
+    /// as Spotlight instead of a box.
     #[test]
     fn the_field_is_a_fat_pill_with_the_microphone_on_its_right() {
         let src = include_str!("command_palette.rs");
         let pill = src
-            .find("let pill = div()")
+            .find("let mut pill = div()")
             .expect("the pill is drawn in overlay()");
         let tail = src.get(pill..).expect("the pill starts on a glyph");
         let mounted = tail
@@ -1078,6 +1080,52 @@ mod tests {
         assert!(
             line_body.contains(".text_2xl()"),
             "the line is larger than the composer's, so the field reads as the window's own control"
+        );
+    }
+
+    /// A running take is drawn inside the field, never as a strip hanging off
+    /// it (#3044).
+    ///
+    /// The counter and the meter are what the person watches while the
+    /// microphone is open, and a second row under the pill reads as a card
+    /// below the card. They ride in the pill's own row, between the query and
+    /// the microphone, so the field stays one control in every state.
+    #[test]
+    fn the_running_take_rides_inside_the_field() {
+        let src = include_str!("command_palette.rs");
+        let pill = src
+            .find("let mut pill = div()")
+            .expect("the pill is drawn in overlay()");
+        let tail = src.get(pill..).expect("the pill starts on a glyph");
+        let mounted = tail
+            .find("shell = shell.child(pill);")
+            .expect("the pill is mounted on the shell");
+        let pill_src = tail
+            .get(..mounted)
+            .expect("the pill body ends at its mount");
+        assert!(
+            pill_src.contains("pill = pill.child(seeker_take(take));"),
+            "the counter and the meter are pill children, not shell children"
+        );
+        let take = pill_src
+            .find("seeker_take(take)")
+            .expect("the take is mounted on the pill");
+        let mic = pill_src
+            .find("field_mic(dictate")
+            .expect("the microphone closes the pill");
+        assert!(
+            take < mic,
+            "the take sits between the query and the microphone, so the stop stays last"
+        );
+        let overlay = src
+            .find("pub(super) fn overlay(")
+            .expect("the overlay is one function");
+        let tail = src.get(overlay..).expect("overlay starts on a glyph");
+        let end = tail.find("\n}\n").expect("overlay closes");
+        let body = tail.get(..end).expect("the body ends on a glyph");
+        assert!(
+            !body.contains("seeker_voice_strip"),
+            "nothing paints a second row under the pill"
         );
     }
 
