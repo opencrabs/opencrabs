@@ -5874,7 +5874,7 @@ mod tests {
             "the fixture has to lose the id tie, or it proves nothing"
         );
 
-        let mut rows = vec![answer, question];
+        let mut rows = [answer, question];
         rows.sort_by_key(family_row_order);
         assert_eq!(
             rows.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
