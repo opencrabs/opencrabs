@@ -2392,19 +2392,23 @@ impl Render for Editor {
             .active_notice(Instant::now())
             .filter(|_| !self.content.is_empty())
             .map(str::to_string);
-        // The icon sits inside the input, to the right of the text, as the
-        // messaging apps place it; the text and its hint are gone (#2445).
+        // The attachment control leads the row, as the messaging apps place it
+        // (#3037). It used to trail the text on the right, where a control the
+        // field already implied had to be hunted for past the caret.
         body = body.child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
+                .child(paperclip(cx))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .pl_1()
+                        // No left inset here: the paperclip and the row gap are
+                        // the inset, so the text starts after the control
+                        // instead of indenting twice.
                         // A draft taller than the box scrolls inside it. Without
                         // the cap the field grew with every line and painted
                         // over the pane below, the overlap the owner saw
@@ -2418,8 +2422,7 @@ impl Render for Editor {
                         .overflow_y_scroll()
                         .track_scroll(&self.scroll)
                         .child(EditorElement { input: cx.entity() }),
-                )
-                .child(paperclip(cx)),
+                ),
         );
         let root = div()
             .relative()
@@ -2697,7 +2700,16 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
 
 /// The paperclip inside the input: opens the platform file picker, then takes
 /// the same attach path a Finder drop does.
+/// The attachment control: a themed paperclip in a 1.8rem hit area, leading
+/// the composer row (#3037).
+///
+/// The glyph is a vector, not the 📎 emoji the field drew before. An emoji
+/// arrives with its own shading and cannot be recoloured, so it never sat in
+/// the row the way the messaging apps manage. The colour is passed straight to
+/// the mark, which is why the hover raises the whole control's opacity rather
+/// than restyling text: an image child cannot inherit `text_color`.
 fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
+    let palette = palette::current();
     div()
         .id("editor-attach")
         .flex()
@@ -2705,13 +2717,13 @@ fn paperclip(cx: &mut Context<Editor>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .size(gpui::rems(1.8))
-        .mr_1()
         .rounded_sm()
         .cursor_pointer()
-        .text_size(gpui::rems(1.1))
-        .text_color(rgb(palette::current().text_faint))
-        .hover(|d| d.text_color(rgb(palette::current().accent)))
-        .child("📎")
+        // Resting quietly and brightening under the pointer keeps the hover
+        // cue the accent tint used to give, without a second copy of the mark.
+        .opacity(0.8)
+        .hover(|d| d.opacity(1.0))
+        .child(crate::icon::paperclip_icon(palette.text_muted, 1.25))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
@@ -3495,10 +3507,14 @@ mod tests {
         }
     }
 
-    /// The single-line hint sits in the middle of the composer, with the
-    /// same small inset at the text's left edge and the paperclip's right.
+    /// The attachment control leads the row and the text follows it (#3037).
+    ///
+    /// The previous layout put the paperclip after the input on the right,
+    /// where the field's own left inset had to fake the spacing. Both of those
+    /// belong to the old arrangement: a control on the left is what the row
+    /// gap spaces, so an extra `pl_1` would indent the text twice.
     #[test]
-    fn composer_centres_text_and_insets_the_attachment_control() {
+    fn the_attachment_control_leads_the_composer_row() {
         let src = include_str!("editor.rs");
         let render = src
             .split("impl Render for Editor")
@@ -3506,13 +3522,45 @@ mod tests {
             .and_then(|rest| rest.split("fn attachment_strip(").next())
             .expect("editor render");
         assert!(render.contains(".items_center()"));
-        assert!(render.contains(".pl_1()"));
+        let clip_at = render
+            .find("child(paperclip(cx))")
+            .expect("the row builds the attachment control");
+        let input_at = render
+            .find(r#".id("composer-input")"#)
+            .expect("the row builds the input");
+        assert!(
+            clip_at < input_at,
+            "the paperclip comes before the input, so it leads the row"
+        );
+        // Everything the input wrapper declares sits between the control and
+        // the field's own id, so that span is where a leftover inset would be.
+        let between = &render[clip_at..input_at];
+        assert!(
+            !between.contains(".pl_1()"),
+            "the paperclip and the row gap are the inset; a left pad would double it"
+        );
+
         let clip = src
             .split("fn paperclip(")
             .nth(1)
             .and_then(|rest| rest.split("/// The keybindings").next())
             .expect("paperclip");
-        assert!(clip.contains(".mr_1()"));
+        assert!(
+            !clip.contains(".mr_1()"),
+            "a right margin belonged to the right-hand placement"
+        );
+        assert!(
+            !clip.contains("\u{1f4ce}") && !clip.contains("📎"),
+            "the paperclip is a themed vector, not the shaded emoji"
+        );
+        assert!(
+            clip.contains("paperclip_icon(palette.text_muted"),
+            "the mark takes the palette's muted grey so it reads in either theme"
+        );
+        // The control keeps the id, the hit area and the picker it had.
+        assert!(clip.contains(r#".id("editor-attach")"#));
+        assert!(clip.contains(".size(gpui::rems(1.8))"));
+        assert!(clip.contains("pick_paths"));
     }
 
     /// A chip's thumbnail and its ✕ are two elements with two ids and two

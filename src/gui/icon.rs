@@ -107,8 +107,10 @@ fn collapse_svg(colour: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// One chevron, drawn from the bytes above, sized in rems.
-fn chevron_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
+/// Bytes of an inline SVG as a fixed-size element, sized in rems. The
+/// chevrons and the composer's paperclip all go through it, so one place
+/// decides how an inline mark is sized and fitted.
+fn svg_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
     img(std::sync::Arc::new(Image::from_bytes(
         ImageFormat::Svg,
         svg,
@@ -121,14 +123,32 @@ fn chevron_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
 
 /// The disclosure arrow in `colour`, sized in rems.
 pub fn disclosure_icon(colour: u32, size: f32) -> impl IntoElement {
-    chevron_icon(disclosure_svg(colour), size)
+    svg_icon(disclosure_svg(colour), size)
 }
 
 /// The fold arrow in `colour`, sized in rems. It sits in the footer of an
 /// expanded card, so a block with many calls ends in a control that says the
 /// click folds it back instead of leaving the reader to guess.
 pub fn collapse_icon(colour: u32, size: f32) -> impl IntoElement {
-    chevron_icon(collapse_svg(colour), size)
+    svg_icon(collapse_svg(colour), size)
+}
+
+/// The composer's attachment control (#3037): Telegram's monoline paperclip,
+/// drawn from bytes so the theme colour reaches it. The field used to draw the
+/// native 📎 emoji, and an emoji carries its own shading: no text colour could
+/// turn it into the quiet grey outline the messaging apps use, so it read as a
+/// sticker sitting on the card instead of a control belonging to the row.
+fn paperclip_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The attachment paperclip in `colour`, sized in rems.
+pub fn paperclip_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(paperclip_svg(colour), size)
 }
 
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an
