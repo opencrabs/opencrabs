@@ -573,17 +573,19 @@ pub fn inline_pieces(text: &str) -> Option<Vec<InlinePiece>> {
     Some(pieces)
 }
 
-const ALL_ICON_DARK: &[u8] = topic_png!("generic_general_back");
-const ALL_ICON_LIGHT: &[u8] = topic_png!("generic_general_white");
+const ALL_ICON_DARK: &[u8] = topic_png!("generic_general_dark_mode");
+const ALL_ICON_LIGHT: &[u8] = topic_png!("generic_general_light_mode");
 const ALL_ICON_SIZE_SCALE: f32 = 0.8;
 
 fn all_icon_bytes(dark: bool) -> &'static [u8] {
     if dark { ALL_ICON_DARK } else { ALL_ICON_LIGHT }
 }
 
-/// The existing depth chat artwork for All: black on dark, white on light.
-/// Only All is scaled down, so it stays distinct from regular topic icons
-/// without changing the icon pack's size (#2963).
+/// The existing depth chat artwork for All, following the panel it sits on:
+/// the light glyph on a dark panel, the dark glyph on a light one. The two
+/// files carry the mode they belong to in their names. Only All is scaled
+/// down, so it stays distinct from regular topic icons without changing the
+/// icon pack's size (#2963).
 pub fn all_icon(size: f32, dark: bool) -> impl IntoElement {
     picture(all_icon_bytes(dark), size * ALL_ICON_SIZE_SCALE)
 }
@@ -896,15 +898,51 @@ mod tests {
         assert_eq!(topic_icon("topic:nope"), None);
     }
 
+    /// Mean luminance of the pixels a PNG actually paints, ignoring its
+    /// transparent margin. The All pair exists to contrast with the panel, so
+    /// the file for dark mode must hold the lighter glyph (#2963).
+    fn mean_ink_luminance(bytes: &[u8]) -> f32 {
+        let decoded = image::load_from_memory(bytes)
+            .expect("the All artwork must decode")
+            .to_rgba8();
+        let mut total = 0f32;
+        let mut count = 0f32;
+        for pixel in decoded.pixels() {
+            let [r, g, b, a] = pixel.0;
+            if a < 200 {
+                continue;
+            }
+            let r = r as f32 / 255.0;
+            let g = g as f32 / 255.0;
+            let b = b as f32 / 255.0;
+            total += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            count += 1.0;
+        }
+        assert!(count > 0.0, "the artwork must paint something");
+        total / count
+    }
+
+    /// All carries its own artwork, and it follows the panel it sits on: the
+    /// light glyph on a dark panel, the dark glyph on a light one. The pair
+    /// was wired the wrong way round until the pixels were compared, so the
+    /// wiring alone is not enough here (#2963).
     #[test]
     fn all_topics_icon_uses_the_depth_pair_and_is_smaller() {
-        let black = topic_png!("generic_general_back");
-        let white = topic_png!("generic_general_white");
-        assert!(is_png(black));
-        assert!(is_png(white));
-        assert_eq!(all_icon_bytes(true), black);
-        assert_eq!(all_icon_bytes(false), white);
+        let dark_mode = topic_png!("generic_general_dark_mode");
+        let light_mode = topic_png!("generic_general_light_mode");
+        assert!(is_png(dark_mode));
+        assert!(is_png(light_mode));
+        assert_eq!(all_icon_bytes(true), dark_mode);
+        assert_eq!(all_icon_bytes(false), light_mode);
         assert_eq!(ALL_ICON_SIZE_SCALE, 0.8);
+
+        let dark_ink = mean_ink_luminance(dark_mode);
+        let light_ink = mean_ink_luminance(light_mode);
+        assert!(
+            dark_ink > light_ink,
+            "dark mode must draw the light glyph, but its artwork measured \
+             {dark_ink} against the light-mode file's {light_ink}"
+        );
     }
 
     #[test]
