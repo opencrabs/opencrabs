@@ -3567,7 +3567,8 @@ fn live_press_row(
 /// A visible live status or preview with drag selection and its own menu.
 ///
 /// `clamp` is the number of lines the entry may take: `None` lets the text wrap
-/// freely and `Some(1)` is the head's single line, ellipsised (#3042). The
+/// freely, `Some(1)` is one ellipsised line, and the head gives its sentence
+/// `Some(3)` so a long one breaks instead of being cut mid-word (#3046). The
 /// width comes from the caller's flex slot, so the text always has one.
 fn live_entry_text(
     id: String,
@@ -3798,18 +3799,23 @@ fn live_card(
     // whether it had one when it decides how many rows it has (#3046).
     let has_lead = !lead.is_empty();
     let footer = live_card_footer(live, ctx);
-    // Every row is one line, ellipsised. The head is a status block, not a
-    // transcript: a sentence that wraps pushes the row under it out of shape,
-    // and a clipped one still reads.
+    // The call row and the numbers are one line each, ellipsised: whichever
+    // overflows, the block keeps its shape. The sentence is the one row that
+    // breaks instead (#3046): clipping it mid-word cut the half of the
+    // narration that said what the turn was doing, so one line became a
+    // fragment rather than a summary. Three lines is where a sentence stops
+    // growing the block, the same bound the tool ledger uses.
     let clamp = Some(1);
+    let narration_clamp = Some(3);
     let accent = palette::current().accent;
     // Three rows, always in this order (#3046): the sentence the turn is
     // speaking, the call it is running right now, and the numbers ending with
-    // the clock. One line each, so the block never grows past three, and one
+    // the clock. One row each, so the block never grows past three, and one
     // size throughout, because every row goes through `head_run` or
     // `live_entry_text` at `SMALL_TEXT_SIZE`. A wide pane used to fold all
     // three onto one row, which is where the numbers came out clipped mid
-    // figure and the sentence and the call ran together.
+    // figure and the sentence and the call ran together. The sentence breaks
+    // inside its row; the call and the numbers never do.
     let mut head = div()
         .flex()
         .flex_col()
@@ -3820,11 +3826,14 @@ fn live_card(
         .px_2()
         .pt_1()
         .pb_1();
-    // Line one: the arrow, the spinner and the sentence it explains.
+    // Line one: the arrow, the spinner and the sentence it explains. The glyphs
+    // start at the first line of the sentence, because a sentence that breaks
+    // over three lines would otherwise leave the chevron and the spinner
+    // floating halfway down the block.
     let mut top = div()
         .flex()
         .flex_row()
-        .items_center()
+        .items_start()
         .gap_1()
         .w_full()
         .min_w_0()
@@ -3841,7 +3850,7 @@ fn live_card(
             Some(*entry),
             paragraph.clone(),
             small_style(SMALL_TEXT_SIZE, accent),
-            clamp,
+            narration_clamp,
             drag,
             press,
         )));
@@ -3885,10 +3894,10 @@ fn live_card(
         .hover(|d| d.bg(rgb(palette::current().panel_hi)));
     card = card.child(head);
     // The ledger belongs to the OPENED card (#3046). A closed card is its head
-    // and nothing else: narration, the call, and the statistics, three lines at
+    // and nothing else: narration, the call, and the statistics, three rows at
     // most. Drawing a tail of rows under a closed head made the block grow with
     // the turn, and those rows are whole paragraphs of narration and reasoning,
-    // so three lines turned into a wall of prose nobody opened.
+    // so three rows turned into a wall of prose nobody opened.
     if expanded {
         if !lines.is_empty() {
             card = card.child(live_card_body(lines, drag, press));
@@ -7479,11 +7488,12 @@ mod tests {
     ///
     /// The head is three rows at most, in one order: the sentence the turn is
     /// speaking, the call it is running right now, and the statistics ending
-    /// with the clock. Every row is one line and ellipsised, so a turn that
-    /// narrates paragraphs between tool calls still reads as one block of the
-    /// same shape instead of growing a wall of text.
+    /// with the clock. The sentence breaks inside its row instead of being cut
+    /// on one line (#3046); the call and the numbers stay one ellipsised line
+    /// each, so a turn that narrates paragraphs between tool calls still reads
+    /// as three rows of the same shape instead of growing a wall of text.
     #[test]
-    fn the_head_is_three_rows_and_never_wraps() {
+    fn the_head_is_three_rows_and_the_sentence_breaks() {
         const SRC: &str = include_str!("transcript.rs");
         // Substring scans, never byte offsets: this file is the thing being
         // read, so a hand-rolled index is one rustfmt pass away from a panic
@@ -7504,7 +7514,7 @@ mod tests {
             .0;
         assert!(
             head.contains(".flex_col()"),
-            "the rows stack, so each one owns a line of its own"
+            "the rows stack, so each one owns a row of its own"
         );
         assert_eq!(
             head.matches("head = head.child(").count(),
@@ -7512,8 +7522,24 @@ mod tests {
             "three rows: the sentence, the call, the numbers, and no fourth"
         );
         assert!(
-            card.contains("let clamp = Some(1);"),
-            "every row is one line, ellipsised, so the block never grows"
+            card.contains("let clamp = Some(1);")
+                && card.contains("let narration_clamp = Some(3);"),
+            "the call and the numbers get one line, the sentence gets three"
+        );
+        let sentence = head
+            .split_once("live-preview-{entry}")
+            .expect("the sentence row")
+            .1;
+        assert!(
+            sentence.contains("narration_clamp,"),
+            "the sentence is the row that breaks, not the one that is clipped"
+        );
+        assert!(
+            head.split_once("live-activity")
+                .expect("the call row")
+                .1
+                .contains("clamp,"),
+            "the call row keeps the single line clamp"
         );
         assert!(
             !head.contains(".flex_wrap()"),
