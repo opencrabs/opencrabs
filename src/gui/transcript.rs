@@ -3577,12 +3577,16 @@ fn live_card(
                     .position(|entry| matches!(entry, LiveEntry::Tool(index) if *index == tool))
             })
     };
-    // #2468: the head row owns the card's width and the lead takes the slack
-    // as a single line. Without a width of its own the row sized to its
-    // content, the content was the lead, and the lead was measured against the
-    // width it was about to define: gpui resolved that circle by giving the
-    // text one character of room, so the lead stacked vertically until a zoom
-    // forced a fresh measure.
+    // #2468: the head row owns the card's width and the lead takes the slack.
+    // Without a width of its own the row sized to its content, the content was
+    // the lead, and the lead was measured against the width it was about to
+    // define: gpui resolved that circle by giving the text one character of
+    // room, so the lead stacked vertically until a zoom forced a fresh measure.
+    //
+    // The lead wraps instead of clipping: a tool call is a sentence, and a
+    // sentence cut mid word with an ellipsis reads as a missing line. Three
+    // lines is the same budget the body rows and the prose preview spend, so
+    // the head and the block under it break at the same place.
     let mut head = div()
         .flex()
         .flex_row()
@@ -3608,15 +3612,21 @@ fn live_card(
                 .child(SharedString::from(frame)),
         );
     if !lead.is_empty() {
-        head = head.child(div().flex_1().min_w_0().truncate().child(live_entry_text(
-            "live-activity".to_string(),
-            activity_entry,
-            lead,
-            small_style(SMALL_TEXT_SIZE, palette::current().accent),
-            false,
-            drag,
-            press,
-        )));
+        head = head.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .line_clamp(3)
+                .child(live_entry_text(
+                    "live-activity".to_string(),
+                    activity_entry,
+                    lead,
+                    small_style(SMALL_TEXT_SIZE, palette::current().accent),
+                    true,
+                    drag,
+                    press,
+                )),
+        );
     }
     let mut card = div()
         .id("live-card")
@@ -7068,14 +7078,17 @@ mod tests {
         );
     }
 
-    /// #2468: the live lead must never wrap. It was the only child of the head
-    /// row that could shrink, and the row sized itself from the lead it was
-    /// about to contain, so the text was measured against roughly one
-    /// character and stacked vertically until a zoom forced a fresh measure.
-    /// The card takes its width from the pane, the head owns that width, and
-    /// the lead takes the slack on one line and clips with an ellipsis.
+    /// #2468: the live lead must never define its own width. It was the only
+    /// child of the head row that could shrink, and the row sized itself from
+    /// the lead it was about to contain, so the text was measured against
+    /// roughly one character and stacked vertically until a zoom forced a
+    /// fresh measure. The card takes its width from the pane, the head owns
+    /// that width, and the lead takes the slack.
+    ///
+    /// It wraps there rather than clipping: a tool call is a sentence, and an
+    /// ellipsis through the middle of one hides the call that was made.
     #[test]
-    fn the_thinking_lead_is_drawn_on_one_line() {
+    fn the_thinking_lead_wraps_inside_the_head() {
         const SRC: &str = include_str!("transcript.rs");
         // Substring scans, never byte offsets: this file is the thing being
         // read, so a hand-rolled index is one rustfmt pass away from a panic
@@ -7112,8 +7125,8 @@ mod tests {
             "the lead takes the row's slack instead of hugging its content"
         );
         assert!(
-            lead_arm.contains(".truncate()"),
-            "a status line clips with an ellipsis; it never wraps"
+            lead_arm.contains(".line_clamp(3)"),
+            "a status line wraps to three lines instead of clipping mid sentence"
         );
         assert!(
             head.contains(".w_full()"),
