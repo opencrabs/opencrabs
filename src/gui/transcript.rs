@@ -1083,6 +1083,20 @@ pub async fn truncate_after(
     }
 }
 
+/// The order a topic family's rows are drawn in (#3018).
+///
+/// `created_at` places rows from different sessions in one stream. Within a
+/// session it cannot order a turn: the assistant row is created at turn start
+/// and updated in place, so it carries the same second as the question it
+/// answers. Breaking that tie on `id` is a coin flip, and the losing side puts
+/// the answer above its question, which leaves the question at the bottom of
+/// the transcript in a turn of its own. `sequence` is the per-session order
+/// the single-session read already uses, so it decides the tie; `id` stays as
+/// the last resort for two different sessions stamped the same second.
+fn family_row_order(m: &Message) -> (chrono::DateTime<chrono::Utc>, i32, uuid::Uuid) {
+    (m.created_at, m.sequence, m.id)
+}
+
 /// Fetch the newest window of the conversation plus the session's total row
 /// count, on a thread with a real stack (crash receipt in `main.rs`).
 /// `Database::connect` runs pragmas only, never migrations.
@@ -1145,10 +1159,15 @@ pub async fn load_recent(
                                 origins.insert(row.id, label.clone());
                             }
                         }
-                        // Same order the TUI's reader gets from SQL. The id
-                        // breaks a tie between two rows stamped the same
-                        // second, so the union is stable across reloads.
-                        rows.sort_by_key(|m| (m.created_at, m.id));
+                        // Same order the TUI's reader gets from SQL (#3018).
+                        // `created_at` places rows from different topics in
+                        // one stream, but it cannot order a turn: the answer
+                        // row is created at turn start, so it is stamped the
+                        // same second as the question it answers. `sequence`
+                        // is the per-session order the single-session read
+                        // already trusts, and `id` only keeps two different
+                        // sessions stamped the same second stable.
+                        rows.sort_by_key(family_row_order);
                         let reactions = reactions_for(&db, &rows).await;
                         Ok::<_, anyhow::Error>(Loaded {
                             rows,
@@ -5682,6 +5701,48 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn's answer must never sort above its own question (#3018).
+    ///
+    /// A topic family merges its sessions by time, and a turn's two rows carry
+    /// the same second: the assistant row is created at turn start. The tie was
+    /// broken on the row id, a random uuid, so half the turns came back
+    /// answer-first and the question then drew alone at the bottom of the pane,
+    /// below the answer it asked for.
+    #[test]
+    fn a_family_turn_keeps_its_question_above_its_answer() {
+        let session = uuid::Uuid::from_u128(0x3018);
+        let stamp = chrono::DateTime::from_timestamp(1_795_000_000, 0).expect("a valid second");
+        let mut question = Message::new(
+            session,
+            "user".to_string(),
+            "yes fix the hook".to_string(),
+            2266,
+        );
+        question.created_at = stamp;
+        // The answer's id sorts first: this is the pair that used to invert.
+        question.id = uuid::Uuid::from_u128(0xffff_0000);
+        let mut answer = Message::new(
+            session,
+            "assistant".to_string(),
+            "hook fixed".to_string(),
+            2267,
+        );
+        answer.created_at = stamp;
+        answer.id = uuid::Uuid::from_u128(0x0001);
+        assert!(
+            answer.id < question.id,
+            "the fixture has to lose the id tie, or it proves nothing"
+        );
+
+        let mut rows = vec![answer, question];
+        rows.sort_by_key(family_row_order);
+        assert_eq!(
+            rows.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+            vec!["user", "assistant"],
+            "the question opens the turn, whatever the ids say"
+        );
+    }
 
     /// The chat's own fill has to read apart from the window's (#2981). The two
     /// were the same pixel, so a screenshot of a black chat could not say
