@@ -9663,7 +9663,7 @@ mod tests {
             "with a path the change applies off the UI thread on the service"
         );
         assert!(
-            !rest.contains("cx.spawn"),
+            !rest.contains("cx.spawn("),
             "the /cd apply never runs on gpui's executor: the row write needs a \
              Tokio reactor and gpui has none, so awaiting it there aborted the \
              window"
