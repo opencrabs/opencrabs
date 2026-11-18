@@ -2645,6 +2645,10 @@ impl Render for Dashboard {
                     self.turn.busy,
                     measure,
                     f32::from(window.rem_size()),
+                    // One pane is the window's whole conversation, so the
+                    // status cards there are held to a share of the column.
+                    // A split pane keeps its full span (#2979).
+                    !split_window,
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,

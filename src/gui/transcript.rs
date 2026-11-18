@@ -2052,6 +2052,34 @@ fn message_max_width(content_width: f32) -> f32 {
     content_width.max(0.0)
 }
 
+/// The share of the column a status card may draw in a single pane.
+///
+/// A single pane caps the conversation at `CHAT_MEASURE_PX`, and a tool card
+/// spanning that whole measure reads as a panel with one clipped sentence on
+/// top of it: the eye travels the full width to read a call that could have
+/// been two lines. Two thirds keeps the call inside a comfortable line and
+/// leaves the rest of the column as margin, which is what the owner asked for
+/// on 2026-11-18 ("that block card could take half or maybe 2/3 max of the
+/// width of the session").
+const CARD_MAX_FRACTION: f32 = 2.0 / 3.0;
+
+/// The widest a status card may draw, given the column it sits in.
+///
+/// A split pane is exempt. Its column is already the narrow box, and a
+/// further share of it would squeeze the same sentence into a third of the
+/// space it has, so the card takes the column there and nothing less.
+///
+/// The card keeps `.w_full()` and takes this as its ceiling (#2979). A row
+/// that carries only a `max_w` sizes itself from its own content, and the
+/// text inside it then measures against a width the row never had.
+fn card_max_width(content_width: f32, single_pane: bool) -> f32 {
+    if single_pane {
+        content_width * CARD_MAX_FRACTION
+    } else {
+        content_width.max(0.0)
+    }
+}
+
 /// The message surface carries a tighter corner than the cards around it, so a
 /// column of chat reads as conversation and not as a stack of panels. This
 /// token belongs to the message bubble alone and never reaches `CARD_RADIUS`
@@ -3030,7 +3058,7 @@ fn tool_ledger_text(calls: &[ToolCall]) -> String {
 /// rounded box holding the head row, the working-out rows when the turn is
 /// open, and the footer that keeps the count, the ctx and the clock after the
 /// turn ends. `None` for a turn that did no work, which earns no card (#758).
-fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<Stateful<Div>> {
+fn settled_card(turn: &Turn, body: Vec<AnyElement>, card_cap: f32) -> Option<Stateful<Div>> {
     turn.header.as_ref()?;
     let (glyph, verb) = settled_verdict(turn);
     let failed = glyph == "\u{274c}";
@@ -3075,9 +3103,10 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
         .flex()
         .flex_col()
         .w_full()
-        // A history card is a row in the transcript like a message, so it
-        // takes the same column (#2979).
-        .when(max_width > 0.0, |d| d.max_w(px(max_width)))
+        // A history card is a row in the transcript like a message (#2979),
+        // held to the share a status card takes in a single pane so the turn
+        // does not change width the moment it finishes.
+        .when(card_cap > 0.0, |d| d.max_w(px(card_cap)))
         .min_w_0()
         .flex_shrink_0()
         .rounded(px(MESSAGE_RADIUS))
@@ -3511,7 +3540,7 @@ fn live_card(
     ctx: (Option<u32>, u32),
     drag: Option<&Rc<CopyDrag>>,
     press: &HashMap<LiveRow, PressHandler>,
-    max_width: f32,
+    card_cap: f32,
 ) -> Stateful<Div> {
     // A stop ends the turn where it stood (#2811). A spinner says work is
     // happening and nothing is, so the head keeps a stop glyph and the card
@@ -3633,9 +3662,10 @@ fn live_card(
         .flex()
         .flex_col()
         .w_full()
-        // The live card follows the same rule as the settled one (#2979), so a
-        // turn does not change width the moment it finishes.
-        .when(max_width > 0.0, |d| d.max_w(px(max_width)))
+        // The live card follows the same rule as the settled one (#2979), and
+        // the same share of a single pane, so a turn does not change width the
+        // moment it finishes.
+        .when(card_cap > 0.0, |d| d.max_w(px(card_cap)))
         .min_w_0()
         .flex_shrink_0()
         .rounded(px(MESSAGE_RADIUS))
@@ -4091,6 +4121,7 @@ fn live_view(
     live: &LiveTurn,
     content_width: f32,
     row_cap: f32,
+    card_cap: f32,
     expanded: bool,
     ctx: (Option<u32>, u32),
     live_click: Option<&ClickHandler>,
@@ -4176,8 +4207,9 @@ fn live_view(
     // anything (#2895). The notices above still draw; the card does not.
     if live.has_turn_content() {
         // The live card is a row of the same conversation, so it takes the
-        // same column the settled rows take (#2979).
-        let card = live_card(live, expanded, ctx, drag, press, row_cap);
+        // same column the settled rows take (#2979), less the single-pane
+        // share a status card is held to.
+        let card = live_card(live, expanded, ctx, drag, press, card_cap);
         col = col.child(match live_click {
             Some(click) => {
                 let click = click.clone();
@@ -5344,14 +5376,18 @@ pub fn view(
     busy: bool,
     content_width: f32,
     rem_size: f32,
+    single_pane: bool,
     mut handlers: HashMap<String, ClickHandler>,
     hooks: ViewHooks,
 ) -> Stateful<Div> {
     let content_width = transcript_content_width(content_width, rem_size);
-    // Every row takes that column, single pane and split alike (#2979). The
-    // two thirds cap that used to be computed here is what broke a single-pane
-    // window: it measured the bubble against a width the row never had.
+    // Every conversation row takes that column, single pane and split alike
+    // (#2979). The two thirds cap that used to be computed here is what broke a
+    // single-pane window: it measured the bubble against a width the row never
+    // had. The cap that remains is the card's, and the card carries a width of
+    // its own before it takes a ceiling.
     let row_cap = message_max_width(content_width);
+    let card_cap = card_max_width(content_width, single_pane);
     let ViewHooks {
         attachments: attachment_handlers,
         drag,
@@ -5719,7 +5755,7 @@ pub fn view(
             }
         }
         col = col.children(pre);
-        if carded && let Some(card) = settled_card(turn, body, row_cap) {
+        if carded && let Some(card) = settled_card(turn, body, card_cap) {
             // The listener is per turn and used exactly here, so it is taken
             // out of the map instead of cloned.
             col = col.child(match handlers.remove(&turn.anchor) {
@@ -5734,6 +5770,7 @@ pub fn view(
             live,
             content_width,
             row_cap,
+            card_cap,
             state.live_expanded,
             (ctx_used, ctx_max),
             live_click.as_ref(),
@@ -6284,6 +6321,29 @@ mod tests {
         );
         assert_eq!(
             message_max_width(0.0),
+            0.0,
+            "an unmeasured window gives no width rather than going negative"
+        );
+    }
+
+    /// A status card is a card, not a panel: in a single pane it takes two
+    /// thirds of the column and leaves the rest as margin, while a split pane
+    /// keeps every pixel it has because its column is already the narrow box.
+    #[test]
+    fn a_status_card_takes_two_thirds_of_a_single_pane() {
+        let two_thirds = 600.0 * 2.0 / 3.0;
+        assert!(
+            (card_max_width(600.0, true) - two_thirds).abs() < 0.01,
+            "a single pane holds a status card to two thirds of its column, got {}",
+            card_max_width(600.0, true)
+        );
+        assert_eq!(
+            card_max_width(600.0, false),
+            600.0,
+            "a split pane has no slack to give away"
+        );
+        assert_eq!(
+            card_max_width(0.0, true),
             0.0,
             "an unmeasured window gives no width rather than going negative"
         );
