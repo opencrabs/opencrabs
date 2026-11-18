@@ -659,9 +659,6 @@ impl Render for PaneView {
             self.busy,
             self.width,
             f32::from(_window.rem_size()),
-            // A split leaf draws at its own full span: its column is already
-            // the narrow box, so the single-pane card share never applies.
-            false,
             fold_handlers,
             transcript::ViewHooks {
                 // The pane's own budget (#2854), not the window's.
