@@ -679,6 +679,27 @@ impl LiveTurn {
             self.tps.advance(now);
         }
         self.stream.push_str(text);
+        // The provider reports the same narration twice: once as intermediate
+        // text and once as streamed chunks. `push_narration` drains the
+        // streamed copy only when the paragraph arrives SECOND, so the other
+        // order left the whole paragraph sitting in the stream, and the answer
+        // bubble below the card then repeated the prose the card was already
+        // previewing at its top. One paragraph, drawn twice, above and below
+        // the same card (#3023).
+        //
+        // The test is exact equality on the trimmed buffer, never a prefix: a
+        // half arrived chunk must not clear the answer, and the stream only
+        // becomes equal to the paragraph once its last chunk has landed. An
+        // answer that follows the paragraph appends to an empty buffer, so no
+        // answer text can be swallowed here.
+        let replays_narration = matches!(
+            self.entries.last(),
+            Some(LiveEntry::Narration(newest)) if self.stream.trim() == newest.trim()
+        );
+        if replays_narration {
+            crate::logging::debug("live card: stream was a replay of the narration, drained");
+            self.stream.clear();
+        }
     }
 
     /// Append narration that may already have arrived as streamed chunks.
@@ -9029,6 +9050,45 @@ mod tests {
             collapsed_narration(&quiet),
             None,
             "a card that has said nothing previews nothing"
+        );
+    }
+
+    /// The provider reports one paragraph twice and the two copies arrive in
+    /// either order. When the streamed copy lands second, the whole paragraph
+    /// used to stay in the answer buffer, so the bubble below the card printed
+    /// the prose the card was already previewing at its top: one paragraph
+    /// drawn twice, above and below the same card (#3023).
+    #[test]
+    fn a_narration_streamed_after_it_was_reported_never_becomes_the_answer() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        live.push_narration("Reading the runner config.");
+        assert_eq!(
+            live.answer(),
+            None,
+            "an intermediate paragraph is not the answer"
+        );
+
+        // The same paragraph, chunk by chunk, the way the provider replays it.
+        // The buffer only equals the narration once its last chunk has landed,
+        // and that is the moment it is drained.
+        let now = std::time::Instant::now();
+        for chunk in ["Reading the", " runner", " config."] {
+            live.note_chunk_at(chunk, now);
+        }
+        assert_eq!(
+            live.answer(),
+            None,
+            "a replay of the narration never reaches the answer bubble"
+        );
+
+        // An answer that follows is untouched: it appends to the drained
+        // buffer and draws in full.
+        live.note_chunk_at(" Done.", now);
+        assert_eq!(
+            live.answer(),
+            Some(" Done."),
+            "the answer after the paragraph survives the drain"
         );
     }
 
