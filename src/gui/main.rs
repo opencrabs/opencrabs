@@ -55,6 +55,7 @@ mod dashboard_turns;
 mod editor;
 mod fonts;
 mod help_view;
+mod hint;
 mod icon;
 mod layout_store;
 mod logging;
@@ -113,7 +114,7 @@ mod window_controls;
 use crate::composer_view::{
     command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
 };
-use crate::help_view::{HelpView, help_screen};
+use crate::help_view::{CommandLists, HelpView, help_screen};
 use crate::mission_control_view::{
     mission_control_body, mission_control_detail, mission_control_logs,
 };
@@ -666,6 +667,24 @@ struct Dashboard {
     finder_paint: Entity<command_palette::FinderPaint>,
     /// A left-button drag is extending the field's selection.
     finder_selecting: bool,
+    /// The Seeker's own take (#3044). The card records in place: the field it
+    /// fills is the field on screen, so the counter, the wave and the stop are
+    /// drawn inside the card instead of the composer's strip, and the words
+    /// land where the person was already typing.
+    seeker_capture: Option<voice_input::Capture>,
+    seeker_transcription: Option<voice_input::Transcription>,
+    /// How long the take has run, and the meter the card draws beside it.
+    seeker_voice_secs: u64,
+    seeker_voice_levels: Vec<f32>,
+    /// The recording was asked to stop and its WAV is being built.
+    seeker_voice_finishing: bool,
+    /// Whether the Seeker's voice loop is already ticking. Same one-shot shape
+    /// as the composer's: one loop per take, never one per frame.
+    seeker_voice_looping: bool,
+    /// Why the last take failed, said in the card. The card is what the person
+    /// is looking at, so an error drawn behind it would be an error nobody
+    /// reads.
+    seeker_voice_error: Option<SharedString>,
     /// Monotonic tag on the latest period fetch; only its result is applied,
     /// so a slow fetch landing after a newer one cannot paint stale data.
     pending: u64,
@@ -808,6 +827,11 @@ struct Dashboard {
     update_prompt: Option<bool>,
     /// The Help Center filter typed after `/`; None while it is not open (#2407).
     help_filter: Option<String>,
+    /// The commands the Help Center prints: slash names, loaded skills and the
+    /// user's own entries (#3044). Read once when the reference opens, because
+    /// two of the three sources walk the disk; a per-frame read would be a
+    /// directory walk and a parse on every repaint.
+    help_commands: CommandLists,
     /// Drag-to-copy state shared by the chat's rows (#2383).
     copy_drag: Rc<CopyDrag>,
     /// The window's panes as a tree (#2472). One leaf is the unsplit window,
@@ -5236,6 +5260,7 @@ impl Render for Dashboard {
                 filter: self.help_filter.clone(),
                 scroll: self.help_scroll.clone(),
                 narrow: f32::from(window.viewport_size().width) < 760.0,
+                commands: &self.help_commands,
             };
             root = root.child(help_screen(&view));
         }
@@ -5479,11 +5504,13 @@ impl Render for Dashboard {
                     caret_on: self.finder_caret,
                     view: cx.entity().downgrade(),
                     paint: self.finder_paint.clone(),
+                    voice: self.seeker_voice_view(),
                 },
                 handlers,
                 chip,
                 wheel,
                 find::channel_hint(state.query(), &self.finder_channels),
+                self.seeker_voice_error.clone(),
             ));
         }
         // The window controls are the frame's, not a screen's (#2813): drawn
@@ -6105,6 +6132,13 @@ fn main() {
                         finder_activity: std::time::Instant::now(),
                         finder_paint: cx.new(|_| command_palette::FinderPaint::default()),
                         finder_selecting: false,
+                        seeker_capture: None,
+                        seeker_transcription: None,
+                        seeker_voice_secs: 0,
+                        seeker_voice_levels: Vec::new(),
+                        seeker_voice_finishing: false,
+                        seeker_voice_looping: false,
+                        seeker_voice_error: None,
                         chip_channel_names: chip_names,
                         channel_chip: channel_chip_line(),
                         daemon_starting: false,
@@ -6151,6 +6185,7 @@ fn main() {
                         update_available: None,
                         update_prompt: None,
                         help_filter: None,
+                        help_commands: CommandLists::empty(),
                         panes: None,
                         pane_states: HashMap::new(),
                         parked_panes: HashMap::new(),
@@ -9335,6 +9370,37 @@ mod tests {
         ] {
             assert!(src.contains(needle), "{needle} is part of the wiring");
         }
+    }
+
+    /// The recording chord belongs to the card while it is up (#3044).
+    ///
+    /// The editor behind the card has `ctrl-alt-r` bound to its own action, and
+    /// a press used to reach it: the take opened the composer's microphone and
+    /// landed in whichever session was focused behind the card while the card
+    /// drew nothing. The chord has to be answered in `finder_key`, ahead of the
+    /// translation that turns modified keys into edits, and it has to stop
+    /// there or the action fires anyway.
+    #[test]
+    fn the_recording_chord_records_into_the_card() {
+        let keys = fn_body(include_str!("dashboard_finder.rs"), "finder_key");
+        let chord = keys
+            .find("ks.key == \"r\"")
+            .expect("the card answers the recording chord");
+        assert!(
+            keys.contains("cx.stop_propagation()"),
+            "an unanswered chord falls through to the editor's own action"
+        );
+        assert!(
+            keys.contains("self.seeker_dictate(cx)"),
+            "the chord does what the card's microphone does"
+        );
+        let editing = keys
+            .find("text_field::editing_chord(")
+            .expect("the editing chords are still translated");
+        assert!(
+            chord < editing,
+            "the chord is a control, not text: it reads before the translation"
+        );
     }
 
     #[test]

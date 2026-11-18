@@ -10,7 +10,7 @@
 //! says can be tested without a window.
 
 use gpui::{
-    App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
+    AnyElement, App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
     InspectorElementId, LayoutId, MouseButton, Pixels, Point, ScrollWheelEvent, SharedString,
     Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, linear_color_stop,
     linear_gradient, point, prelude::*, px, relative, rems, rgb, rgba, size,
@@ -411,24 +411,55 @@ pub(super) fn query_line(
         .child(element)
 }
 
+/// The Seeker's take, as the card paints it (#3044).
+///
+/// Derived from the window's handles on every frame rather than stored: the
+/// card must never show a counter for a microphone that already closed.
+pub(crate) struct SeekerVoice {
+    /// The device is open and samples are arriving.
+    pub recording: bool,
+    /// The recording was asked to stop and its WAV is being built.
+    pub finishing: bool,
+    /// Seconds the take has run, for the counter.
+    pub secs: u64,
+    /// The meter, newest last, for the wave.
+    pub levels: Vec<f32>,
+}
+
 /// The dictation control on the Seeker field (#3044).
 ///
 /// Same glyph, colour and click as the composer's microphone, so the two are
 /// one control on two surfaces: a person who learned it in the field finds it
-/// in the card, and a click on either one walks into `Editor::toggle_dictation`
-/// through the window, so the two cannot drift apart.
+/// in the card, and the hover says the same thing on both.
 ///
-/// It hands the job over instead of doing it. The recording's counter, its
-/// waveform and its stop all belong to the composer's strip, and the card
-/// paints over exactly that, so the click closes the card and lets the composer
-/// carry the take it started.
+/// It records here, in the card. The counter and the wave are drawn under the
+/// field by [`seeker_voice_strip`], and the words land in the field itself: a
+/// search query has to end up in the box the person is looking at, which is
+/// why handing the job to the composer behind the card was the wrong shape.
 ///
 /// The tile is one step larger than the composer's (2.1rem against 1.8rem,
 /// with a 1.5rem glyph against 1.25rem) because the field around it is: the
 /// line here is `text_2xl`, and a control sized for the composer's line would
 /// read as a leftover from the surface it came from (#3044).
-fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
-    let colour = palette::current().text_muted;
+fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl IntoElement {
+    let theme = palette::current();
+    let recording = voice.is_some_and(|v| v.recording);
+    let working = voice.is_some_and(|v| v.finishing && !v.recording);
+    // The four states wear the four colours the composer's microphone wears:
+    // quiet grey, recording red, working amber. A control that changed the
+    // meaning of a click without changing its face would be a trap.
+    let colour = if recording {
+        theme.red
+    } else if working {
+        theme.amber
+    } else {
+        theme.text_muted
+    };
+    let mark: AnyElement = if recording {
+        crate::icon::stop_icon(colour, 1.15).into_any_element()
+    } else {
+        crate::icon::mic_icon(colour, 1.5).into_any_element()
+    };
     div()
         .id("seeker-mic")
         .flex()
@@ -439,14 +470,87 @@ fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
         .size(rems(2.1))
         .rounded_sm()
         .cursor_pointer()
-        .opacity(0.8)
+        .opacity(if recording { 1.0 } else { 0.8 })
         .hover(|d| d.opacity(1.0))
-        .child(crate::icon::mic_icon(colour, 1.5))
+        // The hover names the key, exactly as the composer's microphone does:
+        // two surfaces, one binding, one sentence about it.
+        .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
+        .child(mark)
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             // The click belongs to the control, not to the scrim under it.
             cx.stop_propagation();
             let _ = view.update(cx, |this, cx| this.seeker_dictate(cx));
         })
+}
+
+/// The recording strip under the field (#3044): the counter, the live meter,
+/// and the word that says the same key stops it.
+///
+/// It sits inside the card, under the pill, because that is where the person is
+/// looking. The composer's strip could not do this job: it draws behind this
+/// very card.
+fn seeker_voice_strip(voice: &SeekerVoice) -> impl IntoElement {
+    let theme = palette::current();
+    let colour = if voice.recording {
+        theme.red
+    } else {
+        theme.amber
+    };
+    let word = if voice.recording {
+        "same key to stop"
+    } else {
+        "listening for the last words…"
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px(px(FIELD_PAD_X))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(colour))
+                .child(format!("{}:{:02}", voice.secs / 60, voice.secs % 60)),
+        )
+        .child(seeker_wave(voice.levels, colour))
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(rgb(INK_MUTED))
+                .child(word),
+        )
+}
+
+/// How many meter readings the card's wave draws. The composer's own count, so
+/// the two strips read as the same instrument.
+const SEEKER_WAVE_BARS: usize = 34;
+
+/// The live meter in the card (#3044): one bar per reading, newest on the
+/// right, so the strip scrolls the way a waveform should and its right edge is
+/// what the microphone heard a moment ago.
+fn seeker_wave(levels: &[f32], colour: u32) -> impl IntoElement {
+    let shown = &levels[levels.len().saturating_sub(SEEKER_WAVE_BARS)..];
+    let mut row = div()
+        .flex()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(px(1.5))
+        .h(px(14.0));
+    for level in shown {
+        row = row.child(
+            div()
+                .flex_none()
+                .w(px(2.0))
+                .h(px(2.0 + level.clamp(0.0, 1.0) * 12.0))
+                .rounded(px(1.0))
+                .bg(rgb(colour)),
+        );
+    }
+    row
 }
 
 /// Presentation state for one Seeker frame. Grouping the borrowed engine,
@@ -457,6 +561,8 @@ pub(super) struct FinderOverlayState<'a> {
     pub caret_on: bool,
     pub view: WeakEntity<Dashboard>,
     pub paint: Entity<FinderPaint>,
+    /// The card's own take, or `None` while the microphone is idle (#3044).
+    pub voice: Option<SeekerVoice>,
 }
 
 pub(super) fn overlay(
@@ -465,6 +571,7 @@ pub(super) fn overlay(
     chip: ChipHandler,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     setup: Option<&'static str>,
+    voice_error: Option<SharedString>,
 ) -> impl IntoElement {
     let FinderOverlayState {
         state,
@@ -472,6 +579,7 @@ pub(super) fn overlay(
         caret_on,
         view,
         paint,
+        voice,
     } = frame;
     let theme = palette::current();
     let printed = rows(state);
@@ -534,8 +642,27 @@ pub(super) fn overlay(
         .border_color(rgba(0xffffff2e))
         .shadow_md()
         .child(query_line(state, view, paint, caret_on))
-        .child(field_mic(dictate));
+        .child(field_mic(dictate, voice.as_ref()));
     shell = shell.child(pill);
+
+    // The take draws under the pill, inside the card (#3044): the counter, the
+    // meter and the word that the same key stops it. It has to live here
+    // because the composer's own strip draws behind this card.
+    if let Some(take) = voice.as_ref() {
+        shell = shell.child(seeker_voice_strip(take));
+    }
+
+    // A failed take says so here, for the same reason: the composer's notice
+    // sits behind the card and would be read by nobody (#3044).
+    if let Some(reason) = voice_error {
+        shell = shell.child(
+            div()
+                .px(px(FIELD_PAD_X))
+                .text_xs()
+                .text_color(rgb(theme.red))
+                .child(reason),
+        );
+    }
 
     let mut card = div()
         .flex()
@@ -913,7 +1040,7 @@ mod tests {
             "the height comes from the pillow around the line, not from a bigger font"
         );
         assert!(
-            pill_src.contains(".child(field_mic(dictate))"),
+            pill_src.contains(".child(field_mic(dictate, voice.as_ref()))"),
             "the microphone closes the field's row, where the composer's does"
         );
         let mic = src

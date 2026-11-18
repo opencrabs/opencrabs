@@ -6,6 +6,28 @@
 
 use super::*;
 
+/// How often the Seeker's voice loop drains the microphone and the
+/// transcription (#3044). The composer's own tick: the two strips are driven by
+/// the same kind of timer, so they move at the same speed.
+const SEEKER_VOICE_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What the Seeker's microphone is doing (#3044).
+///
+/// The same four states as the composer's, because it is the same control on a
+/// second surface: idle starts a take, recording ends one, closing and
+/// transcribing are the two waits nobody should be able to interrupt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeekerVoicePhase {
+    /// Nothing in flight: the control starts a recording.
+    Idle,
+    /// The device is open and samples are arriving.
+    Recording,
+    /// The recording was asked to stop and the WAV is being built.
+    Finishing,
+    /// A WAV is on its way through the speech chain.
+    Transcribing,
+}
+
 impl Dashboard {
     /// Open the Seeker card (`alt+space`, `cmd-k`): one field over the
     /// window that finds a conversation, a command or a surface with the same
@@ -70,6 +92,10 @@ impl Dashboard {
     pub(crate) fn close_finder(&mut self, cx: &mut Context<Self>) {
         self.finder = None;
         self.finder_selecting = false;
+        // A take belongs to the card that started it (#3044): closing the card
+        // stops the device instead of leaving the microphone open behind a
+        // surface that no longer draws a counter or a stop.
+        self.seeker_voice_reset();
         self.refocus_screen();
         cx.notify();
     }
@@ -171,6 +197,17 @@ impl Dashboard {
         // Any key is activity: the caret comes back and its idle clock
         // restarts before the key does its work (#2531).
         self.finder_activity_reset();
+        // The recording chord belongs to the card while it is up (#3044). The
+        // editor behind the card has the same chord bound to its own action, so
+        // without this stop the press opens the composer's microphone and the
+        // take lands in a session the person cannot see, which is exactly what
+        // this made happen before: the card drew nothing and the words went
+        // somewhere else.
+        if ks.modifiers.control && ks.modifiers.alt && ks.key == "r" {
+            cx.stop_propagation();
+            self.seeker_dictate(cx);
+            return;
+        }
         if let Some(edit) = text_field::editing_chord(
             &ks.key,
             ks.modifiers.control,
@@ -290,20 +327,193 @@ impl Dashboard {
         self.finder_selecting = false;
     }
 
-    /// The Seeker field's microphone (#3044): the card closes and the composer
-    /// takes the click.
+    /// The Seeker field's microphone (#3044): the card records in place.
     ///
-    /// It cannot dictate with the card up. The recording's counter, its
-    /// waveform and its stop all belong to the composer's own strip, and the
-    /// card paints over exactly that, so a take started from here would be
-    /// invisible from the second it began. One click therefore means what it
-    /// means in the field, on the surface that can show it, and the transcript
-    /// lands where the words would have been typed.
+    /// The words this produces are a search query, so they have to land in the
+    /// field the card is drawing, not in the composer behind it. Closing the
+    /// card to hand the job over was the wrong shape twice over: the take ran
+    /// in whatever session the composer belonged to, and the person watching
+    /// the card saw nothing happen. The card therefore owns its own capture,
+    /// draws its own counter and wave, and fills its own field when the words
+    /// come back.
+    ///
+    /// One control, four states, the same four the composer's microphone has:
+    /// idle starts, recording stops, closing and transcribing wait. A second
+    /// click during the wait is ignored rather than opening a second device.
     pub(crate) fn seeker_dictate(&mut self, cx: &mut Context<Self>) {
-        self.close_finder(cx);
-        let composer = self.composer_entity(cx);
-        composer.update(cx, |editor, cx| editor.toggle_dictation(cx));
+        match self.seeker_voice_phase() {
+            SeekerVoicePhase::Idle => {
+                self.seeker_voice_error = None;
+                self.seeker_capture = Some(voice_input::Capture::start());
+                self.seeker_voice_finishing = false;
+                self.seeker_voice_secs = 0;
+                self.seeker_voice_levels.clear();
+                self.pump_seeker_voice(cx);
+            }
+            SeekerVoicePhase::Recording => {
+                if let Some(capture) = self.seeker_capture.as_ref() {
+                    capture.stop();
+                }
+                self.seeker_voice_finishing = true;
+            }
+            SeekerVoicePhase::Finishing | SeekerVoicePhase::Transcribing => {}
+        }
         cx.notify();
+    }
+
+    /// What the card's microphone is doing, derived from the handles rather
+    /// than stored: a flag kept beside the handle is a flag that can disagree
+    /// with it on the frame after a handoff.
+    pub(crate) fn seeker_voice_phase(&self) -> SeekerVoicePhase {
+        if self.seeker_transcription.is_some() {
+            SeekerVoicePhase::Transcribing
+        } else if self.seeker_voice_finishing {
+            SeekerVoicePhase::Finishing
+        } else if self.seeker_capture.is_some() {
+            SeekerVoicePhase::Recording
+        } else {
+            SeekerVoicePhase::Idle
+        }
+    }
+
+    /// What the card paints, or `None` when the microphone is idle.
+    pub(crate) fn seeker_voice_view(&self) -> Option<command_palette::SeekerVoice> {
+        let phase = self.seeker_voice_phase();
+        if phase == SeekerVoicePhase::Idle {
+            return None;
+        }
+        Some(command_palette::SeekerVoice {
+            recording: phase == SeekerVoicePhase::Recording,
+            finishing: phase == SeekerVoicePhase::Finishing,
+            secs: self.seeker_voice_secs,
+            levels: self.seeker_voice_levels.clone(),
+        })
+    }
+
+    /// Drop the take and everything it owns. Dropping the capture is what
+    /// closes the device: its stop flag is the only thing the capture thread
+    /// watches, so the stream ends at the next tick.
+    fn seeker_voice_reset(&mut self) {
+        self.seeker_capture = None;
+        self.seeker_transcription = None;
+        self.seeker_voice_levels.clear();
+        self.seeker_voice_secs = 0;
+        self.seeker_voice_finishing = false;
+    }
+
+    /// One loop per take, the composer's own shape: it ends the moment there is
+    /// nothing left to wait for, so an idle card runs no timer at all.
+    fn pump_seeker_voice(&mut self, cx: &mut Context<Self>) {
+        if self.seeker_voice_looping {
+            return;
+        }
+        self.seeker_voice_looping = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SEEKER_VOICE_TICK).await;
+                let keep = this
+                    .update(cx, |view, cx| view.poll_seeker_voice(cx))
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Drain one tick of both workers and say whether anything is still
+    /// pending. The flag and the tick cannot disagree, because the same update
+    /// that finds nothing left clears it.
+    fn poll_seeker_voice(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        // Read the device into locals first: the borrow of the capture must end
+        // before the fields it feeds are written.
+        let meter = self
+            .seeker_capture
+            .as_ref()
+            .map(|capture| (capture.elapsed().as_secs(), capture.levels()));
+        if let Some((secs, levels)) = meter {
+            self.seeker_voice_secs = secs;
+            self.seeker_voice_levels = levels;
+            changed = true;
+        }
+        let mut events = Vec::new();
+        if let Some(capture) = self.seeker_capture.as_ref() {
+            while let Some(event) = capture.try_next() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                voice_input::CaptureEvent::Started => {}
+                voice_input::CaptureEvent::Finished(answer) => {
+                    self.seeker_capture = None;
+                    self.seeker_voice_finishing = false;
+                    self.seeker_voice_levels.clear();
+                    changed = true;
+                    match answer {
+                        Ok(recording) => {
+                            self.seeker_transcription =
+                                Some(voice_input::Transcription::start_for_text(recording));
+                        }
+                        Err(message) => self.seeker_voice_failed(message),
+                    }
+                }
+            }
+        }
+        // Take the answer out before touching the handle: the borrow that reads
+        // it must not overlap the assignment that clears it.
+        let answer = match self.seeker_transcription.as_ref() {
+            Some(transcription) => transcription.try_take(),
+            None => None,
+        };
+        if let Some(answer) = answer {
+            self.seeker_transcription = None;
+            changed = true;
+            match answer {
+                Ok(spoken) if spoken.text.trim().is_empty() => {
+                    self.seeker_voice_failed("The microphone caught nothing.".to_string())
+                }
+                Ok(spoken) => self.land_seeker_voice(&spoken.text, cx),
+                Err(message) => self.seeker_voice_failed(message),
+            }
+        }
+        if !changed && self.seeker_voice_phase() == SeekerVoicePhase::Idle {
+            self.seeker_voice_looping = false;
+        }
+        cx.notify();
+        changed
+    }
+
+    /// Put the words in the field the card is drawing, at the caret (#3044).
+    ///
+    /// The insertion goes through the shared text field, so a take replaces a
+    /// selection and lands where the person would have typed. The deep search
+    /// then runs the same way a keystroke starts it.
+    fn land_seeker_voice(&mut self, text: &str, cx: &mut Context<Self>) {
+        let words = text.trim();
+        let Some(state) = self.finder.as_mut() else {
+            // The card closed while the take was in flight: the words are not
+            // thrown away, they go where the keyboard went.
+            let composer = self.composer_entity(cx);
+            let words = words.to_string();
+            composer.update(cx, |editor, cx| editor.dictate_words(&words, cx));
+            return;
+        };
+        state.field_mut().insert_text(words);
+        self.seeker_voice_error = None;
+        self.seeker_find_if_changed(cx);
+        cx.notify();
+    }
+
+    /// Say what went wrong where the person is looking (#3044).
+    ///
+    /// The composer's notice strip draws behind this card, so an error sent
+    /// there would be invisible for exactly as long as the card stays up.
+    fn seeker_voice_failed(&mut self, message: String) {
+        crate::logging::error(&format!("seeker dictation: {message}"));
+        self.seeker_voice_error = Some(SharedString::from(message));
     }
 
     /// Run the row Enter is on, or the best match when no arrow was pressed.

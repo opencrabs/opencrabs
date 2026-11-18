@@ -234,12 +234,27 @@ impl Transcription {
     /// Returns immediately. The UI keeps polling the same 50 ms tick it uses
     /// for the microphone, so the answer lands without a second timer.
     pub(crate) fn start(recording: Recording) -> Self {
+        Self::spawn(move || transcribe(recording))
+    }
+
+    /// The same worker, told not to keep the audio (#3044).
+    ///
+    /// The Seeker dictates a search query, not a message: the words go into
+    /// the field, so a clip nobody will send would be an orphan file in the
+    /// profile's `voice/` folder the moment the take finished.
+    pub(crate) fn start_for_text(recording: Recording) -> Self {
+        Self::spawn(move || transcribe_words(recording))
+    }
+
+    /// One thread, one answer. Both entry points share it so the window has a
+    /// single place that decides the stack size and the failure line.
+    fn spawn(job: impl FnOnce() -> Result<Spoken, String> + Send + 'static) -> Self {
         let (tx, result) = channel();
         let spawned = std::thread::Builder::new()
             .name("gui-voice-stt".into())
             .stack_size(STACK_BYTES)
             .spawn(move || {
-                let _ = tx.send(transcribe(recording));
+                let _ = tx.send(job());
             });
         if let Err(e) = spawned {
             let (tx, result) = channel();
@@ -280,6 +295,26 @@ fn transcribe(recording: Recording) -> Result<Spoken, String> {
     Ok(Spoken {
         text,
         audio,
+        seconds,
+    })
+}
+
+/// Transcribe one take and keep nothing but the words (#3044).
+///
+/// The Seeker's own microphone. A search query is not a message, so there is
+/// no row to carry a clip and no reason to write one: saving here would leave
+/// a recording on disk that nothing points at, which is the exact orphan the
+/// save-last order exists to avoid.
+fn transcribe_words(recording: Recording) -> Result<Spoken, String> {
+    let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
+    let (text, language) = transcribe_wav(recording.wav)?;
+    logging::info(&format!(
+        "voice capture: {seconds:.1}s heard as {}, kept as text only",
+        language.unwrap_or_else(|| "an unreported language".to_string()),
+    ));
+    Ok(Spoken {
+        text,
+        audio: None,
         seconds,
     })
 }

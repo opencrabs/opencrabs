@@ -5,6 +5,7 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use crate::help_view::{CommandLists, load_commands};
 use crate::status::tilde_path;
 
 impl Dashboard {
@@ -979,7 +980,14 @@ impl Dashboard {
     /// exactly as it was.
     pub(crate) fn toggle_help(&mut self, cx: &mut Context<Self>) {
         self.help_open = !self.help_open;
-        if !self.help_open {
+        if self.help_open {
+            // The commands are read once, on the way in: the slash table is
+            // static but skills and the user's own commands come from disk, and
+            // a reference that walked the disk on every repaint would stutter
+            // while the reader scrolls (#3044).
+            self.help_commands = load_commands();
+        } else {
+            self.help_commands = CommandLists::empty();
             // Closing the reference is a return to the conversation, so the
             // caret goes back where typing is expected.
             self.refocus_screen();

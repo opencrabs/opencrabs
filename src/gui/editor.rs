@@ -934,6 +934,15 @@ impl Editor {
 
     /// Put a finished dictation in the field at the caret (#3044).
     ///
+    /// The card records in place, so this runs only for a take that was still
+    /// in flight when the card closed: the words go where the keyboard went
+    /// instead of being thrown away.
+    pub(crate) fn dictate_words(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.insert_dictation(text, cx);
+    }
+
+    /// Put a finished dictation in the field at the caret (#3044).
+    ///
     /// The same door a typed character takes, without the window the input
     /// handler carries: the tick that delivers a transcript has no frame to
     /// hand one. Whether a space goes in is `dictation_insertion`'s call.
@@ -3293,6 +3302,9 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
                 .size(gpui::rems(1.8))
                 .child(mark),
         )
+        // The hover names the key, the same sentence the Seeker's microphone
+        // shows: two surfaces, one binding, one explanation (#3044).
+        .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
