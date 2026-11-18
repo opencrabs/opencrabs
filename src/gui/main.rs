@@ -5198,10 +5198,21 @@ impl Render for Dashboard {
                 this.refocus_screen();
                 cx.notify();
             });
-            let body = self.preview_body(&open, cx);
+            let window_size = window.viewport_size();
+            let viewport = (f32::from(window_size.width), f32::from(window_size.height));
+            let document_height = (viewport.1 - 300.0).clamp(120.0, 620.0);
+            let body = self.preview_body(&open, document_height, cx);
             let detail =
                 preview::detail_line(&open, self.preview_zoom, self.preview_video.as_ref());
-            root = root.child(preview::overlay(&open, detail, body, close));
+            let document_open = self.preview_document.is_some();
+            root = root.child(preview::overlay(
+                &open,
+                detail,
+                body,
+                document_open,
+                viewport,
+                close,
+            ));
         }
         // The key reference, above the panes and above the delete dialog: it
         // is read-only, so nothing behind it can be armed while it is up.

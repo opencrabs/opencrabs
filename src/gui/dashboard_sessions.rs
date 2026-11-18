@@ -555,6 +555,7 @@ impl Dashboard {
     pub(crate) fn preview_body(
         &self,
         open: &preview::Preview,
+        document_height: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let path = open.path.clone();
@@ -583,6 +584,19 @@ impl Dashboard {
                 cx.notify();
             }
         });
+        let middle_click = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+            this.middle_scroll_down(
+                middle_scroll::MiddleScrollTarget::Preview,
+                ev.position,
+                cx,
+            );
+        });
+        let document = self.preview_document.as_ref().map(|state| {
+            preview::DocumentBody {
+                state,
+                height: document_height,
+            }
+        });
         preview::body(
             open,
             preview::actions_row(
@@ -594,7 +608,8 @@ impl Dashboard {
             self.preview_zoom,
             wheel,
             self.preview_video.as_ref(),
-            self.preview_document.as_ref(),
+            document,
+            middle_click,
         )
     }
 

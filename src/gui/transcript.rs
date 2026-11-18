@@ -2228,10 +2228,11 @@ fn md_parsed_blocks(
     out
 }
 
-/// The document preview uses the same typography and table layout as a reply,
-/// but has no transcript selection or per-message cache.
+/// The document preview uses the same Markdown and table layout as a reply,
+/// with the larger reading size already proven in user messages. It has no
+/// transcript selection or per-message cache.
 pub(super) fn document_blocks(blocks: &[markdown::MdBlock]) -> Div {
-    md_parsed_blocks(blocks, MdLook::body(PLAIN_TEXT_SIZE), None)
+    md_parsed_blocks(blocks, MdLook::body(USER_TEXT_SIZE), None)
 }
 
 /// One stored row as the human-readable text a reply quotes (#2868).

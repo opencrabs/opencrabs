@@ -104,6 +104,42 @@ pub fn page_landing(offset: f32, max_offset: f32, page: f32, up: bool) -> PageLa
     }
 }
 
+/// The visible thumb for one vertical scrollbar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollThumb {
+    pub top: f32,
+    pub height: f32,
+}
+
+/// Size and place a scrollbar thumb from the same measurements as the reader.
+///
+/// `offset` uses GPUI's scale: zero at the top and `-max_offset` at the bottom.
+/// Content that fits has no thumb. A very long document keeps a 24px thumb so
+/// the position indicator cannot shrink into an invisible speck.
+pub fn vertical_scroll_thumb(
+    viewport_height: f32,
+    max_offset: f32,
+    offset: f32,
+) -> Option<ScrollThumb> {
+    if !viewport_height.is_finite()
+        || !max_offset.is_finite()
+        || !offset.is_finite()
+        || viewport_height <= 0.0
+        || max_offset <= 0.0
+    {
+        return None;
+    }
+    let content_height = viewport_height + max_offset;
+    let height = (viewport_height * viewport_height / content_height)
+        .max(24.0)
+        .min(viewport_height);
+    let progress = (-offset / max_offset).clamp(0.0, 1.0);
+    Some(ScrollThumb {
+        top: (viewport_height - height) * progress,
+        height,
+    })
+}
+
 /// Pointer travel that does not scroll yet, in px (#2964).
 pub const AUTO_SCROLL_DEAD_ZONE_PX: f32 = 10.0;
 /// The fastest a stationary pointer can walk a transcript, in px per second.

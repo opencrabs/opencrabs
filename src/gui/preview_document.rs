@@ -3,8 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, ScrollHandle, div, px, rgb};
+use gpui::{
+    AnyElement, App, BorderStyle, Bounds, MouseButton, MouseDownEvent, ScrollHandle, Window,
+    canvas, div, fill, point, px, rgb, rgba, size,
+};
+use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::local_document::{self, DocumentKind};
+use opencrabs::ui_core::scroll::vertical_scroll_thumb;
+
+use crate::palette;
 
 use super::markdown::{self, MdBlock};
 use super::transcript;
@@ -66,25 +73,30 @@ pub fn parse(path: &Path, kind: DocumentKind) -> Result<ParsedDocument, String> 
     })
 }
 
-pub fn body(state: &DocumentState) -> AnyElement {
+pub fn body(
+    state: &DocumentState,
+    height: f32,
+    middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let shown = palette::current();
     let content = match &state.status {
         DocumentStatus::Loading => div()
             .text_sm()
-            .text_color(rgb(0x94a3b8))
+            .text_color(rgb(shown.text_muted))
             .child("Loading document...")
             .into_any_element(),
         DocumentStatus::Error(message) => div()
             .text_sm()
-            .text_color(rgb(0xfca5a5))
+            .text_color(rgb(shown.red))
             .child(format!("Could not preview this document: {message}"))
             .into_any_element(),
         DocumentStatus::Ready(document) => {
-            let mut rendered = div().flex().flex_col().gap_2().w_full();
+            let mut rendered = div().flex().flex_col().gap_3().w_full().min_w_0();
             if document.truncated {
                 rendered = rendered.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(0xfbbf24))
+                        .text_color(rgb(shown.warn))
                         .child("Preview truncated. Use Open file to read the rest."),
                 );
             }
@@ -92,7 +104,7 @@ pub fn body(state: &DocumentState) -> AnyElement {
                 rendered = rendered.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x94a3b8))
+                        .text_color(rgb(shown.text_muted))
                         .child("This document is empty."),
                 );
             } else {
@@ -102,19 +114,71 @@ pub fn body(state: &DocumentState) -> AnyElement {
         }
     };
 
-    div()
+    let reader = div()
         .id("preview-document-scroll")
-        .flex_1()
-        .min_h_0()
-        .w_full()
-        .max_h(px(460.0))
+        .size_full()
         .overflow_y_scroll()
+        .scrollbar_width(px(8.0))
         .track_scroll(&state.scroll)
-        .rounded_md()
+        .rounded(px(concentric_radius(8.0)))
         .border_1()
-        .border_color(rgb(0x263449))
-        .bg(rgb(0x0b1220))
-        .p_3()
-        .child(content)
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
+        .p_5()
+        .on_mouse_down(MouseButton::Middle, move |ev, window, cx| {
+            middle_click(ev, window, cx);
+            cx.stop_propagation();
+        })
+        .child(content);
+
+    div()
+        .relative()
+        .w_full()
+        .h(px(height))
+        .min_h_0()
+        .child(reader)
+        .child(scrollbar(state.scroll.clone()))
         .into_any_element()
+}
+
+/// Paint after the reader so the thumb uses this frame's measured content.
+/// The track is deliberately quiet; the thumb appears only when there is
+/// somewhere to scroll and follows the active theme like the rest of the card.
+fn scrollbar(scroll: ScrollHandle) -> impl IntoElement {
+    let shown = palette::current();
+    div()
+        .id("preview-document-scrollbar")
+        .absolute()
+        .top_3()
+        .bottom_3()
+        .right_2()
+        .w(px(4.0))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.paint_quad(fill(bounds, rgba((shown.track << 8) | 0x66)));
+                    let Some(thumb) = vertical_scroll_thumb(
+                        f32::from(bounds.size.height),
+                        f32::from(scroll.max_offset().height),
+                        f32::from(scroll.offset().y),
+                    ) else {
+                        return;
+                    };
+                    let thumb_bounds = Bounds::new(
+                        point(bounds.origin.x, bounds.origin.y + px(thumb.top)),
+                        size(bounds.size.width, px(thumb.height)),
+                    );
+                    window.paint_quad(gpui::quad(
+                        thumb_bounds,
+                        px(2.0),
+                        rgb(shown.text_muted),
+                        px(0.0),
+                        rgba(0x00000000),
+                        BorderStyle::default(),
+                    ));
+                },
+            )
+            .size_full(),
+        )
 }

@@ -3,6 +3,7 @@ use std::fs;
 use crate::ui_core::local_document::{
     DocumentKind, DocumentLoadError, load, load_with_limits,
 };
+use crate::ui_core::scroll::{ScrollThumb, vertical_scroll_thumb};
 
 #[test]
 fn document_kind_accepts_only_the_first_preview_slice() {
@@ -92,16 +93,62 @@ fn document_preview_gui_keeps_io_parsing_scrolling_and_lifetime_wired() {
     assert!(document.contains("DocumentStatus::Error"));
     assert!(document.contains("Preview truncated."));
     assert!(document.contains("markdown::blocks_flow"));
+    assert!(document.contains(".h(px(height))"));
+    assert!(document.contains(".on_mouse_down(MouseButton::Middle"));
+    assert!(document.contains("preview-document-scrollbar"));
+    assert!(document.contains("vertical_scroll_thumb("));
 
     let transcript = include_str!("../gui/transcript.rs");
     assert!(transcript.contains("md_parsed_blocks(parsed.as_slice(), look, selection)"));
     assert!(transcript.contains("pub(super) fn document_blocks"));
+    assert!(transcript.contains("md_parsed_blocks(blocks, MdLook::body(USER_TEXT_SIZE), None)"));
 
     let preview = include_str!("../gui/preview.rs");
     assert!(preview.contains("shell.child(content).child(actions)"));
+    assert!(preview.contains("modal_shell::render("));
+    assert!(preview.contains("width_cap = if document_open { 1040.0 }"));
+    assert!(preview.contains("PgUp PgDn"));
+    assert!(preview.contains("Home End"));
 
     let keys = include_str!("../gui/dashboard_keys.rs");
     let main = include_str!("../gui/main.rs");
+    let middle = include_str!("../gui/middle_scroll.rs");
+    let sessions = include_str!("../gui/dashboard_sessions.rs");
+    assert!(keys.contains("self.preview_key(ev, window, cx);"));
+    assert!(keys.contains("\"pageup\" | \"pagedown\""));
+    assert!(keys.contains("\"home\" => Some(0.0)"));
+    assert!(keys.contains("\"end\" => Some(-max)"));
     assert!(keys.contains("self.close_preview();"));
+    assert!(main.contains("let document_height = (viewport.1 - 300.0).clamp(120.0, 620.0);"));
     assert!(main.contains("this.close_preview();"));
+    assert!(sessions.contains("middle_scroll::MiddleScrollTarget::Preview"));
+    assert!(middle.contains("MiddleScrollTarget::Preview"));
+    assert!(middle.contains("move_scroll(&document.scroll, delta)"));
+}
+
+#[test]
+fn document_scrollbar_tracks_the_reading_position() {
+    assert_eq!(
+        vertical_scroll_thumb(400.0, 1600.0, 0.0),
+        Some(ScrollThumb { top: 0.0, height: 80.0 })
+    );
+    assert_eq!(
+        vertical_scroll_thumb(400.0, 1600.0, -800.0),
+        Some(ScrollThumb { top: 160.0, height: 80.0 })
+    );
+    assert_eq!(
+        vertical_scroll_thumb(400.0, 1600.0, -1600.0),
+        Some(ScrollThumb { top: 320.0, height: 80.0 })
+    );
+}
+
+#[test]
+fn document_scrollbar_keeps_a_visible_thumb_and_hides_when_content_fits() {
+    assert_eq!(
+        vertical_scroll_thumb(400.0, 19_600.0, -19_600.0),
+        Some(ScrollThumb { top: 376.0, height: 24.0 })
+    );
+    assert_eq!(vertical_scroll_thumb(400.0, 0.0, 0.0), None);
+    assert_eq!(vertical_scroll_thumb(0.0, 100.0, 0.0), None);
+    assert_eq!(vertical_scroll_thumb(f32::NAN, 100.0, 0.0), None);
 }
