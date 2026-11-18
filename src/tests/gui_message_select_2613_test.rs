@@ -159,8 +159,8 @@ fn forward_opens_the_destination_and_stages_a_composer_reply() {
 }
 
 /// Every visible live entry is selectable and has its own action target in
-/// both chat surfaces (#2925). Collapsed previews and the activity lead count
-/// too; they are visible text, not a special dead zone.
+/// both chat surfaces (#2925). The head line counts too: it is one exact tool
+/// entry, rendered as visible text rather than a special dead zone (#3046).
 #[test]
 fn live_entries_wire_exact_actions_in_main_and_split() {
     let body = TRANSCRIPT
@@ -177,9 +177,14 @@ fn live_entries_wire_exact_actions_in_main_and_split() {
         .nth(1)
         .and_then(|rest| rest.split("fn live_card_footer(").next())
         .expect("the live card");
-    assert!(card.contains("format!(\"live-preview-{entry}\")"));
-    assert!(card.contains("\"live-activity\".to_string()"));
-    assert!(card.contains("Some(entry)"));
+    // #3046: the head is one status line carrying the sentence, the call and
+    // the numbers, and it renders one exact tool entry, so a click on it opens
+    // that entry's own menu. The ledger moved into the opened card, where every
+    // line keeps its `live-entry-{entry}` target.
+    assert!(card.contains("\"live-head\""));
+    assert!(card.contains("activity_entry"));
+    assert!(card.contains("live_entry_text("));
+    assert!(card.contains("live_card_body("));
 
     assert!(MAIN.contains("transcript::live_action_rows(&self.turn.live, session)"));
     assert!(MAIN.contains("this.live_menu_open(row.clone(), None, ev.position, cx)"));
