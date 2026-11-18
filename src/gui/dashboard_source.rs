@@ -12,6 +12,7 @@
 //! and it is the last part of this text.
 pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_commands.rs"),
+    include_str!("dashboard_config.rs"),
     include_str!("dashboard_finder.rs"),
     include_str!("dashboard_keys.rs"),
     include_str!("dashboard_messages.rs"),

@@ -17,6 +17,7 @@
 /// `main.rs`, and it is the last part of this text.
 pub const DASHBOARD: &str = concat!(
     include_str!("../gui/dashboard_commands.rs"),
+    include_str!("../gui/dashboard_config.rs"),
     include_str!("../gui/dashboard_finder.rs"),
     include_str!("../gui/dashboard_keys.rs"),
     include_str!("../gui/dashboard_messages.rs"),

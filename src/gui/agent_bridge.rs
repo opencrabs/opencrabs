@@ -364,6 +364,17 @@ static SURFACE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync
 static SURFACE_STACK: std::sync::OnceLock<opencrabs::services::surface::SurfaceServices> =
     std::sync::OnceLock::new();
 
+/// Whether this window booted the shared surface, which starts the terminal's
+/// config watcher and posts its reload failures in the conversation.
+///
+/// The window runs a watcher of its own (#3040) because the surface can refuse
+/// to boot, and in that case nothing else would tell the view that a save did
+/// not apply. When the surface IS serving, its watcher already says the line,
+/// so the window's copy of it stays quiet: one file, one message.
+pub fn surface_serving() -> bool {
+    SURFACE_STACK.get().is_some()
+}
+
 /// The window must exist before the GUI claims the profile (#2784). Claiming
 /// preempts (SIGTERMs) the running TUI/daemon, so doing it before the window
 /// opened meant a window that failed to open left the user with no surface at

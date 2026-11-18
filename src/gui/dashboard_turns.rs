@@ -869,6 +869,10 @@ impl Dashboard {
     /// the turn on Done/Failed, reload the transcript so the DB becomes the
     /// rendering.
     pub(crate) fn poll(&mut self, cx: &mut Context<Self>) {
+        // Config reloads first (#3040): the watcher thread has already loaded
+        // the file and published it to `Config::current()`, so this tick only
+        // re-derives the values the window cached at boot.
+        self.drain_config_reloads(cx);
         // One clock for the whole tick (#2899): the checks below that cost a
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.

@@ -34,7 +34,9 @@ mod chat_leaf;
 mod command_palette;
 mod commands;
 mod composer_view;
+mod config_reload;
 mod dashboard_commands;
+mod dashboard_config;
 mod dashboard_finder;
 mod dashboard_keys;
 mod dashboard_messages;
@@ -478,9 +480,15 @@ fn msg_menu_expiry_due(open: bool, current_generation: u64, timer_generation: u6
 /// credential that channel needs. Read once when Seeker opens, so the hint says
 /// "not set up" only when that is true (#2462).
 fn configured_channels() -> Vec<Channel> {
-    let Ok(config) = Config::load() else {
-        return Vec::new();
-    };
+    match Config::load() {
+        Ok(config) => configured_channels_from(&config),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The same answer for a config that is already loaded, so a hot reload can
+/// refresh the cached list without taking a second disk read.
+fn configured_channels_from(config: &Config) -> Vec<Channel> {
     let channels = &config.channels;
     let filled = |value: &Option<String>| value.as_deref().is_some_and(|text| !text.is_empty());
     let mut live = Vec::new();
@@ -1189,6 +1197,11 @@ struct Dashboard {
     /// Agent-side state (task 5). Events from the bridge's bootstrap and
     /// turn threads land in the receiver; the poll tick drains it.
     agent_rx: std::sync::mpsc::Receiver<agent_bridge::TurnEvent>,
+    /// Reloads the watcher thread hands the window: a config.toml, keys.toml or
+    /// commands.toml save, already loaded and published to `Config::current()`
+    /// by the terminal's own reload pass. Drained on the poll tick, which
+    /// re-derives what the window cached at boot (`dashboard_config`).
+    config_reload: std::sync::mpsc::Receiver<config_reload::Reload>,
     sink: agent_bridge::EventSink,
     /// Set once bootstrap reports the service live. Turns run on the pane's
     /// open conversation (`chat_state.transcript.session`), never on a session
@@ -6257,6 +6270,7 @@ fn main() {
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,
+                        config_reload: config_reload::spawn(),
                         sink: agent_sink,
                         agent_ready: false,
                         turn: chat_leaf::Turn::default(),
