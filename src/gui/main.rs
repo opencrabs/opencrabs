@@ -7055,7 +7055,7 @@ mod tests {
             "opening decides the kind from the path"
         );
         assert!(
-            src.contains(&["if self.preview.ta", "ke().is_some()"].concat()),
+            src.contains(&["if self.preview.is", "_some() {"].concat()),
             "Esc closes the preview before anything under it"
         );
         assert!(
