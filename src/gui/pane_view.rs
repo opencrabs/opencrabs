@@ -699,6 +699,10 @@ impl Render for PaneView {
                 menu_dismiss: Some(menu_dismiss),
                 // The rewrite's field, drawn in its own row (#2826).
                 edit_row,
+                // A leaf keeps its own bottom (#3027). The window's chat leaf
+                // has its own follow, so reading it here judged a transcript
+                // the reader was not looking at.
+                following: self.follow.is_following(),
                 ..Default::default()
             },
         )

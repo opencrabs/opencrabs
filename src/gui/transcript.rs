@@ -5230,6 +5230,13 @@ pub struct ViewHooks {
     /// The row whose rewrite is open (#2826). Its message is replaced by a
     /// field and two buttons, in place, and the composer is not involved.
     pub edit_row: Option<InlineEditView>,
+    /// Whether this transcript is following its own bottom (#3027).
+    ///
+    /// The owner holds the state, because only it can tell a reader who scrolled
+    /// up from content that landed under a reader who did not move. The
+    /// transcript needs it to know whether a row running past its box is a
+    /// frame to correct or a place the reader chose to be.
+    pub following: bool,
 }
 
 /// The callers measure the transcript's outer box. Its `.p_2()` consumes half
@@ -5342,6 +5349,17 @@ impl RowReach {
         self.frame() == Frame::RowsAbove
     }
 
+    /// Whether the furthest row still runs past the box's bottom edge.
+    ///
+    /// At its bottom the furthest row ends exactly where the box does, so a
+    /// reading that overflows is a transcript that has not reached its own
+    /// bottom yet. The reader sees that as the next row's first pixel above the
+    /// composer: a line of text cut off by the edge of the conversation.
+    pub fn overflows_below(self) -> bool {
+        self.rows > 0 && self.viewport_height() > SCROLL_SLOP
+            && self.painted_bottom() > self.viewport_bottom + SCROLL_SLOP
+    }
+
     /// The offset that puts the furthest row's bottom on the box's bottom.
     ///
     /// The correction is derived from the rows, never from the scroll maximum:
@@ -5425,6 +5443,7 @@ pub fn view(
         edit_row,
         copy,
         copied,
+        following,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -5443,11 +5462,20 @@ pub fn view(
         // to snap, and a surface with no height cannot be fixed by an offset at
         // all, so asking for another frame there would repaint forever without
         // changing anything.
+        //
+        // A frame that leaves the furthest row running PAST the box is the
+        // other half of the same rule (#3027). The snap to the bottom is taken
+        // from the maximum the previous layout measured, so a row that lands
+        // afterwards leaves the transcript one row short of its own bottom and
+        // its top pixel shows above the composer: text cut in half by the edge
+        // of the conversation. Corrected only while the reader is following, so
+        // a reader parked in history keeps the place they chose.
         .on_children_prepainted({
             let reach_scroll = scroll.clone();
             move |_children, window, _cx| {
                 let reach = row_reach(&reach_scroll);
-                if reach.is_blank() {
+                let short = reach.is_blank() || (following && reach.overflows_below());
+                if short {
                     let x = reach_scroll.offset().x;
                     reach_scroll.set_offset(point(x, px(reach.bottom_offset())));
                     window.request_animation_frame();
@@ -5957,6 +5985,49 @@ mod tests {
         // A row ending on the box's top edge is still that row's last pixel.
         let flush = reach(42.5, 0.0, 1);
         assert!(!flush.is_blank());
+    }
+
+    /// The other half of the bottom (#3027): a following transcript whose
+    /// furthest row still runs past the box is one row short of its own bottom,
+    /// and the reader sees that row's top pixels cut off above the composer.
+    /// The reach has to name it, and the correction has to land the row.
+    #[test]
+    fn a_row_past_the_box_bottom_is_one_frame_short() {
+        // The box ends at 934 and the furthest row's bottom is drawn at 958:
+        // 24px of it are under the composer.
+        let short = reach(1_042.0, -84.0, 26);
+        assert_eq!(short.painted_bottom(), 958.0);
+        assert_eq!(short.frame(), Frame::RowsInside);
+        assert!(
+            !short.is_blank(),
+            "the row is showing, which is why this frame looks fine until the \
+             reader notices the cut"
+        );
+        assert!(
+            short.overflows_below(),
+            "a row 24px past the box is the frame to correct"
+        );
+        let corrected = RowReach {
+            offset: short.bottom_offset(),
+            ..short
+        };
+        assert_eq!(corrected.painted_bottom(), corrected.viewport_bottom);
+        assert!(!corrected.overflows_below());
+    }
+
+    /// A transcript already landed on its bottom must not be corrected again,
+    /// or the correction repaints the frame forever (#3027). Its own bottom
+    /// padding is what separates the last row from the edge, so the row ends
+    /// above the box even when the offset is exactly the maximum.
+    #[test]
+    fn a_landed_transcript_is_left_alone() {
+        let landed = reach(1_042.0, -108.0, 26);
+        assert_eq!(landed.painted_bottom(), 934.0);
+        assert!(!landed.overflows_below());
+        // And one with room to spare at the top is not short of its bottom
+        // either: a short conversation rests on the box's top, not its bottom.
+        let short = reach(200.0, 0.0, 2);
+        assert!(!short.overflows_below());
     }
 
     /// A surface with nothing drawn is not a blank frame to correct: the empty

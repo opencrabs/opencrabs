@@ -2681,6 +2681,11 @@ impl Render for Dashboard {
                         // moving the row.
                         copy: message_copy.clone(),
                         copied: self.copied_row(),
+                        // Whether this transcript is keeping its own bottom
+                        // (#3027). Only the reader's place can say whether a
+                        // row that runs past the box is a frame to correct or
+                        // a place they chose to be.
+                        following: self.chat_state.follow.is_following(),
                     },
                 );
                 // The conversation takes the measure and the column centres it
