@@ -52,13 +52,17 @@ impl WebSearchTool {
 
         let mut last_err = String::new();
         for (attempt, ua) in DDG_USER_AGENTS.iter().enumerate() {
-            let client = reqwest::Client::builder()
+            // Shared client so the CA bundle loads once per process; the
+            // user-agent and the deadline belong to this attempt (#2843). The
+            // client used to be built inside this loop, so one search that
+            // rotated through the agent list paid the TLS root store load once
+            // per attempt.
+            let request = crate::utils::http::shared()
+                .get(&url)
                 .timeout(std::time::Duration::from_secs(10))
-                .user_agent(*ua)
-                .build()
-                .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {e}")))?;
+                .header(reqwest::header::USER_AGENT, *ua);
 
-            match client.get(&url).send().await {
+            match request.send().await {
                 // DDG bot-detection challenge: HTTP 202 is their
                 // protocol-level "you're blocked" signal. Stable across
                 // deploys. Short-circuit instead of burning UA rotations.

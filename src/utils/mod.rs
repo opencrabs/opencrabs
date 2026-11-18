@@ -17,6 +17,7 @@ pub mod echo_budget;
 pub mod fd_suppress;
 pub mod file_extract;
 pub mod git_branch;
+pub mod http;
 pub mod image;
 pub mod install;
 pub mod internal_message;
