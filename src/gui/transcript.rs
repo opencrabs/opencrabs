@@ -715,8 +715,16 @@ impl LiveTurn {
         // again as intermediate text. When the streamed copy is what ends the
         // pending stream, this text IS that copy, so it moves into the card
         // instead of being drawn twice (#2442).
-        if self.stream.trim_end().ends_with(text) {
-            self.stream.clear();
+        //
+        // The copy is CUT from wherever it sits, not only from the end (#3043).
+        // Matching the end alone left the paragraph on screen twice whenever it
+        // arrived in the other order or the stream carried anything after it:
+        // the card's line said the sentence and the answer bubble under the
+        // card said it again. Cutting the one copy the card now owns leaves
+        // whatever the turn really answered, and nothing of the paragraph.
+        if let Some(at) = self.stream.find(text) {
+            let kept = format!("{}{}", &self.stream[..at], &self.stream[at + text.len()..]);
+            self.stream = kept.trim().to_string();
         }
         self.push_narration_entry(text);
     }
@@ -6911,6 +6919,33 @@ mod tests {
             "the pending stream flushed into the card"
         );
         assert_eq!(live.stream, "", "the answer bubble starts clean");
+    }
+
+    /// #3043: the copy of the narration is cut from wherever it sits in the
+    /// pending stream, not only from its end.
+    ///
+    /// Cutting the end alone left the paragraph on screen twice whenever the
+    /// turn streamed anything after it: the card's head previewed the sentence
+    /// and the answer bubble under the card drew it again. What the turn really
+    /// answered is not touched, before or after the copy.
+    #[test]
+    fn the_narration_copy_is_cut_wherever_it_sits_in_the_stream() {
+        let now = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("question".into());
+        live.note_chunk_at("Checking the parser now.\nThe parser is fine, moving on.", now);
+        live.push_narration("Checking the parser now.");
+        assert_eq!(
+            live.stream, "The parser is fine, moving on.",
+            "only the paragraph the card owns leaves the stream"
+        );
+
+        // And the other way round: the answer ran ahead of the paragraph.
+        let mut ahead = LiveTurn::default();
+        ahead.begin("question".into());
+        ahead.note_chunk_at("Padding before. Then the sentence.", now);
+        ahead.push_narration("Then the sentence.");
+        assert_eq!(ahead.stream, "Padding before.", "the copy goes, the answer stays");
     }
 
     /// #3021: the service discards a streamed iteration and the card has to
