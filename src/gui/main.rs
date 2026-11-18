@@ -10144,7 +10144,7 @@ mod gui {
     mod tests {
         use super::super::Config;
         use crate::composer_view::popup_window;
-        use crate::dashboard_source::DASHBOARD;
+        use crate::dashboard_source::{DASHBOARD, production_half};
 
         /// Eight names is the most a popup may cover: beyond that it would
         /// hide the conversation it belongs to.
