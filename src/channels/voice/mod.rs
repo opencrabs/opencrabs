@@ -22,6 +22,12 @@ pub mod local_whisper;
 #[cfg(feature = "local-tts")]
 pub mod local_tts;
 
+// The OGG/Opus encoder is shared: the channel replies encode with it, and the
+// window records with it. Gated on either feature so a GUI build without Piper
+// still gets a playable voice note.
+#[cfg(any(feature = "local-tts", feature = "gui"))]
+pub mod opus;
+
 pub mod text_cleanup;
 
 pub(crate) mod service;

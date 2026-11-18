@@ -2,8 +2,9 @@
 //! PCM/WAV/OGG encoding.
 
 use crate::channels::voice::local_tts::{
-    PIPER_VOICES, encode_ogg_opus, extract_sample_rate, find_piper_voice, ogg_crc32, pcm_to_wav,
+    PIPER_VOICES, extract_sample_rate, find_piper_voice, pcm_to_wav,
 };
+use crate::channels::voice::opus::{encode_ogg_opus, ogg_crc32};
 
 // ── extract_sample_rate ───────────────────────────────────────────────
 
