@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, App, ClickEvent, Div, Image, ImageFormat, InteractiveElement, ObjectFit,
     ScrollHandle, SharedString, Stateful, Styled, TextRun, Window, div, img, linear_color_stop,
-    linear_gradient, prelude::*, rems, rgb,
+    linear_gradient, prelude::*, px, rems, rgb,
 };
 use std::sync::Arc;
 
@@ -1441,7 +1441,38 @@ pub fn pin_mark(favorited: bool) -> (bool, u32) {
 pub const RAIL_MARK_REMS: f32 = 1.75;
 /// The closed rail fits its 24px mark with 4px on either side (#2982).
 pub const COLLAPSED_RAIL_REM: f32 = 2.0;
+/// The rail's left inset, shared by the brand header and every full row so
+/// their media share one axis (#3013).
+const RAIL_PAD_PX: f32 = 8.0;
+/// A topic row indented under its session starts one step further in.
+const RAIL_INDENT_PAD_PX: f32 = 16.0;
+/// The selected row's accent bar, the width `border_l_2` draws.
+const ACCENT_BAR_PX: f32 = 2.0;
 const RAIL_CHANNEL_BADGE_REMS: f32 = 0.75;
+
+/// A row's left padding (#3013). The accent bar is a border, and a border
+/// takes layout space: the selected row gives that width back from its
+/// padding, so selecting a row never moves its content.
+fn row_left_pad(indented: bool, bar: bool) -> f32 {
+    let pad = if indented {
+        RAIL_INDENT_PAD_PX
+    } else {
+        RAIL_PAD_PX
+    };
+    if bar { pad - ACCENT_BAR_PX } else { pad }
+}
+
+/// Where a row's media slot starts, measured from the rail's left edge.
+fn row_media_left(indented: bool, bar: bool) -> f32 {
+    let border = if bar { ACCENT_BAR_PX } else { 0.0 };
+    border + row_left_pad(indented, bar)
+}
+
+/// Where the brand header's logo slot starts: the same inset as a full row.
+fn header_media_left() -> f32 {
+    RAIL_PAD_PX
+}
+
 const RAIL_CHANNEL_GLYPH_REMS: f32 = 0.45;
 
 /// Telegram-like placeholder colours. The session id picks one, so a refresh
@@ -2067,6 +2098,7 @@ pub fn row(card: &RailCard, flags: RowFlags, chips: Option<Stateful<Div>>) -> St
     // topic cards (#2803, #2809). With topics attached it floats over the
     // strip's first line at the card's right edge; a card with no topics keeps
     // the pin on its name line so it never invents an empty row.
+    let bar = accent_bar_visible(selected, cursored);
     let (title_pin, footer_pin) = if chips.is_some() {
         (None, pin_toggle)
     } else {
@@ -2202,7 +2234,11 @@ pub fn row(card: &RailCard, flags: RowFlags, chips: Option<Stateful<Div>>) -> St
         .gap_1()
         .w_full()
         .p_2()
-        .when(indented, |d| d.pl_4().pr_2().py_1())
+        .when(indented, |d| d.pr_2().py_1())
+        // The left inset is computed, not a utility class: the selected row
+        // gives the accent bar's width back so its media stays on the axis
+        // every other row and the brand logo share (#3013).
+        .pl(px(row_left_pad(indented, bar)))
         .cursor_pointer()
         // Every card paints the same soft panel, focused or not (#2792):
         // state reads from the small marks, never a big colour field. The
@@ -2473,11 +2509,25 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
         .flex_row()
         .items_center()
         .gap_2()
-        .px_3()
+        // The row's own inset on the left, so the logo slot lines up with the
+        // media under it (#3013).
+        .pl(px(header_media_left()))
+        .pr_3()
         .py_3()
         .border_b_1()
         .border_color(rgb(palette::current().panel_hi))
-        .child(icon::banner_logo())
+        // The logo is smaller than a row's picture, so it is centred in a
+        // slot of the same size instead of starting at its own inset: one
+        // axis for the whole column of icons (#3013).
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(rems(RAIL_MARK_REMS))
+                .child(icon::banner_logo()),
+        )
         .child(
             div()
                 .flex_1()
@@ -2494,6 +2544,7 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
 
 #[cfg(test)]
 mod tests {
+    use super::{ACCENT_BAR_PX, header_media_left, row_left_pad, row_media_left};
     use super::{
         Database, FindMatch, MenuKind, PlanFilter, RailChip, RailFilter, SessionsState,
         accent_bar_visible, chip_order_key, chip_width_at, filter_is_active, fit,
@@ -2501,6 +2552,47 @@ mod tests {
         placeholder_colour, placeholder_initial, preview_line, rail_cost, rail_filter_allows,
         rail_menu_entries, rail_stamp, strip_budgets,
     };
+
+    /// #3013: the brand logo's slot and every full row's media start at the
+    /// same distance from the rail's left edge, selected or not.
+    #[test]
+    fn the_logo_and_every_row_media_share_one_axis() {
+        let axis = header_media_left();
+        assert_eq!(row_media_left(false, false), axis, "an unselected row");
+        assert_eq!(row_media_left(false, true), axis, "the selected row");
+    }
+
+    /// #3013: the accent bar is paid for out of the row's padding, so a row
+    /// does not move when it is selected. Holds for indented topic rows too.
+    #[test]
+    fn selecting_a_row_does_not_move_its_content() {
+        for indented in [false, true] {
+            assert_eq!(
+                row_media_left(indented, true),
+                row_media_left(indented, false),
+                "indented={indented}"
+            );
+            assert_eq!(
+                row_left_pad(indented, false) - row_left_pad(indented, true),
+                ACCENT_BAR_PX
+            );
+        }
+    }
+
+    /// #3013: the drawing uses the computed inset and the shared slot. A
+    /// utility-class inset on either would let the two drift apart again.
+    #[test]
+    fn the_row_and_the_header_draw_with_the_shared_inset() {
+        let src = include_str!("sessions.rs");
+        let row = src.split("pub fn row(").nth(1).expect("row exists");
+        let row = row.split("\nfn badge_cell").next().expect("row ends");
+        assert!(row.contains(".pl(px(row_left_pad(indented, bar)))"));
+        assert!(!row.contains(".pl_4()"), "the indent is not a second inset");
+        let header = src.split("fn brand_header(").nth(1).expect("header exists");
+        let header = header.split("\n}").next().expect("header ends");
+        assert!(header.contains(".pl(px(header_media_left()))"));
+        assert!(header.contains(".size(rems(RAIL_MARK_REMS))"));
+    }
     use opencrabs::db::models::{Session, TitleSource};
     use opencrabs::db::repository::ContentSearchRow;
     use opencrabs::db::repository::PREVIEW_CHARS;
