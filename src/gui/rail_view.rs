@@ -160,6 +160,46 @@ pub(crate) struct RailTopic {
     pub(crate) plan: Option<(usize, usize)>,
 }
 
+/// Whether a chip says work is still going in that topic (#3020).
+///
+/// A running turn or a running plan is a badge, a plan waiting for approval is
+/// a ring, and a plan with tasks still open is a progress fill. All three are
+/// reasons the reader may need the chip, so all three keep it visible when the
+/// strip folds.
+pub(crate) fn chip_in_flight(kid: &RailTopic) -> bool {
+    kid.mark.badge.is_some() || kid.mark.ring || kid.plan.is_some()
+}
+
+/// Which chips a folded strip paints (#3020).
+///
+/// A folded strip shows three chips, but position is not the rule: a chip with
+/// work in flight is the one the reader needs, so it keeps its place wherever
+/// it sits in the ledger order, and idle chips fill the rest of the budget in
+/// order. The painted order stays the ledger's, so a chip that stays visible
+/// never jumps when a neighbour folds.
+pub(crate) fn folded_mask(kids: &[RailTopic]) -> Vec<bool> {
+    /// The three chips a folded strip always shows.
+    const BUDGET: usize = 3;
+    let mut shown = vec![false; kids.len()];
+    let mut kept = 0;
+    for (i, kid) in kids.iter().enumerate() {
+        if chip_in_flight(kid) {
+            shown[i] = true;
+            kept += 1;
+        }
+    }
+    for slot in shown.iter_mut() {
+        if kept >= BUDGET {
+            break;
+        }
+        if !*slot {
+            *slot = true;
+            kept += 1;
+        }
+    }
+    shown
+}
+
 /// The channel chip at the end of the rail (#2452).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RailFooter {
@@ -436,12 +476,22 @@ impl RailView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = row.card.id;
-        let limit = if chips.expanded { chips.kids.len() } else { 3 };
+        // Which chips the strip paints (#3020). Expanded shows every topic; a
+        // folded strip keeps every chip with work in flight and fills the rest
+        // of the three-chip budget with idle ones, in ledger order.
+        let shown = if chips.expanded {
+            vec![true; chips.kids.len()]
+        } else {
+            folded_mask(&chips.kids)
+        };
         // Each chip is measured as it is built: the strip places the chips
         // itself so the first row can stop short of the pin while the rows
         // below keep the full card width (#2809).
         let mut els: Vec<(Stateful<Div>, f32)> = Vec::new();
-        for kid in chips.kids.iter().take(limit) {
+        for (kid, shown) in chips.kids.iter().zip(shown.iter()) {
+            if !*shown {
+                continue;
+            }
             let kid_id = kid.id;
             let title = &kid.title;
             let live = kid.mark.badge.map(|_| rail_activity::frame(phase));
@@ -469,7 +519,7 @@ impl RailView {
                 sessions::chip_width(window, title, live.is_some() || kid.mark.ring, kid.selected);
             els.push((chip, width));
         }
-        let hidden = chips.kids.len().saturating_sub(limit);
+        let hidden = shown.iter().filter(|shown| !**shown).count();
         if hidden > 0 {
             let label = SharedString::from(format!("+{hidden}"));
             let width = sessions::count_chip_width(window, &label);
@@ -651,5 +701,94 @@ impl RailView {
                 .child(chips)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rail_activity::Badge;
+
+    /// One chip: `badge`, `ring` and `plan` are the three in-flight signals.
+    fn kid(id: u128, badge: bool, ring: bool, plan: bool) -> RailTopic {
+        RailTopic {
+            id: uuid::Uuid::from_u128(id),
+            title: SharedString::from(format!("topic-{id}")),
+            mark: rail_activity::RowState {
+                badge: badge.then_some(Badge::Live),
+                ring,
+            },
+            selected: false,
+            plan: plan.then_some((1, 4)),
+        }
+    }
+
+    fn shown(mask: &[bool]) -> Vec<usize> {
+        mask.iter()
+            .enumerate()
+            .filter(|(_, shown)| **shown)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn a_folded_strip_shows_the_three_leading_chips() {
+        // #3020: the plain case is still three, so a card with nothing running
+        // reads exactly as it did before the fold rule existed.
+        let kids: Vec<RailTopic> = (0..5).map(|i| kid(i, false, false, false)).collect();
+        assert_eq!(shown(&folded_mask(&kids)), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_folded_strip_keeps_a_busy_chip_past_the_budget() {
+        // #3020: the chip the reader needs is the one with work in flight, so
+        // it keeps its place even when three idle chips sit in front of it.
+        let kids = vec![
+            kid(0, false, false, false),
+            kid(1, false, false, false),
+            kid(2, false, false, false),
+            kid(3, true, false, false),
+            kid(4, false, false, false),
+        ];
+        assert_eq!(shown(&folded_mask(&kids)), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_folded_strip_keeps_every_busy_chip_and_folds_idle_ones() {
+        // #3020: four topics with work in flight all stay visible, and the
+        // idle chips on either side are what the "+N" pill hides.
+        let kids = vec![
+            kid(0, false, false, false),
+            kid(1, true, false, false),
+            kid(2, false, true, false),
+            kid(3, false, false, true),
+            kid(4, true, false, false),
+            kid(5, false, false, false),
+        ];
+        assert_eq!(shown(&folded_mask(&kids)), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn every_in_flight_signal_keeps_a_chip() {
+        // #3020: a spinner, a plan waiting for approval and an active plan are
+        // three different reasons the reader may need the chip.
+        assert!(chip_in_flight(&kid(0, true, false, false)), "a live turn");
+        assert!(chip_in_flight(&kid(1, false, true, false)), "a waiting plan");
+        assert!(chip_in_flight(&kid(2, false, false, true)), "a running plan");
+        assert!(
+            !chip_in_flight(&kid(3, false, false, false)),
+            "an idle topic folds with the rest"
+        );
+    }
+
+    #[test]
+    fn the_mask_answers_for_every_chip_it_is_given() {
+        // #3020: `chip_strip` zips the mask with the kids, so a mask shorter
+        // than the list would silently drop chips from a folded strip and one
+        // longer would be ignored. The length is the contract.
+        let kids: Vec<RailTopic> = (0..6).map(|i| kid(i, false, false, false)).collect();
+        let folded = folded_mask(&kids);
+        assert_eq!(folded.len(), kids.len());
+        assert_eq!(shown(&folded), vec![0, 1, 2]);
     }
 }
