@@ -1,10 +1,14 @@
 //! A recording is a message, start to finish (#3044).
 //!
 //! The window records through the microphone, saves the take as an OGG/Opus
-//! file beside the profile, sends its words to the agent with the clip attached
-//! as `<<AUD:path>>`, and speaks the answer back when the turn settles. That is
-//! the loop Telegram has always run, and it only holds together while four
+//! file beside the profile, attaches the clip and its words to the composer,
+//! and only sends when the person presses Enter. The turn then carries a
+//! `<<AUD:path>>` marker and the answer is spoken back when it settles. That is
+//! the loop Telegram has always run, and it only holds together while five
 //! rules do:
+//!
+//! * the stop control ends the recording and attaches the take, because a stop
+//!   is not a decision to send;
 //!
 //! * the marker carries the words and the clip in one string, and the send path
 //!   splits them so the agent reads prose and never a path;
@@ -47,12 +51,6 @@ fn editor(start: &str, end: &str) -> &'static str {
 /// travels whole instead of arriving as an empty turn.
 #[test]
 fn a_voice_message_travels_as_words_plus_one_marker() {
-    let marker = editor("pub fn voice_marker(", "/// Split a message's first");
-    assert!(
-        marker.contains("format!(\"<<AUD:{}>>\", path.display())"),
-        "the marker is the same shape the image and video markers use"
-    );
-
     let split = editor("pub fn split_audio_marker(", "pub fn strip_markers(");
     assert!(
         split.contains("kind == \"AUD\""),
@@ -65,6 +63,27 @@ fn a_voice_message_travels_as_words_plus_one_marker() {
     assert!(
         split.contains("Some((words, format!(\"<<{marker}>>\")))"),
         "the two halves come back separately: words for the agent, marker for the row"
+    );
+}
+
+/// The stop control ends the take, it does not send it. The words land in the
+/// field where they can be read and corrected, and the clip joins the
+/// composer's attachments, so the turn leaves only when the person in front of
+/// the window says so (#3044).
+#[test]
+fn the_stop_attaches_the_take_and_leaves_the_send_to_the_user() {
+    let land = editor("fn land_voice(", "fn insert_dictation(");
+    assert!(
+        land.contains("self.insert_dictation(&spoken.text, cx)"),
+        "the words land in the field, where the person can fix what the microphone misheard"
+    );
+    assert!(
+        land.contains("self.attach_paths([path.clone()])"),
+        "the clip waits in the composer's attachment row instead of going out"
+    );
+    assert!(
+        !land.contains("EditorEvent::Sent"),
+        "a stop is not a send: Enter is the one thing that emits the message"
     );
 }
 

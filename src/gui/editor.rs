@@ -245,15 +245,6 @@ pub fn marker_paths(text: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// The marker one saved recording travels as (#3044).
-///
-/// The same shape the window already uses for an image or a video, so the send
-/// path, the file tracker and the transcript all read one convention instead of
-/// three.
-pub fn voice_marker(path: &Path) -> String {
-    format!("<<AUD:{}>>", path.display())
-}
-
 /// Split a message's first `<<AUD:...>>` marker off its words (#3044).
 ///
 /// Returns the words with the marker removed and the marker itself, so the two
@@ -546,14 +537,6 @@ const CARET_BLINK_MS: u64 = 530;
 /// seconds, and it lands a finished transcript without a second timer.
 const VOICE_TICK: Duration = Duration::from_millis(100);
 
-/// How long a finished voice message waits before it leaves the composer.
-///
-/// The transcript lands inside `poll_voice`, which the window calls while this
-/// editor is borrowed, and the send it becomes walks every composer, this one
-/// included. One tick of the executor between the two is what keeps the send
-/// out of this editor's own update (#3044).
-const VOICE_EMIT_DELAY: Duration = Duration::from_millis(1);
-
 /// What the composer's microphone is doing (#3044). The row paints from this,
 /// never from the threads' state: one of them can be mid-handoff on a frame,
 /// and the button must not flicker because of it.
@@ -841,31 +824,32 @@ impl Editor {
 
     /// Put a finished dictation where it belongs (#3044).
     ///
-    /// A transcript with a saved clip is a voice message, not a draft: it goes
-    /// out as a turn the moment it lands, the way a voice note sent to a
-    /// channel does, and the row it leaves behind carries the clip. A
-    /// transcription with no clip (the encoder or the folder failed) is typed
-    /// in at the caret instead, so the words are never lost over a file.
+    /// A transcript with a saved clip is a voice message waiting to be sent,
+    /// not a draft and not a send: the words land in the field and the take
+    /// joins the composer's attachments, exactly where a paperclip attachment
+    /// sits. Stopping the microphone is not deciding to send. A person who
+    /// stops to think, or to fix a word the microphone caught wrong, still has
+    /// the field in front of them, and Enter is the one thing that puts a turn
+    /// on the wire (#3044). A transcription with no clip (the encoder or the
+    /// folder failed) still types its words in at the caret, so what was said
+    /// is never lost over a file.
     fn land_voice(&mut self, spoken: voice_input::Spoken, cx: &mut Context<Self>) {
+        self.insert_dictation(&spoken.text, cx);
         let Some(path) = spoken.audio else {
-            self.insert_dictation(&spoken.text, cx);
             return;
         };
-        let payload = format!("{} {}", spoken.text.trim(), voice_marker(&path));
         crate::logging::info(&format!(
-            "voice capture: sending {} character(s) with {}",
+            "voice capture: attached {} character(s) with {}",
             spoken.text.chars().count(),
             path.display()
         ));
-        // Deferred by one turn of the executor: this runs inside the tick's
-        // own update of this editor, and the send the payload becomes walks
-        // every composer, this one included (#3044).
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(VOICE_EMIT_DELAY).await;
-            this.update(cx, |_editor, cx| cx.emit(EditorEvent::Sent(payload)))
-                .ok();
-        })
-        .detach();
+        // A clip that vanished between the save and this line is reported
+        // rather than dropped: an attachment row that silently stayed empty
+        // would read as a failed recording.
+        if self.attach_paths([path.clone()]) == 0 {
+            self.show_notice(format!("Could not attach {}", path.display()), cx);
+        }
+        cx.notify();
     }
 
     /// Put a finished dictation in the field at the caret (#3044).
@@ -3002,7 +2986,15 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .flex_shrink_0()
                 .rounded(px(4.0))
                 .bg(rgb(palette::current().bg))
-                .child(if attachment.is_video { "🎬" } else { "📄" })
+                .child(if attachment.is_video {
+                    "🎬"
+                } else if attachment.is_audio() {
+                    // A take waiting in the composer has to read as a voice
+                    // the moment it lands, not as one more document (#3044).
+                    "🎙"
+                } else {
+                    "📄"
+                })
                 .into_any_element()
         };
         let tile = div()
