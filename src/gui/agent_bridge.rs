@@ -2690,23 +2690,31 @@ mod tests {
         let guard = scan
             .find("if channel != \"tui\"")
             .expect("channel rows are told apart from window rows");
-        let mark = scan
-            .find("expect_channel_route(")
-            .expect("the channel row is marked channel-owned");
-        let hand_over = scan
-            .find("deliver_or_park(")
-            .expect("the channel row is handed to its route");
         let local = scan
             .find("spawn_resume(")
             .expect("the window resume is still there");
         assert!(
-            guard < mark && mark < hand_over && hand_over < local,
-            "a channel row is marked and handed over before the window resume is reached, \
-             and the hand-over never runs for a window row"
+            guard < local,
+            "the channel branch is decided before the window resume is reached"
         );
+        // The mark and the hand-over are read inside the branch: the boot scan
+        // hands pushed turns over before this loop, so the first match in the
+        // whole scan belongs to that earlier pass and proves nothing about the
+        // channel branch.
         let branch = scan
             .get(guard..local)
             .expect("the branch between the hand-over and the window resume");
+        let mark = branch
+            .find("expect_channel_route(")
+            .expect("the channel row is marked channel-owned");
+        let hand_over = branch
+            .find("deliver_or_park(")
+            .expect("the channel row is handed to its route");
+        assert!(
+            mark < hand_over,
+            "a channel row is marked and handed over before the window resume is reached, \
+             and the hand-over never runs for a window row"
+        );
         assert!(
             branch.contains("CONTINUATION_PROMPT"),
             "the hand-over continues from context instead of replaying the request (#2627)"
