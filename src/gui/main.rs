@@ -1041,6 +1041,13 @@ struct Dashboard {
     cd_entries: Vec<std::path::PathBuf>,
     cd_selected: usize,
     cd_show_hidden: bool,
+    /// The session the open picker is about. Pinned when the screen opens,
+    /// because a split window's caret leaf is not the chat leaf: reading
+    /// `chat_session` at either end sent the change to the conversation the
+    /// window happens to hold while the reader was looking at a pane, and a
+    /// switch made while the picker was open moved the target out from under
+    /// them.
+    cd_session: Option<Uuid>,
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     models_rows: Vec<models::Row>,
@@ -6172,6 +6179,7 @@ fn main() {
                         cd_entries: Vec::new(),
                         cd_selected: 0,
                         cd_show_hidden: false,
+                        cd_session: None,
                         models_rows: Vec::new(),
                         models_query: String::new(),
                         models_index: 0,
@@ -9707,6 +9715,35 @@ mod tests {
             !body.contains("cx.spawn"),
             "the picker's apply never runs on gpui's executor: the row write \
              needs a Tokio reactor and gpui has none"
+        );
+        // #3035: the picker names its session when it opens and applies to
+        // that same one. Both ends used to read `chat_session`, so in a split
+        // the directory changed in the conversation the window held while the
+        // reader was standing in a pane, and a switch made while the screen
+        // was open moved the target out from under them.
+        let (_, picker) = src
+            .split_once("fn open_cd_picker")
+            .expect("open_cd_picker exists");
+        let (picker, _) = picker
+            .split_once("\n    pub(crate) fn ")
+            .unwrap_or((picker, ""));
+        assert!(
+            picker.contains("self.focused_pane()"),
+            "the picker opens on the leaf the reader is in"
+        );
+        assert!(
+            !picker.contains("self.chat_session"),
+            "and never on the window's chat leaf, which is a different \
+             session in a split"
+        );
+        assert!(
+            picker.contains("self.cd_session = Some(session)"),
+            "the picker pins the session it was opened for"
+        );
+        assert!(
+            body.contains("self.cd_session.or_else(|| self.focused_pane())"),
+            "select-here applies to the pinned session, not to whatever the \
+             window holds when the key lands"
         );
     }
 

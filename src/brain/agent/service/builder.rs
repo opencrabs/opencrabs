@@ -1293,20 +1293,72 @@ impl AgentService {
     ) -> std::path::PathBuf {
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.set_working_directory_for_session(session_id, canonical.clone());
-
-        // The DB row is the source of truth for a resume, so a `/cd` the user
-        // confirmed must survive the process, not just the pane.
-        let sessions = crate::services::SessionService::new(self.context.clone());
-        if let Err(e) = sessions
-            .update_session_working_directory(
-                session_id,
-                Some(canonical.to_string_lossy().to_string()),
-            )
-            .await
-        {
-            tracing::warn!("failed to persist session working directory: {e}");
-        }
+        self.set_project_directory(session_id, canonical.clone()).await;
         canonical
+    }
+
+    /// Move one project's sessions to `dir`: the session asked for, and the
+    /// parent and every topic it shares a project with (#3035).
+    ///
+    /// A topic is a session inside a session (#2301), and the group is one
+    /// project: the parent and every topic under it read the same tree, so a
+    /// `/cd` moves the family or the group splits across two directories the
+    /// reader never chose. Handles first, then the rows, because the row is the
+    /// source of truth for a resume and a `/cd` the user confirmed must survive
+    /// the process.
+    ///
+    /// The process-global cwd is NOT touched here: that belongs to
+    /// `apply_operator_cd`, the one place an operator's explicit `/cd` is
+    /// allowed to move it.
+    pub(crate) async fn set_project_directory(&self, session_id: Uuid, dir: std::path::PathBuf) {
+        let family = self.project_family(session_id).await;
+        for member in &family {
+            self.set_session_only_working_directory(*member, dir.clone());
+        }
+        let sessions = crate::services::SessionService::new(self.context.clone());
+        let dir_text = dir.to_string_lossy().to_string();
+        for id in &family {
+            if let Err(e) = sessions
+                .update_session_working_directory(*id, Some(dir_text.clone()))
+                .await
+            {
+                tracing::warn!("failed to persist working directory for session {id}: {e}");
+            }
+        }
+    }
+
+    /// The session plus every session in its project: its topics when it is
+    /// the parent, or the parent and the siblings when it is a topic (#3035).
+    ///
+    /// The asked-for session always comes first and is never dropped. A read
+    /// failure returns just that one, because a `/cd` must still move the
+    /// directory the operator typed in the conversation they typed it in; the
+    /// family is the part that can wait for a retry, never the one they asked
+    /// for.
+    pub(crate) async fn project_family(&self, session_id: Uuid) -> Vec<Uuid> {
+        use crate::db::repository::SessionRepository;
+        let repo = SessionRepository::new(self.context.pool());
+        let root = match repo.find_parent_id(session_id).await {
+            Ok(Some(parent)) => parent,
+            Ok(None) => session_id,
+            Err(e) => {
+                tracing::warn!("failed to read the project root of {session_id}: {e}");
+                return vec![session_id];
+            }
+        };
+        match repo.family_of(root).await {
+            Ok(members) => {
+                let mut out: Vec<Uuid> = members.into_iter().map(|(id, _)| id).collect();
+                if !out.contains(&session_id) {
+                    out.push(session_id);
+                }
+                out
+            }
+            Err(e) => {
+                tracing::warn!("failed to read the project family of {root}: {e}");
+                vec![session_id]
+            }
+        }
     }
 
     /// True when this session has no cwd handle yet, i.e. the next

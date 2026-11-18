@@ -876,7 +876,10 @@ impl Dashboard {
     /// answer the same key with the same screen. Needs an open conversation
     /// like every other session-bound command here.
     pub(crate) fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.chat_session else {
+        // The leaf the reader is looking at, not the window's chat leaf. In a
+        // split those are different sessions, and reading `chat_session` here
+        // opened the picker seeded with somebody else's directory (#3035).
+        let Some(session) = self.focused_pane() else {
             self.turn
                 .live
                 .notices
@@ -890,6 +893,7 @@ impl Dashboard {
         self.cd_dir = here;
         self.cd_show_hidden = false;
         self.cd_selected = 0;
+        self.cd_session = Some(session);
         self.cd_entries = cd_entries_for(&self.cd_dir, false);
         self.screen = Screen::DirectoryPicker;
         // The screen takes the keyboard, the same rule as Themes: on this
@@ -901,6 +905,7 @@ impl Dashboard {
 
     /// Leave the picker: nothing is applied, the conversation comes back.
     pub(crate) fn close_cd_picker(&mut self, cx: &mut Context<Self>) {
+        self.cd_session = None;
         self.screen = Screen::Chat;
         self.refocus_screen();
         cx.notify();
@@ -916,10 +921,15 @@ impl Dashboard {
     /// `deadpool_sqlite`, which needs a Tokio reactor, and gpui's executor is
     /// not one. Awaiting it in place aborted the window on every pick.
     pub(crate) fn cd_select_here(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.chat_session else {
+        // The session the picker was opened for, never whatever the window
+        // holds now: a switch made while the screen was open used to move the
+        // target, and the pick landed on a conversation the reader had left
+        // (#3035).
+        let Some(session) = self.cd_session.or_else(|| self.focused_pane()) else {
             self.close_cd_picker(cx);
             return;
         };
+        self.cd_session = None;
         let dir = self.cd_dir.clone();
         self.screen = Screen::Chat;
         self.refocus_screen();

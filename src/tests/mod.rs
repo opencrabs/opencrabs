@@ -978,6 +978,7 @@ pub mod session_cwd_restore_test;
 pub mod session_enqueue_callback_test;
 pub mod session_notify_test;
 pub mod session_provider_restore_test;
+pub mod session_project_dir_test;
 pub mod session_working_dir_isolation_test;
 pub mod session_working_dir_test;
 pub mod slack_activity_text_test;
