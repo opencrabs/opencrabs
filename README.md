@@ -677,7 +677,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | `opencrabs run <prompt>` | Execute a single prompt non-interactively. Already unattended under the default `approval_policy`; `--auto-approve` / `--yolo` only when the policy is `ask`. `--quiet` suppresses UI chrome for machine-pure stdout. `--format text\|json\|markdown` |
 | `opencrabs agent` | Interactive CLI agent — multi-turn conversation in your terminal, no TUI. `-m <msg>` for single-message mode |
 | `opencrabs status` | System overview: version, provider, channels, database, brain, cron, dynamic tools |
-| `opencrabs doctor` | Full diagnostics: config, provider connectivity, database, brain, channels, CLI tools in PATH |
+| `opencrabs doctor` | Full diagnostics: config, provider connectivity, database, brain, channels, CLI tools in PATH, loaded service labels and profile lock owners (exits non-zero when two definitions or two pids claim one profile) |
 | `opencrabs init` | Initialize configuration (`--force` to overwrite) |
 | `opencrabs config` | Show current configuration (`--show-secrets` to reveal keys) |
 | `opencrabs onboard` | Run the onboarding setup wizard |

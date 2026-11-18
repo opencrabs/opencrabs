@@ -522,6 +522,13 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
         }
     }
 
+    // 10. Service definitions and profile lock holders (#2838). Read only, and
+    // the one section whose findings change the exit code.
+    let (svc_ok, svc_warn, svc_conflicts) = doctor_service_report();
+    pass += svc_ok;
+    warn += svc_warn;
+    fail += svc_conflicts;
+
     // Summary
     println!();
     if fail == 0 {
@@ -531,7 +538,254 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
     }
     println!();
 
+    if svc_conflicts > 0 {
+        // Non-zero exit is what makes the command usable from a script. Every
+        // other check here is advisory, so only a service conflict fails it.
+        anyhow::bail!(
+            "{svc_conflicts} service conflict(s) found; see the Service section above"
+        );
+    }
+
     Ok(())
+}
+
+/// One loaded service definition, as `doctor` reports it.
+struct LoadedService {
+    /// launchd PID when the job is running. `None` for a loaded-but-idle job,
+    /// and always for systemd, whose PID does not appear in `list-units`.
+    pid: Option<u32>,
+    /// launchd label, or the systemd unit name with its scope.
+    name: String,
+    /// State note for the report line.
+    state: String,
+}
+
+/// Loaded OpenCrabs service definitions for this platform. Read only.
+#[cfg(target_os = "macos")]
+fn loaded_services() -> Vec<LoadedService> {
+    let out = match std::process::Command::new("launchctl").arg("list").output() {
+        Ok(out) => out,
+        Err(_) => return Vec::new(),
+    };
+    parse_launchctl_rows(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .map(|(pid, name)| LoadedService {
+            pid,
+            name,
+            state: match pid {
+                Some(p) => format!("loaded, running as pid {p}"),
+                None => "loaded, not running (KeepAlive starts it on demand)".to_string(),
+            },
+        })
+        .collect()
+}
+
+/// Loaded OpenCrabs units for both scopes. A unit loaded in BOTH the system and
+/// the user scope is two definitions for one profile, so each row keeps its
+/// scope instead of being merged away.
+#[cfg(target_os = "linux")]
+fn loaded_services() -> Vec<LoadedService> {
+    let mut rows: Vec<LoadedService> = Vec::new();
+    for user in [false, true] {
+        let scope = if user { "user" } else { "system" };
+        let mut cmd = std::process::Command::new("systemctl");
+        if user {
+            cmd.arg("--user");
+        }
+        cmd.args([
+            "list-units",
+            "--all",
+            "--no-legend",
+            "--plain",
+            "opencrabs*",
+        ]);
+        let Ok(out) = cmd.output() else {
+            continue;
+        };
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let Some(unit) = fields.next() else {
+                continue;
+            };
+            if !unit.starts_with("opencrabs") {
+                continue;
+            }
+            // UNIT LOAD ACTIVE SUB DESCRIPTION
+            let active = fields.nth(1).unwrap_or("unknown");
+            rows.push(LoadedService {
+                pid: None,
+                name: format!("{unit} [{scope}]"),
+                state: format!("loaded, {active}"),
+            });
+        }
+    }
+    rows
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn loaded_services() -> Vec<LoadedService> {
+    Vec::new()
+}
+
+/// Whether a loaded definition belongs to `profile`.
+#[cfg(target_os = "macos")]
+fn service_is_owned(name: &str, profile: &str) -> bool {
+    service_labels_for(Some(profile))
+        .iter()
+        .any(|owned| owned == name)
+}
+
+/// The scope suffix is part of the reported name, so match on the prefix: the
+/// same unit in two scopes must count as two definitions.
+#[cfg(target_os = "linux")]
+fn service_is_owned(name: &str, _profile: &str) -> bool {
+    let (_plist_name, systemd_name, _log_suffix) = service_identifiers();
+    name.starts_with(&format!("{systemd_name}.service"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn service_is_owned(_name: &str, _profile: &str) -> bool {
+    false
+}
+
+/// Conflict findings for `doctor`'s service section, as printable lines (#2838).
+///
+/// Pure, so the decision is testable without a real `launchctl` or a live
+/// profile. Two shapes count, and both mean a profile cannot hold its own
+/// credentials:
+///
+/// - more than one definition loaded for one profile. Every service template
+///   sets `KeepAlive`, so the pair restarts each other forever and takes turns
+///   losing the instance lock, which is what a user sees as a daemon that keeps
+///   dying for no reason.
+/// - more than one pid claiming the profile. The instance stamp is one claimant
+///   and each channel-lock pid is another; only one can hold the channel
+///   credentials, so the other is about to fail every send.
+pub(crate) fn service_conflict_lines(
+    owned_labels: &[String],
+    claimants: &[u32],
+    profile: &str,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if owned_labels.len() > 1 {
+        lines.push(format!(
+            "    ❌ Conflict: {} are loaded for profile [{profile}]; every service template \
+             sets KeepAlive, so they restart each other and take turns failing the instance lock",
+            owned_labels.join(" and ")
+        ));
+    }
+    if claimants.len() > 1 {
+        lines.push(format!(
+            "    ❌ Conflict: pids {} all claim profile [{profile}]; only one can hold the \
+             channel credentials",
+            claimants
+                .iter()
+                .map(|pid| pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines
+}
+
+/// Read-only service and lock report for `doctor` (#2838).
+///
+/// A failed start or stop always begins with the same three questions: what does
+/// launchd (or systemd) have loaded, which pid holds this profile, and which
+/// channel locks does each pid hold. Answering them here is the difference
+/// between one command and reading `launchctl list` by hand, guessing which rows
+/// are ours, then `kill`ing a process launchd restarts on purpose.
+///
+/// It spawns `launchctl list` / `systemctl list-units` and reads lock stamps.
+/// It never loads, boots out, signals, or writes anything, so it works while a
+/// service is misbehaving, which is the moment it gets used.
+///
+/// Returns `(ok, warn, conflicts)`. Conflicts are the states worth a non-zero
+/// exit: two definitions loaded for one profile, or two pids claiming it.
+fn doctor_service_report() -> (u32, u32, u32) {
+    let mut ok = 0u32;
+    let mut warn = 0u32;
+    let profile = crate::config::profile::active_profile().unwrap_or("default");
+
+    println!();
+    println!("  Service:");
+    let services = loaded_services();
+    let owned: Vec<String> = services
+        .iter()
+        .filter(|svc| service_is_owned(&svc.name, profile))
+        .map(|svc| svc.name.clone())
+        .collect();
+    if services.is_empty() {
+        println!("    ⬚  No OpenCrabs service loaded");
+    } else {
+        for svc in &services {
+            let marker = if svc.pid.is_some() { "✅" } else { "⚠️ " };
+            println!("    {marker} {}: {}", svc.name, svc.state);
+            if svc.pid.is_some() {
+                ok += 1;
+            } else {
+                warn += 1;
+            }
+        }
+    }
+    println!();
+    println!("  Profile [{profile}]:");
+    let locks_dir = crate::config::profile::base_opencrabs_dir().join("locks");
+    let stamp_pid = std::fs::read_to_string(
+        locks_dir.join("instance").join(format!("{profile}.lock")),
+    )
+    .ok()
+    .and_then(|contents| crate::config::profile::split_pid_ticks(contents.trim()))
+    .map(|(pid, _ticks)| pid);
+
+    let mut claimants: Vec<u32> = Vec::new();
+    match stamp_pid {
+        Some(pid) if crate::config::profile::is_pid_alive(pid) => {
+            println!("    ✅ Instance lock: held by pid {pid}");
+            ok += 1;
+            claimants.push(pid);
+        }
+        Some(pid) => {
+            println!(
+                "    ⚠️  Instance lock: stamp names pid {pid}, which is not running \
+                 (stale; the next start takes it over)"
+            );
+            warn += 1;
+        }
+        None => println!("    ⬚  Instance lock: free"),
+    }
+
+    let owners = crate::config::profile::foreign_lock_owners(&locks_dir);
+    if owners.is_empty() {
+        println!("    ⬚  Channel locks: none held by another pid");
+    }
+    for (pid, owner) in &owners {
+        let mut channels = owner.channels.clone();
+        channels.sort();
+        println!("    ✅ Channel locks: pid {pid} holds {}", channels.join(", "));
+        ok += 1;
+        if !claimants.contains(pid) {
+            claimants.push(*pid);
+        }
+    }
+    // Conflicts print as one block at the end: they are the summary of the rows
+    // above, not another row.
+    let conflicts_found = service_conflict_lines(&owned, &claimants, profile);
+
+    for line in &conflicts_found {
+        println!("{line}");
+    }
+    let conflicts = conflicts_found.len() as u32;
+
+    match crate::logging::get_log_path() {
+        Some(path) => println!("    📄 Today's log: {}", path.display()),
+        None => println!(
+            "    📄 Logs: {} (no log file yet)",
+            crate::logging::log_dir().display()
+        ),
+    }
+
+    (ok, warn, conflicts)
 }
 
 /// Load configuration from file or defaults

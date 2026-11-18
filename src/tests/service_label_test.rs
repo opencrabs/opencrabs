@@ -18,7 +18,7 @@
 use crate::cli::commands::{
     LabelMigration, any_owned_label_loaded, build_launchagent_plist, launchagent_plist_path_in,
     managed_service_label, owned_launchctl_rows, parse_launchctl_rows, plan_label_migration,
-    remove_legacy_plist_in, service_labels_for,
+    remove_legacy_plist_in, service_conflict_lines, service_labels_for,
 };
 
 /// A realistic `launchctl list`: a header, a system job, our two labels (one
@@ -214,4 +214,54 @@ fn named_profile_never_retires_the_unscoped_label() {
         LabelMigration::Nothing
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One job, one owner: the state every install should report, and the state
+/// `doctor` must stay quiet and exit zero on (#2838).
+#[test]
+fn one_loaded_label_and_one_pid_is_healthy() {
+    let owned = vec!["com.opencrabs.daemon".to_string()];
+    assert!(service_conflict_lines(&owned, &[4242], "default").is_empty());
+    // Nothing loaded at all is equally healthy; a stopped service is not a bug.
+    assert!(service_conflict_lines(&[], &[], "hermes").is_empty());
+}
+
+/// Both templates loaded for the default profile: the pair sets KeepAlive, so
+/// they restart each other and trade the instance lock forever. This is the
+/// state that looked like a daemon "dying for no reason".
+#[test]
+fn two_loaded_labels_for_one_profile_conflict() {
+    let owned = vec![
+        "com.opencrabs.daemon".to_string(),
+        "com.opencrabs.agent".to_string(),
+    ];
+    let lines = service_conflict_lines(&owned, &[4242], "default");
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("com.opencrabs.daemon and com.opencrabs.agent"));
+    assert!(lines[0].contains("profile [default]"));
+    assert!(lines[0].contains("KeepAlive"));
+}
+
+/// One definition but two pids on the profile: an orphaned daemon still holding
+/// the channel locks while a fresh one runs. Only one can hold the credentials.
+#[test]
+fn two_pids_claiming_one_profile_conflict() {
+    let owned = vec!["com.opencrabs.daemon".to_string()];
+    let lines = service_conflict_lines(&owned, &[4242, 5151], "hermes");
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("4242, 5151"));
+    assert!(lines[0].contains("profile [hermes]"));
+}
+
+/// Both faults at once report twice, and `doctor` turns that count directly
+/// into its exit code, so the number here is the contract.
+#[test]
+fn stacked_faults_report_one_line_each() {
+    let owned = vec![
+        "com.opencrabs.daemon".to_string(),
+        "com.opencrabs.agent".to_string(),
+    ];
+    let lines = service_conflict_lines(&owned, &[4242, 5151], "default");
+    assert_eq!(lines.len(), 2);
+    assert!(lines.iter().all(|line| line.contains("Conflict")));
 }
