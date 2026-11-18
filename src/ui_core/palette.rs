@@ -446,6 +446,13 @@ pub enum PaletteAction {
     /// same door its chord and its row menu walk, from the pane holding the
     /// caret (#2712).
     BeginSplit(crate::ui_core::split::Layout),
+    /// Start dictating a message: the frontend hands the job to the composer
+    /// the keyboard owns, the same call the microphone's click and its chord
+    /// make (#3044).
+    ///
+    /// Window-only, because the microphone is part of the composer and the
+    /// terminal dictates through `/whisper` instead.
+    ToggleDictation,
 }
 
 /// Why the card is armed as a session picker. The purpose decides what a
@@ -627,6 +634,22 @@ pub fn keywords_for(command: &str) -> &'static str {
         .find(|(_, name)| *name == command)
         .map(|(words, _)| *words)
         .unwrap_or("")
+}
+
+/// The words a command row carries in the window, which differ from the
+/// terminal's where the same name means two things (#3044).
+///
+/// `/whisper` is the terminal's microphone: with no composer there, speaking
+/// goes to a clipboard instead. The window has a microphone of its own in the
+/// composer row, so here `/whisper` is only the clipboard flow and the words
+/// that name the microphone must not land on it. Otherwise typing `mic` in
+/// Seeker reaches the wrong feature, which is how a wired control still reads
+/// as unwired.
+pub fn window_keywords_for(command: &str) -> &'static str {
+    match command {
+        "/whisper" => "whisper clipboard paste anywhere transcribe audio file",
+        other => keywords_for(other),
+    }
 }
 
 /// Short exact words that are real app vocabulary rather than stray letters.
@@ -2434,6 +2457,29 @@ mod tests {
             state.selected().map(|row| row.item.action),
             Some(PaletteAction::SetupChannel(Channel::Telegram))
         );
+    }
+
+    /// The window's `/whisper` row is clipboard dictation, so the words that
+    /// name the microphone must not arm it: the composer has its own control
+    /// and its own row (#3044). The terminal keeps every word, because there
+    /// `/whisper` is the only way to talk.
+    #[test]
+    fn the_window_keeps_the_microphone_words_off_the_clipboard_command() {
+        let window = window_keywords_for("/whisper");
+        for word in ["mic", "microphone", "dictate", "dictation", "record"] {
+            assert!(
+                !window.split_whitespace().any(|token| token == word),
+                "{word} names the composer's microphone, not the clipboard flow"
+            );
+        }
+        assert!(window.contains("clipboard"));
+        for command in ["/evolve", "/models"] {
+            assert_eq!(
+                window_keywords_for(command),
+                keywords_for(command),
+                "{command} keeps the table's own words"
+            );
+        }
     }
 
     /// The phrases a person actually types on the way to a page, a command or

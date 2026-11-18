@@ -4218,6 +4218,14 @@ impl App {
                 self.notification = Some("Group topics opens in the window".to_string());
                 self.notification_shown_at = Some(std::time::Instant::now());
             }
+            PaletteAction::ToggleDictation => {
+                // The microphone is part of the window's composer, so the
+                // terminal names the route it does have instead of opening a
+                // device it never draws (#3044).
+                self.notification =
+                    Some("Dictation lives in the window; /whisper dictates here".to_string());
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
             PaletteAction::BeginSplit(layout) => {
                 // The same door the `|` and `_` keys walk (#2712): pin the
                 // focused pane to the session it is showing, stash the input

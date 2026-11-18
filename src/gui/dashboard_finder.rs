@@ -89,7 +89,10 @@ impl Dashboard {
                     PaletteKind::Command,
                     PaletteAction::RunSlash(cmd.name),
                 )
-                .with_keywords(find::keywords_for(cmd.name))
+                // The window's own words for a name the terminal spells
+                // differently: `/whisper` pastes to the clipboard here, and
+                // "mic" belongs to the composer's control (#3044).
+                .with_keywords(find::window_keywords_for(cmd.name))
             })
             .collect();
         items.extend(find::surface_items());
@@ -407,6 +410,16 @@ impl Dashboard {
                 // The same door the chord and the rail row menu walk, from the
                 // pane holding the caret (#2712).
                 self.begin_split(layout, cx);
+            }
+            PaletteAction::ToggleDictation => {
+                // The microphone belongs to the composer, so the row hands the
+                // job to the field the keyboard owns, the same call the
+                // control's click and the chord make (#3044). The card is
+                // already closed and the caret already aimed back at that
+                // field by the time this runs.
+                let composer = self.composer_entity(cx);
+                composer.update(cx, |editor, cx| editor.toggle_dictation(cx));
+                cx.notify();
             }
             PaletteAction::OpenDocs(path) => {
                 let url = docs::url(path);

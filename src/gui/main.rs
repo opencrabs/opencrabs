@@ -7803,6 +7803,26 @@ mod tests {
             arm.contains("self.begin_split(layout, cx)"),
             "the row walks the same split door the chord walks"
         );
+
+        // The microphone (#3044): the card cannot reach the composer's own
+        // state, so the row hands the job to the field the keyboard owns,
+        // through the same call the control's click and the chord make.
+        let mic_row = "PaletteAction::ToggleDictation =>";
+        let mic = code
+            .find(mic_row)
+            .expect("the microphone row has a handler");
+        let tail = code
+            .get(mic + mic_row.len()..)
+            .expect("the arm starts on a glyph");
+        let arm = tail.split("PaletteAction::").next().expect("the arm body");
+        assert!(
+            arm.contains("self.composer_entity(cx)"),
+            "the row targets the field the keyboard owns, not the window's"
+        );
+        assert!(
+            arm.contains("editor.toggle_dictation(cx)"),
+            "the row starts the same loop the control and the chord start"
+        );
     }
 
     #[test]

@@ -76,17 +76,31 @@ pub fn items() -> Vec<PaletteItem> {
     ACTIONS.iter().map(ActionSpec::item).collect()
 }
 
-/// The one row that needs a window (#2713).
+/// The rows that need a window (#2713, #3044).
 ///
 /// Grouping sessions into topics is a window modal, so a terminal row would
-/// be a dead end. Both surfaces print `items()`; only the window adds this.
-pub const GUI_ACTIONS: &[ActionSpec] = &[ActionSpec {
-    title: "group topics",
-    subtitle: "attach sessions as topics under the picked one",
-    keywords: "group topics attach sessions parent nest under existing",
-    kind: PaletteKind::Action,
-    action: PaletteAction::GroupTopics,
-}];
+/// be a dead end. The microphone is part of the composer, and the terminal
+/// dictates through `/whisper` with no in-app device, so its row lives here
+/// too. Both surfaces print `items()`; only the window adds these.
+pub const GUI_ACTIONS: &[ActionSpec] = &[
+    ActionSpec {
+        title: "group topics",
+        subtitle: "attach sessions as topics under the picked one",
+        keywords: "group topics attach sessions parent nest under existing",
+        kind: PaletteKind::Action,
+        action: PaletteAction::GroupTopics,
+    },
+    // The composer's microphone, reachable from the card as well as from its
+    // control and its chord (#3044). The words are the ones people say when
+    // they want to talk instead of type, so the row is found by intent.
+    ActionSpec {
+        title: "start dictation",
+        subtitle: "speak the next message instead of typing it",
+        keywords: "mic microphone voice dictate dictation speak record recording stt transcribe audio listening",
+        kind: PaletteKind::Action,
+        action: PaletteAction::ToggleDictation,
+    },
+];
 
 /// The window-only rows, built the same way as the shared ones.
 pub fn gui_items() -> Vec<PaletteItem> {
@@ -105,13 +119,17 @@ mod tests {
             .expect("catalog action")
     }
 
-    /// Both surfaces own panes, so both print the split rows; only the group
-    /// modal is window-only (#2712, #2713).
+    /// Both surfaces own panes, so both print the split rows; the group modal
+    /// and the composer's microphone are window-only (#2712, #2713, #3044).
     #[test]
-    fn the_split_rows_print_everywhere_and_the_group_row_prints_in_the_window() {
+    fn the_split_rows_print_everywhere_and_the_window_only_rows_print_in_the_window() {
         let gui = gui_items();
         let shared = items();
-        assert_eq!(gui.len(), 1, "group topics is the only window-only row");
+        assert_eq!(
+            gui.len(),
+            2,
+            "group topics and start dictation are the window-only rows"
+        );
 
         let group = gui
             .iter()
@@ -122,6 +140,16 @@ mod tests {
             group.subtitle,
             "attach sessions as topics under the picked one"
         );
+
+        // The microphone lives in the composer, which the terminal never
+        // draws, so the row is the window's alone (#3044).
+        let mic = gui
+            .iter()
+            .find(|it| it.action == PaletteAction::ToggleDictation)
+            .expect("the dictation row prints in the window");
+        assert_eq!(mic.title, "start dictation");
+        assert_eq!(mic.subtitle, "speak the next message instead of typing it");
+        assert_eq!(mic.kind, PaletteKind::Action);
 
         for (layout, title, shape) in [
             (Layout::Side, "split | horizontal", "side by side"),
@@ -139,12 +167,40 @@ mod tests {
             );
         }
 
-        assert!(
-            !shared
-                .iter()
-                .any(|it| it.action == PaletteAction::GroupTopics),
-            "the terminal has no group modal, so it gets no row"
-        );
+        for (title, action) in [
+            (
+                "the terminal has no group modal",
+                PaletteAction::GroupTopics,
+            ),
+            (
+                "the terminal has no in-app microphone",
+                PaletteAction::ToggleDictation,
+            ),
+        ] {
+            assert!(
+                !shared.iter().any(|it| it.action == action),
+                "{title}, so it gets no row"
+            );
+        }
+    }
+
+    /// Somebody who wants to talk instead of type types the word they say, so
+    /// the microphone row answers to those words (#3044).
+    #[test]
+    fn the_dictation_row_answers_to_the_words_people_say() {
+        for query in ["mic", "microphone", "dictate", "dictation", "speak"] {
+            let mut state = PaletteState::new(gui_items());
+            for c in query.chars() {
+                state.type_char(c);
+            }
+            assert!(
+                state
+                    .visible()
+                    .iter()
+                    .any(|row| row.item.action == PaletteAction::ToggleDictation),
+                "{query} reaches the microphone"
+            );
+        }
     }
 
     /// The rows answer to the word the user types, so `split` and `group`
