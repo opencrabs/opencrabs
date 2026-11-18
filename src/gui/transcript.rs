@@ -3722,7 +3722,11 @@ fn live_card(
             )),
         );
     }
-    if !lead.is_empty() {
+    // Whether the call leads the row, read before the row draws it: the entry
+    // that renders the call takes the string, and the head still asks whether
+    // it had one when it decides about its dot (#3046).
+    let has_lead = !lead.is_empty();
+    if has_lead {
         // The sentence and the call are two segments of one line (#3046).
         // Without the dot the prose runs straight into the call and the two
         // read as one broken sentence.
@@ -3772,7 +3776,7 @@ fn live_card(
         // A dot needs a word on its left. A turn that has only streamed text so
         // far has no lead and no preview, so its head is the frame and the
         // clock, and a dot in front of the clock would read as a stray mark.
-        if has_narration || !lead.is_empty() {
+        if has_narration || has_lead {
             head = head.child(head_dot(palette::current().accent));
         }
         head = head.child(
@@ -7415,7 +7419,7 @@ mod tests {
             "the sentence and the call it explains are divided, not run together"
         );
         assert!(
-            live.contains("if has_narration || !lead.is_empty() {"),
+            live.contains("if has_narration || has_lead {"),
             "the numbers wait for a word to stand on their left"
         );
         assert!(
