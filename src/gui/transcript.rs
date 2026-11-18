@@ -3731,8 +3731,8 @@ fn live_card(
     max_width: f32,
 ) -> Stateful<Div> {
     // A stop ends the turn where it stood (#2811), and a finished turn shows
-    // the tick. While the turn runs the slot carries the clock, and only while
-    // the clock is the whole line (#3046).
+    // the tick. While the turn runs the slot carries the clock, and it leaves
+    // that slot the moment the turn has called or spoken (#3046).
     //
     // It led a full turn once, where the spinning dot used to be, and that read
     // wrong: it stayed in front of the sentence and the call after they
@@ -3805,9 +3805,6 @@ fn live_card(
     // whether it had one when it decides how many rows it has (#3046).
     let has_lead = !lead.is_empty();
     let footer = live_card_footer(live, ctx);
-    // Read before the footer moves into the line below: the clock's own gate
-    // asks whether there are any numbers yet.
-    let has_footer = footer.is_some();
     // One status line, dot-divided (#3046): the sentence the turn is speaking,
     // the call it is running right now, and the numbers, with the turn's total
     // closing them once the turn has ended. It went to three stacked rows to
@@ -3829,22 +3826,27 @@ fn live_card(
         segments.push(footer);
     }
     // The clock closes the numbers once there is anything to close (#3046). A
-    // line that has nothing to say yet has no end to close, so the clock takes
-    // the slot instead and the reader watches it count from zero where the dot
-    // used to spin; the first call, the first narration or the first number
-    // sends it back here, and here it stays. Written once either way, so the
-    // two places cannot disagree.
+    // line with no call and no sentence yet has no end to close, so the clock
+    // takes the slot instead and the reader watches it count from zero where
+    // the dot used to spin; the first call or the first narration sends it back
+    // here, and here it stays. Written once either way, so the two places
+    // cannot disagree.
     //
-    // The placeholder is not something to say. `live_status_line` answers
-    // "OpenCrabs is thinking..." while the turn has nothing at all, and that
-    // sentence sits beside the clock rather than in front of it, so the clock
-    // still leads the line a message begins on.
+    // The numbers do not move it. The budget is measured before the turn has
+    // called or said anything, so a clock that stepped back the moment the
+    // first number arrived was never seen counting from zero at all, and two
+    // sessions showed two different heads for the same state of a turn. Only a
+    // call or a sentence is something to say.
+    //
+    // The placeholder is not something to say either. `live_status_line`
+    // answers "OpenCrabs is thinking..." while the turn has nothing at all, and
+    // that sentence sits beside the clock rather than in front of it, so the
+    // clock still leads the line a message begins on.
     let idle = live.tools.is_empty()
         && live.chunks == 0
         && live.stream.is_empty()
         && live.reasoning.is_empty()
-        && narration.is_none()
-        && !has_footer;
+        && collapsed_narration(live).is_none();
     let clock = clock_glyph(live.elapsed_secs());
     if idle && !finished {
         slot = Some(clock);
@@ -3868,9 +3870,10 @@ fn live_card(
                 .w(px(16.0))
                 .child(disclosure_icon(accent, 1.0)),
         );
-    // The slot, on the arrow's own line: the clock while the turn has nothing
-    // to say, the verdict once it stops. A line with content starts on the
-    // sentence itself, so no number ever stands in front of the words.
+    // The slot, on the arrow's own line: the clock while the turn has not
+    // called or spoken yet, the verdict once it stops. It leaves the slot the
+    // moment there is a call or a sentence, so it never stands in front of what
+    // the turn itself said.
     if let Some(slot) = slot {
         head = head.child(head_run(slot, palette::current().text_muted, None).flex_shrink_0());
     }
@@ -7548,15 +7551,20 @@ mod tests {
         );
     }
 
-    /// #3046: the clock leads the head line only while the line is empty, and
-    /// closes the numbers from the first call or narration on. It led a whole
-    /// turn once, where the spinning dot used to be, and stayed in front of the
-    /// sentence and the call after they arrived. The rule is one move per turn:
-    /// count from zero in the arrow's slot until the card has something to say,
-    /// then sit at the end of the statistics, which is where the Telegram
-    /// footer and the settled card keep it.
+    /// #3046: the clock leads the head line until the turn calls or speaks, and
+    /// closes the numbers from that moment on. It led a whole turn once, where
+    /// the spinning dot used to be, and stayed in front of the sentence and the
+    /// call after they arrived. The rule is one move per turn: count from zero
+    /// in the arrow's slot until the card has a call or a sentence, then sit at
+    /// the end of the statistics, which is where the Telegram footer and the
+    /// settled card keep it.
+    ///
+    /// The numbers are not something to say. The budget is measured before the
+    /// turn has called or spoken, so letting it end the leading clock meant the
+    /// clock was never seen counting from zero at all, and two panes showed two
+    /// different heads for the same state of a turn.
     #[test]
-    fn the_clock_leads_only_an_empty_head_line() {
+    fn the_clock_leads_until_the_turn_calls_or_speaks() {
         const SRC: &str = include_str!("transcript.rs");
         let card = SRC
             .split_once("fn live_card(")
@@ -7597,8 +7605,12 @@ mod tests {
             "nothing called yet is the only state that lets the clock lead"
         );
         assert!(
-            segments.contains("narration.is_none()"),
+            segments.contains("collapsed_narration(live).is_none()"),
             "and nothing spoken yet"
+        );
+        assert!(
+            !card.contains("has_footer"),
+            "the numbers never move the clock: the budget lands before the first call"
         );
         assert!(
             segments.contains("if idle && !finished {"),
@@ -7610,7 +7622,7 @@ mod tests {
         );
         assert!(
             segments.contains("segments.push(clock);"),
-            "the first call, narration or number ends the line on the clock"
+            "the first call or the first narration ends the line on the clock"
         );
         assert!(
             !segments.contains("live.elapsed_secs())"),
