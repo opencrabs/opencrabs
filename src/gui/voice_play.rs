@@ -115,17 +115,6 @@ pub(crate) fn toggle(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop whatever is sounding. Inert when nothing is.
-pub(crate) fn stop() {
-    let previous = match slot().lock() {
-        Ok(mut guard) => guard.take(),
-        Err(poisoned) => poisoned.into_inner().take(),
-    };
-    if let Some(active) = previous {
-        active.stop.store(true, Ordering::Relaxed);
-    }
-}
-
 /// How long the clip is, in seconds, read from the OGG's own granule positions.
 ///
 /// The container carries the sample count at the end of the stream, so the card
