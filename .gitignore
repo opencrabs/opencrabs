@@ -11,6 +11,12 @@
 *.pdb
 
 # Configuration and data
+opencrabs.toml
+opencrabs.json
+opencrabs.db
+opencrabs.db-shm
+opencrabs.db-wal
+opencrabs.db.pre-migration-*
 opencrab.toml
 opencrab.json
 opencrab.db
