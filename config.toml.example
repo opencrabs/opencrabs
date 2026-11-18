@@ -895,6 +895,12 @@ enabled = false
 # ([providers.web_search.serper] api_key = "...") to add Google results
 # to the web_search fan-out. Supports gl/hl locale targeting per query.
 
+[providers.web_search.keenable]
+enabled = false
+# Optional. Set enabled = true to add Keenable to the web_search fan-out.
+# Keyless public endpoint works with no key. For higher limits put an API
+# key in keys.toml: [providers.web_search.keenable] api_key = "..."
+
 # ========================================
 # Memory / Embeddings
 # ========================================
