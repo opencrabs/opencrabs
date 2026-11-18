@@ -59,7 +59,11 @@ fn the_settled_card_paints_no_preview_band() {
 fn the_settled_card_still_paints_the_expanded_body() {
     let card = body_after(TRANSCRIPT, "fn settled_card(turn: &Turn,");
     assert!(
-        card.contains("if !body.is_empty()"),
+        card.contains("let open = !body.is_empty();"),
+        "the card must still ask whether the body is open, got {card:?}"
+    );
+    assert!(
+        card.contains(".children(body),"),
         "the expanded body must still reach the card, got {card:?}"
     );
 }
