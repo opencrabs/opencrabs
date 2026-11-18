@@ -10,7 +10,7 @@
 //! says can be tested without a window.
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
+    App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
     InspectorElementId, LayoutId, MouseButton, Pixels, Point, ScrollWheelEvent, SharedString,
     Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, linear_color_stop,
     linear_gradient, point, prelude::*, px, relative, rems, rgb, rgba, size,
@@ -167,6 +167,11 @@ const FIELD_PAD_X: f32 = 22.0;
 /// flex gap beside the shaped line would move the caret, which has to sit
 /// exactly where the text does (#2531).
 const FIELD_MIC_GAP: f32 = 14.0;
+
+/// The floating take's diameter (#3044). Siri-sized rather than chip-sized:
+/// while the microphone is open the bubble is the only thing on the screen, so
+/// it has to carry the whole state at a glance from across a desk.
+const TAKE_BUBBLE: f32 = 9.0;
 
 /// The line the field prints while it is empty. An armed pick names its job
 /// instead of inviting a query: the list under it is a set of conversations
@@ -411,15 +416,13 @@ pub(super) fn query_line(
         .child(element)
 }
 
-/// The Seeker's take, as the card paints it (#3044).
+/// The Seeker's take, as the window paints it (#3044).
 ///
 /// Derived from the window's handles on every frame rather than stored: the
-/// card must never show a counter for a microphone that already closed.
+/// bubble must never show a counter for a microphone that already closed.
 pub(crate) struct SeekerVoice {
     /// The device is open and samples are arriving.
     pub recording: bool,
-    /// The recording was asked to stop and its WAV is being built.
-    pub finishing: bool,
     /// Seconds the take has run, for the counter.
     pub secs: u64,
     /// The meter, newest last, for the wave.
@@ -432,47 +435,19 @@ pub(crate) struct SeekerVoice {
 /// one control on two surfaces: a person who learned it in the field finds it
 /// in the card, and the hover says the same thing on both.
 ///
-/// It records here, in the card. The counter and the meter ride inside the
-/// pill, to the left of this control, and the words land in the field itself: a
-/// search query has to end up in the box the person is looking at, which is
-/// why handing the job to the composer behind the card was the wrong shape.
+/// The take starts here, in the card, and the words land in the field itself: a
+/// search query has to end up in the box the person is looking at, which is why
+/// handing the job to the composer behind the card was the wrong shape. The
+/// open microphone is not drawn on this control though: while a take runs the
+/// card leaves the window and the take floats as one bubble in its middle
+/// (#3044), so the tile is only ever painted idle.
 ///
 /// The tile is one step larger than the composer's (2.1rem against 1.8rem,
 /// with a 1.5rem glyph against 1.25rem) because the field around it is: the
 /// line here is `text_2xl`, and a control sized for the composer's line would
 /// read as a leftover from the surface it came from (#3044).
-fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl IntoElement {
+fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
     let theme = palette::current();
-    let recording = voice.is_some_and(|v| v.recording);
-    let working = voice.is_some_and(|v| v.finishing && !v.recording);
-    // The four states wear the four colours the composer's microphone wears:
-    // quiet grey, recording red, working amber. A control that changed the
-    // meaning of a click without changing its face would be a trap.
-    let colour = if recording {
-        theme.red
-    } else if working {
-        theme.amber
-    } else {
-        theme.text_muted
-    };
-    let mark: AnyElement = if recording {
-        crate::icon::stop_icon(colour, 1.15).into_any_element()
-    } else {
-        crate::icon::mic_icon(colour, 1.5).into_any_element()
-    };
-    // While the take runs the tile wears a red pad whose strength follows the
-    // newest meter reading, so the control itself breathes with the voice
-    // instead of only changing colour (#3044). It costs no clock: the meter
-    // already repaints the card once per reading.
-    let heard = voice
-        .and_then(|v| v.levels.last().copied())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let pad = if recording {
-        rgba((theme.red << 8) | (0x1c + (heard * 0x54 as f32) as u32))
-    } else {
-        rgba(0x00000000)
-    };
     div()
         .id("seeker-mic")
         .flex()
@@ -482,14 +457,13 @@ fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl I
         .ml(px(FIELD_MIC_GAP))
         .size(rems(2.1))
         .rounded_sm()
-        .bg(pad)
         .cursor_pointer()
-        .opacity(if recording { 1.0 } else { 0.8 })
+        .opacity(0.8)
         .hover(|d| d.opacity(1.0))
         // The hover names the key, exactly as the composer's microphone does:
         // two surfaces, one binding, one sentence about it.
         .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
-        .child(mark)
+        .child(crate::icon::mic_icon(theme.text_muted, 1.5))
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             // The click belongs to the control, not to the scrim under it.
             cx.stop_propagation();
@@ -497,42 +471,72 @@ fn field_mic(view: WeakEntity<Dashboard>, voice: Option<&SeekerVoice>) -> impl I
         })
 }
 
-/// The running take, drawn inside the field's own row (#3044): the counter and
-/// the live meter, to the left of the microphone.
+/// The take, as one glass bubble in the middle of the window (#3044).
 ///
-/// It rides in the pill rather than under it. Below the field it read as a
-/// second card hanging off the first, and the person watching the counter is
-/// looking at the line they are about to search with. The word that the same
-/// key stops it is not lost: it lives on the microphone's hover, next to the
-/// chord, and the tile itself turns into the stop while the take runs.
-fn seeker_take(voice: &SeekerVoice) -> impl IntoElement {
+/// Spotlight's Siri bubble is the shape: while the microphone is open the card
+/// leaves the window and this is the only thing drawn, so the bubble carries
+/// the whole state by itself. Yellow while the device is open, green from the
+/// moment the take is handed to the transcriber: the colour answers "did my
+/// second press land" before any words do, and the words come back into the
+/// field for editing and sending.
+///
+/// The rim and the specular band are what make it read as glass: a dark
+/// translucent sphere with a wet top edge, not a second dialog.
+fn seeker_bubble(voice: &SeekerVoice) -> impl IntoElement {
     let theme = palette::current();
     let colour = if voice.recording {
-        theme.red
-    } else {
         theme.amber
+    } else {
+        theme.green
     };
+    // The newest reading, for the rim: the sphere brightens on what the
+    // microphone just heard rather than on a clock of its own.
+    let heard = voice.levels.last().copied().unwrap_or(0.0).clamp(0.0, 1.0);
     div()
+        .id("seeker-take-bubble")
+        .relative()
         .flex()
         .flex_none()
-        .flex_row()
+        .flex_col()
         .items_center()
+        .justify_center()
         .gap_2()
+        .size(rems(TAKE_BUBBLE))
+        .rounded_full()
+        .bg(linear_gradient(
+            150.0,
+            linear_color_stop(rgba(0x23232ff2), 0.0),
+            linear_color_stop(rgba(0x0b0b11fa), 1.0),
+        ))
+        .border_1()
+        .border_color(rgba((colour << 8) | (0x66 + (heard * 0x55 as f32) as u32)))
+        .shadow_lg()
+        .overflow_hidden()
         .child(
+            // The specular band across the top third: the one thing that
+            // separates glass from a flat disc.
             div()
-                .flex_none()
-                .text_xs()
-                .text_color(rgb(colour))
-                .child(format!("{}:{:02}", voice.secs / 60, voice.secs % 60)),
+                .absolute()
+                .top(px(12.0))
+                .left(px(26.0))
+                .right(px(26.0))
+                .h(px(26.0))
+                .rounded_full()
+                .bg(rgba(0xffffff16)),
         )
         .child(seeker_wave(&voice.levels, colour))
+        .child(div().text_sm().text_color(rgb(colour)).child(format!(
+            "{}:{:02}",
+            voice.secs / 60,
+            voice.secs % 60
+        )))
 }
 
-/// How many meter readings the card's wave draws. The composer's own count, so
-/// the two strips read as the same instrument.
-const SEEKER_WAVE_BARS: usize = 34;
+/// How many meter readings the bubble draws. Fewer than the composer's strip,
+/// because the bubble is round and the same count would run into its curve.
+const SEEKER_WAVE_BARS: usize = 26;
 
-/// The live meter in the card (#3044): one bar per reading, newest on the
+/// The live meter in the bubble (#3044): one bar per reading, newest on the
 /// right, so the strip scrolls the way a waveform should and its right edge is
 /// what the microphone heard a moment ago.
 fn seeker_wave(levels: &[f32], colour: u32) -> impl IntoElement {
@@ -542,15 +546,15 @@ fn seeker_wave(levels: &[f32], colour: u32) -> impl IntoElement {
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(px(1.5))
-        .h(px(14.0));
+        .gap(px(2.0))
+        .h(px(32.0));
     for level in shown {
         row = row.child(
             div()
                 .flex_none()
-                .w(px(2.0))
-                .h(px(2.0 + level.clamp(0.0, 1.0) * 12.0))
-                .rounded(px(1.0))
+                .w(px(2.5))
+                .h(px(2.0 + level.clamp(0.0, 1.0) * 30.0))
+                .rounded(px(1.25))
                 .bg(rgb(colour)),
         );
     }
@@ -646,13 +650,10 @@ pub(super) fn overlay(
         .border_color(rgba(0xffffff2e))
         .shadow_md()
         .child(query_line(state, view, paint, caret_on));
-    // The take rides in the field's own row (#3044): counter and meter between
-    // the query and the microphone, so a running recording can never hang a
-    // second card off the bottom of the field.
-    if let Some(take) = voice.as_ref() {
-        pill = pill.child(seeker_take(take));
-    }
-    pill = pill.child(field_mic(dictate, voice.as_ref()));
+    // The microphone closes the field's row in the one state this card paints
+    // it: idle. A running take leaves the card entirely for its own bubble
+    // (#3044), so nothing can hang a second row off the field here.
+    pill = pill.child(field_mic(dictate));
     shell = shell.child(pill);
 
     // A failed take says so here, for the same reason: the composer's notice
@@ -881,7 +882,7 @@ pub(super) fn overlay(
         shell = shell.child(card);
     }
 
-    div()
+    let scrim = div()
         .id("command-palette-scrim")
         // Modal: the scrim owns the pointer, so a click meant for the window
         // behind it cannot act on anything but the card.
@@ -893,11 +894,20 @@ pub(super) fn overlay(
         .flex()
         .flex_col()
         .items_center()
-        // Spotlight floats the card high, not centered: the eye reads it as
-        // a command surface, not a dialog (#2491).
+        .bg(rgba(0x08080acc));
+    // A live take is one bubble in the middle of the window and nothing else
+    // (#3044): the field and the rows would compete with the thing the person
+    // is watching, and the words are coming back into that field in a moment
+    // anyway. Green here means the take was handed over and the wait is the
+    // transcriber's, not the microphone's.
+    if let Some(take) = voice.as_ref() {
+        return scrim.justify_center().child(seeker_bubble(take));
+    }
+    // Spotlight floats the card high, not centered: the eye reads it as
+    // a command surface, not a dialog (#2491).
+    scrim
         .justify_start()
         .pt(rems(6.5))
-        .bg(rgba(0x08080acc))
         // scrim.child(shell): the pill and the results card float as one
         // island; the shell carries both, never the card alone (#2495).
         .child(shell)
@@ -1042,7 +1052,7 @@ mod tests {
             "the height comes from the pillow around the line, not from a bigger font"
         );
         assert!(
-            pill_src.contains(".child(field_mic(dictate, voice.as_ref()))"),
+            pill_src.contains(".child(field_mic(dictate))"),
             "the microphone closes the field's row, where the composer's does"
         );
         let mic = src
@@ -1068,8 +1078,12 @@ mod tests {
             "the control brings its own inset, because a flex gap would move the caret"
         );
         assert!(
-            body.contains("mic_icon(colour, 1.5)") && body.contains(".size(rems(2.1))"),
+            body.contains("mic_icon(theme.text_muted, 1.5)") && body.contains(".size(rems(2.1))"),
             "the microphone is a step larger than the composer's, so it matches the bigger line instead of reading as a leftover"
+        );
+        assert!(
+            !body.contains("stop_icon"),
+            "the tile is only ever painted idle: the stop belongs to the bubble that replaces the card"
         );
         let line = src
             .find("fn query_line(")
@@ -1083,40 +1097,16 @@ mod tests {
         );
     }
 
-    /// A running take is drawn inside the field, never as a strip hanging off
-    /// it (#3044).
+    /// A live take is one bubble in the middle of the window, and the card is
+    /// not drawn beside it (#3044).
     ///
-    /// The counter and the meter are what the person watches while the
-    /// microphone is open, and a second row under the pill reads as a card
-    /// below the card. They ride in the pill's own row, between the query and
-    /// the microphone, so the field stays one control in every state.
+    /// The bubble replaced the counter that rode in the pill and the strip that
+    /// hung under it: while the microphone is open the person watches one
+    /// thing, so the field and its rows leave the screen and come back with the
+    /// words.
     #[test]
-    fn the_running_take_rides_inside_the_field() {
+    fn the_take_is_one_bubble_and_the_card_steps_aside() {
         let src = include_str!("command_palette.rs");
-        let pill = src
-            .find("let mut pill = div()")
-            .expect("the pill is drawn in overlay()");
-        let tail = src.get(pill..).expect("the pill starts on a glyph");
-        let mounted = tail
-            .find("shell = shell.child(pill);")
-            .expect("the pill is mounted on the shell");
-        let pill_src = tail
-            .get(..mounted)
-            .expect("the pill body ends at its mount");
-        assert!(
-            pill_src.contains("pill = pill.child(seeker_take(take));"),
-            "the counter and the meter are pill children, not shell children"
-        );
-        let take = pill_src
-            .find("seeker_take(take)")
-            .expect("the take is mounted on the pill");
-        let mic = pill_src
-            .find("field_mic(dictate")
-            .expect("the microphone closes the pill");
-        assert!(
-            take < mic,
-            "the take sits between the query and the microphone, so the stop stays last"
-        );
         let overlay = src
             .find("pub(super) fn overlay(")
             .expect("the overlay is one function");
@@ -1124,8 +1114,38 @@ mod tests {
         let end = tail.find("\n}\n").expect("overlay closes");
         let body = tail.get(..end).expect("the body ends on a glyph");
         assert!(
-            !body.contains("seeker_voice_strip"),
-            "nothing paints a second row under the pill"
+            body.contains("return scrim.justify_center().child(seeker_bubble(take));"),
+            "a live take is one bubble, centered, and overlay() returns before the shell is mounted"
+        );
+        let bubble = body
+            .find("scrim.justify_center()")
+            .expect("the bubble is mounted on the scrim");
+        let shell = body
+            .find(".child(shell)")
+            .expect("the card branch mounts the shell");
+        assert!(
+            bubble < shell,
+            "the bubble returns first, so the field is never drawn beside it"
+        );
+        assert!(
+            !body.contains("seeker_take") && !body.contains("seeker_voice_strip"),
+            "neither the old in-field counter nor the strip under the pill survives"
+        );
+        let start = src
+            .find("fn seeker_bubble(")
+            .expect("the bubble is one function, so no caller can drift");
+        let tail = src.get(start..).expect("seeker_bubble starts on a glyph");
+        let end = tail.find("\n}\n").expect("seeker_bubble closes");
+        let drawn = tail.get(..end).expect("the bubble body ends on a glyph");
+        assert!(
+            drawn.contains("if voice.recording {")
+                && drawn.contains("theme.amber")
+                && drawn.contains("theme.green"),
+            "yellow while the device is open, green from the hand-off to the transcriber"
+        );
+        assert!(
+            drawn.contains(".size(rems(TAKE_BUBBLE))") && drawn.contains(".rounded_full()"),
+            "the take is a sphere, not a bar"
         );
     }
 

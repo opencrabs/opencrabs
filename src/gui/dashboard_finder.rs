@@ -208,6 +208,16 @@ impl Dashboard {
             self.seeker_dictate(cx);
             return;
         }
+        // While the take floats as a bubble the card paints nothing, so every
+        // other key has nothing to act on: a character would edit a field
+        // nobody can see and Enter would run a row that is not drawn (#3044).
+        // Escape still closes, which is how a take is abandoned.
+        if self.seeker_voice_phase() != SeekerVoicePhase::Idle {
+            if ks.key == "escape" {
+                self.close_finder(cx);
+            }
+            return;
+        }
         if let Some(edit) = text_field::editing_chord(
             &ks.key,
             ks.modifiers.control,
@@ -334,8 +344,8 @@ impl Dashboard {
     /// card to hand the job over was the wrong shape twice over: the take ran
     /// in whatever session the composer belonged to, and the person watching
     /// the card saw nothing happen. The card therefore owns its own capture,
-    /// draws its own counter and wave, and fills its own field when the words
-    /// come back.
+    /// floats it as one bubble while the microphone is open, and fills its own
+    /// field when the words come back.
     ///
     /// One control, four states, the same four the composer's microphone has:
     /// idle starts, recording stops, closing and transcribing wait. A second
@@ -376,7 +386,7 @@ impl Dashboard {
         }
     }
 
-    /// What the card paints, or `None` when the microphone is idle.
+    /// What the bubble paints, or `None` when the microphone is idle.
     pub(crate) fn seeker_voice_view(&self) -> Option<command_palette::SeekerVoice> {
         let phase = self.seeker_voice_phase();
         if phase == SeekerVoicePhase::Idle {
@@ -384,7 +394,6 @@ impl Dashboard {
         }
         Some(command_palette::SeekerVoice {
             recording: phase == SeekerVoicePhase::Recording,
-            finishing: phase == SeekerVoicePhase::Finishing,
             secs: self.seeker_voice_secs,
             levels: self.seeker_voice_levels.clone(),
         })
