@@ -367,27 +367,53 @@ impl TurnMetrics {
         })
     }
 
-    /// The card's ctx segment: the Telegram formatter's words and numbers with
-    /// the brain and the bolt that mark them on the GUI card (#3046). The
-    /// wording still comes from `format_ctx_footer`, so the two surfaces cannot
-    /// drift into different spellings of the same number (#2324 D2).
-    pub fn segment(&self) -> Option<String> {
-        ctx_segment(self.ctx_used, self.ctx_max, self.tps)
+    /// The card's stats: the budget behind its brain and the rate behind its
+    /// bolt, each a segment of its own (#3046). The wording still comes from
+    /// `format_ctx_footer`, so the two surfaces cannot drift into different
+    /// spellings of the same number (#2324 D2).
+    pub fn segments(&self) -> Vec<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(segment) = ctx_segment(self.ctx_used, self.ctx_max) {
+            parts.push(segment);
+        }
+        if let Some(segment) = self.tps.and_then(rate_segment) {
+            parts.push(segment);
+        }
+        parts
     }
 }
 
-/// `\u{1f9e0} ctx: 74K/200K 37% | \u{26a1}\u{fe0f} 285 tok/s`: the budget and the rate,
-/// marked the way the card's head marks them (#3046). The words are the shared
-/// Telegram formatter's; the icons are this surface's own, because the head is
-/// read at a glance and a bare `ctx:` reads as prose.
-fn ctx_segment(used: u32, max: u32, tps: Option<f64>) -> Option<String> {
-    (max > 0).then(|| {
-        let base = opencrabs::utils::string::format_ctx_footer(used, max, tps);
-        match base.split_once(" | ") {
-            Some((budget, rate)) => format!("\u{1f9e0} {budget} | \u{26a1}\u{fe0f} {rate}"),
-            None => format!("\u{1f9e0} {base}"),
-        }
+/// `\u{1f9e0} ctx: 74K/200K 37%`: the budget, marked the way the card's head
+/// marks it (#3046). The words are the shared Telegram formatter's, so the two
+/// surfaces cannot drift into different spellings of the same number (#2324
+/// D2); the brain is this surface's own, because the head is read at a glance
+/// and a bare `ctx:` reads as prose.
+///
+/// No rate, no zero. The rate is its own segment now (#3046), and a session
+/// with no usage record must not print `0/200K 0%`, which reads as a measured
+/// empty budget rather than as no measurement at all.
+fn ctx_segment(used: u32, max: u32) -> Option<String> {
+    (max > 0 && used > 0).then(|| {
+        let budget = opencrabs::utils::string::format_ctx_footer(used, max, None);
+        format!("\u{1f9e0} {budget}")
     })
+}
+
+/// `\u{26a1}\u{fe0f} 285 tok/s`: the streaming rate as a segment of its own
+/// (#3046). It used to ride inside the ctx segment behind a pipe, so one
+/// statistic looked like an appendix of another and the rate had no slot to
+/// disappear from on its own. `None` when there is no credible measurement, so
+/// the line closes up instead of printing `0 tok/s`.
+fn rate_segment(tps: f64) -> Option<String> {
+    (tps > 0.0).then(|| format!("\u{26a1}\u{fe0f} {tps:.0} tok/s"))
+}
+
+/// One stats line: each segment divided from the next by the same dot (#3046).
+/// Both cards build their footer through here, so the running card and the
+/// finished one cannot punctuate the same numbers two ways, and a segment that
+/// has nothing to say removes itself without leaving a separator behind.
+fn stats_line(parts: Vec<String>) -> Option<String> {
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
 /// One conversation turn, folded the way the TUI folds it (#758/#759): the
@@ -3217,34 +3243,19 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
                 .w(px(16.0))
                 .child(disclosure_icon(palette::current().accent, 1.0)),
         )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(glyph)),
-        )
-        .child(
-            div()
-                .text_xs()
-                .flex_shrink_0()
-                .text_color(rgb(accent))
-                .child(SharedString::from(verb)),
-        );
+        .child(head_run(glyph.to_string(), palette::current().text_muted, None).flex_shrink_0())
+        .child(head_run(verb.to_string(), accent, Some(1)).flex_shrink_0().min_w_0());
     // The count, the ctx and the clock ride the verdict's own line (#3042),
     // behind the same dot the live head divides its segments with (#3046), so
     // the finished card is one sentence in one colour instead of a verdict with
-    // a footer bolted underneath it. `min_w_0` plus `truncate` lets a narrow
-    // pane clip the numbers instead of growing the row.
+    // a footer bolted underneath it. `min_w_0` plus the run's own clamp lets a
+    // narrow pane ellipsise the numbers instead of growing the row.
     if let Some(footer) = footer {
         head = head.child(head_dot(accent)).child(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_xs()
-                .text_color(rgb(accent))
-                .child(SharedString::from(footer)),
+                .child(head_run(footer, accent, Some(1)).w_full()),
         );
     }
     let mut card = div()
@@ -3363,13 +3374,13 @@ fn turn_footer_text(turn: &Turn) -> Option<String> {
     if summary.failed > 0 {
         parts.push(format!("{} failed", summary.failed));
     }
-    if let Some(segment) = turn.metrics.as_ref().and_then(|m| m.segment()) {
-        parts.push(segment);
+    if let Some(metrics) = turn.metrics.as_ref() {
+        parts.extend(metrics.segments());
     }
     if summary.duration_secs > 0 {
         parts.push(clock_glyph(summary.duration_secs.max(0) as u64));
     }
-    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+    stats_line(parts)
 }
 
 /// `\u{23f1} M:SS`, the clock that closes every Telegram flow footer (ADR
@@ -3595,13 +3606,41 @@ fn live_entry_text(
     }
 }
 
+/// How many ledger rows a collapsed card draws before it starts counting. A
+/// long turn runs hundreds of calls, and drawing them all under a card nobody
+/// opened rebuilds the wall of rows #3039 took out of the head.
+const LEDGER_TAIL: usize = 3;
+
+/// Below this width the card head stops trying to be one line (#3046). Split
+/// panes are where the report came from: the row's own children do not shrink,
+/// so at a few hundred pixels the tail of the head fell off the pane edge. At
+/// or above it the head keeps the one-line shape a full pane reads best.
+const HEAD_STACK_WIDTH: f32 = 560.0;
+
 /// The card's body: every exact entry keeps its own menu, while one shared
 /// selection row preserves drag offsets and receives mouse release (#2925).
+///
+/// `limit` is how many trailing entries the body may draw: `None` draws the
+/// whole ledger, which is what an opened card shows. A collapsed card shows
+/// the tail only, with a muted marker naming the rows it left out, so a long
+/// turn reads as a short ledger under its head instead of as a wall of rows.
 fn live_card_body(
-    lines: Vec<(usize, LiveCardLine)>,
+    mut lines: Vec<(usize, LiveCardLine)>,
     drag: Option<&Rc<CopyDrag>>,
     press: &HashMap<LiveRow, PressHandler>,
+    limit: Option<usize>,
 ) -> AnyElement {
+    // The rows left out, and the rows kept. The marker sits ABOVE the kept
+    // rows because the rows it counts happened earlier than the ones below
+    // it: the same reading order the ledger has when it is drawn whole.
+    let hidden = limit
+        .map(|n| lines.len().saturating_sub(n))
+        .unwrap_or(0);
+    let lines = if hidden > 0 {
+        lines.split_off(hidden)
+    } else {
+        lines
+    };
     let mut body = div()
         .flex()
         .flex_col()
@@ -3610,6 +3649,15 @@ fn live_card_body(
         .pb_1()
         .min_w_0()
         .overflow_hidden();
+    if hidden > 0 {
+        body = body.child(head_run(
+            format!("+{hidden} earlier call{}", if hidden == 1 { "" } else { "s" }),
+            palette::current().text_muted,
+            None,
+        ));
+    }
+    // The copy string is built from the drawn slice, so it matches the pixels:
+    // a collapsed card copies what it shows, never the rows it hid.
     let row_text = lines
         .iter()
         .map(|(_, line)| live_card_line_text(line))
@@ -3785,83 +3833,160 @@ fn live_card(
     // up beside the prose instead of at the top of the card. A head that wraps
     // is a head that reads as two items, which is exactly what the report
     // showed: narration on top, tools below.
-    let lead_cap = (max_width.max(0.0) * 0.5).max(240.0);
+    // A pane narrower than HEAD_STACK_WIDTH gets the stacked head (#3046). One
+    // row cannot hold a sentence, a call and four statistics at 400px: the row
+    // is built from `flex_shrink_0` children, so its tail was cut off at the
+    // pane edge and the stats came out clipped mid number. Stacked, the same
+    // pieces take two or three lines and every one of them stays readable.
+    let width = max_width.max(0.0);
+    let stacked = width > 0.0 && width < HEAD_STACK_WIDTH;
+    // Wide, the call may take half the row when a sentence precedes it. In a
+    // stacked head the call owns a line of its own and needs no cap.
+    let lead_cap = (width * 0.5).max(240.0);
     let has_narration = narration.is_some();
-    let mut head = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .px_2()
-        .pt_1()
-        .pb_1()
-        .child(
-            div()
-                .flex_shrink_0()
-                .w(px(16.0))
-                .child(disclosure_icon(palette::current().accent, 1.0)),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(frame)),
-        );
-    // The turn's last paragraph and the call it is about, side by side (#3039):
-    // the sentence first, then the call that follows it in time, both in the
-    // accent and both clipped to the one line (#3042). The sentence takes the
-    // slack; the call keeps up to half the row, so neither can starve the
-    // other.
-    let mut status = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .flex_1()
-        .min_w_0();
-    if let Some((entry, paragraph)) = narration {
-        status = status.child(div().flex_1().min_w_0().child(live_entry_text(
-            format!("live-preview-{entry}"),
-            Some(entry),
-            paragraph,
-            small_style(SMALL_TEXT_SIZE, palette::current().accent),
-            Some(1),
-            drag,
-            press,
-        )));
-    }
     // Whether the call leads the row, read before the row draws it: the entry
     // that renders the call takes the string, and the head still asks whether
     // it had one when it decides about its dot (#3046).
     let has_lead = !lead.is_empty();
-    if has_lead {
-        // The sentence and the call are two segments of one line (#3046).
-        // Without the dot the prose runs straight into the call and the two
-        // read as one broken sentence.
-        if has_narration {
-            status = status.child(head_dot(palette::current().accent));
+    let footer = live_card_footer(live, ctx);
+    // One line on a wide head, two when it stacks: a narrow pane should read
+    // the sentence and the call, not two ellipsised stubs.
+    let clamp = if stacked { Some(2) } else { Some(1) };
+    let accent = palette::current().accent;
+    let mut head = div()
+        .flex()
+        .when(stacked, |d| d.flex_col().items_start())
+        .when(!stacked, |d| d.flex_row().items_center().overflow_hidden())
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .pt_1()
+        .pb_1();
+    if stacked {
+        // Line one: the arrow, the spinner and the sentence it explains.
+        let mut top = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(16.0))
+                    .child(disclosure_icon(accent, 1.0)),
+            )
+            .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
+        if let Some((entry, paragraph)) = narration.as_ref() {
+            top = top.child(div().flex_1().min_w_0().child(live_entry_text(
+                format!("live-preview-{entry}"),
+                Some(*entry),
+                paragraph.clone(),
+                small_style(SMALL_TEXT_SIZE, accent),
+                clamp,
+                drag,
+                press,
+            )));
         }
-        let arm = div().min_w_0();
-        let arm = if has_narration {
-            arm.flex_shrink_0().max_w(px(lead_cap))
-        } else {
-            arm.flex_1()
-        };
-        status = status.child(arm.child(live_entry_text(
-            "live-activity".to_string(),
-            activity_entry,
-            lead,
-            small_style(SMALL_TEXT_SIZE, palette::current().accent),
-            Some(1),
-            drag,
-            press,
-        )));
+        head = head.child(top);
+        // Line two: the call. Its own line, so a narrow pane wraps it instead
+        // of cutting it off at the edge.
+        if has_lead {
+            head = head.child(div().w_full().min_w_0().child(live_entry_text(
+                "live-activity".to_string(),
+                activity_entry,
+                lead,
+                small_style(SMALL_TEXT_SIZE, accent),
+                clamp,
+                drag,
+                press,
+            )));
+        }
+        // Line three: every statistic. No leading dot: a dot needs a word on
+        // its left, and this line starts with the hammer.
+        if let Some(footer) = footer {
+            head = head.child(head_run(footer, accent, clamp).w_full());
+        }
+    } else {
+        head = head
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(16.0))
+                    .child(disclosure_icon(accent, 1.0)),
+            )
+            .child(head_run(frame, palette::current().text_muted, None).flex_shrink_0());
+        // The turn's last paragraph and the call it is about, side by side
+        // (#3039): the sentence first, then the call that follows it in time,
+        // both in the accent and both clipped to the one line (#3042). The
+        // sentence takes the slack; the call keeps up to half the row, so
+        // neither can starve the other.
+        let mut status = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_1()
+            .min_w_0();
+        if let Some((entry, paragraph)) = narration {
+            status = status.child(div().flex_1().min_w_0().child(live_entry_text(
+                format!("live-preview-{entry}"),
+                Some(entry),
+                paragraph,
+                small_style(SMALL_TEXT_SIZE, accent),
+                clamp,
+                drag,
+                press,
+            )));
+        }
+        if has_lead {
+            // The sentence and the call are two segments of one line (#3046).
+            // Without the dot the prose runs straight into the call and the two
+            // read as one broken sentence.
+            if has_narration {
+                status = status.child(head_dot(accent));
+            }
+            let arm = div().min_w_0();
+            let arm = if has_narration {
+                arm.flex_shrink_0().max_w(px(lead_cap))
+            } else {
+                arm.flex_1()
+            };
+            status = status.child(arm.child(live_entry_text(
+                "live-activity".to_string(),
+                activity_entry,
+                lead,
+                small_style(SMALL_TEXT_SIZE, accent),
+                clamp,
+                drag,
+                press,
+            )));
+        }
+        head = head.child(status);
+        // The count, the rate and the clock ride the arrow's own line (#3042).
+        // A running card that stacked them on a bar under the body read as two
+        // blocks, the status on top and loose numbers underneath, and it kept
+        // that shape for the moment after the turn settled, when the head had
+        // already turned into the tick. One line, one colour, exactly what the
+        // settled card draws when it replaces this one.
+        if let Some(footer) = footer {
+            // A dot needs a word on its left. A turn that has only streamed
+            // text so far has no lead and no preview, so its head is the frame
+            // and the clock, and a dot in front of the clock would read as a
+            // stray mark.
+            if has_narration || has_lead {
+                head = head.child(head_dot(accent));
+            }
+            head = head.child(
+                div()
+                    .flex_shrink()
+                    .min_w_0()
+                    .child(head_run(footer, accent, clamp).w_full()),
+            );
+        }
     }
-    head = head.child(status);
     let mut card = div()
         .id("live-card")
         .flex()
@@ -3878,34 +4003,18 @@ fn live_card(
         .bg(glass_fill(palette::current().panel))
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)));
-    // The count, the rate and the clock ride the arrow's own line (#3042). A
-    // running card that stacked them on a bar under the body read as two
-    // blocks, the status on top and loose numbers underneath, and it kept that
-    // shape for the moment after the turn settled, when the head had already
-    // turned into the tick. One line, one colour, exactly what the settled card
-    // draws when it replaces this one.
-    if let Some(footer) = live_card_footer(live, ctx) {
-        // A dot needs a word on its left. A turn that has only streamed text so
-        // far has no lead and no preview, so its head is the frame and the
-        // clock, and a dot in front of the clock would read as a stray mark.
-        if has_narration || has_lead {
-            head = head.child(head_dot(palette::current().accent));
-        }
-        head = head.child(
-            div()
-                .flex_shrink_0()
-                .truncate()
-                .text_xs()
-                .text_color(rgb(palette::current().accent))
-                // `footer` is already unwrapped here, so it is one string on
-                // the head's line, never an option to fan out.
-                .child(SharedString::from(footer)),
-        );
-    }
     card = card.child(head);
+    // The ledger draws whether or not the card is open (#3046). It used to
+    // draw only inside `if expanded`, so a running turn was one strip with no
+    // row per call: the work a reader most wants to see vanished until they
+    // clicked a card that gave them no reason to click. A collapsed card shows
+    // the tail of the ledger; opening it draws every row.
+    if !lines.is_empty() {
+        let body = live_card_body(lines, drag, press, (!expanded).then_some(LEDGER_TAIL));
+        card = card.child(body);
+    }
     if expanded {
         card = card
-            .child(live_card_body(lines, drag, press))
             // An open card ends in the control that closes it: the head's
             // chevron keeps pointing down, so without this the only sign that
             // the block folds was the pointer changing shape over it. The
@@ -3933,12 +4042,19 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     if !live.tools.is_empty() {
         parts.push(tool_count_label(live.tools.len()));
     }
-    if ctx.1 > 0 {
-        let tps = live.tokens_per_sec();
-        let rate = (tps > 0.0).then_some(f64::from(tps));
-        if let Some(segment) = ctx_segment(ctx.0.unwrap_or(0), ctx.1, rate) {
+    // The budget only when the turn has measured one. An unknown used figure
+    // used to print `ctx: 0/200K 0%`, which reads as a measured empty budget
+    // instead of as no measurement yet (#3046).
+    if let Some(used) = ctx.0 {
+        if let Some(segment) = ctx_segment(used, ctx.1) {
             parts.push(segment);
         }
+    }
+    // The rate is its own segment, so it can appear or drop out without taking
+    // the budget with it (#3046). `tokens_per_sec` answers zero when the window
+    // is not a credible measurement, and a zero drops the segment.
+    if let Some(segment) = rate_segment(f64::from(live.tokens_per_sec())) {
+        parts.push(segment);
     }
     let elapsed = live.elapsed_secs();
     if elapsed > 0 {
@@ -3946,7 +4062,7 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
         // verdict and nothing else (#2632/#2638).
         parts.push(clock_glyph(elapsed));
     }
-    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+    stats_line(parts)
 }
 
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
@@ -4082,15 +4198,36 @@ fn tool_count_label(count: usize) -> String {
     )
 }
 
+/// One run on a card head, drawn the way every other run on that head is
+/// (#3046). The heads used to mix plain `.text_xs()` divs with `StyledText`
+/// runs at `SMALL_TEXT_SIZE`, so a glyph, a word and a number sitting on one
+/// line came out at two sizes and read as larger text overlapping smaller.
+/// Every head text, dots included, goes through here, so no later edit can
+/// split them into two sizes again.
+///
+/// `clamp` is the number of lines the run may take: `Some(1)` keeps a run on
+/// the head's single line and ellipsises it, `None` leaves a glyph or a dot at
+/// its own width.
+fn head_run(text: String, colour: u32, clamp: Option<usize>) -> Div {
+    let content = selectable_styled_text(
+        text,
+        small_style(SMALL_TEXT_SIZE, colour),
+        Vec::new(),
+        &[],
+        None,
+    );
+    match clamp {
+        Some(lines) => content.line_clamp(lines),
+        None => content,
+    }
+}
+
 /// The `\u{b7}` that divides one head segment from the next (#3046). It carries
 /// the head's own colour, so it reads as punctuation inside one sentence
 /// instead of as a divider between two blocks.
 fn head_dot(colour: u32) -> AnyElement {
-    div()
+    head_run("\u{b7}".to_string(), colour, None)
         .flex_shrink_0()
-        .text_xs()
-        .text_color(rgb(colour))
-        .child(SharedString::from("\u{b7}"))
         .into_any_element()
 }
 
@@ -7390,11 +7527,13 @@ mod tests {
         assert!(turns[0].header.is_none());
     }
 
-    /// Both card states use the vector arrow instead of a tiny text triangle.
+    /// Both card states use the vector arrow instead of a tiny text triangle,
+    /// and the narrow pane keeps it on the first line of its stacked head
+    /// (#3046), so the live card holds one arrow per shape.
     #[test]
     fn the_fold_header_uses_the_vector_disclosure_arrow() {
         // Read the file up to its own test module. The whole-file scan counted
-        // this assertion's own needle as a third call site and found
+        // this assertion's own needle as a fourth call site and found
         // `fn fold_chevron(` inside the line that forbids it, so the pin
         // failed on itself instead of on the card (#2998).
         let source = include_str!("transcript.rs");
@@ -7402,7 +7541,11 @@ mod tests {
             .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("the test module marker is still in the file");
-        assert_eq!(body.matches("disclosure_icon(").count(), 2);
+        assert_eq!(
+            body.matches("disclosure_icon(").count(),
+            3,
+            "the settled head and the live card's two shapes, one arrow each"
+        );
         assert!(!body.contains("fn fold_chevron("));
     }
 
@@ -7454,13 +7597,16 @@ mod tests {
     /// a fresh measure. The card takes its width from the pane, the head owns
     /// that width, and the entries share it.
     ///
-    /// The head is one line, and only one: a wrapping head put the sentence on
-    /// its own row with the call under it, and the arrow, centred against the
-    /// tall row, ended up beside the prose. Both entries are clamped to a
-    /// single line and ellipsised instead, the sentence taking the slack and
-    /// the call holding its half so neither can starve the other.
+    /// The head never wraps: a wrapping head put the sentence on its own row
+    /// with the call under it, and the arrow, centred against the tall row,
+    /// ended up beside the prose. #3046 turns that into two deliberate shapes.
+    /// A wide pane keeps one line, both entries clamped once and ellipsised,
+    /// the sentence taking the slack and the call holding its half so neither
+    /// starves the other. A pane narrower than `HEAD_STACK_WIDTH` stacks the
+    /// head into a column and lets the sentence keep two lines, which is a
+    /// break the reader chose rather than a measure the row forced.
     #[test]
-    fn the_head_keeps_the_sentence_and_the_call_on_one_line() {
+    fn the_head_keeps_the_sentence_and_the_call_together() {
         const SRC: &str = include_str!("transcript.rs");
         // Substring scans, never byte offsets: this file is the thing being
         // read, so a hand-rolled index is one rustfmt pass away from a panic
@@ -7491,11 +7637,11 @@ mod tests {
             .split_once("if let Some((entry, paragraph)) = narration {")
             .expect("the narration arm")
             .1
-            .split_once("if !lead.is_empty() {")
+            .split_once("if has_lead {")
             .expect("the call arm")
             .0;
         let lead_arm = head_and_else
-            .split_once("if !lead.is_empty() {")
+            .split_once("if has_lead {")
             .expect("the lead arm")
             .1
             .split_once("head = head.child(status)")
@@ -7515,14 +7661,22 @@ mod tests {
         );
         assert!(
             !status_row.contains(".flex_wrap()") && !head.contains(".flex_wrap()"),
-            "the head never wraps: the call follows the sentence on the same line"
+            "the head breaks by stacking, never by wrapping a row of shrinking children"
         );
         assert!(
-            preview.contains("Some(1)"),
-            "the sentence is clamped to the one line it shares with the call"
+            card.contains("width < HEAD_STACK_WIDTH") && head.contains(".flex_col()"),
+            "a narrow pane stacks the head into a column of its own accord"
         );
         assert!(
-            lead_arm.contains("live_entry_text(") && lead_arm.contains("Some(1)"),
+            card.contains("let clamp = if stacked { Some(2) } else { Some(1) };"),
+            "the sentence gets one line on a wide head and two once it stacks"
+        );
+        assert!(
+            preview.contains("clamp,"),
+            "the sentence is clamped to the head it shares with the call"
+        );
+        assert!(
+            lead_arm.contains("live_entry_text(") && lead_arm.contains("clamp,"),
             "the call is clamped to the same line instead of dropping under the prose"
         );
         assert!(
@@ -7547,7 +7701,7 @@ mod tests {
             .expect("the card footer")
             .0;
         assert!(
-            live.contains("status = status.child(head_dot(palette::current().accent))"),
+            live.contains("status = status.child(head_dot(accent))"),
             "the sentence and the call it explains are divided, not run together"
         );
         assert!(
@@ -7555,7 +7709,7 @@ mod tests {
             "the numbers wait for a word to stand on their left"
         );
         assert!(
-            live.contains("head = head.child(head_dot(palette::current().accent))"),
+            live.contains("head = head.child(head_dot(accent))"),
             "the numbers are divided from the status they follow"
         );
         let settled = SRC
@@ -7568,6 +7722,66 @@ mod tests {
         assert!(
             settled.contains("head = head.child(head_dot(accent))"),
             "the verdict and its numbers are divided on the finished card's one line"
+        );
+    }
+
+    /// #3046: the heads used to mix plain `.text_xs()` divs with `StyledText`
+    /// runs at `SMALL_TEXT_SIZE`, so a glyph, a word and a number on one line
+    /// came out at two sizes and the report read as larger text overlapping
+    /// smaller text. Every head segment, dots included, now goes through
+    /// `head_run`, which is the only place a head size can come from.
+    #[test]
+    fn the_head_draws_every_segment_at_one_size() {
+        const SRC: &str = include_str!("transcript.rs");
+        let production = SRC
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source before the test module");
+        let live = production
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .1
+            .split_once("fn live_card_footer(")
+            .expect("the card footer")
+            .0;
+        let settled = production
+            .split_once("fn settled_card(")
+            .expect("the settled card")
+            .1
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .0;
+        for (name, head) in [("live", live), ("settled", settled)] {
+            assert!(
+                !head.contains(".text_xs()"),
+                "the {name} head must not set a size of its own, or it drifts off the line"
+            );
+            assert!(
+                head.matches("head_run(").count() >= 3,
+                "the {name} head draws every segment through head_run"
+            );
+        }
+        let run = production
+            .split_once("fn head_run(")
+            .expect("the head run")
+            .1
+            .split_once("fn head_dot(")
+            .expect("the head dot")
+            .0;
+        assert!(
+            run.contains("small_style(SMALL_TEXT_SIZE, colour)"),
+            "head_run is where the head's one size is decided"
+        );
+        let dot = production
+            .split_once("fn head_dot(")
+            .expect("the head dot")
+            .1
+            .split_once("fn live_status_line(")
+            .expect("the status line")
+            .0;
+        assert!(
+            dot.contains("head_run("),
+            "the dot is punctuation inside the line, not a smaller glyph beside it"
         );
     }
 
@@ -7643,12 +7857,17 @@ mod tests {
         );
         let (_, mut turns) = turns_with_origins(&rows, 2, &known, &HashMap::new());
         let turn = turns.pop().expect("one turn");
-        let segment = turn
+        let segments = turn
             .metrics
-            .and_then(|m| m.segment())
-            .expect("a remembered turn prints its metrics");
-        const SEGMENT: &str = "\u{1f9e0} ctx: 68K/200K 34% | \u{26a1}\u{fe0f} 58 tok/s";
-        assert_eq!(segment, SEGMENT, "the card adds the icons it is read by");
+            .expect("a remembered turn prints its metrics")
+            .segments();
+        const CTX: &str = "\u{1f9e0} ctx: 68K/200K 34%";
+        const RATE: &str = "\u{26a1}\u{fe0f} 58 tok/s";
+        assert_eq!(
+            segments,
+            vec![CTX.to_string(), RATE.to_string()],
+            "the card adds the icons it is read by, and the rate is its own stat"
+        );
     }
 
     /// #2632: a persisted row that lost its ledger must not turn the settled
@@ -7682,7 +7901,7 @@ mod tests {
             "a row with no ledger still knows how many calls the turn made"
         );
         const FOOTER: &str = concat!(
-            "\u{1f6e0}\u{fe0f} 4 tool calls \u{b7} \u{1f9e0} ctx: 53K/200K 26% | ",
+            "\u{1f6e0}\u{fe0f} 4 tool calls \u{b7} \u{1f9e0} ctx: 53K/200K 26% \u{b7} ",
             "\u{26a1}\u{fe0f} 31 tok/s \u{b7} \u{23f1} 0:01",
         );
         let footer = turn_footer_text(&turn);
@@ -7700,8 +7919,8 @@ mod tests {
             tool_calls: 0,
         };
         assert_eq!(
-            metrics.segment().as_deref(),
-            Some("\u{1f9e0} ctx: 12K/200K 6%")
+            metrics.segments(),
+            vec!["\u{1f9e0} ctx: 12K/200K 6%".to_string()]
         );
     }
 
@@ -7715,7 +7934,134 @@ mod tests {
         let (_, mut turns) = turns(&rows, 2);
         let turn = turns.pop().expect("one turn");
         assert!(turn.metrics.is_none());
-        assert_eq!(turn.metrics.and_then(|m| m.segment()), None);
+        assert!(
+            turn.metrics
+                .as_ref()
+                .map(|m| m.segments())
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing remembered means no segment to print"
+        );
+    }
+
+    /// #3046: a session with no usage record has no budget to report, and
+    /// `0/200K 0%` reads as a measured empty window instead of as no measurement
+    /// at all. The segment removes itself, and so does the dot that would have
+    /// introduced it.
+    #[test]
+    fn an_unknown_context_prints_no_budget() {
+        assert_eq!(ctx_segment(0, 200_000), None, "no usage, no budget");
+        assert_eq!(ctx_segment(12_000, 0), None, "no window, no percentage");
+
+        let mut live = LiveTurn::default();
+        live.begin("run it".into());
+        live.push_tool(ToolCall::running("bash".into(), "bash: git status".into()));
+        let footer = live_card_footer(&live, (None, 200_000)).expect("a footer once a tool ran");
+        assert!(
+            !footer.contains("ctx:"),
+            "a head with no budget says nothing about one: {footer}"
+        );
+        assert!(
+            footer.starts_with("\u{1f6e0}\u{fe0f} 1 tool call"),
+            "the count still leads the line: {footer}"
+        );
+    }
+
+    /// #3046: the four statistics are four clauses of one sentence, divided by
+    /// the same dot the Telegram footer uses. The pipe that used to separate the
+    /// rate from the budget made one number look like an appendix of another.
+    #[test]
+    fn the_head_stats_divide_by_a_dot_not_a_pipe() {
+        let turn = Turn {
+            header: None,
+            summary: TurnSummary {
+                tool_calls: 2,
+                duration_secs: 24,
+                ..Default::default()
+            },
+            metrics: Some(TurnMetrics {
+                ctx_used: 74_000,
+                ctx_max: 200_000,
+                tps: Some(285.0),
+                tool_calls: 2,
+            }),
+            anchor: "a".into(),
+            blocks: Vec::new(),
+            final_idx: None,
+            origin: None,
+        };
+        let footer = turn_footer_text(&turn).expect("a turn with four numbers");
+        assert!(
+            !footer.contains('|'),
+            "no pipe divides the statistics: {footer}"
+        );
+        assert_eq!(
+            footer.matches('\u{b7}').count(),
+            3,
+            "four segments, three dots: {footer}"
+        );
+        for glyph in [
+            "\u{1f6e0}\u{fe0f} 2 tool calls",
+            "\u{1f9e0} ctx: 74K/200K 37%",
+            "\u{26a1}\u{fe0f} 285 tok/s",
+            "\u{23f1} 0:24",
+        ] {
+            assert!(footer.contains(glyph), "the line carries {glyph}: {footer}");
+        }
+    }
+
+    /// #3046: the card draws its ledger whether or not it is open, and a
+    /// collapsed card draws only the tail of it. A turn with more calls than
+    /// `LEDGER_TAIL` names the ones it left out, or a reader counts three rows
+    /// under a head that says twelve.
+    #[test]
+    fn a_collapsed_card_draws_the_ledger_tail() {
+        assert_eq!(LEDGER_TAIL, 3, "a short ledger, not a wall of rows");
+        let mut live = LiveTurn::default();
+        live.begin("run them".into());
+        for n in 0..6 {
+            live.push_tool(ToolCall::running("bash".into(), format!("bash: step {n}")));
+        }
+        assert_eq!(live_card_lines(&live).len(), 6, "the body keeps every row");
+
+        const SRC: &str = include_str!("transcript.rs");
+        let card = SRC
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .1
+            .split_once("fn live_card_footer(")
+            .expect("the card footer")
+            .0;
+        assert!(
+            card.contains("live_card_body(lines, drag, press, (!expanded).then_some(LEDGER_TAIL))"),
+            "the collapsed card asks the body for the tail, and only the tail"
+        );
+        let (before_fold, in_fold) = card
+            .split_once("if expanded {\n        card = card")
+            .expect("the fold's own branch");
+        assert!(
+            before_fold.contains("live_card_body("),
+            "the ledger draws whether or not the card is open"
+        );
+        assert!(
+            !in_fold.contains("live_card_body("),
+            "opening the card changes the limit, never whether there is a ledger"
+        );
+        let body = SRC
+            .split_once("fn live_card_body(")
+            .expect("the card body")
+            .1
+            .split_once("fn live_card_line_text(")
+            .expect("the body's end")
+            .0;
+        assert!(
+            body.contains("format!(\"+{hidden} earlier call{}\""),
+            "the rows left out are named, above the ones kept"
+        );
+        assert!(
+            body.contains("lines.split_off(hidden)"),
+            "the body draws the last rows, not the first"
+        );
     }
 
     /// The owner's "the session I sent the request to was empty afterwards",
@@ -8357,15 +8703,9 @@ mod tests {
             "\u{1f6e0}\u{fe0f} 2 tool calls \u{b7} \u{1f9e0} ctx: 12K/200K 6%"
         );
 
-        // And the drawing order itself: header, then body, with nothing under
-        // the body but the arrow that folds the block.
+        // And the drawing order itself: header, then body, and the arrow under
+        // the body only once the card is open.
         const SRC: &str = include_str!("transcript.rs");
-        let head = [".child(", "head)"].concat();
-        let body = ["live_card_", "body(lines, drag, press)"].concat();
-        assert!(
-            src_at(SRC, &head) < src_at(SRC, &body),
-            "the header is built before the body"
-        );
         let card = SRC
             .split_once("fn live_card(")
             .expect("the live card")
@@ -8373,18 +8713,22 @@ mod tests {
             .split_once("fn live_card_footer(")
             .expect("the card footer")
             .0;
-        // The footer is a plain string by the time the head draws it, so it is
-        // one child on the head's line. It joins the card BEFORE the head does,
-        // which is what keeps it off a bar of its own under the body.
+        assert!(
+            src_at(card, "card = card.child(head);") < src_at(card, "live_card_body("),
+            "the header is built before the body"
+        );
+        // The footer is a plain string by the time the head draws it, and it is
+        // drawn INTO the head (#3046), so it never gets a bar of its own under
+        // the body.
         let (head_first, under_body) = card
             .split_once("card = card.child(head);")
             .expect("the head joins the card");
         assert!(
-            head_first.contains(".child(SharedString::from(footer))"),
+            head_first.contains("head_run(footer"),
             "the numbers join the head's line"
         );
         assert!(
-            !under_body.contains("SharedString::from(footer)"),
+            !under_body.contains("head_run(footer"),
             "no bar is drawn under the body: the block ends at the arrow"
         );
     }
@@ -8420,7 +8764,7 @@ mod tests {
             .split_once("if let Some((entry, paragraph)) = narration {")
             .expect("the narration arm")
             .1
-            .split_once("if !lead.is_empty() {")
+            .split_once("if has_lead {")
             .expect("the call arm follows the sentence")
             .0;
         assert!(
@@ -8428,7 +8772,7 @@ mod tests {
             "the paragraph rides the head row, ahead of the call"
         );
         assert!(
-            preview.contains("small_style(SMALL_TEXT_SIZE, palette::current().accent)"),
+            preview.contains("small_style(SMALL_TEXT_SIZE, accent)"),
             "the paragraph takes the arrow line's accent instead of a muted grey"
         );
         assert!(
@@ -8593,7 +8937,7 @@ mod tests {
             origin: None,
         };
         const FOOTER: &str = concat!(
-            "\u{1f6e0}\u{fe0f} 1 tool call \u{b7} \u{1f9e0} ctx: 72K/200K 36% | ",
+            "\u{1f6e0}\u{fe0f} 1 tool call \u{b7} \u{1f9e0} ctx: 72K/200K 36% \u{b7} ",
             "\u{26a1}\u{fe0f} 58 tok/s \u{b7} \u{23f1} 0:24",
         );
         let footer = turn_footer_text(&turn);
