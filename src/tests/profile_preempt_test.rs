@@ -173,15 +173,29 @@ fn launchctl_parse_rejects_lookalike_prefixes() {
 fn instance_stamp_is_a_preemption_target_on_its_own() {
     let tmp = TempDir::new().unwrap();
     let profile = active_profile().unwrap_or("default");
-    let mut child = std::process::Command::new("sleep")
-        .arg("60")
-        .spawn()
+    // Spawned from a shell that exits at once, so the stand-in is reparented to
+    // init instead of staying this test's child. A direct child would sit as a
+    // ZOMBIE after SIGTERM until this test waited on it, and `kill(pid, 0)`
+    // reports a zombie as alive, so the handover would look like it failed to
+    // stop a process that was already dead. A real daemon is reaped by launchd
+    // or systemd immediately; this gives the stand-in the same parent.
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sleep 60 >/dev/null 2>&1 & echo $!")
+        .output()
         .expect("spawn a stand-in background instance");
-    let pid = child.id();
+    let pid: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("the shell prints the stand-in's pid");
 
     let instance_dir = tmp.path().join("instance");
     fs::create_dir_all(&instance_dir).unwrap();
-    fs::write(instance_dir.join(format!("{profile}.lock")), format!("{pid}:0")).unwrap();
+    fs::write(
+        instance_dir.join(format!("{profile}.lock")),
+        format!("{pid}:0"),
+    )
+    .unwrap();
 
     let preempted = preempt_instances_in(tmp.path(), false);
     assert_eq!(
@@ -199,8 +213,6 @@ fn instance_stamp_is_a_preemption_target_on_its_own() {
         preempted[0].stopped,
         "the stamped instance must be gone by the time preemption returns"
     );
-
-    let _ = child.wait();
 }
 
 /// Fail-closed: a stamp whose PID is already gone is refused. Nothing is
