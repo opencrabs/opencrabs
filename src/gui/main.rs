@@ -7823,6 +7823,36 @@ mod tests {
             arm.contains("editor.toggle_dictation(cx)"),
             "the row starts the same loop the control and the chord start"
         );
+
+        // The field's own microphone (#3044): the card closes before it
+        // dictates. The take's counter, wave and stop are the composer's strip
+        // and the card paints over it, so a recording started with the card up
+        // would be invisible from its first second. One click, one door, and
+        // the surface that can show the take is the one that gets it.
+        let dictate = "fn seeker_dictate(";
+        let handler = code
+            .find(dictate)
+            .expect("the field's microphone has a handler");
+        let tail = code.get(handler..).expect("the handler starts on a glyph");
+        let body = tail.split("\n    }\n").next().expect("the handler body");
+        assert!(
+            body.contains("self.close_finder(cx)"),
+            "the card leaves before the composer starts recording under it"
+        );
+        assert!(
+            body.contains("editor.toggle_dictation(cx)"),
+            "the field's microphone starts the same loop as the row and the chord"
+        );
+        let before = body
+            .find("self.close_finder(cx)")
+            .expect("the close is in the handler");
+        let after = body
+            .find("editor.toggle_dictation(cx)")
+            .expect("the toggle is in the handler");
+        assert!(
+            before < after,
+            "the card closes first: a take started behind it has nothing to show it"
+        );
     }
 
     #[test]

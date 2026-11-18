@@ -290,6 +290,22 @@ impl Dashboard {
         self.finder_selecting = false;
     }
 
+    /// The Seeker field's microphone (#3044): the card closes and the composer
+    /// takes the click.
+    ///
+    /// It cannot dictate with the card up. The recording's counter, its
+    /// waveform and its stop all belong to the composer's own strip, and the
+    /// card paints over exactly that, so a take started from here would be
+    /// invisible from the second it began. One click therefore means what it
+    /// means in the field, on the surface that can show it, and the transcript
+    /// lands where the words would have been typed.
+    pub(crate) fn seeker_dictate(&mut self, cx: &mut Context<Self>) {
+        self.close_finder(cx);
+        let composer = self.composer_entity(cx);
+        composer.update(cx, |editor, cx| editor.toggle_dictation(cx));
+        cx.notify();
+    }
+
     /// Run the row Enter is on, or the best match when no arrow was pressed.
     pub(crate) fn run_finder_pick(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.finder.as_ref().and_then(|state| state.selected()) else {

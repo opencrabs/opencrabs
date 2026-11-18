@@ -145,7 +145,28 @@ const INK_WARM: u32 = 0xe8b96a;
 const CHIP_FILL: u32 = 0xffffff14;
 
 /// The invitation the field prints while it is empty.
-const PLACEHOLDER: &str = "Seeker: sessions, feats, skills, docs, debug and more.";
+///
+/// Short on purpose (#3044): the field is a thick pill, and a sentence long
+/// enough to fill it reads as a value typed into the box instead of an
+/// invitation to type one. Three words and a trailing ellipsis, the way
+/// Spotlight invites a query, so the line never competes with what a person
+/// types and never has to be measured against the pill's width.
+const PLACEHOLDER: &str = "Search anything...";
+
+/// The field's vertical padding (#3044): the pill is a target a hand aims at,
+/// so its height comes from the pillow around the line and not from a bigger
+/// font, which would make the query look like a heading.
+const FIELD_PAD_Y: f32 = 22.0;
+
+/// The field's horizontal padding, the same on both caps so neither the
+/// invitation nor the microphone reads as glued to the curve (#3044).
+const FIELD_PAD_X: f32 = 22.0;
+
+/// The space the microphone puts between itself and the line it follows
+/// (#3044). It is the control's own inset rather than a gap on the pill: a
+/// flex gap beside the shaped line would move the caret, which has to sit
+/// exactly where the text does (#2531).
+const FIELD_MIC_GAP: f32 = 14.0;
 
 /// The line the field prints while it is empty. An armed pick names its job
 /// instead of inviting a query: the list under it is a set of conversations
@@ -373,7 +394,7 @@ pub(super) fn query_line(
         .id("seeker-query-field")
         .flex_1()
         .min_w_0()
-        .text_xl()
+        .text_2xl()
         .cursor(CursorStyle::IBeam)
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
             let _ = down.update(cx, |this, cx| this.finder_mouse_down(event, cx));
@@ -388,6 +409,44 @@ pub(super) fn query_line(
             let _ = drag.update(cx, |this, cx| this.finder_mouse_move(event, cx));
         })
         .child(element)
+}
+
+/// The dictation control on the Seeker field (#3044).
+///
+/// Same glyph, colour and click as the composer's microphone, so the two are
+/// one control on two surfaces: a person who learned it in the field finds it
+/// in the card, and a click on either one walks into `Editor::toggle_dictation`
+/// through the window, so the two cannot drift apart.
+///
+/// It hands the job over instead of doing it. The recording's counter, its
+/// waveform and its stop all belong to the composer's strip, and the card
+/// paints over exactly that, so the click closes the card and lets the composer
+/// carry the take it started.
+///
+/// The tile is one step larger than the composer's (2.1rem against 1.8rem,
+/// with a 1.5rem glyph against 1.25rem) because the field around it is: the
+/// line here is `text_2xl`, and a control sized for the composer's line would
+/// read as a leftover from the surface it came from (#3044).
+fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
+    let colour = palette::current().text_muted;
+    div()
+        .id("seeker-mic")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .ml(px(FIELD_MIC_GAP))
+        .size(rems(2.1))
+        .rounded_sm()
+        .cursor_pointer()
+        .opacity(0.8)
+        .hover(|d| d.opacity(1.0))
+        .child(crate::icon::mic_icon(colour, 1.5))
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            // The click belongs to the control, not to the scrim under it.
+            cx.stop_propagation();
+            let _ = view.update(cx, |this, cx| this.seeker_dictate(cx));
+        })
 }
 
 /// Presentation state for one Seeker frame. Grouping the borrowed engine,
@@ -454,22 +513,28 @@ pub(super) fn overlay(
         .w(rems(34.0))
         .on_click(|_ev, _window, cx| cx.stop_propagation());
 
-    // The field: Spotlight's floating pill, fatter than his, with the
-    // invitation wrapping to two grey lines. No icon in the bar; the caret
-    // blinks while the pill owns the keyboard, and stops once typing does
-    // (#2491, #2495, #2531).
+    // The field: Spotlight's floating pill, fatter than his (#3044). The
+    // invitation is a short phrase now, so the height is a pillow around the
+    // line instead of a box sized for a sentence, and the microphone closes the
+    // row the way it closes the composer's: one control, two surfaces. The pill
+    // carries no flex gap, because the caret rides the shaped line and a gap
+    // beside it would move the one thing that has to sit exactly where the text
+    // does (#2531); the microphone brings its own inset instead.
+    let dictate = view.clone();
     let pill = div()
         .flex()
         .flex_row()
         .items_center()
-        .px_5()
-        .py_4()
+        .pl(px(FIELD_PAD_X))
+        .pr(px(FIELD_PAD_X))
+        .py(px(FIELD_PAD_Y))
         .rounded_full()
         .bg(rgba(0x1b1b25fa))
         .border_1()
         .border_color(rgba(0xffffff2e))
         .shadow_md()
-        .child(query_line(state, view, paint, caret_on));
+        .child(query_line(state, view, paint, caret_on))
+        .child(field_mic(dictate));
     shell = shell.child(pill);
 
     let mut card = div()
@@ -816,6 +881,94 @@ mod tests {
         assert!(
             !pill_src.contains("gap_3"),
             "the pill row itself carries no gap either"
+        );
+    }
+
+    /// The field is a fat pill with the microphone on its right (#3044).
+    ///
+    /// The card cannot run a recording itself: the counter, the wave and the
+    /// stop are the composer's strip, and the card paints over exactly that. So
+    /// the control hands the job to the window, and the pins here are the three
+    /// things a refactor can quietly undo: the glyph, the door the click walks,
+    /// and the pillow that makes the field read as Spotlight instead of a box.
+    #[test]
+    fn the_field_is_a_fat_pill_with_the_microphone_on_its_right() {
+        let src = include_str!("command_palette.rs");
+        let pill = src
+            .find("let pill = div()")
+            .expect("the pill is drawn in overlay()");
+        let tail = src.get(pill..).expect("the pill starts on a glyph");
+        let mounted = tail
+            .find("shell = shell.child(pill);")
+            .expect("the pill is mounted on the shell");
+        let pill_src = tail
+            .get(..mounted)
+            .expect("the pill body ends at its mount");
+        assert!(
+            pill_src.contains(".pl(px(FIELD_PAD_X))") && pill_src.contains(".pr(px(FIELD_PAD_X))"),
+            "both caps keep the same inset, so neither the invitation nor the microphone is glued to the curve"
+        );
+        assert!(
+            pill_src.contains(".py(px(FIELD_PAD_Y))"),
+            "the height comes from the pillow around the line, not from a bigger font"
+        );
+        assert!(
+            pill_src.contains(".child(field_mic(dictate))"),
+            "the microphone closes the field's row, where the composer's does"
+        );
+        let mic = src
+            .find("fn field_mic(")
+            .expect("the field's microphone is one function, so no layout can drift");
+        let tail = src.get(mic..).expect("field_mic starts on a glyph");
+        let end = tail.find("\n}\n").expect("field_mic closes");
+        let body = tail.get(..end).expect("the body ends on a glyph");
+        assert!(
+            body.contains("crate::icon::mic_icon("),
+            "the card draws the composer's microphone, never a second glyph"
+        );
+        assert!(
+            body.contains("this.seeker_dictate(cx)"),
+            "the click walks the window's door instead of reaching into the composer"
+        );
+        assert!(
+            !body.contains("toggle_dictation"),
+            "the card owns no recording state, so it cannot toggle one"
+        );
+        assert!(
+            body.contains(".ml(px(FIELD_MIC_GAP))"),
+            "the control brings its own inset, because a flex gap would move the caret"
+        );
+        assert!(
+            body.contains("mic_icon(colour, 1.5)") && body.contains(".size(rems(2.1))"),
+            "the microphone is a step larger than the composer's, so it matches the bigger line instead of reading as a leftover"
+        );
+        let line = src
+            .find("fn query_line(")
+            .expect("the query line is one function, so no caller can drift");
+        let tail = src.get(line..).expect("query_line starts on a glyph");
+        let end = tail.find("\n}\n").expect("query_line closes");
+        let line_body = tail.get(..end).expect("the body ends on a glyph");
+        assert!(
+            line_body.contains(".text_2xl()"),
+            "the line is larger than the composer's, so the field reads as the window's own control"
+        );
+    }
+
+    /// The invitation is a short phrase, not the sentence that filled the pill
+    /// and read as a value already typed (#3044).
+    #[test]
+    fn the_invitation_is_a_phrase_and_never_a_sentence() {
+        assert!(
+            PLACEHOLDER.ends_with("..."),
+            "the invitation trails off the way a search field's does"
+        );
+        assert!(
+            !PLACEHOLDER.contains("Seeker:"),
+            "the card already says what it is, so the line does not repeat it"
+        );
+        assert!(
+            PLACEHOLDER.len() <= 20,
+            "a phrase fits the pill; a sentence has to be measured against its width"
         );
     }
 
