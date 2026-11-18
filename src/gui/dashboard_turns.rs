@@ -1051,7 +1051,15 @@ impl Dashboard {
                 // no session and stays where it has always been (#2672).
                 agent_bridge::TurnEvent::CommandReply { session, text } => {
                     match session {
-                        Some(id) => self.push_session_notice(id, text, cx),
+                        Some(id) => {
+                            // The receipt is logged before it is routed, so a
+                            // reader who saw nothing can be told whether the
+                            // answer arrived and which conversation took it
+                            // (#3035: a `/cd` applied, and the window showed
+                            // neither a line nor a moved footer).
+                            logging::debug(&format!("command reply for {id}: {text}"));
+                            self.push_session_notice(id, text, cx)
+                        }
                         None => self.turn.live.notices.push(text),
                     }
                     cx.notify();

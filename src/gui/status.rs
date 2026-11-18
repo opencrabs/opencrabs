@@ -40,7 +40,9 @@ pub(crate) fn tilde_path(p: &std::path::Path) -> String {
 }
 
 /// The checkout's branch name, or `None` when the directory is not a repo.
-/// Run once at startup: this is a footer label, not a per-frame subprocess.
+/// This runs a subprocess, so callers keep the answer beside the directory it
+/// was read from and ask again only when that directory changes: it is a
+/// footer label, never a per-frame read.
 pub(crate) fn git_branch(dir: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")

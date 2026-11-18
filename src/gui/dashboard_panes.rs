@@ -6,6 +6,7 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use crate::status::{git_branch, tilde_path};
 
 /// How often a leaf's detached-command line is rebuilt (#2805). The label
 /// prints whole seconds, so a faster rebuild cannot produce different text.
@@ -882,11 +883,52 @@ impl Dashboard {
         self.new_session(cx);
     }
 
+    /// The place the window footer names: the open conversation's own working
+    /// directory and the branch checked out there (#3035).
+    ///
+    /// Read from the session, not from the process. `launch_cwd()` is the
+    /// directory the window started in and nothing ever moves it, so the footer
+    /// kept naming the old project after a `/cd` had moved the session, and the
+    /// branch was resolved once at startup from that same stale directory.
+    ///
+    /// The branch is cached beside the directory it was read from: `git` is a
+    /// subprocess, so it runs when the directory changes and never per frame.
+    /// With no conversation open there is nothing to name, and the launch
+    /// directory is the honest answer for a window that has not been pointed
+    /// anywhere yet.
+    pub(crate) fn footer_place(&mut self) -> (String, String) {
+        let session = self.chat_session;
+        let dir = match agent_bridge::bridge() {
+            Some(bridge) => match session {
+                Some(id) => bridge.service.get_working_directory_for_session(id),
+                None => opencrabs::utils::cwd::launch_cwd(),
+            },
+            None => opencrabs::utils::cwd::launch_cwd(),
+        };
+        let stale = self
+            .footer_dir
+            .as_ref()
+            .is_none_or(|place| place.session != session || place.dir != dir);
+        if stale {
+            self.footer_dir = Some(FooterPlace {
+                session,
+                branch: git_branch(&dir),
+                dir: dir.clone(),
+            });
+        }
+        let branch = self
+            .footer_dir
+            .as_ref()
+            .and_then(|place| place.branch.clone())
+            .unwrap_or_else(|| "-".to_string());
+        (tilde_path(&dir), branch)
+    }
+
     /// One pane's footer text (#2593): pane index, whether that session is
-    /// mid-turn, who is answering it, and its plan progress. The detached
-    /// commands ride the strip above the composer instead, so the one-line
-    /// footer never grows past the pane. Resolved here, once per frame,
-    /// because it reads the bridge and the plan state, neither of which
+    /// mid-turn, where it works, who is answering it, and its plan progress.
+    /// The detached commands ride the strip above the composer instead, so the
+    /// one-line footer never grows past the pane. Resolved here, once per
+    /// frame, because it reads the bridge and the plan state, neither of which
     /// belongs in a draw pass per pane.
     pub(crate) fn pane_footer_text(&self, session: Uuid, index: usize, count: usize) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -899,6 +941,12 @@ impl Dashboard {
             parts.push("⠙ working".to_string());
         }
         if let Some(bridge) = agent_bridge::bridge() {
+            // Each pane names the directory its own conversation works in, so
+            // a `/cd` in one leaf never reads as a move of its neighbour
+            // (#3035). Only the directory: the branch would run `git` per pane
+            // per frame, and the window footer above already names it.
+            let dir = bridge.service.get_working_directory_for_session(session);
+            parts.push(tilde_path(&dir));
             let (provider, model) = bridge.service.provider_pair_for_session(session);
             if !model.is_empty() {
                 let label = model.rsplit('/').next().unwrap_or(&model).to_string();

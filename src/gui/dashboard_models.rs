@@ -721,6 +721,12 @@ impl Dashboard {
 
     /// Put a one-line answer in the conversation that owns it, so a pane never
     /// reads a switch receipt meant for the window chat.
+    ///
+    /// The receipt is never allowed to go missing (#3035). A `/cd` from the
+    /// picker applies off the UI thread and answers here, and the reader saw
+    /// nothing at all: the line was pushed below the fold of a transcript they
+    /// had scrolled, and a conversation that had been parked by a switch had
+    /// its receipt painted on the chat the reader had moved to instead.
     pub(crate) fn push_session_notice(
         &mut self,
         session: Uuid,
@@ -729,13 +735,27 @@ impl Dashboard {
     ) {
         if self.chat_session == Some(session) {
             self.turn.live.notices.push(line);
-        } else if let Some(pane) = self.pane_states.get(&session) {
+            // The line lands at the bottom of the conversation, so the follow
+            // is re-armed and the transcript lands on it. A reader parked in
+            // history would otherwise never learn the command answered.
+            self.rearm_transcript_follow();
+        } else if let Some(pane) = self.pane_states.get(&session).cloned() {
             pane.update(cx, |pane, cx| {
                 pane.live.notices.push(line);
                 cx.notify();
             });
+            self.rearm_pane_follow(session, cx);
         } else {
-            self.turn.live.notices.push(line);
+            // Neither on screen nor in a pane: park the line with the turn the
+            // switch took out of the window, so it is waiting when that
+            // conversation comes back. Painting it on the open chat answered a
+            // question the reader had not asked there.
+            self.stashed
+                .entry(session)
+                .or_default()
+                .live
+                .notices
+                .push(line);
         }
     }
 

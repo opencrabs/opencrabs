@@ -5,6 +5,7 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use crate::status::tilde_path;
 
 impl Dashboard {
     /// ctrl+u: open the usage ledger, or return to the conversation. The panes

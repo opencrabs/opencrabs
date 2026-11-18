@@ -128,7 +128,7 @@ use crate::screen_keys::{
     ChordMods, FocusTarget, KeyboardOwner, OverlayId, ScreenAction, focus_target, keyboard_owner,
     screen_chord,
 };
-use crate::status::{git_branch, status_identity, tilde_path};
+use crate::status::status_identity;
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use crate::topic_bar_view::{overflow_chip, topic_label, topic_strip, topic_tab};
 use opencrabs::db::models::Message;
@@ -579,6 +579,23 @@ impl Drop for PreviewSlot {
     fn drop(&mut self) {
         self.0.set(self.0.get().saturating_sub(1));
     }
+}
+
+/// The place the footer names: the open conversation's working directory and
+/// the branch checked out in it (#3035).
+///
+/// The window used to print the directory the process was launched from, which
+/// never moves, so a `/cd` changed where the agent works and left the footer
+/// naming the old project. The branch was read once at startup for the same
+/// reason. Both are resolved from the session now, and the branch is kept here
+/// because reading it runs `git`: it is re-read only when the directory
+/// changes, never on every frame.
+struct FooterPlace {
+    /// The conversation it was read for. `None` means no conversation is open,
+    /// so the row falls back to the launch directory.
+    session: Option<Uuid>,
+    dir: std::path::PathBuf,
+    branch: Option<String>,
 }
 
 /// The window root. Every string on screen is real data or the real error.
@@ -1195,10 +1212,12 @@ struct Dashboard {
     /// numbers waiting for their rows to land. One owner, like the handshake
     /// above: both are read from the same reload.
     metrics: chat_leaf::Metrics,
-    /// The checkout's branch, read once at startup: the footer's own field in
-    /// the TUI. `None` outside a git tree, which the footer shows as a dash
-    /// rather than a made-up name.
-    branch: Option<String>,
+    /// The footer's place, resolved from the open conversation rather than
+    /// from the process (#3035): the session it was read for, the directory
+    /// that session works in, and the branch checked out there. The window
+    /// used to print the launch directory and a branch read once at startup,
+    /// so a `/cd` moved the session and left the footer naming the old place.
+    footer_dir: Option<FooterPlace>,
 }
 
 /// Apply sidebar visibility without letting a closed rail retain keyboard
@@ -2755,14 +2774,22 @@ impl Render for Dashboard {
                         // (#2596), and in a split this footer stands down while
                         // each pane's border names its own conversation, so the
                         // name is not printed twice anywhere (#2578).
+                        // The place the footer names is the open
+                        // conversation's own, never the directory the process
+                        // was started in (#3035): the launch directory never
+                        // moves, so a `/cd` could change where the agent works
+                        // and leave this row pointing at the old project. The
+                        // branch is read from that same directory, and only
+                        // when it changes, because `git` is a subprocess.
+                        let (cwd, branch) = self.footer_place();
                         let identity = format!(
                             "{} · {}",
                             self.session_title().unwrap_or_else(|| "chat".to_string()),
                             status_identity(
                                 &provider,
                                 &model,
-                                &tilde_path(&opencrabs::utils::cwd::launch_cwd()),
-                                self.branch.as_deref().unwrap_or("-"),
+                                &cwd,
+                                &branch,
                                 self.turn.live.tokens_per_sec(),
                             )
                         );
@@ -6236,7 +6263,7 @@ fn main() {
                         stashed: HashMap::new(),
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
-                        branch: git_branch(&opencrabs::utils::cwd::launch_cwd()),
+                        footer_dir: None,
                     }
                 });
                 // Local transcript targets open in this window's preview;
@@ -10078,6 +10105,73 @@ mod tests {
             side.contains("row.child(strip).child(pane)")
                 && side.contains("row.child(pane).child(strip)"),
             "both edges put the strip beside the pane, never above or below it"
+        );
+    }
+
+    /// The footer names the open conversation's own place (#3035).
+    ///
+    /// It printed `launch_cwd()`, the directory the process started in, which
+    /// nothing ever moves: a `/cd` changed where the agent worked and left the
+    /// row naming the old project. The branch was read from that same directory
+    /// once at startup, so it was just as stale.
+    #[test]
+    fn the_footer_names_the_open_conversations_directory() {
+        let place = DASHBOARD
+            .split("fn footer_place(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    pub(crate) fn ").next())
+            .expect("the footer's place is resolved from the session");
+        assert!(
+            place.contains("get_working_directory_for_session"),
+            "the directory comes from the conversation, not the process"
+        );
+        assert!(
+            place.contains("git_branch(&dir)"),
+            "the branch is read from that same directory"
+        );
+        assert!(
+            place.contains("place.dir != dir"),
+            "and only re-read when the directory changes, because git is a subprocess"
+        );
+        let reads = ["let (cwd, branch) = self.", "footer_place();"].concat();
+        assert!(
+            DASHBOARD.contains(&reads),
+            "the identity line prints that place"
+        );
+        let launch = ["tilde_path(&opencrabs::utils::cwd::", "launch_cwd())"].concat();
+        assert!(
+            !DASHBOARD.contains(&launch),
+            "the launch directory can never name a `/cd`"
+        );
+    }
+
+    /// A receipt is parked with the conversation that asked for it, never
+    /// painted on another chat (#3035).
+    ///
+    /// A `/cd` from the picker answers through this door. A switch to another
+    /// session parks the live turn, so the fallback printed the receipt on the
+    /// conversation the reader had moved to while the one that asked saw
+    /// nothing. The line now waits in the parked turn, and the visible one is
+    /// scrolled into view so a reader parked in history still sees it.
+    #[test]
+    fn a_notice_is_parked_with_the_conversation_that_asked() {
+        let notice = DASHBOARD
+            .split("fn push_session_notice(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// ").next())
+            .expect("the notice door");
+        let parked = [".entry(", "session)"].concat();
+        assert!(
+            notice.contains(&parked),
+            "the receipt is parked with its own turn"
+        );
+        assert!(
+            notice.contains("rearm_transcript_follow()"),
+            "and a visible one is scrolled into view"
+        );
+        assert!(
+            notice.contains("rearm_pane_follow(session, cx)"),
+            "a pane's own transcript is scrolled into view too"
         );
     }
 }
