@@ -3737,9 +3737,15 @@ fn live_card(
     // The clock leaves that slot the moment the turn ends and takes its final
     // place at the end of the numbers, so the head ends on the verdict and the
     // statistics end on the total.
+    //
+    // One decision, two consumers: `finished` drives the slot AND the total at
+    // the end of the numbers, because the two were worked out in separate
+    // places and could disagree, which is how the clock ended up counted in
+    // both at once. There is no path that prints it twice.
+    let finished = live.stopped || live.settled.is_some();
     let frame = if live.stopped {
         "\u{23f9}".to_string()
-    } else if live.settled.is_some() {
+    } else if finished {
         "\u{2705}".to_string()
     } else {
         clock_glyph(live.elapsed_secs())
@@ -3800,14 +3806,14 @@ fn live_card(
     let has_lead = !lead.is_empty();
     let footer = live_card_footer(live, ctx);
     // One status line, dot-divided (#3046): the sentence the turn is speaking,
-    // the call it is running right now, and the numbers that end with the
-    // clock. It went to three stacked rows to stop a narrow pane clipping the
-    // numbers mid-figure, and three rows read as three separate blocks instead
-    // of the single status line the card had before. The width is what has to
-    // give, so the line wraps: it takes the one line a wide pane gives it and
-    // the two or three a split pane needs, and every segment keeps every word.
-    // Nothing here is ellipsised, because a number cut in half is worse than a
-    // longer line.
+    // the call it is running right now, and the numbers, with the turn's total
+    // closing them once the turn has ended. It went to three stacked rows to
+    // stop a narrow pane clipping the numbers mid-figure, and three rows read
+    // as three separate blocks instead of the single status line the card had
+    // before. The width is what has to give, so the line wraps: it takes the
+    // one line a wide pane gives it and the two or three a split pane needs,
+    // and every segment keeps every word. Nothing here is ellipsised, because a
+    // number cut in half is worse than a longer line.
     let accent = palette::current().accent;
     let mut segments: Vec<String> = Vec::new();
     if let Some((_, paragraph)) = narration.as_ref() {
@@ -3818,6 +3824,14 @@ fn live_card(
     }
     if let Some(footer) = footer {
         segments.push(footer);
+    }
+    // The total closes the numbers once the turn has ended (#3046), in the same
+    // clock the settled card prints, so finishing changes the verdict and
+    // nothing else. It reads the same `finished` flag as the glyph slot, so the
+    // two can never both count and the clock is written once, at the end.
+    let elapsed = live.elapsed_secs();
+    if finished && elapsed > 0 {
+        segments.push(clock_glyph(elapsed));
     }
     let status_line = segments.join(" \u{b7} ");
     let mut head = div()
@@ -3896,10 +3910,14 @@ fn live_card(
     card
 }
 
-/// The card's footer, segment for segment the Telegram one: how many calls,
-/// the ctx budget, the rate it is streaming at, and the clock. `None` before
-/// the turn has anything to say, so the head never ends in a dangling
-/// separator.
+/// The card's numbers, segment for segment the Telegram one: how many calls,
+/// the ctx budget and the rate it is streaming at. `None` before the turn has
+/// anything to say, so the head never ends in a dangling separator.
+///
+/// The clock is not one of them (#3046). It belongs to the head's own slot
+/// while the turn runs, and `live_card` appends the total after these numbers
+/// once the turn ends, so the footers here stay one segment shorter and the
+/// clock is written in exactly one place.
 fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if !live.tools.is_empty() {
@@ -3919,18 +3937,10 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     if let Some(segment) = rate_segment(f64::from(live.tokens_per_sec())) {
         parts.push(segment);
     }
-    // While the turn runs, the clock is the head's own glyph, so the numbers
-    // end on the call count, the budget and the rate (#3046). Once it stops,
-    // the glyph turns into the verdict and the clock takes its final place at
-    // the end of the numbers, which is where the settled card keeps it: the
-    // total moves once, and only when there is nothing left to measure.
-    let running = !live.stopped && live.settled.is_none();
-    let elapsed = live.elapsed_secs();
-    if elapsed > 0 && !running {
-        // The same clock the settled card prints, so finishing changes the
-        // verdict and nothing else (#2632/#2638).
-        parts.push(clock_glyph(elapsed));
-    }
+    // No clock here (#3046). The turn's total is decided in `live_card`, beside
+    // the glyph it swaps for: while the turn runs the head's own slot is the
+    // only clock, and once it ends the same flag appends the total after these
+    // numbers. Building it here too is what let the two disagree.
     stats_line(parts)
 }
 
@@ -7529,10 +7539,14 @@ mod tests {
     #[test]
     fn the_head_slot_shows_the_clock_until_the_turn_ends() {
         const SRC: &str = include_str!("transcript.rs");
-        let slot = SRC
+        let card = SRC
             .split_once("fn live_card(")
             .expect("the live card")
             .1
+            .split_once("fn live_card_footer(")
+            .expect("the numbers")
+            .0;
+        let slot = card
             .split_once("let (lead, _) = live_status_line(live);")
             .expect("the status line")
             .0;
@@ -7544,20 +7558,28 @@ mod tests {
             !slot.contains("SPINNER_FRAMES"),
             "the running slot no longer animates: the clock is the progress"
         );
+        // Both places read the same flag (#3046). The slot and the total used
+        // to be worked out separately, and a disagreement between them printed
+        // a running turn's clock at the end of the numbers as well as in the
+        // slot. One flag, and the total is appended under it.
+        assert!(
+            slot.contains("let finished = live.stopped || live.settled.is_some();"),
+            "one flag decides the slot and the total"
+        );
+        assert!(
+            card.contains("if finished && elapsed > 0 {"),
+            "the total joins the numbers under that same flag"
+        );
         let footer = SRC
             .split_once("fn live_card_footer(")
-            .expect("the card footer")
+            .expect("the numbers")
             .1
             .split_once("/// One block, drawn.")
             .expect("the footer's end")
             .0;
         assert!(
-            footer.contains("let running = !live.stopped && live.settled.is_none();"),
-            "the footer knows whether the clock still belongs to the head"
-        );
-        assert!(
-            footer.contains("if elapsed > 0 && !running {"),
-            "the clock joins the numbers only once the turn has ended"
+            !footer.contains("clock_glyph("),
+            "the numbers never build a clock of their own"
         );
     }
 
