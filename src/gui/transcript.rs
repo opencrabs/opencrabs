@@ -2112,7 +2112,16 @@ fn md_block(
     selection: Option<&SelectionContext>,
 ) -> Div {
     let parsed = md_blocks(src, flow);
-    let blocks = parsed.as_slice();
+    md_parsed_blocks(parsed.as_slice(), look, selection)
+}
+
+/// Paint blocks that were already parsed, so document previews never parse on
+/// the UI thread. Transcript rows still use their source-keyed cache above.
+fn md_parsed_blocks(
+    blocks: &[markdown::MdBlock],
+    look: MdLook,
+    selection: Option<&SelectionContext>,
+) -> Div {
     let mut out = div()
         .flex()
         .flex_col()
@@ -2160,6 +2169,12 @@ fn md_block(
         }
     }
     out
+}
+
+/// The document preview uses the same typography and table layout as a reply,
+/// but has no transcript selection or per-message cache.
+pub(super) fn document_blocks(blocks: &[markdown::MdBlock]) -> Div {
+    md_parsed_blocks(blocks, MdLook::body(PLAIN_TEXT_SIZE), None)
 }
 
 /// One stored row as the human-readable text a reply quotes (#2868).

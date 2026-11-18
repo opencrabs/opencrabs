@@ -75,6 +75,7 @@ mod pane_view;
 mod plan_strip;
 mod platform_icons;
 mod preview;
+mod preview_document;
 mod projects;
 mod projects_screen;
 mod projects_view;
@@ -936,6 +937,10 @@ struct Dashboard {
     /// because both facts come from a subprocess and a render that shells out
     /// is a render that stutters.
     preview_video: Option<preview::VideoFacts>,
+    /// Markdown and plain text load off the UI thread and carry their own
+    /// scroll position. A generation rejects a response for an older file.
+    preview_document: Option<preview_document::DocumentState>,
+    preview_document_generation: u64,
     /// The chat's `...` menu, as the session it acts on (#2480).
     ///
     /// It carries the id, never a bare flag: a right press on a topic tab
@@ -5136,7 +5141,7 @@ impl Render for Dashboard {
                 // stayed on screen, an open and a close in the same gesture is
                 // the overlay dismissing itself (#2395).
                 logging::info("preview: closed");
-                this.preview = None;
+                this.close_preview();
                 this.refocus_screen();
                 cx.notify();
             });
@@ -6111,6 +6116,8 @@ fn main() {
                         preview: None,
                         preview_zoom: 1.0,
                         preview_video: None,
+                        preview_document: None,
+                        preview_document_generation: 0,
                         help_open: false,
                         topic_menu: None,
                         topic_menu_at: None,

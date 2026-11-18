@@ -479,14 +479,20 @@ impl Dashboard {
         }
     }
 
-    /// Open a file a tile stands for. The overlay decides what to draw from the
-    /// path alone, so this stays one assignment: no state is derived at click
-    /// time that could disagree with what the overlay renders (#2395).
+    /// Open a file a tile or link stands for. Images and clips keep their
+    /// existing path-driven behavior; supported documents start a guarded
+    /// background read and parse below (#3019).
     pub(crate) fn open_preview(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let open = preview::Preview::of(path);
-        // A clip is the only kind whose overlay needs the disk: a poster frame
-        // has to be extracted, and its length read. Doing it here, on the
-        // click, is what keeps ffmpeg off the render path.
+        let path = open.path.clone();
+        let generation = self.preview_document_generation.wrapping_add(1);
+        self.preview_document_generation = generation;
+        let document_kind = opencrabs::ui_core::local_document::DocumentKind::of_path(&path);
+        self.preview_document = document_kind.map(|_| {
+            preview_document::DocumentState::loading(path.clone(), generation)
+        });
+        // A clip's poster frame and length are still probed on the click, as
+        // before. Document bytes and Markdown parsing use the async path below.
         self.preview_video = if open.kind == preview::PreviewKind::Video {
             Some(preview::VideoFacts::probe(
                 &opencrabs::config::opencrabs_home(),
@@ -507,6 +513,40 @@ impl Dashboard {
         self.preview = Some(open);
         self.preview_zoom = 1.0;
         cx.notify();
+
+        if let Some(kind) = document_kind {
+            cx.spawn(async move |this, cx| {
+                let load_path = path.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { preview_document::parse(&load_path, kind) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let visible = this
+                        .preview
+                        .as_ref()
+                        .is_some_and(|open| open.path == path);
+                    let current = this
+                        .preview_document
+                        .as_ref()
+                        .is_some_and(|document| document.matches(&path, generation));
+                    if visible && current {
+                        if let Some(document) = this.preview_document.as_mut() {
+                            document.complete(result);
+                        }
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    pub(crate) fn close_preview(&mut self) {
+        self.preview_document_generation = self.preview_document_generation.wrapping_add(1);
+        self.preview = None;
+        self.preview_video = None;
+        self.preview_document = None;
     }
 
     /// The inside of the preview: the part that differs per kind. The shell
@@ -554,6 +594,7 @@ impl Dashboard {
             self.preview_zoom,
             wheel,
             self.preview_video.as_ref(),
+            self.preview_document.as_ref(),
         )
     }
 

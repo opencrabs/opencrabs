@@ -29,7 +29,7 @@ pub enum PreviewKind {
     Image,
     /// A poster frame with a play handoff to the system player.
     Video,
-    /// Name, kind, size, mtime, and the two file actions.
+    /// Metadata and actions, plus a body for supported text documents.
     File,
 }
 
@@ -533,20 +533,19 @@ pub fn body(
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     facts: Option<&VideoFacts>,
+    document: Option<&super::preview_document::DocumentState>,
 ) -> AnyElement {
     let content = match preview.kind {
         PreviewKind::Image => image_body(preview, zoom, wheel),
         PreviewKind::Video => video_body(preview, facts.and_then(|f| f.poster.as_deref())),
-        PreviewKind::File => file_body(preview),
+        PreviewKind::File => file_body(preview, document),
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .min_w_0()
-        .child(content)
-        .child(actions)
-        .into_any_element()
+    let document_open = preview.kind == PreviewKind::File && document.is_some();
+    let mut shell = div().flex().flex_col().gap_2().min_w_0();
+    if document_open {
+        shell = shell.flex_1().min_h_0();
+    }
+    shell.child(content).child(actions).into_any_element()
 }
 
 /// The box an image is drawn in, in points. Both sides are pinned because gpui
@@ -655,14 +654,23 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
     }
 }
 
-fn file_body(preview: &Preview) -> AnyElement {
+fn file_body(
+    preview: &Preview,
+    document: Option<&super::preview_document::DocumentState>,
+) -> AnyElement {
     let mut col = div().flex().flex_col().gap_1().w(px(IMAGE_BOX.0));
     col = col.child(row("kind", preview.extension_or_unknown()));
     for (label, value) in FileFacts::probe(&preview.path).rows() {
         col = col.child(row(label, value));
     }
-    col.child(row("path", preview.path.display().to_string()))
-        .into_any_element()
+    col = col.child(row("path", preview.path.display().to_string()));
+    if let Some(document) = document {
+        col = col
+            .flex_1()
+            .min_h_0()
+            .child(super::preview_document::body(document));
+    }
+    col.into_any_element()
 }
 
 fn missing_body(preview: &Preview) -> AnyElement {

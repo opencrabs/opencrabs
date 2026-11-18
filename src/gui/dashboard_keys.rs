@@ -564,10 +564,10 @@ impl Dashboard {
             // A preview is the nearest thing to the pointer that Esc can
             // answer: it covers the window, so it goes before anything under
             // it (#2395).
-            if self.preview.take().is_some() {
-                // The facts belong to the file that was open, so they leave
-                // with it: the next clip probes its own.
-                self.preview_video = None;
+            if self.preview.is_some() {
+                // The facts and document state belong to the file that was
+                // open, so they leave with it and invalidate pending reads.
+                self.close_preview();
                 cx.notify();
                 return;
             }

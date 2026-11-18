@@ -376,6 +376,7 @@ pub mod gui_conversation_floor_test;
 pub mod gui_dashboard_source;
 pub mod gui_debug_config_test;
 pub mod gui_depth_test;
+pub mod gui_document_preview_test;
 pub mod gui_esc_screens_test;
 pub mod gui_font_test;
 pub mod gui_footer_title_test;
