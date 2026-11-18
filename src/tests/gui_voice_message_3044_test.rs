@@ -116,8 +116,10 @@ fn the_take_previews_above_the_row_with_its_own_shape() {
     );
 
     let strip = editor("fn voice_strip(", "/// The keybindings the editor needs");
+    // The call is wrapped across lines by rustfmt, so the pin reads its two
+    // halves instead of the single line they happened to share (#3044).
     assert!(
-        strip.contains("waveform(&draft.levels"),
+        strip.contains("waveform(") && strip.contains("&draft.levels"),
         "the preview draws the shape that was recorded, not a pattern invented for it"
     );
     assert!(
