@@ -111,11 +111,6 @@ impl Motion {
         glyph: None,
         ring: None,
     };
-
-    /// Whether this motion paints anything at all.
-    pub fn is_still(self) -> bool {
-        self == Self::STILL
-    }
 }
 
 /// What a column of row marks moves on `phase` (#2842).
@@ -894,13 +889,18 @@ mod tests {
     #[test]
     fn a_plan_only_column_has_no_motion() {
         let marks = [
-            RowState { badge: Some(Badge::Plan), ring: false },
-            RowState { badge: None, ring: false },
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: None,
+                ring: false,
+            },
         ];
         for ms in [0u64, 200, 2_400, 10_000] {
             let motion = motion(marks, Duration::from_millis(ms));
             assert_eq!(motion, Motion::STILL);
-            assert!(motion.is_still());
         }
     }
 
@@ -909,13 +909,19 @@ mod tests {
     /// is the only reason they are allowed to ask for a repaint.
     #[test]
     fn a_live_badge_and_a_waiting_ring_still_move() {
-        let live = [RowState { badge: Some(Badge::Live), ring: false }];
+        let live = [RowState {
+            badge: Some(Badge::Live),
+            ring: false,
+        }];
         let at_0 = motion(live, Duration::ZERO);
         let at_200 = motion(live, Duration::from_millis(200));
         assert!(at_0.glyph.is_some());
         assert_ne!(at_0, at_200, "a live spinner advances with the clock");
 
-        let ring = [RowState { badge: None, ring: true }];
+        let ring = [RowState {
+            badge: None,
+            ring: true,
+        }];
         let ring_a = motion(ring, Duration::ZERO);
         let ring_b = motion(ring, Duration::from_millis(200));
         assert!(ring_a.ring.is_some());
@@ -927,19 +933,37 @@ mod tests {
     /// changes what the paint does.
     #[test]
     fn motion_is_one_answer_for_the_whole_column() {
-        let one = [RowState { badge: Some(Badge::Live), ring: true }];
+        let one = [RowState {
+            badge: Some(Badge::Live),
+            ring: true,
+        }];
         let many = [
-            RowState { badge: Some(Badge::Live), ring: true },
-            RowState { badge: Some(Badge::Plan), ring: false },
-            RowState { badge: Some(Badge::Live), ring: true },
+            RowState {
+                badge: Some(Badge::Live),
+                ring: true,
+            },
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: Some(Badge::Live),
+                ring: true,
+            },
         ];
         let phase = Duration::from_millis(347);
         assert_eq!(motion(one, phase), motion(many, phase));
         // Precedence: a live turn wins the badge, so a plan mark beside it
         // neither adds a second glyph nor stills the column.
         let mixed = [
-            RowState { badge: Some(Badge::Plan), ring: false },
-            RowState { badge: Some(Badge::Live), ring: false },
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: Some(Badge::Live),
+                ring: false,
+            },
         ];
         assert_eq!(motion(mixed, phase).glyph, Some(frame(phase)));
     }
