@@ -13,6 +13,7 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 const GUI_MAIN: &str = include_str!("../gui/main.rs");
 /// The window's menu doors moved into a module of their own (#2822).
 const DASHBOARD_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
+const DASHBOARD_TOPICS: &str = include_str!("../gui/dashboard_topics.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 const MENU: &str = include_str!("../gui/menu.rs");
@@ -60,26 +61,29 @@ fn every_right_press_records_the_point_it_happened_at() {
     // The swipe still records its own press in the window. The row and the
     // chip are built by the rail's view, so they hand the point to a window
     // method that records it (#2933).
+    // Read each entry point where it lives. `code(DASHBOARD)` cuts the text at
+    // the first module's test block, and the rail's modules carry tests now
+    // (#3014, #3020), which would drop every module after them.
     assert_eq!(
-        code(DASHBOARD)
+        code(GUI_MAIN)
             .matches("this.rail_menu_at = Some(ev.position);")
             .count(),
         1,
         "the swipe records the press where it happens"
     );
     assert_eq!(
-        code(DASHBOARD)
+        code(DASHBOARD_RAIL)
             .matches("self.rail_menu_at = Some(at);")
             .count(),
         2,
         "a rail row and a topic chip each record the point they were handed"
     );
     assert!(
-        code(DASHBOARD).contains("this.topic_menu_at = Some(ev.position);"),
+        code(DASHBOARD_TOPICS).contains("this.topic_menu_at = Some(ev.position);"),
         "a topic tab records its press too"
     );
     assert!(
-        code(DASHBOARD).contains("this.msg_menu_open(row.clone(), None, ev.position, cx);"),
+        code(GUI_MAIN).contains("this.msg_menu_open(row.clone(), None, ev.position, cx);"),
         "a stored message row opens its menu at the press"
     );
     assert!(
