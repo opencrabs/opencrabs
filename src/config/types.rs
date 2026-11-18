@@ -1240,6 +1240,18 @@ pub struct WhatsAppConfig {
     /// card. Test it first with `whatsapp_send` action `send_buttons`.
     #[serde(default)]
     pub interactive_buttons: bool,
+    /// Paint the live tool block on ordinary conversation turns (#2609).
+    /// One message opens with the turn's first tool call, gains a row per
+    /// call and settles before the answer is sent; a turn that calls no
+    /// tools never opens one. Default false, and deliberately so: the block
+    /// edits itself every five seconds, and that cadence on a personal chat
+    /// is unverified against WhatsApp's rate heuristics. On this channel the
+    /// paired number IS the bot, so a behaviour that can draw a ban stays
+    /// opt-in until a real phone has shown it is quiet. Background
+    /// completions keep their block either way (#2023): that path has no
+    /// other sign of life.
+    #[serde(default)]
+    pub live_tool_block: bool,
     /// Channel-wide disappearing-message TTL in seconds (#1487). Unset or
     /// `0` means messages do not expire, which is the WhatsApp default.
     /// Common values: 86400 (24h), 604800 (7d), 7776000 (90d, the maximum).

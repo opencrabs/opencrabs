@@ -271,6 +271,22 @@ pub(crate) fn drop_held(content: &str, held: &[String]) -> String {
         .join("\n\n")
 }
 
+/// Whether a flush paints anything at all (#2609).
+///
+/// A block can be told to wait for its first tool row: an ordinary
+/// conversation turn only has a block worth reading once a tool has run, and
+/// a one-line reply must never create a message that says "0 tool calls".
+/// An eager block (the background-completion path, #2023) paints from the
+/// first flush so its clock covers the thinking, and a block that already
+/// posted always paints, because settling it is what closes it.
+pub(crate) fn paints(steps: &[Step], posted: bool, wait_for_first_tool: bool) -> bool {
+    !wait_for_first_tool
+        || posted
+        || steps
+            .iter()
+            .any(|step| matches!(step, Step::Tool { .. }))
+}
+
 /// Render the block as one WhatsApp text body.
 pub(crate) fn render(steps: &[Step], phase: Phase, elapsed: Duration) -> String {
     let tools = steps

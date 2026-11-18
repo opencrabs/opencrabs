@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::WhatsAppState;
 use super::flow_render::{
-    FlushAction, Phase, Step, WindowPlan, fold, render, take_trailing_answer,
+    FlushAction, Phase, Step, WindowPlan, fold, paints, render, take_trailing_answer,
 };
 use super::followups::send_suggestions;
 use super::rate_limit::GateOutcome;
@@ -40,6 +40,12 @@ pub(crate) struct FlowConfig {
     pub is_owner: bool,
     /// Whether suggestions may use native buttons (`interactive_buttons`).
     pub interactive_buttons: bool,
+    /// Whether the block waits for its first tool row before it posts
+    /// (#2609). The ordinary turn sets this so a reply that calls no tools
+    /// creates no message at all. The background-completion path leaves it
+    /// off: there the block is the only sign of life, so its clock has to
+    /// cover the thinking.
+    pub wait_for_first_tool: bool,
     /// Answers posted before the suggestions, so the caller can keep its
     /// final body from repeating them (#2030).
     pub posted: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -79,6 +85,35 @@ impl FlowSender {
                     target: "whatsapp",
                     error = %e,
                     "flow event arrived after the block settled; not shown"
+                );
+            }
+        })
+    }
+
+    /// Progress callback for an ordinary conversation turn (#2609).
+    ///
+    /// Only the events that draw a row reach the block. The turn's narration
+    /// already owns the streamed message (`stream.rs`) and its follow-up
+    /// suggestions are sent by the handler itself, so forwarding either here
+    /// would show the same text twice and let the block post an answer the
+    /// handler is about to deliver.
+    pub(crate) fn row_callback(&self) -> ProgressCallback {
+        let tx = self.tx.clone();
+        Arc::new(move |_session_id, event| {
+            if !matches!(
+                event,
+                ProgressEvent::ToolStarted { .. }
+                    | ProgressEvent::ToolCompleted { .. }
+                    | ProgressEvent::DetachedTaskStarted { .. }
+                    | ProgressEvent::DetachedTaskFinished { .. }
+            ) {
+                return;
+            }
+            if let Err(e) = tx.send(FlowMsg::Progress(event)) {
+                tracing::warn!(
+                    target: "whatsapp",
+                    error = %e,
+                    "flow row arrived after the block settled; not shown"
                 );
             }
         })
@@ -223,6 +258,16 @@ impl Block {
 
     async fn flush(&mut self, phase: Phase) {
         let settled = phase != Phase::Running;
+        // A block that waits for its first tool row is invisible until one
+        // arrives, and a turn that settles with none never posts: its answer
+        // is the whole message (#2609).
+        if !paints(
+            &self.steps,
+            self.message_id.is_some(),
+            self.config.wait_for_first_tool,
+        ) {
+            return;
+        }
         let text = render(&self.steps, phase, self.started.elapsed());
         let action = self.plan.decide(&text, settled, self.edit_window_open());
         match action {
