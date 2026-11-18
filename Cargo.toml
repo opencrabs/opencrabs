@@ -356,7 +356,22 @@ pdfium = ["dep:pdfium-render"]
 code-graph = ["tree-sitter", "tree-sitter-rust"]
 # Native desktop app. Off by default so a plain `cargo build` stays free of the
 # gpui dependency tree; the release build and CI enable it.
-gui = ["dep:gpui", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:cpal"]
+#
+# The audio entries are for voice messages (#3044): `opusic-sys` encodes the
+# recording into the OGG/Opus a channel would have sent, and symphonia plus its
+# libopus adapter decode it again for the transcript's play button. They are the
+# same crates `local-tts` and `local-stt` already pull in, so a build with those
+# features pays nothing extra.
+gui = [
+    "dep:gpui",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-app-kit",
+    "dep:cpal",
+    "dep:symphonia",
+    "dep:symphonia-adapter-libopus",
+    "dep:opusic-sys",
+]
 [profile.dev]
 # Our own crate is optimised too: the GUI re-runs transcript layout on every
 # keystroke in the composer, and at opt-level 0 that work was slow enough to

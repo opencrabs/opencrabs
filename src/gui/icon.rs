@@ -168,6 +168,42 @@ pub fn mic_icon(colour: u32, size: f32) -> impl IntoElement {
     svg_icon(mic_svg(colour), size)
 }
 
+/// The composer's stop control (#3044): the square a recording turns into.
+///
+/// Filled, not outlined. The microphone beside it is a monoline outline, and a
+/// second outline would read as another input at a glance; a solid rounded
+/// square is the shape every recorder and every messaging app uses for "this is
+/// running, press it to end". Same 24-unit grid and same optical size as the
+/// microphone, so the control does not jump when the phase changes.
+fn stop_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.6" fill="#{colour:06x}"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The stop square in `colour`, sized in rems.
+pub fn stop_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(stop_svg(colour), size)
+}
+
+/// The voice card's play control (#3044): a monoline triangle, the outline
+/// twin of the stop square above so a card that starts playing swaps one glyph
+/// for the other without the tile moving or changing weight.
+fn play_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><path d="M8 5.5v13l11-6.5-11-6.5Z" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The play triangle in `colour`, sized in rems.
+pub fn play_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(play_svg(colour), size)
+}
+
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an
 /// AppKit concept, and the ugly "exec" block is macOS's generic-executable
 /// icon. Runs on the main thread, right after `Application::run` starts.

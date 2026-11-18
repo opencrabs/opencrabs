@@ -16,7 +16,7 @@
 //! Phase-0 lessons still bind: 4 MB fetch thread, no migrations, char-safe
 //! truncation everywhere (#2271).
 
-use super::icon::{collapse_icon, disclosure_icon};
+use super::icon::{collapse_icon, disclosure_icon, play_icon, stop_icon};
 use crate::palette;
 use crate::topic_icons;
 use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE};
@@ -54,6 +54,7 @@ use opencrabs::tui::render::{
 use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
+use crate::voice_play;
 
 impl markdown::MdPalette for palette::Palette {
     fn tint(&self, tint: markdown::MdTint) -> u32 {
@@ -2838,19 +2839,46 @@ fn history_attachments(
             row = row.child(if index < drawn {
                 let path = &paths[index];
                 let key = path.to_string_lossy().to_string();
-                // Cloned, not taken: the same file can appear in more than
-                // one message, and every tile of it must open it.
-                match handlers.get(&key).cloned() {
-                    // A tile you can see is a tile you can open: the click
-                    // goes to the overlay, which decides what the file is.
-                    Some(handler) => attachment_cell(path, side)
+                let attachment = Attachment::for_display(path.to_path_buf());
+                if attachment.is_audio() {
+                    // A clip sounds where it sits (#3044). The press belongs to
+                    // the player, not to the preview overlay: a recording is
+                    // something to hear, not something to open, and the tile
+                    // says so by swapping its glyph while it plays.
+                    let clip = attachment.path.clone();
+                    let playing = voice_play::is_playing(&clip);
+                    let mut card = audio_card(&attachment, side, playing)
                         .id(SharedString::from(format!("attachment-{key}")))
-                        .cursor_pointer()
-                        // gpui wants a real `Fn`, and `Rc<dyn Fn>` is not one,
-                        // so each tile forwards into the shared handler.
-                        .on_click(move |event, window, cx| handler(event, window, cx))
-                        .into_any_element(),
-                    None => attachment_cell(path, side).into_any_element(),
+                        .cursor_pointer();
+                    // A file that has been moved or cleaned up can only be
+                    // reported: the card still shows what the message said, and
+                    // pressing it explains the silence instead of doing nothing.
+                    if path.is_file() {
+                        card = card.on_click(move |_event, _window, cx| {
+                            match voice_play::toggle(&clip) {
+                                Ok(()) => cx.refresh_windows(),
+                                Err(reason) => {
+                                    crate::logging::error(&format!("voice card: {reason}"))
+                                }
+                            }
+                        });
+                    }
+                    card.into_any_element()
+                } else {
+                    // Cloned, not taken: the same file can appear in more than
+                    // one message, and every tile of it must open it.
+                    match handlers.get(&key).cloned() {
+                        // A tile you can see is a tile you can open: the click
+                        // goes to the overlay, which decides what the file is.
+                        Some(handler) => attachment_cell(path, side)
+                            .id(SharedString::from(format!("attachment-{key}")))
+                            .cursor_pointer()
+                            // gpui wants a real `Fn`, and `Rc<dyn Fn>` is not one,
+                            // so each tile forwards into the shared handler.
+                            .on_click(move |event, window, cx| handler(event, window, cx))
+                            .into_any_element(),
+                        None => attachment_cell(path, side).into_any_element(),
+                    }
                 }
             } else {
                 fold_cell(plan.folded, side)
@@ -2954,6 +2982,95 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
         .text_color(rgb(palette::current().text_muted))
         .child(SharedString::from(format!("+{folded}")))
         .into_any_element()
+}
+
+/// The bars a voice card draws instead of a thumbnail (#3044).
+///
+/// A fixed pattern, on purpose: the card has to say "this is a sound" at a
+/// glance, and decoding every recording on every paint to draw its true
+/// envelope would cost far more than the shape is worth. A waveform that
+/// pretends to be the clip's own would be the worse lie of the two.
+const AUDIO_BARS: [f32; 9] = [4.0, 9.0, 14.0, 7.0, 16.0, 11.0, 5.0, 12.0, 6.0];
+
+/// One voice message, drawn as a card that plays where it sits (#3044).
+///
+/// Same square footprint as every other attachment tile, so the strip's own
+/// layout keeps deciding the row: the play glyph, bars and length sit inside
+/// it, and the file name stays under it where the other tiles put theirs. The
+/// card has no click of its own; `history_attachments` hands it to the player.
+fn audio_card(attachment: &Attachment, side: f32, playing: bool) -> Div {
+    let palette = palette::current();
+    let tint = if playing { palette.red } else { palette.accent };
+    let mut bars = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap_1();
+    for height in AUDIO_BARS {
+        bars = bars.child(
+            div()
+                .w(px(2.0))
+                .h(px(height))
+                .rounded(px(1.0))
+                .bg(rgb(if playing { tint } else { palette.track })),
+        );
+    }
+    // Absent or half-written clips still draw: the length is the one thing the
+    // card cannot invent, so it says so instead of showing a made-up number.
+    let length = voice_play::duration(&attachment.path)
+        .map(clip_length)
+        .unwrap_or_else(|| "--:--".to_string());
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .w(px(side))
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w(px(side))
+                .h(px(side))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(rgb(if playing { tint } else { palette.track }))
+                .bg(glass_fill(if playing {
+                    palette.panel_hi
+                } else {
+                    palette.panel
+                }))
+                .child(if playing {
+                    stop_icon(tint, 1.15).into_any_element()
+                } else {
+                    play_icon(tint, 1.15).into_any_element()
+                })
+                .child(bars)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette.text_muted))
+                        .child(SharedString::from(length)),
+                ),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_xs()
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from(attachment.name.clone())),
+        )
+}
+
+/// A clip's length the way a player prints it: `0:07`, `1:23`.
+fn clip_length(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// A thinking block: dim, italic, collapsed to a bounded preview so a long
@@ -3633,15 +3750,12 @@ fn live_card(
         None
     } else {
         let newest = collapsed_narration(live);
-        lines
-            .iter()
-            .rev()
-            .find_map(|(entry, line)| match line {
-                LiveCardLine::Narration(text) if Some(collapsed_paragraph(text)) == newest => {
-                    Some((*entry, collapsed_paragraph(text)))
-                }
-                _ => None,
-            })
+        lines.iter().rev().find_map(|(entry, line)| match line {
+            LiveCardLine::Narration(text) if Some(collapsed_paragraph(text)) == newest => {
+                Some((*entry, collapsed_paragraph(text)))
+            }
+            _ => None,
+        })
     };
     // The head is another rendering of one exact tool entry, not a separate
     // menu target. Resolve the same running-or-last call used by the label.
@@ -3710,17 +3824,15 @@ fn live_card(
         .flex_1()
         .min_w_0();
     if let Some((entry, paragraph)) = narration {
-        status = status.child(
-            div().flex_1().min_w_0().child(live_entry_text(
-                format!("live-preview-{entry}"),
-                Some(entry),
-                paragraph,
-                small_style(SMALL_TEXT_SIZE, palette::current().accent),
-                Some(1),
-                drag,
-                press,
-            )),
-        );
+        status = status.child(div().flex_1().min_w_0().child(live_entry_text(
+            format!("live-preview-{entry}"),
+            Some(entry),
+            paragraph,
+            small_style(SMALL_TEXT_SIZE, palette::current().accent),
+            Some(1),
+            drag,
+            press,
+        )));
     }
     // Whether the call leads the row, read before the row draws it: the entry
     // that renders the call takes the string, and the head still asks whether
@@ -3964,7 +4076,10 @@ pub(crate) fn live_activity(live: &LiveTurn) -> Option<String> {
 /// the live line and for the expanded turn's own count, behind the hammer the
 /// head is scanned by (#3046).
 fn tool_count_label(count: usize) -> String {
-    format!("\u{1f6e0}\u{fe0f} {count} tool call{}", if count == 1 { "" } else { "s" })
+    format!(
+        "\u{1f6e0}\u{fe0f} {count} tool call{}",
+        if count == 1 { "" } else { "s" }
+    )
 }
 
 /// The `\u{b7}` that divides one head segment from the next (#3046). It carries
@@ -5447,7 +5562,8 @@ impl RowReach {
     /// bottom yet. The reader sees that as the next row's first pixel above the
     /// composer: a line of text cut off by the edge of the conversation.
     pub fn overflows_below(self) -> bool {
-        self.rows > 0 && self.viewport_height() > SCROLL_SLOP
+        self.rows > 0
+            && self.viewport_height() > SCROLL_SLOP
             && self.painted_bottom() > self.viewport_bottom + SCROLL_SLOP
     }
 
@@ -7031,7 +7147,10 @@ mod tests {
         let now = std::time::Instant::now();
         let mut live = LiveTurn::default();
         live.begin("question".into());
-        live.note_chunk_at("Checking the parser now.\nThe parser is fine, moving on.", now);
+        live.note_chunk_at(
+            "Checking the parser now.\nThe parser is fine, moving on.",
+            now,
+        );
         live.push_narration("Checking the parser now.");
         assert_eq!(
             live.stream, "The parser is fine, moving on.",
@@ -7043,7 +7162,10 @@ mod tests {
         ahead.begin("question".into());
         ahead.note_chunk_at("Padding before. Then the sentence.", now);
         ahead.push_narration("Then the sentence.");
-        assert_eq!(ahead.stream, "Padding before.", "the copy goes, the answer stays");
+        assert_eq!(
+            ahead.stream, "Padding before.",
+            "the copy goes, the answer stays"
+        );
     }
 
     /// #3021: the service discards a streamed iteration and the card has to
@@ -7071,7 +7193,11 @@ mod tests {
         live.strip_streamed(usize::MAX);
         assert_eq!(live.stream, "", "the discarded text leaves the bubble");
         assert_eq!(live.reasoning, "", "and the reasoning it also fed");
-        assert_eq!(live.answer(), None, "nothing is drawn in the answer's place");
+        assert_eq!(
+            live.answer(),
+            None,
+            "nothing is drawn in the answer's place"
+        );
         assert!(
             narration_lines(&live).is_empty(),
             "the card kept a row for an iteration that never happened"
@@ -7088,14 +7214,20 @@ mod tests {
 
         // Iteration one ran a tool, so its narration is part of the turn.
         live.note_chunk_at("Reading the file.", now);
-        live.push_tool(ToolCall::running("read_file".into(), "read_file: src/main.rs".into()));
+        live.push_tool(ToolCall::running(
+            "read_file".into(),
+            "read_file: src/main.rs".into(),
+        ));
 
         // Iteration two streamed a preamble and a draft after it. The service
         // strips the preamble only, because the draft that follows it may be
         // real.
         live.note_chunk_at("I cannot use tools. The fix is this.", now);
         live.strip_streamed("I cannot use tools.".len());
-        assert_eq!(live.stream, " The fix is this.", "the draft after the preamble survives");
+        assert_eq!(
+            live.stream, " The fix is this.",
+            "the draft after the preamble survives"
+        );
         assert_eq!(
             narration_lines(&live),
             vec!["Reading the file.".to_string()],
@@ -7567,7 +7699,10 @@ mod tests {
             tps: None,
             tool_calls: 0,
         };
-        assert_eq!(metrics.segment().as_deref(), Some("\u{1f9e0} ctx: 12K/200K 6%"));
+        assert_eq!(
+            metrics.segment().as_deref(),
+            Some("\u{1f9e0} ctx: 12K/200K 6%")
+        );
     }
 
     /// No record means no segment: borrowing the session's current number
@@ -8217,7 +8352,10 @@ mod tests {
         );
         let footer =
             live_card_footer(&live, (Some(12_000), 200_000)).expect("a footer once a tool ran");
-        assert_eq!(footer, "\u{1f6e0}\u{fe0f} 2 tool calls \u{b7} \u{1f9e0} ctx: 12K/200K 6%");
+        assert_eq!(
+            footer,
+            "\u{1f6e0}\u{fe0f} 2 tool calls \u{b7} \u{1f9e0} ctx: 12K/200K 6%"
+        );
 
         // And the drawing order itself: header, then body, with nothing under
         // the body but the arrow that folds the block.

@@ -93,6 +93,14 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".3gp", ".flv",
 ];
 
+/// Audio suffixes, the kinds a recording or a hand-attached clip arrives as
+/// (#3044). A file with one of these travels as `<<AUD:>>`, which the
+/// transcript draws as a card it can play back rather than an icon it can
+/// only open.
+const AUDIO_EXTENSIONS: &[&str] = &[
+    ".ogg", ".oga", ".opus", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".aiff", ".aif", ".weba",
+];
+
 /// One row of the composer's `:query` list (#2769).
 ///
 /// A glyph row inserts its character. A crab row is one of our own pictures and
@@ -170,10 +178,27 @@ impl Attachment {
         IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
     }
 
+    /// A clip, which the transcript draws as a card it can play rather than a
+    /// tile it can only open (#3044). Video is deliberately not audio: a
+    /// recording is a sound, and a sound is what the card offers.
+    pub fn is_audio(&self) -> bool {
+        if self.is_video {
+            return false;
+        }
+        let lower = self.path.to_string_lossy().to_lowercase();
+        AUDIO_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+    }
+
     /// The marker the agent reads. Same shape the TUI writes: `<<IMG:path>>`
     /// for images and every non-video file, `<<VID:path>>` for videos.
     pub fn marker(&self) -> String {
-        let prefix = if self.is_video { "VID" } else { "IMG" };
+        let prefix = if self.is_video {
+            "VID"
+        } else if self.is_audio() {
+            "AUD"
+        } else {
+            "IMG"
+        };
         format!("<<{prefix}:{}>>", self.path.display())
     }
 }
@@ -192,7 +217,8 @@ fn message_with_markers(text: &str, attachments: &[Attachment]) -> String {
     payload
 }
 
-/// The paths carried by `<<IMG:...>>` / `<<VID:...>>` markers in a message.
+/// The paths carried by `<<IMG:...>>` / `<<VID:...>>` / `<<AUD:...>>` markers in
+/// a message.
 /// Pure string work so it is testable without a window, and shared with the
 /// send path that tracks each attachment against the session.
 pub fn marker_paths(text: &str) -> Vec<PathBuf> {
@@ -209,7 +235,7 @@ pub fn marker_paths(text: &str) -> Vec<PathBuf> {
             break;
         };
         if let Some((kind, path)) = marker.split_once(':')
-            && (kind == "IMG" || kind == "VID")
+            && (kind == "IMG" || kind == "VID" || kind == "AUD")
             && !path.is_empty()
         {
             paths.push(PathBuf::from(path));
@@ -219,9 +245,62 @@ pub fn marker_paths(text: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// The message text without its `<<IMG:...>>` / `<<VID:...>>` markers. Those
-/// files are drawn as thumbnails, so leaving the raw marker in the bubble
-/// would print the same attachment twice, once as pixels and once as text.
+/// The marker one saved recording travels as (#3044).
+///
+/// The same shape the window already uses for an image or a video, so the send
+/// path, the file tracker and the transcript all read one convention instead of
+/// three.
+pub fn voice_marker(path: &Path) -> String {
+    format!("<<AUD:{}>>", path.display())
+}
+
+/// Split a message's first `<<AUD:...>>` marker off its words (#3044).
+///
+/// Returns the words with the marker removed and the marker itself, so the two
+/// halves of a voice message can go to different places: the words to the
+/// agent, which can answer them, and the marker to the row, which draws the
+/// clip. `None` is every message that carries no recording, which is nearly
+/// every message.
+pub fn split_audio_marker(text: &str) -> Option<(String, String)> {
+    let mut rest = text;
+    while let Some(start) = rest.find("<<") {
+        let Some(after) = rest.get(start + 2..) else {
+            return None;
+        };
+        let Some(end) = after.find(">>") else {
+            return None;
+        };
+        let Some(marker) = after.get(..end) else {
+            return None;
+        };
+        if let Some((kind, path)) = marker.split_once(':')
+            && kind == "AUD"
+            && !path.is_empty()
+        {
+            let head = rest.get(..start).unwrap_or_default();
+            let tail = after.get(end + 2..).unwrap_or_default();
+            // Collapsed through `split_whitespace`, because the marker's own
+            // space is left behind when it leaves the middle of a sentence.
+            let words = format!("{head} {tail}")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            // A recording with no words has nothing for the agent to answer,
+            // so the message keeps the marker and goes out as it was.
+            if words.is_empty() {
+                return None;
+            }
+            return Some((words, format!("<<{marker}>>")));
+        }
+        rest = after.get(end + 2..).unwrap_or_default();
+    }
+    None
+}
+
+/// The message text without its `<<IMG:...>>` / `<<VID:...>>` / `<<AUD:...>>`
+/// markers. Those files are drawn as thumbnails and cards, so leaving the raw
+/// marker in the bubble would print the same attachment twice, once as pixels
+/// or a play button and once as text.
 ///
 /// Borrowed when the text carries no marker, which is nearly every row: the
 /// transcript asks this of every message on every frame, so copying each one
@@ -240,9 +319,9 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
         let Some(marker) = after.get(..end) else {
             break;
         };
-        let is_marker = marker
-            .split_once(':')
-            .is_some_and(|(kind, path)| (kind == "IMG" || kind == "VID") && !path.is_empty());
+        let is_marker = marker.split_once(':').is_some_and(|(kind, path)| {
+            (kind == "IMG" || kind == "VID" || kind == "AUD") && !path.is_empty()
+        });
         if is_marker {
             if let Some(head) = rest.get(..start) {
                 out.push_str(head);
@@ -434,6 +513,11 @@ pub struct Editor {
     /// The whole second last painted in the recording counter, so a tick that
     /// moved no digit leaves the frame alone.
     voice_secs: u64,
+    /// The meter's window while recording, newest last (#3044). Copied out of
+    /// the capture on every tick: the waveform is the only part of the composer
+    /// that changes ten times a second, so it is also the only reason the row
+    /// repaints while the microphone is open.
+    voice_levels: Vec<f32>,
 }
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
@@ -461,6 +545,14 @@ const CARET_BLINK_MS: u64 = 530;
 /// (#3044). Ten ticks a second is fine grain for a counter that reads whole
 /// seconds, and it lands a finished transcript without a second timer.
 const VOICE_TICK: Duration = Duration::from_millis(100);
+
+/// How long a finished voice message waits before it leaves the composer.
+///
+/// The transcript lands inside `poll_voice`, which the window calls while this
+/// editor is borrowed, and the send it becomes walks every composer, this one
+/// included. One tick of the executor between the two is what keeps the send
+/// out of this editor's own update (#3044).
+const VOICE_EMIT_DELAY: Duration = Duration::from_millis(1);
 
 /// What the composer's microphone is doing (#3044). The row paints from this,
 /// never from the threads' state: one of them can be mid-handoff on a frame,
@@ -544,6 +636,7 @@ impl Editor {
             voice_transcription: None,
             voice_looping: false,
             voice_secs: 0,
+            voice_levels: Vec::new(),
         }
     }
 
@@ -630,6 +723,7 @@ impl Editor {
                 self.voice_capture = Some(voice_input::Capture::start());
                 self.voice_finishing = false;
                 self.voice_secs = 0;
+                self.voice_levels.clear();
                 self.pump_voice(cx);
             }
             VoicePhase::Recording => {
@@ -686,10 +780,14 @@ impl Editor {
                     // with the device either way.
                     self.voice_capture = None;
                     self.voice_finishing = false;
+                    // The waveform belongs to a recording that is over: leaving
+                    // it up would paint a frozen strip beside the spinner.
+                    self.voice_levels.clear();
                     changed = true;
                     match answer {
-                        Ok(wav) => {
-                            self.voice_transcription = Some(voice_input::Transcription::start(wav));
+                        Ok(recording) => {
+                            self.voice_transcription =
+                                Some(voice_input::Transcription::start(recording));
                         }
                         Err(message) => self.show_notice(message, cx),
                     }
@@ -706,19 +804,28 @@ impl Editor {
             self.voice_transcription = None;
             changed = true;
             match answer {
-                Ok(text) if text.trim().is_empty() => {
+                Ok(spoken) if spoken.text.trim().is_empty() => {
                     self.show_notice("The microphone caught nothing.", cx);
                 }
-                Ok(text) => self.insert_dictation(&text, cx),
+                Ok(spoken) => self.land_voice(spoken, cx),
                 Err(message) => self.show_notice(message, cx),
             }
         }
-        // The counter moves once a second, so a tick that changed no digit
-        // leaves the frame alone instead of repainting ten times a second.
-        if let Some(capture) = self.voice_capture.as_ref() {
-            let secs = capture.elapsed().as_secs();
+        // The counter moves once a second; the waveform moves on every tick.
+        // Both are read out of the capture before anything is assigned, so the
+        // borrow of the handle does not overlap the writes to the fields it
+        // feeds.
+        let meter = self
+            .voice_capture
+            .as_ref()
+            .map(|capture| (capture.elapsed().as_secs(), capture.levels()));
+        if let Some((secs, levels)) = meter {
             if secs != self.voice_secs {
                 self.voice_secs = secs;
+                changed = true;
+            }
+            if levels != self.voice_levels {
+                self.voice_levels = levels;
                 changed = true;
             }
         }
@@ -730,6 +837,35 @@ impl Editor {
             self.voice_looping = false;
         }
         keep
+    }
+
+    /// Put a finished dictation where it belongs (#3044).
+    ///
+    /// A transcript with a saved clip is a voice message, not a draft: it goes
+    /// out as a turn the moment it lands, the way a voice note sent to a
+    /// channel does, and the row it leaves behind carries the clip. A
+    /// transcription with no clip (the encoder or the folder failed) is typed
+    /// in at the caret instead, so the words are never lost over a file.
+    fn land_voice(&mut self, spoken: voice_input::Spoken, cx: &mut Context<Self>) {
+        let Some(path) = spoken.audio else {
+            self.insert_dictation(&spoken.text, cx);
+            return;
+        };
+        let payload = format!("{} {}", spoken.text.trim(), voice_marker(&path));
+        crate::logging::info(&format!(
+            "voice capture: sending {} character(s) with {}",
+            spoken.text.chars().count(),
+            path.display()
+        ));
+        // Deferred by one turn of the executor: this runs inside the tick's
+        // own update of this editor, and the send the payload becomes walks
+        // every composer, this one included (#3044).
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VOICE_EMIT_DELAY).await;
+            this.update(cx, |_editor, cx| cx.emit(EditorEvent::Sent(payload)))
+                .ok();
+        })
+        .detach();
     }
 
     /// Put a finished dictation in the field at the caret (#3044).
@@ -1729,6 +1865,17 @@ impl Editor {
         // Every key restarts the caret's blink, so the field goes quiet a
         // moment after typing stops (#2745).
         self.poke_caret(cx);
+        // Esc ends a recording before anything else reads the key (#3044). The
+        // microphone is holding the device and the row is counting at the
+        // person; escape mid-sentence means "stop this", never "close the
+        // card behind it". Checked ahead of the composition and menu cases for
+        // that reason, and the click on the stop square takes the same path.
+        if ev.keystroke.key == "escape" && self.voice_phase() == VoicePhase::Recording {
+            window.prevent_default();
+            cx.stop_propagation();
+            self.toggle_dictation(cx);
+            return;
+        }
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {
             window.prevent_default();
             cx.stop_propagation();
@@ -2625,7 +2772,12 @@ impl Render for Editor {
                 // The microphone closes the row (#3044), where the messaging
                 // apps put theirs: the paperclip attaches on the left, the
                 // voice control sits at the caret's own end.
-                .child(mic(self.voice_phase(), self.voice_secs, cx)),
+                .child(mic(
+                    self.voice_phase(),
+                    self.voice_secs,
+                    &self.voice_levels,
+                    cx,
+                )),
         );
         let root = div()
             .relative()
@@ -2968,12 +3120,13 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 /// line instead of a control and an afterthought.
 ///
 /// It carries the phase itself. Idle is the quiet grey the paperclip wears;
-/// recording turns it red and puts the elapsed time beside it, because a
-/// control that just started the microphone has to say so; a WAV being built
-/// keeps the red, and the transcription turns amber, the same "working" tone
-/// the rest of the window uses. Like the paperclip, the colour goes into the
-/// vector and the hover raises the control's opacity.
-fn mic(phase: VoicePhase, secs: u64, cx: &mut Context<Editor>) -> impl IntoElement {
+/// recording turns it red, puts the elapsed time and a live waveform beside it,
+/// and swaps the microphone for a stop square, because a control that just
+/// started the microphone has to say so and has to say how to end it; a WAV
+/// being built keeps the red, and the transcription turns amber, the same
+/// "working" tone the rest of the window uses. Like the paperclip, the colour
+/// goes into the vector and the hover raises the control's opacity.
+fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -> impl IntoElement {
     let palette = palette::current();
     let colour = match phase {
         VoicePhase::Idle => palette.text_muted,
@@ -2992,17 +3145,28 @@ fn mic(phase: VoicePhase, secs: u64, cx: &mut Context<Editor>) -> impl IntoEleme
         .cursor_pointer()
         .opacity(if phase == VoicePhase::Idle { 0.8 } else { 1.0 })
         .hover(|d| d.opacity(1.0));
-    // The counter sits in the row, left of the mark: a red microphone alone
-    // says "something is happening", never "for how long", and the one thing
-    // a person wants to know mid-sentence is that the thing is still running.
-    if phase == VoicePhase::Recording {
-        control = control.child(
-            div()
-                .text_size(px(11.0))
-                .text_color(rgb(palette.red))
-                .child(format!("{}:{:02}", secs / 60, secs % 60)),
-        );
-    }
+    // While the microphone is open the control becomes a recording strip: the
+    // counter says how long, the wave says it is hearing something, and the
+    // mark on the end is the stop square instead of the microphone. One control
+    // whose meaning changes with the state, which is how every recorder works
+    // and why there is no second button to find (#3044).
+    let mark: gpui::AnyElement = if phase == VoicePhase::Recording {
+        control = control
+            // The counter sits in the row, left of the wave: a red mark alone
+            // says "something is happening", never "for how long", and the one
+            // thing a person wants to know mid-sentence is that the thing is
+            // still running.
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(palette.red))
+                    .child(format!("{}:{:02}", secs / 60, secs % 60)),
+            )
+            .child(waveform(levels, palette.red));
+        crate::icon::stop_icon(colour, 1.05).into_any_element()
+    } else {
+        crate::icon::mic_icon(colour, 1.25).into_any_element()
+    };
     control
         .child(
             div()
@@ -3011,7 +3175,7 @@ fn mic(phase: VoicePhase, secs: u64, cx: &mut Context<Editor>) -> impl IntoEleme
                 .items_center()
                 .justify_center()
                 .size(gpui::rems(1.8))
-                .child(crate::icon::mic_icon(colour, 1.25)),
+                .child(mark),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -3020,6 +3184,42 @@ fn mic(phase: VoicePhase, secs: u64, cx: &mut Context<Editor>) -> impl IntoEleme
                 this.toggle_dictation(cx);
             }),
         )
+}
+
+/// How many meter readings the waveform draws.
+///
+/// The capture keeps ~1.1 s of readings; the strip shows the last two thirds of
+/// a second, which is about as far back as the eye reads a scroll, and keeps
+/// the control from growing into the field's text.
+const WAVE_BARS: usize = 34;
+
+/// The live meter beside the counter (#3044).
+///
+/// One bar per reading, oldest on the left, newest on the right, so the strip
+/// scrolls the way a waveform should and its right edge is always what the
+/// microphone heard a moment ago. A bar never drops below two pixels: an empty
+/// strip and a silent microphone have to look different, or a muted device
+/// reads as "still starting up" forever.
+fn waveform(levels: &[f32], colour: u32) -> impl IntoElement {
+    let shown = &levels[levels.len().saturating_sub(WAVE_BARS)..];
+    let mut row = div()
+        .flex()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(px(1.5))
+        .h(px(14.0));
+    for level in shown {
+        row = row.child(
+            div()
+                .flex_none()
+                .w(px(2.0))
+                .h(px(2.0 + level.clamp(0.0, 1.0) * 12.0))
+                .rounded(px(1.0))
+                .bg(rgb(colour)),
+        );
+    }
+    row
 }
 
 /// The keybindings the editor needs, registered once on the App. They are
@@ -4601,7 +4801,7 @@ mod tests {
             .find("child(paperclip(cx))")
             .expect("the row builds the attachment control");
         let mic_at = render
-            .find("child(mic(self.voice_phase(), self.voice_secs, cx))")
+            .find("child(mic(")
             .expect("the row builds the dictation control");
         assert!(
             clip_at < input_at && input_at < mic_at,

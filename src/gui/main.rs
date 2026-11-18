@@ -107,6 +107,7 @@ mod topic_tabs;
 mod transcript;
 mod usage_view;
 mod voice_input;
+mod voice_play;
 mod window_controls;
 
 use crate::composer_view::{
@@ -755,6 +756,17 @@ struct Dashboard {
     /// a picker, not a setting, so it folds itself after a bounded idle period
     /// instead of staying open until the window restarts.
     rail_chips_expanded: std::collections::HashMap<Uuid, std::time::Instant>,
+    /// The conversations whose turn is running a voice message (#3044). A turn
+    /// started from a recording is answered with speech once it settles, the
+    /// way a channel answers a voice note, and this is how the settle knows
+    /// which turns those are: the transcript is ordinary text by the time it
+    /// reaches the bridge, and nothing downstream can tell it apart from typing.
+    voice_turns: std::collections::HashSet<Uuid>,
+    /// The clip the window is playing right now (#3044). A card draws a stop
+    /// square while its own file sounds, and the player clears the slot the
+    /// moment the clip ends, so this field is what the poll tick compares
+    /// against: one repaint where the two disagree, none while they match.
+    voice_playing: Option<std::path::PathBuf>,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -6125,6 +6137,8 @@ fn main() {
                         seeker_find_gen: 0,
                         seeker_scheduled_query: String::new(),
                         rail_chips_expanded: std::collections::HashMap::new(),
+                        voice_turns: std::collections::HashSet::new(),
+                        voice_playing: None,
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
@@ -6298,14 +6312,15 @@ fn main() {
                 {
                     let dashboard = view.downgrade();
                     view.update(cx, |this, _| {
-                        this.copy_drag.set_open_target_listener(Rc::new(move |target, cx| {
-                            if dashboard
-                                .update(cx, |this, cx| this.open_transcript_target(target, cx))
-                                .is_err()
-                            {
-                                logging::info("transcript link: window is gone");
-                            }
-                        }));
+                        this.copy_drag
+                            .set_open_target_listener(Rc::new(move |target, cx| {
+                                if dashboard
+                                    .update(cx, |this, cx| this.open_transcript_target(target, cx))
+                                    .is_err()
+                                {
+                                    logging::info("transcript link: window is gone");
+                                }
+                            }));
                     });
                 }
                 // Custom icon images are read once at startup, not per paint
@@ -6874,7 +6889,11 @@ mod tests {
             },
             at,
         );
-        assert_eq!(live.answer(), Some("I cannot use tools."), "the chunk is what the bubble drew");
+        assert_eq!(
+            live.answer(),
+            Some("I cannot use tools."),
+            "the chunk is what the bubble drew"
+        );
         super::fold_live(
             &mut live,
             ProgressEvent::StripStreamedContent {
@@ -6883,7 +6902,11 @@ mod tests {
             },
             at,
         );
-        assert_eq!(live.answer(), None, "the folded card kept drawing the discarded text");
+        assert_eq!(
+            live.answer(),
+            None,
+            "the folded card kept drawing the discarded text"
+        );
     }
 
     /// The conversation caps at a readable measure in a single pane, and any

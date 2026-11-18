@@ -20,13 +20,20 @@
 //! window's 50 ms poll tick drains: no frame waits on a device or a network.
 //! What leaves this module is a WAV, a string, or a line explaining what failed
 //! (no device, no permission, a format we cannot read, a provider chain with
-//! nothing in it). Audio is never written to disk and nothing here writes
-//! config.
+//! nothing in it). Nothing here writes config.
+//!
+//! A recording that comes back with words is saved as an OGG/Opus voice note
+//! under the profile's `voice/` folder (#3044). That is the file the message
+//! carries, the same artifact a channel would have delivered, so the row can
+//! play back what was actually said instead of only the transcript. The save
+//! happens after the transcription, not before: a recording nobody could
+//! transcribe becomes no message, and a file for it would be an orphan.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -49,8 +56,36 @@ pub(crate) const TARGET_RATE: u32 = 16_000;
 /// far past any spoken turn and keeps the worst case at ~8 MB of f32.
 const MAX_SECONDS: u32 = 120;
 
+/// Where a take with words is kept: `<profile home>/voice/`, beside `memory/`
+/// and `logs/`. A profile's recordings belong to that profile.
+pub(crate) const VOICE_DIR: &str = "voice";
+
+/// What a recording is named, inside [`VOICE_DIR`].
+///
+/// The prefix is the contract, not decoration: a spoken reply is saved in the
+/// same folder, and only a `voice-*` file is a message whose words came out of
+/// the microphone. Without it the reply's own clip would read as a recording
+/// and its marker would be taken back out of text the user actually typed.
+const RECORDING_PREFIX: &str = "voice-";
+
+/// What a spoken reply is named, inside [`VOICE_DIR`].
+///
+/// Deliberately not [`RECORDING_PREFIX`]: the reply is the agent's own voice,
+/// and a turn that began with typing must never be mistaken for one the
+/// microphone heard when the ledger is read back.
+const REPLY_PREFIX: &str = "reply-";
+
 /// How often the capture thread checks whether it should stop.
 const TICK: Duration = Duration::from_millis(20);
+
+/// How many meter readings the composer's waveform keeps.
+///
+/// One reading per tick, newest last, so the strip shows the last ~1.1 seconds
+/// of the microphone: long enough to read as a wave and short enough that the
+/// right-hand edge is what the person is saying right now. The reading is a
+/// peak, not an RMS, because the point of the strip is "the microphone hears
+/// you", and a peak moves on the first syllable instead of averaging it away.
+pub(crate) const METER_BARS: usize = 56;
 
 /// What the capture thread tells the window.
 pub(crate) enum CaptureEvent {
@@ -58,8 +93,31 @@ pub(crate) enum CaptureEvent {
     /// its rate are logged by the thread that read them: the window only needs
     /// to know the microphone is live, and a copy nobody reads is dead weight.
     Started,
-    /// The recording ended. `Ok` carries the finished WAV bytes.
-    Finished(Result<Vec<u8>, String>),
+    /// The recording ended. `Ok` carries the finished take.
+    Finished(Result<Recording, String>),
+}
+
+/// One finished take: the audio, in the two shapes the next two steps want.
+///
+/// The WAV is what a speech endpoint is given, header included, so the
+/// transcription thread never touches the samples. The PCM is the same audio
+/// for the Opus encoder, which takes samples rather than a container. Both are
+/// produced once, on the capture thread, from the same resample.
+pub(crate) struct Recording {
+    /// 16 kHz mono PCM16 WAV, ready to POST.
+    pub(crate) wav: Vec<u8>,
+    /// 16 kHz mono samples, ready to encode.
+    pub(crate) pcm: Vec<i16>,
+}
+
+/// A finished recording with the words it carried (#3044).
+///
+/// `audio` is the saved voice note, and `None` means the save failed: the
+/// transcript is still worth sending, so a missing clip never costs the user
+/// their message.
+pub(crate) struct Spoken {
+    pub(crate) text: String,
+    pub(crate) audio: Option<PathBuf>,
 }
 
 /// One recording in flight.
@@ -70,6 +128,10 @@ pub(crate) enum CaptureEvent {
 pub(crate) struct Capture {
     stop: Arc<AtomicBool>,
     events: Receiver<CaptureEvent>,
+    /// The rolling peak meter the composer's waveform draws, newest last. The
+    /// capture thread appends one reading per tick and trims the front, so the
+    /// window reads a snapshot instead of racing the device.
+    levels: Arc<Mutex<Vec<f32>>>,
     started: Instant,
 }
 
@@ -82,11 +144,13 @@ impl Capture {
     /// as the first `CaptureEvent`.
     pub(crate) fn start() -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let levels: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
         let (tx, events) = channel();
         let flag = Arc::clone(&stop);
+        let meter = Arc::clone(&levels);
         let spawned = std::thread::Builder::new()
             .name("gui-voice-capture".into())
-            .spawn(move || run(tx, flag));
+            .spawn(move || run(tx, flag, meter));
         if let Err(e) = spawned {
             let (tx, rx) = channel();
             let _ = tx.send(CaptureEvent::Finished(Err(format!(
@@ -95,12 +159,14 @@ impl Capture {
             return Self {
                 stop,
                 events: rx,
+                levels,
                 started: Instant::now(),
             };
         }
         Self {
             stop,
             events,
+            levels,
             started: Instant::now(),
         }
     }
@@ -125,6 +191,19 @@ impl Capture {
     pub(crate) fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
+
+    /// The meter's current window, oldest first.
+    ///
+    /// A snapshot, not a handle: the composer paints whatever was true when the
+    /// frame was built, and the device keeps writing underneath. An empty
+    /// vector is a recording that has not delivered its first tick yet, which
+    /// the waveform draws as a flat line rather than a gap.
+    pub(crate) fn levels(&self) -> Vec<f32> {
+        match self.levels.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
 }
 
 impl Drop for Capture {
@@ -143,22 +222,22 @@ impl Drop for Capture {
 /// boot is what makes the window inherit whatever the terminal and the channels
 /// are set to, including an edit the reloader applied a moment ago.
 pub(crate) struct Transcription {
-    result: Receiver<Result<String, String>>,
+    result: Receiver<Result<Spoken, String>>,
 }
 
 impl Transcription {
     /// Send a finished recording through the configured chain, off the UI
-    /// thread.
+    /// thread, and save the voice note beside the words.
     ///
     /// Returns immediately. The UI keeps polling the same 50 ms tick it uses
     /// for the microphone, so the answer lands without a second timer.
-    pub(crate) fn start(wav: Vec<u8>) -> Self {
+    pub(crate) fn start(recording: Recording) -> Self {
         let (tx, result) = channel();
         let spawned = std::thread::Builder::new()
             .name("gui-voice-stt".into())
             .stack_size(STACK_BYTES)
             .spawn(move || {
-                let _ = tx.send(transcribe_wav(wav));
+                let _ = tx.send(transcribe(recording));
             });
         if let Err(e) = spawned {
             let (tx, result) = channel();
@@ -169,12 +248,100 @@ impl Transcription {
     }
 
     /// Take the answer if it has landed. Non-blocking.
-    pub(crate) fn try_take(&self) -> Option<Result<String, String>> {
+    pub(crate) fn try_take(&self) -> Option<Result<Spoken, String>> {
         match self.result.try_recv() {
             Ok(answer) => Some(answer),
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
     }
+}
+
+/// Transcribe one take, then keep its audio as a voice note.
+///
+/// The order matters: a take with no words becomes no message, so saving first
+/// would leave a file nothing points at. A save that fails is logged and the
+/// words still go out, because the transcript is what the agent answers.
+fn transcribe(recording: Recording) -> Result<Spoken, String> {
+    let text = transcribe_wav(recording.wav)?;
+    let audio = match save_voice_note(&recording.pcm) {
+        Ok(path) => Some(path),
+        Err(reason) => {
+            logging::error(&format!("voice capture: {reason}"));
+            None
+        }
+    };
+    Ok(Spoken { text, audio })
+}
+
+/// Whether a path is one of the window's own recordings (#3044).
+///
+/// Only a recording is a message whose words came out of speech, so only its
+/// marker is taken back out of the text the agent reads: the card in the row is
+/// what carries the audio, and the agent gets the words it can answer. A clip
+/// the user picked with the paperclip is a file the agent may need to open, and
+/// that marker has to survive into the prompt.
+pub(crate) fn is_recording(path: &Path) -> bool {
+    let folder = opencrabs::config::opencrabs_home().join(VOICE_DIR);
+    path.parent() == Some(folder.as_path())
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(RECORDING_PREFIX))
+}
+
+/// Write one take into the profile's `voice/` folder as an OGG/Opus file.
+///
+/// The same container the channels send, so the clip in the transcript is the
+/// artifact a recipient of a voice note would have received. Named by the
+/// millisecond it was saved: two recordings in one second would otherwise
+/// overwrite each other, and the older message would start playing the newer
+/// audio.
+fn save_voice_note(pcm: &[i16]) -> Result<PathBuf, String> {
+    let ogg = opencrabs::channels::voice::opus::encode_ogg_opus(pcm, TARGET_RATE)
+        .map_err(|e| format!("the recording would not encode as a voice note: {e:#}"))?;
+    let path = write_clip(&ogg, RECORDING_PREFIX)?;
+    logging::info(&format!(
+        "voice capture: saved {} bytes of ogg to {}",
+        ogg.len(),
+        path.display()
+    ));
+    Ok(path)
+}
+
+/// Keep one synthesized answer beside the recordings, for the turn that began
+/// as one (#3044).
+///
+/// `synthesize` already returns OGG/Opus, so the bytes are written as they
+/// arrive: re-encoding a finished clip would only cost time and quality. The
+/// name does not start with [`RECORDING_PREFIX`], so a spoken reply is never
+/// mistaken for something the microphone heard.
+pub(crate) fn save_reply_audio(ogg: &[u8]) -> Result<PathBuf, String> {
+    let path = write_clip(ogg, REPLY_PREFIX)?;
+    logging::info(&format!(
+        "voice reply: saved {} bytes of ogg to {}",
+        ogg.len(),
+        path.display()
+    ));
+    Ok(path)
+}
+
+/// Write one finished clip into the profile's `voice/` folder, named for the
+/// millisecond it was saved.
+///
+/// Two recordings inside one second would otherwise overwrite each other, and
+/// the older message would start playing the newer audio.
+fn write_clip(bytes: &[u8], prefix: &str) -> Result<PathBuf, String> {
+    let dir = opencrabs::config::opencrabs_home().join(VOICE_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("the voice folder would not open ({}): {e}", dir.display()))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{prefix}{stamp}.ogg"));
+    std::fs::write(&path, bytes)
+        .map_err(|e| format!("the clip would not save ({}): {e}", path.display()))?;
+    Ok(path)
 }
 
 fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
@@ -220,14 +387,18 @@ fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
 const STACK_BYTES: usize = 4 * 1024 * 1024;
 
 /// The capture thread's body: open, record, encode, report.
-fn run(tx: Sender<CaptureEvent>, stop: Arc<AtomicBool>) {
-    if let Err(reason) = record(&tx, &stop) {
+fn run(tx: Sender<CaptureEvent>, stop: Arc<AtomicBool>, meter: Arc<Mutex<Vec<f32>>>) {
+    if let Err(reason) = record(&tx, &stop, &meter) {
         logging::error(&format!("voice capture: {reason}"));
         let _ = tx.send(CaptureEvent::Finished(Err(reason)));
     }
 }
 
-fn record(tx: &Sender<CaptureEvent>, stop: &Arc<AtomicBool>) -> Result<(), String> {
+fn record(
+    tx: &Sender<CaptureEvent>,
+    stop: &Arc<AtomicBool>,
+    meter: &Arc<Mutex<Vec<f32>>>,
+) -> Result<(), String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -247,11 +418,17 @@ fn record(tx: &Sender<CaptureEvent>, stop: &Arc<AtomicBool>) -> Result<(), Strin
 
     let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
     let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // The loudest sample since the last tick, as raw f32 bits. The callback
+    // stores it and the tick below takes it, which is what turns a stream of
+    // buffers of unknown size into a steady 50 readings a second: the waveform
+    // scrolls at the same speed whatever the device's buffer size happens to
+    // be.
+    let peak = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let cap = (rate as usize)
         .saturating_mul(channels as usize)
         .saturating_mul(MAX_SECONDS as usize);
 
-    let stream = build_stream(&device, &config, format, &buffer, &failure, cap)?;
+    let stream = build_stream(&device, &config, format, &buffer, &failure, &peak, cap)?;
     stream
         .play()
         .map_err(|e| format!("the microphone stream would not start: {e}"))?;
@@ -260,6 +437,10 @@ fn record(tx: &Sender<CaptureEvent>, stop: &Arc<AtomicBool>) -> Result<(), Strin
 
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(TICK);
+        push_level(
+            meter,
+            f32::from_bits(peak.swap(0.0f32.to_bits(), Ordering::Relaxed)),
+        );
     }
 
     // Drop the stream before reading the buffer, so no callback is mid-push
@@ -286,14 +467,15 @@ fn record(tx: &Sender<CaptureEvent>, stop: &Arc<AtomicBool>) -> Result<(), Strin
         );
     }
     let at_target = resample(&mono, rate, TARGET_RATE);
-    let wav = wav_bytes(&at_target, TARGET_RATE);
+    let pcm = pcm16(&at_target);
+    let wav = wav_bytes_from_pcm(&pcm, TARGET_RATE);
     logging::info(&format!(
         "voice capture: {} at {rate} Hz -> {:.1}s of 16 kHz mono, {} bytes",
         name,
         mono.len() as f32 / rate as f32,
         wav.len()
     ));
-    let _ = tx.send(CaptureEvent::Finished(Ok(wav)));
+    let _ = tx.send(CaptureEvent::Finished(Ok(Recording { wav, pcm })));
     Ok(())
 }
 
@@ -308,17 +490,27 @@ fn build_stream(
     format: SampleFormat,
     buffer: &Arc<Mutex<Vec<f32>>>,
     failure: &Arc<Mutex<Option<String>>>,
+    peak: &Arc<AtomicU32>,
     cap: usize,
 ) -> Result<cpal::Stream, String> {
     macro_rules! open {
         ($ty:ty, $convert:expr) => {{
             let sink = Arc::clone(buffer);
             let errors = Arc::clone(failure);
+            let loudest = Arc::clone(peak);
             let convert: fn($ty) -> f32 = $convert;
             device
                 .build_input_stream(
                     config,
                     move |data: &[$ty], _: &cpal::InputCallbackInfo| {
+                        // The meter is a monotonic max over the tick, so it
+                        // keeps up on the device's thread without a lock: two
+                        // relaxed atomics per buffer, nothing the audio path
+                        // can block on.
+                        let here = data
+                            .iter()
+                            .fold(0.0f32, |loud, s| loud.max(convert(*s).abs()));
+                        loudest.fetch_max(here.to_bits(), Ordering::Relaxed);
                         let mut guard = match sink.lock() {
                             Ok(guard) => guard,
                             Err(poisoned) => poisoned.into_inner(),
@@ -348,6 +540,25 @@ fn build_stream(
             "the microphone records in {other:?}, which this build cannot read"
         )),
     }
+}
+
+/// Append one reading to the meter, keeping its window fixed.
+///
+/// A `Vec` of 56 floats shifted by one is a memmove of 224 bytes on a thread
+/// that sleeps 20 ms between pushes, so a deque's bookkeeping would cost more
+/// than it saves. The lock is only ever held for that push: the composer takes
+/// a clone and lets go.
+fn push_level(meter: &Arc<Mutex<Vec<f32>>>, peak: f32) {
+    let mut guard = match meter.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.len() >= METER_BARS {
+        guard.remove(0);
+    }
+    // Full scale is 1.0 and the strip draws to the top of its box at 1.0; a
+    // clipped input would otherwise paint past the row.
+    guard.push(peak.clamp(0.0, 1.0));
 }
 
 /// Fold an interleaved buffer down to mono by averaging each frame.
@@ -405,6 +616,23 @@ pub(crate) fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
 /// layout is the canonical 44-byte one and nothing here assumes a seekable
 /// file, because the bytes go straight to an HTTP body.
 pub(crate) fn wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    wav_bytes_from_pcm(&pcm16(samples), sample_rate)
+}
+
+/// Fold f32 samples to the PCM16 the WAV and the voice note both carry.
+///
+/// One conversion, shared by both: a clip whose WAV and whose saved voice note
+/// were scaled differently would play back at two volumes depending on which
+/// one you opened.
+pub(crate) fn pcm16(samples: &[f32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+        .collect()
+}
+
+/// The same WAV, from samples that are already folded.
+pub(crate) fn wav_bytes_from_pcm(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     const CHANNELS: u16 = 1;
     const BITS: u16 = 16;
 
@@ -428,9 +656,7 @@ pub(crate) fn wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(&data_len.to_le_bytes());
 
     for sample in samples {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let scaled = (clamped * i16::MAX as f32).round() as i16;
-        out.extend_from_slice(&scaled.to_le_bytes());
+        out.extend_from_slice(&sample.to_le_bytes());
     }
     out
 }
@@ -549,5 +775,26 @@ mod tests {
         let wav = wav_bytes(&[], TARGET_RATE);
         assert_eq!(wav.len(), 44);
         assert_eq!(u32_at(&wav, 40), 0);
+    }
+
+    /// The meter is a fixed window that scrolls: the oldest reading goes when
+    /// the strip is full, and a reading past full scale or below silence is
+    /// clamped so the waveform can never paint outside its box.
+    #[test]
+    fn the_meter_keeps_a_fixed_window_and_clamps() {
+        let meter: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        for i in 0..(METER_BARS + 10) {
+            push_level(&meter, i as f32 / 100.0);
+        }
+        let levels = meter.lock().map(|g| g.clone()).unwrap_or_default();
+        assert_eq!(levels.len(), METER_BARS, "the window never grows");
+        assert_eq!(levels[0], 0.10, "the oldest ten readings were dropped");
+        assert_eq!(levels[METER_BARS - 1], (METER_BARS + 9) as f32 / 100.0);
+
+        push_level(&meter, 4.0);
+        push_level(&meter, -2.0);
+        let levels = meter.lock().map(|g| g.clone()).unwrap_or_default();
+        assert_eq!(levels[METER_BARS - 2], 1.0, "above full scale clamps");
+        assert_eq!(levels[METER_BARS - 1], 0.0, "below zero clamps to silence");
     }
 }
