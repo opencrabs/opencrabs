@@ -32,6 +32,7 @@ pub mod text_cleanup;
 
 pub(crate) mod service;
 
+pub use service::transcribe_with_language;
 pub use service::{synthesize, synthesize_speech, transcribe, transcribe_audio};
 
 #[cfg(feature = "local-stt")]

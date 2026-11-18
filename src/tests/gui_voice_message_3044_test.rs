@@ -7,9 +7,12 @@
 //! the loop Telegram has always run, and it only holds together while five
 //! rules do:
 //!
-//! * the stop control ends the recording and attaches the take, because a stop
+//! * the stop control ends the recording and previews the take, because a stop
 //!   is not a decision to send;
 //!
+//! * the take is previewed above the row with its own wave and transcript, and
+//!   it is spent by the send that carries it, so a clip never rides the next
+//!   message;
 //! * the marker carries the words and the clip in one string, and the send path
 //!   splits them so the agent reads prose and never a path;
 //! * a recording is never mistaken for a reply, or a spoken answer would be
@@ -66,24 +69,141 @@ fn a_voice_message_travels_as_words_plus_one_marker() {
     );
 }
 
-/// The stop control ends the take, it does not send it. The words land in the
-/// field where they can be read and corrected, and the clip joins the
-/// composer's attachments, so the turn leaves only when the person in front of
-/// the window says so (#3044).
+/// The stop control ends the take, it does not send it. The clip and the words
+/// wait in the composer's own preview, where they can be heard and read back
+/// before Enter spends them (#3044).
 #[test]
 fn the_stop_attaches_the_take_and_leaves_the_send_to_the_user() {
-    let land = editor("fn land_voice(", "fn insert_dictation(");
+    let land = editor("fn land_voice(", "/// Throw away the take");
     assert!(
-        land.contains("self.insert_dictation(&spoken.text, cx)"),
-        "the words land in the field, where the person can fix what the microphone misheard"
-    );
-    assert!(
-        land.contains("self.attach_paths([path.clone()])"),
-        "the clip waits in the composer's attachment row instead of going out"
+        land.contains("self.voice_draft = Some(VoiceDraft {"),
+        "the take waits in the composer's preview instead of going out"
     );
     assert!(
         !land.contains("EditorEvent::Sent"),
         "a stop is not a send: Enter is the one thing that emits the message"
+    );
+    // A transcription whose clip could not be saved still has words worth
+    // sending, and the field is the only place left for them.
+    assert!(
+        land.contains("self.insert_dictation(&spoken.text, cx)"),
+        "a take with no clip keeps its words in the field rather than losing them"
+    );
+}
+
+/// A stopped take is a message the user still holds, so it is drawn where it
+/// can be read back before it is spent: under any attachment chip, above the
+/// input row, with the wave and the length of the take it came from (#3044).
+#[test]
+fn the_take_previews_above_the_row_with_its_own_shape() {
+    let render = EDITOR
+        .split("fn render(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn attachment_strip(").next())
+        .expect("editor render");
+    let clip_at = render
+        .find("body.child(attachment_strip(&self.attachments, cx))")
+        .expect("the chips are drawn before the row");
+    let voice_at = render
+        .find("body.child(voice_strip(draft, cx))")
+        .expect("the take is drawn before the row");
+    let row_at = render
+        .find(r#".id("composer-input")"#)
+        .expect("the row builds the input");
+    assert!(
+        clip_at < voice_at && voice_at < row_at,
+        "a take with a chip attached reads chip, then take, then the words"
+    );
+
+    let strip = editor("fn voice_strip(", "/// The keybindings the editor needs");
+    assert!(
+        strip.contains("waveform(&draft.levels"),
+        "the preview draws the shape that was recorded, not a pattern invented for it"
+    );
+    assert!(
+        strip.contains("crate::voice_play::duration(&draft.clip)"),
+        "the length comes from the file the message will carry"
+    );
+    assert!(
+        strip.contains("crate::voice_play::toggle(&clip)"),
+        "the clip can be heard before it is spent"
+    );
+    assert!(
+        strip.contains("\"voice-preview-discard\""),
+        "the ✕ is its own element, so throwing a take away cannot also move the caret"
+    );
+    assert!(
+        !strip.contains("EditorEvent::Sent"),
+        "the preview holds the message; Enter is still the only thing that sends it"
+    );
+}
+
+/// Enter spends the take exactly once. A second Enter on the empty composer
+/// must not send the same words and the same clip again, which is what the
+/// transfer out of the field is for.
+#[test]
+fn one_send_spends_the_take() {
+    let send = editor("fn send(", "fn payload_with_reply(");
+    assert!(
+        send.contains("let voice = self.voice_draft.take();"),
+        "the take leaves the field with the message it belongs to"
+    );
+    assert!(
+        send.contains("voice.is_none()"),
+        "a take alone is something to send, even with no character typed"
+    );
+    assert!(
+        send.contains("<<AUD:{}>>"),
+        "the clip goes out as the marker the row draws as a player"
+    );
+}
+
+/// Throwing a take away is one action: the draft goes, the microphone state
+/// goes, and the player stops singing a clip the composer no longer shows.
+#[test]
+fn the_take_can_be_thrown_away() {
+    let discard = editor("fn discard_voice(", "fn insert_dictation(");
+    assert!(
+        discard.contains("self.voice_draft.take()"),
+        "the draft is consumed rather than left behind"
+    );
+    assert!(
+        discard.contains("crate::voice_play::is_playing(&draft.clip)")
+            && discard.contains("crate::voice_play::toggle(&draft.clip)"),
+        "a discarded take goes silent instead of playing to an empty composer"
+    );
+    assert!(
+        discard.contains("self.voice_levels.clear()"),
+        "the meter readings belong to the discarded take"
+    );
+    // A take is only replaced by sending or discarding it: a second recording
+    // would land on top of words the person can still read (#3044).
+    let toggle = editor("fn toggle_dictation(", "fn pump_voice(");
+    assert!(
+        toggle.contains("self.voice_draft.is_some()"),
+        "the microphone refuses to start over a take still in the preview"
+    );
+}
+
+/// A take belongs to the message and the conversation it was recorded for. It
+/// is dropped wherever the field is emptied, or a clip recorded in one
+/// conversation would arrive in a different one (#3044).
+#[test]
+fn the_take_never_rides_the_next_message() {
+    let clear = editor("fn clear_after_send(", "fn ");
+    assert!(
+        clear.contains("self.voice_draft = None"),
+        "an emptied field cannot leave a take waiting for the next Enter"
+    );
+    let switch = editor("pub fn begin_conversation(", "pub fn ");
+    assert!(
+        switch.contains("self.voice_draft = None"),
+        "the take follows the attachments out: a new conversation starts clean"
+    );
+    let empty = editor("pub fn is_empty(", "pub fn discard_draft(");
+    assert!(
+        empty.contains("self.voice_draft.is_none()"),
+        "a take is a draft, so Ctrl+C has something to throw away"
     );
 }
 
@@ -100,6 +220,17 @@ fn the_agent_reads_the_words_and_the_row_keeps_the_clip() {
     assert!(
         send.contains("self.voice_turns.insert(session)"),
         "the turn is remembered as spoken, so the settle can answer out loud"
+    );
+    // The agent cannot play the clip, so the words have to arrive labelled as
+    // speech: a transcript handed over as ordinary prose gets an ordinary
+    // answer, and the whole point of a voice note is the spoken reply.
+    assert!(
+        send.contains("editor::VOICE_NOTE_PREFIX"),
+        "the prompt says the words were spoken"
+    );
+    assert!(
+        send.contains("format!(\"{spoken} {marker}\")"),
+        "the note goes to the agent only: the row shows the words and the clip"
     );
     assert!(
         region_in(DASHBOARD_TURNS, "fn send_message_showing(", "fn ")

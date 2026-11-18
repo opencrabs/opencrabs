@@ -38,7 +38,12 @@ impl Dashboard {
                 .is_some_and(|path| crate::voice_input::is_recording(path))
         });
         let text = match &voice {
-            Some((spoken, _)) => spoken.clone(),
+            // The agent cannot play the clip, so the one thing it has to learn
+            // from the marker is that the words in front of it were spoken: a
+            // transcript read as a typed question gets a typed answer, and the
+            // point of a voice note is the spoken reply (#3044). Added where
+            // the marker comes off, so the note never reaches the screen.
+            Some((spoken, _)) => format!("{} {spoken}", editor::VOICE_NOTE_PREFIX),
             None => text,
         };
         let display = match &voice {
@@ -531,7 +536,9 @@ impl Dashboard {
                 .is_some_and(|path| crate::voice_input::is_recording(path))
         });
         let text = match &voice {
-            Some((spoken, _)) => spoken.clone(),
+            // Same note as the pane path (#3044): the words were spoken, and a
+            // transcript handed over as ordinary prose gets an ordinary answer.
+            Some((spoken, _)) => format!("{} {spoken}", editor::VOICE_NOTE_PREFIX),
             None => text,
         };
         let display = match &voice {

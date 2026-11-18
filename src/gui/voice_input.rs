@@ -114,10 +114,12 @@ pub(crate) struct Recording {
 ///
 /// `audio` is the saved voice note, and `None` means the save failed: the
 /// transcript is still worth sending, so a missing clip never costs the user
-/// their message.
+/// their message. `seconds` is how long the take ran, measured from the samples
+/// rather than the clock, so it is the length of the clip the user will hear.
 pub(crate) struct Spoken {
     pub(crate) text: String,
     pub(crate) audio: Option<PathBuf>,
+    pub(crate) seconds: f32,
 }
 
 /// One recording in flight.
@@ -262,7 +264,8 @@ impl Transcription {
 /// would leave a file nothing points at. A save that fails is logged and the
 /// words still go out, because the transcript is what the agent answers.
 fn transcribe(recording: Recording) -> Result<Spoken, String> {
-    let text = transcribe_wav(recording.wav)?;
+    let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
+    let (text, language) = transcribe_wav(recording.wav)?;
     let audio = match save_voice_note(&recording.pcm) {
         Ok(path) => Some(path),
         Err(reason) => {
@@ -270,7 +273,15 @@ fn transcribe(recording: Recording) -> Result<Spoken, String> {
             None
         }
     };
-    Ok(Spoken { text, audio })
+    logging::info(&format!(
+        "voice capture: {seconds:.1}s heard as {}",
+        language.unwrap_or_else(|| "an unreported language".to_string()),
+    ));
+    Ok(Spoken {
+        text,
+        audio,
+        seconds,
+    })
 }
 
 /// Whether a path is one of the window's own recordings (#3044).
@@ -344,7 +355,7 @@ fn write_clip(bytes: &[u8], prefix: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
+fn transcribe_wav(wav: Vec<u8>) -> Result<(String, Option<String>), String> {
     let config = Config::current();
     let voice = config.voice_config();
     if !voice.stt_enabled {
@@ -361,9 +372,12 @@ fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("the transcription runtime would not start: {e}"))?;
-    let text = runtime
-        .block_on(async move { opencrabs::channels::voice::transcribe(wav, &voice).await })
+    let heard = runtime
+        .block_on(
+            async move { opencrabs::channels::voice::transcribe_with_language(wav, &voice).await },
+        )
         .map_err(|e| format!("{e:#}"))?;
+    let (text, language) = heard;
 
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -373,10 +387,11 @@ fn transcribe_wav(wav: Vec<u8>) -> Result<String, String> {
         );
     }
     logging::info(&format!(
-        "voice capture: transcribed {} character(s)",
-        text.chars().count()
+        "voice capture: transcribed {} character(s) in {}",
+        text.chars().count(),
+        language.as_deref().unwrap_or("an unreported language"),
     ));
-    Ok(text)
+    Ok((text, language))
 }
 
 /// The stack the transcription thread runs on.

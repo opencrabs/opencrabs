@@ -509,7 +509,40 @@ pub struct Editor {
     /// that changes ten times a second, so it is also the only reason the row
     /// repaints while the microphone is open.
     voice_levels: Vec<f32>,
+    /// The take that has been transcribed and is waiting to be sent (#3044).
+    ///
+    /// A recording is a message of its own, so it does not go through the caret:
+    /// the preview under the row is where it lives, and Enter is what puts it on
+    /// the wire.
+    voice_draft: Option<VoiceDraft>,
 }
+
+/// A transcribed take waiting to be sent (#3044).
+///
+/// Holding the words here instead of typing them into the field is the point:
+/// a recording is one message, and pushing its transcript through the caret
+/// would splice it into whatever the person had already written. The preview
+/// under the row is where it is read back, and the clip rides along so the sent
+/// row can draw the very thing that was spoken.
+pub(crate) struct VoiceDraft {
+    /// What the microphone carried.
+    pub(crate) text: String,
+    /// The saved clip the marker on the sent row points at.
+    pub(crate) clip: PathBuf,
+    /// How long the take ran, for the preview's own line.
+    pub(crate) seconds: f32,
+    /// The take's own peaks, so the preview draws the shape that was recorded
+    /// instead of a pattern invented for it.
+    pub(crate) levels: Vec<f32>,
+}
+
+/// What the agent is told about a message that began as speech (#3044).
+///
+/// The row shows the clip, the agent cannot play it, so the one thing it has to
+/// know is that the words in front of it were spoken: that is what tells it to
+/// answer out loud with the voice tools it already has. It is added where the
+/// marker is taken off, so the note never reaches the screen.
+pub const VOICE_NOTE_PREFIX: &str = "[voice note]";
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
 /// about a third of a laptop window: enough to read a paragraph back, never
@@ -620,6 +653,7 @@ impl Editor {
             voice_looping: false,
             voice_secs: 0,
             voice_levels: Vec::new(),
+            voice_draft: None,
         }
     }
 
@@ -700,9 +734,21 @@ impl Editor {
     /// alone, so a double click cannot open a second device. Nothing here
     /// touches config or the network: the two worker threads do that and the
     /// tick collects what they say.
-    fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `pub(crate)` because Seeker's own row hands the job here (#3044): the
+    /// card cannot reach the composer's private state, and a second copy of
+    /// this match would let the row and the button drift apart.
+    pub(crate) fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
         match self.voice_phase() {
             VoicePhase::Idle => {
+                // One take at a time is what the composer holds (#3044). A
+                // second recording would land on top of the first and lose
+                // words the person can still see, so the take waiting in the
+                // preview has to be sent or thrown away first.
+                if self.voice_draft.is_some() {
+                    self.show_notice("Send or discard the voice message first", cx);
+                    return;
+                }
                 self.voice_capture = Some(voice_input::Capture::start());
                 self.voice_finishing = false;
                 self.voice_secs = 0;
@@ -822,33 +868,67 @@ impl Editor {
         keep
     }
 
-    /// Put a finished dictation where it belongs (#3044).
+    /// Turn a finished transcription into a take waiting to be sent (#3044).
     ///
-    /// A transcript with a saved clip is a voice message waiting to be sent,
-    /// not a draft and not a send: the words land in the field and the take
-    /// joins the composer's attachments, exactly where a paperclip attachment
-    /// sits. Stopping the microphone is not deciding to send. A person who
-    /// stops to think, or to fix a word the microphone caught wrong, still has
-    /// the field in front of them, and Enter is the one thing that puts a turn
-    /// on the wire (#3044). A transcription with no clip (the encoder or the
-    /// folder failed) still types its words in at the caret, so what was said
-    /// is never lost over a file.
+    /// The words never enter the field. Stopping the microphone is not deciding
+    /// to send, but it is also not deciding to write: the take gets its own
+    /// preview under the row, with the waveform it was recorded with and the
+    /// transcript beneath it, so a person can read what the microphone thought
+    /// it heard while still holding the message. Enter is the one thing that
+    /// puts a turn on the wire, and the clip rides out as a marker the row
+    /// draws as a playable card.
+    ///
+    /// A transcription whose clip could not be saved still has words worth
+    /// sending, and the field is the only place left to put them, so that case
+    /// keeps typing at the caret rather than losing what was said over a file.
     fn land_voice(&mut self, spoken: voice_input::Spoken, cx: &mut Context<Self>) {
-        self.insert_dictation(&spoken.text, cx);
-        let Some(path) = spoken.audio else {
+        let Some(clip) = spoken.audio else {
+            self.voice_levels.clear();
+            self.insert_dictation(&spoken.text, cx);
             return;
         };
+        // The peaks are taken here rather than copied during the capture: the
+        // recording is over, and the strip under the preview is the only thing
+        // left that has to remember its shape.
+        let levels = std::mem::take(&mut self.voice_levels);
         crate::logging::info(&format!(
-            "voice capture: attached {} character(s) with {}",
+            "voice capture: previewing {} character(s) with {} ({:.1}s)",
             spoken.text.chars().count(),
-            path.display()
+            clip.display(),
+            spoken.seconds,
         ));
-        // A clip that vanished between the save and this line is reported
-        // rather than dropped: an attachment row that silently stayed empty
-        // would read as a failed recording.
-        if self.attach_paths([path.clone()]) == 0 {
-            self.show_notice(format!("Could not attach {}", path.display()), cx);
+        self.voice_draft = Some(VoiceDraft {
+            text: spoken.text,
+            clip,
+            seconds: spoken.seconds,
+            levels,
+        });
+        cx.notify();
+    }
+
+    /// Throw away the take waiting in the composer (#3044).
+    ///
+    /// The ✕ next to the preview, and the one path the microphone state has to
+    /// leave clean: the clip file stays on disk (the transcript may already
+    /// have pointed at it, and a deleted file would turn a sent card silent),
+    /// but nothing of the draft survives to ride the next message.
+    fn discard_voice(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.voice_draft.take() else {
+            return;
+        };
+        // A take silenced before it is thrown away: leaving the player running
+        // would keep a clip the composer no longer shows.
+        if crate::voice_play::is_playing(&draft.clip)
+            && let Err(reason) = crate::voice_play::toggle(&draft.clip)
+        {
+            crate::logging::error(&format!("voice preview stop: {reason}"));
         }
+        self.voice_levels.clear();
+        crate::logging::info(&format!(
+            "voice capture: discarded {:.1}s take, {}",
+            draft.seconds,
+            draft.clip.display(),
+        ));
         cx.notify();
     }
 
@@ -1548,7 +1628,7 @@ impl Editor {
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
-        let picked = if self.attachments.is_empty() {
+        let picked = if self.attachments.is_empty() && self.voice_draft.is_none() {
             self.command_popup()
                 .and_then(|(names, index)| names.get(index).copied())
         } else {
@@ -1562,10 +1642,30 @@ impl Editor {
         }
         let text = self.content.trim().to_string();
         let attachments = self.take_attachments();
-        if text.is_empty() && attachments.is_empty() {
+        // The take is spent by the send that carries it, exactly like an
+        // attachment: a second Enter must not send the same words again
+        // (#3044).
+        let voice = self.voice_draft.take();
+        if text.is_empty() && attachments.is_empty() && voice.is_none() {
             return;
         }
-        let payload = self.payload_with_reply(&text, &attachments);
+        let mut payload = self.payload_with_reply(&text, &attachments);
+        if let Some(draft) = voice {
+            // The clip goes out as the same marker a recorded take always has,
+            // so the sent row draws the card and the agent gets the words plus
+            // the note that they were spoken (#3044).
+            if !payload.is_empty() {
+                payload.push(' ');
+            }
+            payload.push_str(&draft.text);
+            payload.push(' ');
+            payload.push_str(&format!("<<AUD:{}>>", draft.clip.display()));
+            crate::logging::info(&format!(
+                "voice capture: sent {:.1}s take, {}",
+                draft.seconds,
+                draft.clip.display(),
+            ));
+        }
         self.remember(&text);
         self.clear_after_send(cx);
         cx.emit(EditorEvent::Sent(payload));
@@ -1645,6 +1745,11 @@ impl Editor {
     /// Empty the field and put the command list back to its resting state.
     fn clear_after_send(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
+        // A take belongs to the message it was recorded for (#3044). Clearing it
+        // here as well as at the send is the safety net: any other path that
+        // empties the field must not leave a voice message behind to ride the
+        // next one.
+        self.voice_draft = None;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -1665,6 +1770,10 @@ impl Editor {
     pub fn begin_conversation(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.attachments.clear();
+        // A take was recorded for the conversation it was made in (#3044), and
+        // the same rule that drops the attachments drops it: the message would
+        // otherwise arrive in a conversation the speaker was not in.
+        self.voice_draft = None;
         // A reply belongs to the conversation it was opened in, so leaving
         // that conversation drops the chip with the draft (#2827).
         self.reply = None;
@@ -1683,9 +1792,14 @@ impl Editor {
     /// Whether there is anything to throw away: text in the field, or a chip
     /// waiting to fly with it. A reply counts too, because its quoted context
     /// belongs to the next send. A recall counts as text, because its joined
-    /// entries are what the field is showing.
+    /// entries are what the field is showing. A recorded take counts as well
+    /// (#3044): it is a message the user still holds, so Escape and Ctrl+C have
+    /// something to discard even when no character was ever typed.
     pub fn is_empty(&self) -> bool {
-        self.content.trim().is_empty() && self.attachments.is_empty() && self.reply.is_none()
+        self.content.trim().is_empty()
+            && self.attachments.is_empty()
+            && self.voice_draft.is_none()
+            && self.reply.is_none()
     }
 
     /// A Ctrl+C that throws the draft away (#2308). The text and the chips go,
@@ -2715,12 +2829,22 @@ impl Render for Editor {
         if !self.attachments.is_empty() {
             body = body.child(attachment_strip(&self.attachments, cx));
         }
+        // A stopped take waits above the row, where its words can be read back
+        // before Enter spends them (#3044). It is not in the field: the clip
+        // and the transcript are one thing, and typing around them would let a
+        // person cut the take in half without noticing.
+        if let Some(draft) = self.voice_draft.as_ref() {
+            body = body.child(voice_strip(draft, cx));
+        }
         // With a draft in the field the placeholder is gone, so the copy notice
         // gets its own line under the text instead (#2587). It is chrome, never
         // a transcript line: the box grows by nothing when it expires.
         let notice_row_text = self
             .active_notice(Instant::now())
-            .filter(|_| !self.content.is_empty())
+            // A take in the preview is a message in progress even with nothing
+            // typed (#3044), and that is exactly when the composer has to say
+            // why the microphone refused to start over it.
+            .filter(|_| !self.content.is_empty() || self.voice_draft.is_some())
             .map(str::to_string);
         // The attachment control leads the row, as the messaging apps place it
         // (#3037). It used to trail the text on the right, where a control the
@@ -3212,6 +3336,115 @@ fn waveform(levels: &[f32], colour: u32) -> impl IntoElement {
         );
     }
     row
+}
+
+/// The take waiting to be sent, drawn above the input row (#3044).
+///
+/// The microphone's own preview: the clip can be heard before Enter spends it,
+/// the wave is the shape that was recorded rather than a pattern invented for
+/// it, and the transcript sits under both so a person can catch a word the
+/// recogniser got wrong while the message is still theirs to hold. There is no
+/// second send control here on purpose: the composer already has one, and two
+/// senders for one draft is how a message goes out twice.
+fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
+    let palette = palette::current();
+    let playing = crate::voice_play::is_playing(&draft.clip);
+    let tint = if playing { palette.red } else { palette.accent };
+    let clip = draft.clip.clone();
+    let play = cx.listener(move |_this, _ev: &MouseDownEvent, _window, cx| {
+        // The click belongs to the control, not to the composer: without this
+        // the caret would also move into the field and the take would look
+        // like it had been dropped.
+        cx.stop_propagation();
+        match crate::voice_play::toggle(&clip) {
+            Ok(()) => cx.refresh_windows(),
+            Err(reason) => crate::logging::error(&format!("voice preview: {reason}")),
+        }
+    });
+    let discard = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+        cx.stop_propagation();
+        this.discard_voice(cx);
+    });
+    // The length comes from the file, not from the timer that ran the capture:
+    // the two disagree by whatever the encoder trimmed, and the file is the
+    // artifact the message will carry.
+    let length = crate::voice_play::duration(&draft.clip)
+        .map(|secs| format!("{}:{:02}", secs / 60, secs % 60))
+        .unwrap_or_else(|| format!("{:.0}s", draft.seconds.ceil()));
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .p_1()
+        .rounded(px(6.0))
+        .bg(rgb(palette.panel_hi))
+        .child(
+            div()
+                .id("voice-preview-play")
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(gpui::rems(1.5))
+                .cursor_pointer()
+                .child(if playing {
+                    crate::icon::stop_icon(tint, 0.9).into_any_element()
+                } else {
+                    crate::icon::play_icon(tint, 0.9).into_any_element()
+                })
+                .on_mouse_down(MouseButton::Left, play),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(waveform(
+                            &draft.levels,
+                            if playing { tint } else { palette.track },
+                        ))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(palette.text_muted))
+                                .child(length),
+                        ),
+                )
+                // The words the recogniser carried, dimmed so they read as a
+                // caption of the take rather than as text in the field: the
+                // field is what Enter sends for real (#3044).
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(palette.text_muted))
+                        .child(SharedString::from(draft.text.clone())),
+                ),
+        )
+        .child(
+            div()
+                .id("voice-preview-discard")
+                .flex_none()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(rgb(palette.text_faint))
+                .hover(|d| d.text_color(rgb(palette.accent)))
+                .child("✕")
+                .on_mouse_down(MouseButton::Left, discard),
+        )
 }
 
 /// The keybindings the editor needs, registered once on the App. They are

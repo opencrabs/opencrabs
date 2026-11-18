@@ -42,7 +42,13 @@ pub async fn transcribe_audio(
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("model", model_owned)
-        .text("response_format", "json");
+        .text("response_format", "json")
+        // The language rule (#3044). Whisper picks a language on its own and a
+        // short take gives it almost nothing to pick from, so an English note
+        // came back spelled in Portuguese. The hint forbids translating and
+        // asks for the language that was spoken; every whisper-compatible
+        // server accepts the field and ignores it when it cannot use it.
+        .text("prompt", super::service::STT_PROMPT);
 
     let response = client
         .post(&transcribe_url)
@@ -111,7 +117,7 @@ pub async fn transcribe_audio_chat(
             "content": [
                 {
                     "type": "text",
-                    "text": "Transcribe this audio note verbatim. Reply with the transcription only."
+                    "text": super::service::STT_CHAT_INSTRUCTION
                 },
                 {
                     "type": "input_audio",
