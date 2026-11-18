@@ -558,6 +558,7 @@ pub mod seeker_nbsp_test;
 pub mod seen_skills_test;
 #[cfg(target_os = "linux")]
 pub mod service_label_test;
+#[cfg(target_os = "linux")]
 pub mod service_scope_test;
 pub mod services_context_test;
 pub mod services_file_test;
