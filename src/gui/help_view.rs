@@ -6,7 +6,7 @@
 //! paints the groups, so the window and the terminal never spell a chord
 //! twice. Nothing here invents a shortcut, a count or a section order.
 //!
-//! The command rows are the terminal's own three sources (#3044): the shared
+//! The command rows are the terminal's own three sources (#3048): the shared
 //! slash table filtered to what this window runs, the skills loaded from
 //! `skills/`, and the user's entries in `commands.toml`. The window used to
 //! list none of them, which made its reference the weaker of the two screens.
@@ -66,7 +66,7 @@ impl CommandLists {
 /// Called when the screen opens, never from the renderer. The slash rows come
 /// from the shared table already filtered to what this window runs; the other
 /// two are the terminal's own sources, so the two surfaces list the same names
-/// in the same order (#3044).
+/// in the same order (#3048).
 pub(crate) fn load_commands() -> CommandLists {
     let commands = gui_help_commands()
         .into_iter()
@@ -608,7 +608,7 @@ mod tests {
 
     /// The header counts both halves of the screen, each in its singular form
     /// at one, because a reference that says "1 shortcuts" reads like a bug
-    /// (#3044).
+    /// (#3048).
     #[test]
     fn the_header_counts_commands_and_shortcuts() {
         assert_eq!(
@@ -630,7 +630,7 @@ mod tests {
 
     /// The `/` box finds a command by its name, with or without the slash, and
     /// by its description, so a reader who does not know the name can still
-    /// reach the row (#3044).
+    /// reach the row (#3048).
     #[test]
     fn the_filter_finds_a_command_by_name_or_description() {
         let row = CommandRow {
@@ -657,7 +657,7 @@ mod tests {
     /// The command card lists what the window runs, and nothing it cannot:
     /// every name is one this window answers, `/seeker` is absent because no
     /// surface answers it, and the window-only `/settings` is present because
-    /// the reference describes this surface, not the terminal (#3044).
+    /// the reference describes this surface, not the terminal (#3048).
     #[test]
     fn the_reference_lists_the_commands_this_window_runs() {
         let lists = load_commands();
