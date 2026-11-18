@@ -5,10 +5,11 @@
 //! gate the controls read, so a window with no speech engine is pointed at the
 //! command that sets one up instead of a chord that would only print an error.
 //!
-//! The line names the key exactly as the Help Center's key table names it. Two
-//! places describing one binding is how a key reference goes stale, so the
-//! chord here is the same one `help_keys` prints and the same one the key
-//! binding dispatches.
+//! The chord is spelled the way the composer's placeholder spells it, because
+//! the two things a person reads about recording should agree with each other.
+//! The Help Center's table prints the binding's own form (`ctrl-alt-r`); this
+//! is the same key written the way a key is written in a sentence, and both
+//! dispatch the same action.
 
 use gpui::{
     AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px, rgb,
