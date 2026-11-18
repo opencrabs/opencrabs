@@ -144,7 +144,11 @@ impl Dashboard {
     /// live under the caret because that is where the user is typing, and the
     /// queue card is a list, not an instruction manual (#2630).
     pub(crate) fn composer_hint(&self) -> SharedString {
-        composer_hint_for(self.turn.busy, self.queued_for_strip().len())
+        composer_hint_for(
+            self.turn.busy,
+            self.queued_for_strip().len(),
+            crate::composer_view::voice_ready(),
+        )
     }
 
     /// Every split pane's own composer. The window's field lives on the chat

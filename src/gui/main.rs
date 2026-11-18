@@ -8619,16 +8619,16 @@ mod tests {
     #[test]
     fn the_composer_hint_names_the_queue_while_a_turn_runs() {
         assert_eq!(
-            composer_hint_for(false, 0).as_ref(),
-            "Talk to the crab…",
-            "an idle composer keeps its own prompt"
+            composer_hint_for(false, 0, false).as_ref(),
+            "Talk to the crab… · /voice sets up the mic",
+            "an idle composer without an engine points at the command that sets one up"
         );
-        let running = composer_hint_for(true, 0);
+        let running = composer_hint_for(true, 0, false);
         assert!(
             running.contains("esc") && running.contains("queues"),
             "a running turn says Esc stops it and Enter queues: {running}"
         );
-        let queued = composer_hint_for(true, 2);
+        let queued = composer_hint_for(true, 2, false);
         assert!(
             queued.contains("queued 2"),
             "the count is on screen: {queued}"
@@ -8636,6 +8636,47 @@ mod tests {
         assert!(
             queued.contains('↑') && queued.contains("esc"),
             "Up edits a queued message and Esc flushes it: {queued}"
+        );
+    }
+
+    /// The idle hint offers the microphone the composer can actually serve
+    /// (#3044): the chord once an engine is configured, the setup command when
+    /// there is none, and never both at the same time.
+    #[test]
+    fn the_composer_hint_offers_the_microphone_only_when_it_works() {
+        let ready = composer_hint_for(false, 0, true);
+        assert!(
+            ready.contains("ctrl+alt+r") && ready.contains("record"),
+            "a configured window names the chord and what it does: {ready}"
+        );
+        assert!(
+            ready.contains("same key to stop"),
+            "the one key both starts and stops the take: {ready}"
+        );
+        assert!(
+            !ready.contains("/voice"),
+            "a working microphone never points the reader at setup: {ready}"
+        );
+        let cold = composer_hint_for(false, 0, false);
+        assert!(
+            cold.contains("/voice"),
+            "an unconfigured window names the only command that helps: {cold}"
+        );
+        assert!(
+            !cold.contains("ctrl+alt+r"),
+            "a chord that would only print an error is not offered: {cold}"
+        );
+        for hint in [ready, cold] {
+            assert!(
+                hint.starts_with("Talk to the crab…"),
+                "the product's own prompt still leads the line: {hint}"
+            );
+        }
+        // A running turn keeps its keys: the microphone waits for the field.
+        assert_eq!(
+            composer_hint_for(true, 0, true),
+            composer_hint_for(true, 0, false),
+            "a busy composer says how to stop, not how to dictate"
         );
     }
 
@@ -8653,9 +8694,9 @@ mod tests {
             "the hint is the faint colour, not the text colour"
         );
         assert_eq!(
-            composer_hint_for(false, 0).as_ref(),
-            "Talk to the crab…",
-            "an empty idle field keeps the product's own prompt"
+            composer_hint_for(false, 0, false).as_ref(),
+            "Talk to the crab… · /voice sets up the mic",
+            "an empty idle field keeps the product's own prompt, then the way to the mic"
         );
     }
 
