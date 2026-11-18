@@ -28,3 +28,20 @@ pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_turns.rs"),
     include_str!("main.rs"),
 );
+
+/// Everything in [`DASHBOARD`] before the window's own test module.
+///
+/// The concat above puts the modules first and `main.rs` last, so the window's
+/// own `mod tests` is the LAST marker in this text, not the first. Modules with
+/// test modules of their own matter here: `dashboard_rail.rs` and
+/// `rail_view.rs` both carry one, and a scan that cut at the first marker
+/// stopped at the rail's, so every rule checking anything in `rail_view.rs`,
+/// `dashboard_screens.rs` or `main.rs` was reading a text that did not contain
+/// the code it pinned. Take the last marker instead, so a module that grows a
+/// test module can never hide the ones behind it.
+pub fn production_half() -> &'static str {
+    DASHBOARD
+        .rsplit("\n#[cfg(test)]\nmod tests")
+        .next()
+        .expect("the concat always has a tail")
+}

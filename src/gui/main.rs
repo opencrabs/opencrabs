@@ -6701,7 +6701,7 @@ enum SendOrigin {
 mod tests {
     use super::{Launch, launch_intent, pick_initial_session, remember_open_session};
     use crate::composer_view::{composer_hint_for, queue_rows};
-    use crate::dashboard_source::DASHBOARD;
+    use crate::dashboard_source::{DASHBOARD, production_half};
     use crate::overlays::cd_entries_for;
     use crate::pane_chrome::CHAT_MEASURE_PX;
     use crate::status::help_rows;
@@ -7321,10 +7321,7 @@ mod tests {
     #[test]
     fn seeker_deep_search_wiring() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("the production half of the file");
+        let production = production_half();
         assert!(
             production.contains("fn schedule_seeker_find"),
             "the debounced content read exists"
@@ -7524,10 +7521,7 @@ mod tests {
     #[test]
     fn every_paint_hands_over_the_turn_the_window_holds() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         assert!(
             !production.contains("live_owner"),
             "ownership is the parking map's job now, not a parallel ledger"
@@ -7727,10 +7721,7 @@ mod tests {
     /// that already exist: the group modal and the split pick (#2712, #2713).
     #[test]
     fn the_seeker_prints_the_window_only_rows_and_routes_them() {
-        let code = DASHBOARD
-            .split("\nmod tests {")
-            .next()
-            .expect("the production half of the file");
+        let code = production_half();
         assert!(
             code.contains("items.extend(actions::gui_items());"),
             "the window adds the rows that need a window"
@@ -7776,10 +7767,7 @@ mod tests {
         // one drops only its own follow.
         // Read the production half only: this test lives in the same file it
         // reads, so its own needles would count as hits and prove nothing.
-        let code = DASHBOARD
-            .split("\nmod tests {")
-            .next()
-            .expect("the production half of the file");
+        let code = production_half();
         // The pane's own tick lives with the leaf's state now (#2805), so the
         // two halves of #2698 are read where each one lives.
         let view = PANE_VIEW;
@@ -8580,10 +8568,7 @@ mod tests {
     #[test]
     fn esc_cancels_the_turn_and_sends_the_queue() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let branch = production
             .split("// One Esc stops the turn, and the queue becomes the next turn.")
             .nth(1)
@@ -8613,10 +8598,7 @@ mod tests {
     #[test]
     fn esc_with_no_queue_only_cancels() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         // rustfmt wraps a long call chain across lines, so compare the code
         // with its whitespace removed: the same call, however it is laid out.
         // Both sides are flattened, because the message itself holds a space.
@@ -8648,10 +8630,7 @@ mod tests {
     #[test]
     fn esc_flush_pane_turn_end_drains_the_leaf_queue() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let settle = production
             .split("    pub(crate) fn settle_pane(")
             .nth(1)
@@ -8711,10 +8690,7 @@ mod tests {
     #[test]
     fn the_cancel_arm_records_the_stop_and_keeps_the_stream() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let cancelled = production
             .split("agent_bridge::TurnEvent::Cancelled { session } =>")
             .nth(1)
@@ -8750,10 +8726,7 @@ mod tests {
     #[test]
     fn the_overlay_gate_only_refuses_a_composers_own_send() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let send = production
             .split("    pub(crate) fn send_from_pane(")
             .nth(1)
@@ -8791,10 +8764,7 @@ mod tests {
     #[test]
     fn esc_flush_reload_keeps_the_drained_turns_card() {
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let reload = production
             .split("    pub(crate) fn reload_pane(")
             .nth(1)
@@ -8836,10 +8806,7 @@ mod tests {
             "a take leaves a receipt"
         );
         let src = DASHBOARD;
-        let production = src
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("production source before the test module");
+        let production = production_half();
         let window_drain = production
             .split("    pub(crate) fn drain_pending(")
             .nth(1)
@@ -10494,7 +10461,7 @@ mod gui {
             // row every time (#2999).
             let chat = DASHBOARD
                 .get(chat_start..)
-                .and_then(|rest| rest.split("\n#[cfg(test)]\nmod tests").next())
+                .and_then(|rest| rest.rsplit("\n#[cfg(test)]\nmod tests").next())
                 .expect("the chat arm offset lands on a char boundary");
             assert!(
                 !chat.contains("col.child(central(footer"),
