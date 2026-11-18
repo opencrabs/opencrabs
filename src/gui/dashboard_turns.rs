@@ -2329,6 +2329,10 @@ impl Dashboard {
     /// asking twenty times a second bought nothing but four identical answers
     /// and four times the file reads. The answer is cached for the ticks in
     /// between, and a closed rail is not asked at all: it draws no badge.
+    ///
+    /// Only a live turn's spinner and a waiting plan's ring move (#2842). A
+    /// plan holding a task draws a still mark, so it is not a reason to tick
+    /// the rail's clock at all.
     fn rail_animating(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.rail_open && self.screen != Screen::Onboard {
             self.rail_anim_live = false;
@@ -2340,7 +2344,7 @@ impl Dashboard {
         let live = self
             .rail_activity_map(cx)
             .values()
-            .any(|row| row.badge.is_some() || row.ring);
+            .any(|row| row.badge == Some(crate::rail_activity::Badge::Live) || row.ring);
         self.rail_anim_live = live;
         live
     }
