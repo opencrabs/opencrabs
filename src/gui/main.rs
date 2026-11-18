@@ -6457,6 +6457,11 @@ fn fold_live(
             transcript::settle_detached(&mut live.tools, &task_id, success, elapsed_secs);
         }
         ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+        // The service discarded what it had already streamed: a phantom
+        // iteration, a gaslighting preamble, a thinking-loop timeout. The card
+        // has to drop it too, or the working-out that just got retried stays on
+        // screen as the answer until the turn settles (#3021).
+        ProgressEvent::StripStreamedContent { bytes, .. } => live.strip_streamed(bytes),
         _ => {}
     }
 }
@@ -6776,6 +6781,36 @@ mod tests {
             at,
         );
         assert_eq!(live.tools.len(), before, "an unmatched finish adds no row");
+    }
+
+    /// #3021: a strip folded into a card drops the text the service discarded.
+    /// Panes, parked turns and rail cards fold through here, and the arm used to
+    /// fall through the catch-all, so a phantom iteration's working-out stayed on
+    /// screen as the answer until the turn settled and the reload erased it.
+    #[test]
+    fn a_stripped_iteration_leaves_the_folded_card() {
+        use crate::transcript;
+        use opencrabs::brain::agent::ProgressEvent;
+
+        let mut live = transcript::LiveTurn::default();
+        let at = std::time::Instant::now();
+        super::fold_live(
+            &mut live,
+            ProgressEvent::StreamingChunk {
+                text: "I cannot use tools.".to_string(),
+            },
+            at,
+        );
+        assert_eq!(live.answer(), Some("I cannot use tools."), "the chunk is what the bubble drew");
+        super::fold_live(
+            &mut live,
+            ProgressEvent::StripStreamedContent {
+                bytes: usize::MAX,
+                reason: "phantom self-heal narration discarded".to_string(),
+            },
+            at,
+        );
+        assert_eq!(live.answer(), None, "the folded card kept drawing the discarded text");
     }
 
     /// The conversation caps at a readable measure in a single pane, and any

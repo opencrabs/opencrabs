@@ -732,6 +732,42 @@ impl LiveTurn {
         self.tools.push(call);
     }
 
+    /// The service threw away text it had already streamed (#3021).
+    ///
+    /// A phantom iteration, a gaslighting preamble or a thinking-loop timeout
+    /// is discarded server side, but it reached this card first. The answer
+    /// bubble is drawn from `stream`, and [`Self::answer`] prefers it over
+    /// `settled`, so without this the discarded working-out sat on screen as
+    /// the answer until the turn settled and the reload erased it. The terminal
+    /// has always drained its buffer on the same event (`tui/app/state.rs`),
+    /// which is why the leak only showed on the desktop.
+    ///
+    /// `bytes` is the length of the leading text the service discarded, cut to
+    /// a char boundary the way the terminal cuts it, so a partial strip keeps
+    /// the draft that followed the preamble. A strip that leaves nothing
+    /// streaming means the whole iteration was a lie, so the reasoning and the
+    /// card rows it added go too, back to the last tool row: narration before a
+    /// call belongs to a call that really ran and stays. The token and chunk
+    /// counters keep their numbers, because the provider really did produce and
+    /// bill them.
+    pub fn strip_streamed(&mut self, bytes: usize) {
+        let mut cut = bytes.min(self.stream.len());
+        while cut > 0 && !self.stream.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.stream.drain(..cut);
+        if !self.stream.is_empty() {
+            return;
+        }
+        self.reasoning.clear();
+        while matches!(
+            self.entries.last(),
+            Some(LiveEntry::Reasoning(_) | LiveEntry::Narration(_))
+        ) {
+            self.entries.pop();
+        }
+    }
+
     /// The same guard for reasoning, which travels as `IntermediateText`.
     ///
     /// The clock is a parameter for the same reason as [`Self::note_chunk_at`]
@@ -6761,6 +6797,74 @@ mod tests {
             "the pending stream flushed into the card"
         );
         assert_eq!(live.stream, "", "the answer bubble starts clean");
+    }
+
+    /// #3021: the service discards a streamed iteration and the card has to
+    /// drop it too. The answer bubble reads `stream`, so a phantom's working-out
+    /// stayed on screen as the answer until the turn settled and the reload
+    /// erased it. The terminal drained its buffer on the same event; the desktop
+    /// had no arm for it.
+    #[test]
+    fn a_discarded_iteration_leaves_the_card() {
+        let now = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("question".into());
+
+        // What a Kimi turn streams: the chain of thought arrives as content, so
+        // it lands in the answer bubble, and the intermediate text that follows
+        // carries no text to move it into the card.
+        live.note_chunk_at("Let me think about the parser.", now);
+        live.push_reasoning_at("Let me think about the parser.", now);
+        assert_eq!(
+            live.answer(),
+            Some("Let me think about the parser."),
+            "the chain is what the bubble drew before the strip"
+        );
+
+        live.strip_streamed(usize::MAX);
+        assert_eq!(live.stream, "", "the discarded text leaves the bubble");
+        assert_eq!(live.reasoning, "", "and the reasoning it also fed");
+        assert_eq!(live.answer(), None, "nothing is drawn in the answer's place");
+        assert!(
+            narration_lines(&live).is_empty(),
+            "the card kept a row for an iteration that never happened"
+        );
+    }
+
+    /// A call that really ran keeps its own narration, and a partial strip is a
+    /// preamble cut, not a wipe (#3021).
+    #[test]
+    fn a_strip_keeps_what_a_call_committed() {
+        let now = std::time::Instant::now();
+        let mut live = LiveTurn::default();
+        live.begin("question".into());
+
+        // Iteration one ran a tool, so its narration is part of the turn.
+        live.note_chunk_at("Reading the file.", now);
+        live.push_tool(ToolCall::running("read_file".into(), "read_file: src/main.rs".into()));
+
+        // Iteration two streamed a preamble and a draft after it. The service
+        // strips the preamble only, because the draft that follows it may be
+        // real.
+        live.note_chunk_at("I cannot use tools. The fix is this.", now);
+        live.strip_streamed("I cannot use tools.".len());
+        assert_eq!(live.stream, " The fix is this.", "the draft after the preamble survives");
+        assert_eq!(
+            narration_lines(&live),
+            vec!["Reading the file.".to_string()],
+            "the committed narration stays"
+        );
+
+        // A whole iteration is discarded: what came after the last call goes,
+        // and the rows before it stay.
+        live.push_narration("I did it.");
+        live.strip_streamed(usize::MAX);
+        assert_eq!(live.stream, "", "the draft goes with the iteration");
+        assert_eq!(
+            narration_lines(&live),
+            vec!["Reading the file.".to_string()],
+            "narration before the call belongs to work that ran"
+        );
     }
 
     #[test]

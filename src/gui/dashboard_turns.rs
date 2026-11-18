@@ -1374,6 +1374,17 @@ impl Dashboard {
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }, _) => {
                     Self::play_task_chime();
                 }
+                // The service discarded text it had already streamed, so the
+                // card drops it now instead of waiting for the reload (#3021).
+                // Without this arm a phantom iteration's working-out stayed on
+                // screen as the answer for every retry the guard took.
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::StripStreamedContent { bytes, .. },
+                    _,
+                ) => {
+                    self.turn.live.strip_streamed(bytes);
+                }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet. The follow-up offer is already
