@@ -12,6 +12,7 @@
 
 use crate::palette;
 use crate::topic_icons::CRAB_ICONS;
+use crate::voice_input;
 use opencrabs::ui_core::card::{COMPOSER_RADIUS, glass_fill};
 use opencrabs::ui_core::commands::gui_completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
