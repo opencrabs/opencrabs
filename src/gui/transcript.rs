@@ -366,14 +366,27 @@ impl TurnMetrics {
         })
     }
 
-    /// The card's ctx segment, built by the same formatter the Telegram
-    /// footer uses (`format_ctx_footer`), so the two surfaces cannot drift
-    /// into different spellings of the same number (#2324 D2).
+    /// The card's ctx segment: the Telegram formatter's words and numbers with
+    /// the brain and the bolt that mark them on the GUI card (#3046). The
+    /// wording still comes from `format_ctx_footer`, so the two surfaces cannot
+    /// drift into different spellings of the same number (#2324 D2).
     pub fn segment(&self) -> Option<String> {
-        (self.ctx_max > 0).then(|| {
-            opencrabs::utils::string::format_ctx_footer(self.ctx_used, self.ctx_max, self.tps)
-        })
+        ctx_segment(self.ctx_used, self.ctx_max, self.tps)
     }
+}
+
+/// `\u{1f9e0} ctx: 74K/200K 37% | \u{26a1}\u{fe0f} 285 tok/s`: the budget and the rate,
+/// marked the way the card's head marks them (#3046). The words are the shared
+/// Telegram formatter's; the icons are this surface's own, because the head is
+/// read at a glance and a bare `ctx:` reads as prose.
+fn ctx_segment(used: u32, max: u32, tps: Option<f64>) -> Option<String> {
+    (max > 0).then(|| {
+        let base = opencrabs::utils::string::format_ctx_footer(used, max, tps);
+        match base.split_once(" | ") {
+            Some((budget, rate)) => format!("\u{1f9e0} {budget} | \u{26a1}\u{fe0f} {rate}"),
+            None => format!("\u{1f9e0} {base}"),
+        }
+    })
 }
 
 /// One conversation turn, folded the way the TUI folds it (#758/#759): the
@@ -3070,7 +3083,7 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
         palette::current().accent
     };
     let footer = turn_footer_text(turn);
-    let head = div()
+    let mut head = div()
         .flex()
         .flex_row()
         .items_center()
@@ -3100,22 +3113,23 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
                 .flex_shrink_0()
                 .text_color(rgb(accent))
                 .child(SharedString::from(verb)),
-        )
-        .child(
-            // The count, the ctx and the clock ride the verdict's own line
-            // (#3042). A finished block that stacked its numbers on a second
-            // grey row read as two separate things, the verdict on top and a
-            // footer underneath, and the report asked for one line in one
-            // colour. `min_w_0` plus `truncate` lets a narrow pane clip the
-            // numbers instead of growing the row.
+        );
+    // The count, the ctx and the clock ride the verdict's own line (#3042),
+    // behind the same dot the live head divides its segments with (#3046), so
+    // the finished card is one sentence in one colour instead of a verdict with
+    // a footer bolted underneath it. `min_w_0` plus `truncate` lets a narrow
+    // pane clip the numbers instead of growing the row.
+    if let Some(footer) = footer {
+        head = head.child(head_dot(accent)).child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_xs()
                 .text_color(rgb(accent))
-                .children(footer.map(SharedString::from)),
+                .child(SharedString::from(footer)),
         );
+    }
     let mut card = div()
         .id(SharedString::from(format!("card-{}", turn.anchor)))
         .flex()
@@ -3709,6 +3723,12 @@ fn live_card(
         );
     }
     if !lead.is_empty() {
+        // The sentence and the call are two segments of one line (#3046).
+        // Without the dot the prose runs straight into the call and the two
+        // read as one broken sentence.
+        if has_narration {
+            status = status.child(head_dot(palette::current().accent));
+        }
         let arm = div().min_w_0();
         let arm = if has_narration {
             arm.flex_shrink_0().max_w(px(lead_cap))
@@ -3749,6 +3769,12 @@ fn live_card(
     // turned into the tick. One line, one colour, exactly what the settled card
     // draws when it replaces this one.
     if let Some(footer) = live_card_footer(live, ctx) {
+        // A dot needs a word on its left. A turn that has only streamed text so
+        // far has no lead and no preview, so its head is the frame and the
+        // clock, and a dot in front of the clock would read as a stray mark.
+        if has_narration || !lead.is_empty() {
+            head = head.child(head_dot(palette::current().accent));
+        }
         head = head.child(
             div()
                 .flex_shrink_0()
@@ -3794,11 +3820,9 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     if ctx.1 > 0 {
         let tps = live.tokens_per_sec();
         let rate = (tps > 0.0).then_some(f64::from(tps));
-        parts.push(opencrabs::utils::string::format_ctx_footer(
-            ctx.0.unwrap_or(0),
-            ctx.1,
-            rate,
-        ));
+        if let Some(segment) = ctx_segment(ctx.0.unwrap_or(0), ctx.1, rate) {
+            parts.push(segment);
+        }
     }
     let elapsed = live.elapsed_secs();
     if elapsed > 0 {
@@ -3932,10 +3956,23 @@ pub(crate) fn live_activity(live: &LiveTurn) -> Option<String> {
     (!text.is_empty()).then(|| format!("{} {}", activity_glyph(call), fit(text, 160)))
 }
 
-/// `1 tool call`, `9 tool calls`: one spelling for the live line and for the
-/// expanded turn's own count.
+/// `\u{1f6e0}\u{fe0f} 1 tool call`, `\u{1f6e0}\u{fe0f} 9 tool calls`: one spelling for
+/// the live line and for the expanded turn's own count, behind the hammer the
+/// head is scanned by (#3046).
 fn tool_count_label(count: usize) -> String {
-    format!("{count} tool call{}", if count == 1 { "" } else { "s" })
+    format!("\u{1f6e0}\u{fe0f} {count} tool call{}", if count == 1 { "" } else { "s" })
+}
+
+/// The `\u{b7}` that divides one head segment from the next (#3046). It carries
+/// the head's own colour, so it reads as punctuation inside one sentence
+/// instead of as a divider between two blocks.
+fn head_dot(colour: u32) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .text_xs()
+        .text_color(rgb(colour))
+        .child(SharedString::from("\u{b7}"))
+        .into_any_element()
 }
 
 /// The live line split into its accented lead and its muted tail (#2326).
@@ -7358,6 +7395,46 @@ mod tests {
         );
     }
 
+    /// #3046: one line carrying several numbers is one line only while the
+    /// reader can tell where each starts. The heads divide their segments with
+    /// the same middle dot the Telegram footer uses, in the head's own accent,
+    /// so the count, the budget and the clock read as one sentence's clauses
+    /// instead of running together.
+    #[test]
+    fn the_head_segments_are_divided_by_the_accent_dot() {
+        const SRC: &str = include_str!("transcript.rs");
+        let live = SRC
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .1
+            .split_once("fn live_card_footer(")
+            .expect("the card footer")
+            .0;
+        assert!(
+            live.contains("status = status.child(head_dot(palette::current().accent))"),
+            "the sentence and the call it explains are divided, not run together"
+        );
+        assert!(
+            live.contains("if has_narration || !lead.is_empty() {"),
+            "the numbers wait for a word to stand on their left"
+        );
+        assert!(
+            live.contains("head = head.child(head_dot(palette::current().accent))"),
+            "the numbers are divided from the status they follow"
+        );
+        let settled = SRC
+            .split_once("fn settled_card(")
+            .expect("the settled card")
+            .1
+            .split_once("fn live_card(")
+            .expect("the live card")
+            .0;
+        assert!(
+            settled.contains("head = head.child(head_dot(accent))"),
+            "the verdict and its numbers are divided on the finished card's one line"
+        );
+    }
+
     /// Zero is not a duration worth printing: the segment is omitted rather
     /// than reading "0s".
     #[test]
@@ -7434,10 +7511,8 @@ mod tests {
             .metrics
             .and_then(|m| m.segment())
             .expect("a remembered turn prints its metrics");
-        assert_eq!(
-            segment, "ctx: 68K/200K 34% | 58 tok/s",
-            "the card must read exactly as the Telegram footer does"
-        );
+        const SEGMENT: &str = "\u{1f9e0} ctx: 68K/200K 34% | \u{26a1}\u{fe0f} 58 tok/s";
+        assert_eq!(segment, SEGMENT, "the card adds the icons it is read by");
     }
 
     /// #2632: a persisted row that lost its ledger must not turn the settled
@@ -7470,11 +7545,12 @@ mod tests {
             turn.summary.tool_calls, 4,
             "a row with no ledger still knows how many calls the turn made"
         );
-        assert_eq!(
-            turn_footer_text(&turn).as_deref(),
-            Some("4 tool calls \u{b7} ctx: 53K/200K 26% | 31 tok/s \u{b7} \u{23f1} 0:01"),
-            "the settled footer prints the live card's numbers, not fewer"
+        const FOOTER: &str = concat!(
+            "\u{1f6e0}\u{fe0f} 4 tool calls \u{b7} \u{1f9e0} ctx: 53K/200K 26% | ",
+            "\u{26a1}\u{fe0f} 31 tok/s \u{b7} \u{23f1} 0:01",
         );
+        let footer = turn_footer_text(&turn);
+        assert_eq!(footer.as_deref(), Some(FOOTER), "every segment, in order");
     }
 
     /// A provider that reports no rate still gets the honest half: ctx only,
@@ -7487,7 +7563,7 @@ mod tests {
             tps: None,
             tool_calls: 0,
         };
-        assert_eq!(metrics.segment().as_deref(), Some("ctx: 12K/200K 6%"));
+        assert_eq!(metrics.segment().as_deref(), Some("\u{1f9e0} ctx: 12K/200K 6%"));
     }
 
     /// No record means no segment: borrowing the session's current number
@@ -8137,7 +8213,7 @@ mod tests {
         );
         let footer =
             live_card_footer(&live, (Some(12_000), 200_000)).expect("a footer once a tool ran");
-        assert!(footer.contains("2 tool calls"), "got {footer}");
+        assert_eq!(footer, "\u{1f6e0}\u{fe0f} 2 tool calls \u{b7} \u{1f9e0} ctx: 12K/200K 6%");
 
         // And the drawing order itself: header, then body, with nothing under
         // the body but the arrow that folds the block.
@@ -8374,11 +8450,12 @@ mod tests {
             final_idx: None,
             origin: None,
         };
-        assert_eq!(
-            turn_footer_text(&turn).as_deref(),
-            Some("1 tool call \u{b7} ctx: 72K/200K 36% | 58 tok/s \u{b7} \u{23f1} 0:24"),
-            "the footer is the live card's line, settled: calls, ctx, its own rate, clock"
+        const FOOTER: &str = concat!(
+            "\u{1f6e0}\u{fe0f} 1 tool call \u{b7} \u{1f9e0} ctx: 72K/200K 36% | ",
+            "\u{26a1}\u{fe0f} 58 tok/s \u{b7} \u{23f1} 0:24",
         );
+        let footer = turn_footer_text(&turn);
+        assert_eq!(footer.as_deref(), Some(FOOTER), "the footer stays one line");
         assert_eq!(
             settled_verdict(&turn),
             ("\u{2705}", "Finished"),
@@ -8409,7 +8486,7 @@ mod tests {
         };
         assert_eq!(
             turn_footer_text(&measured).as_deref(),
-            Some("2 tool calls"),
+            Some("\u{1f6e0}\u{fe0f} 2 tool calls"),
             "the count it knows, nothing it does not"
         );
         let unmeasured = Turn {
