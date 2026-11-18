@@ -1462,12 +1462,6 @@ fn row_left_pad(indented: bool, bar: bool) -> f32 {
     if bar { pad - ACCENT_BAR_PX } else { pad }
 }
 
-/// Where a row's media slot starts, measured from the rail's left edge.
-fn row_media_left(indented: bool, bar: bool) -> f32 {
-    let border = if bar { ACCENT_BAR_PX } else { 0.0 };
-    border + row_left_pad(indented, bar)
-}
-
 /// Where the brand header's logo slot starts: the same inset as a full row.
 fn header_media_left() -> f32 {
     RAIL_PAD_PX
@@ -2550,7 +2544,7 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{ACCENT_BAR_PX, header_media_left, row_left_pad, row_media_left};
+    use super::{ACCENT_BAR_PX, header_media_left, row_left_pad};
     use super::{
         Database, FindMatch, MenuKind, PlanFilter, RailChip, RailFilter, SessionsState,
         accent_bar_visible, chip_order_key, chip_width_at, filter_is_active, fit,
@@ -2559,13 +2553,21 @@ mod tests {
         rail_menu_entries, rail_stamp, strip_budgets,
     };
 
+    /// Where a row's media slot starts, measured from the rail's left edge.
+    /// Composed the way `row` composes it: the accent bar is a border, so it
+    /// takes layout space, and the row's padding follows it.
+    fn media_axis(indented: bool, bar: bool) -> f32 {
+        let border = if bar { ACCENT_BAR_PX } else { 0.0 };
+        border + row_left_pad(indented, bar)
+    }
+
     /// #3013: the brand logo's slot and every full row's media start at the
     /// same distance from the rail's left edge, selected or not.
     #[test]
     fn the_logo_and_every_row_media_share_one_axis() {
         let axis = header_media_left();
-        assert_eq!(row_media_left(false, false), axis, "an unselected row");
-        assert_eq!(row_media_left(false, true), axis, "the selected row");
+        assert_eq!(media_axis(false, false), axis, "an unselected row");
+        assert_eq!(media_axis(false, true), axis, "the selected row");
     }
 
     /// #3013: the accent bar is paid for out of the row's padding, so a row
@@ -2574,8 +2576,8 @@ mod tests {
     fn selecting_a_row_does_not_move_its_content() {
         for indented in [false, true] {
             assert_eq!(
-                row_media_left(indented, true),
-                row_media_left(indented, false),
+                media_axis(indented, true),
+                media_axis(indented, false),
                 "indented={indented}"
             );
             assert_eq!(
@@ -2593,6 +2595,10 @@ mod tests {
         let row = src.split("pub fn row(").nth(1).expect("row exists");
         let row = row.split("\nfn badge_cell").next().expect("row ends");
         assert!(row.contains(".pl(px(row_left_pad(indented, bar)))"));
+        assert!(
+            row.contains("border_l_2()"),
+            "the accent bar is the border the media axis counts"
+        );
         assert!(!row.contains(".pl_4()"), "the indent is not a second inset");
         let header = src.split("fn brand_header(").nth(1).expect("header exists");
         let header = header.split("\n}").next().expect("header ends");
