@@ -208,4 +208,22 @@ mod tests {
         assert!(svg.contains("stroke-linecap=\"round\""));
         assert!(svg.contains("viewBox=\"0 0 24 24\""));
     }
+
+    /// The composer's paperclip is a thin monoline outline, not a filled mark
+    /// (#3037): the control has to sit in the row like the messaging apps'
+    /// does, and a heavy glyph would pull the eye off the text it belongs to.
+    #[test]
+    fn the_paperclip_is_a_thin_themed_outline() {
+        let svg = String::from_utf8(paperclip_svg(0x12ab34)).unwrap();
+        assert!(svg.contains("stroke-width=\"1.8\""));
+        assert!(
+            svg.contains("fill=\"none\""),
+            "an outline, not a filled shape"
+        );
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+        // Same channel cancellation the chevrons need, so the caller's colour
+        // is the colour the window paints.
+        assert!(svg.contains("stroke=\"#34ab12\""));
+    }
 }
