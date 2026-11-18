@@ -53,7 +53,13 @@ impl DocumentState {
 /// stay off the UI thread; only the completed render model crosses back.
 pub fn parse(path: &Path, kind: DocumentKind) -> Result<ParsedDocument, String> {
     let loaded = local_document::load(path).map_err(|error| error.to_string())?;
-    let blocks = markdown::blocks_flow(&loaded.text, kind == DocumentKind::Markdown);
+    // Markdown documents reflow like a reply; plain text keeps the breaks the
+    // author typed, because those breaks are the only structure it has.
+    let flow = match kind {
+        DocumentKind::Markdown => markdown::MdFlow::Prose,
+        DocumentKind::PlainText => markdown::MdFlow::Verbatim,
+    };
+    let blocks = markdown::blocks_flow(&loaded.text, flow);
     Ok(ParsedDocument {
         blocks,
         truncated: loaded.truncated,
