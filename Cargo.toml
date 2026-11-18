@@ -346,8 +346,8 @@ trello = []
 whatsapp = ["whatsapp-rust", "whatsapp-rust-tokio-transport", "whatsapp-rust-ureq-http-client", "wacore", "wacore-binary", "waproto", "dep:qrcode", "dep:rmp-serde"]
 discord = ["serenity"]
 slack = ["slack-morphism", "tokio-tungstenite", "rustls"]
-local-stt = ["rwhisper", "rodio", "hound", "rubato", "symphonia", "symphonia-adapter-libopus"]
-local-tts = ["opusic-sys", "rubato"]
+local-stt = ["rwhisper", "rodio", "hound", "rubato", "dep:symphonia", "dep:symphonia-adapter-libopus"]
+local-tts = ["dep:opusic-sys", "rubato"]
 # Plan-finished chime (#2255). `rodio` is already pulled in by `local-stt`,
 # so this feature only adds the WAV decoder for the one embedded chime.
 notification-sound = ["rodio", "rodio/wav"]
