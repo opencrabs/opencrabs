@@ -117,10 +117,12 @@ fn the_bubble_shrinks_horizontally_without_shrinking_attachments() {
 /// otherwise invisible drag-selection row (#2947).
 #[test]
 fn the_text_width_stays_definite_through_the_wrappers() {
+    // `md_block` is a delegate now: the width lives on the block list it
+    // builds, so the wrapper that carries it is `md_parsed_blocks` (#3019).
     for body in [
         body_after(TRANSCRIPT, "fn selectable_row<E: gpui::IntoElement>("),
         body_after(TRANSCRIPT, "fn message_row("),
-        body_after(TRANSCRIPT, "fn md_block("),
+        body_after(TRANSCRIPT, "fn md_parsed_blocks("),
         body_after(TRANSCRIPT, "fn plain_block("),
     ] {
         assert!(
