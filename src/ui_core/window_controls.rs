@@ -78,6 +78,41 @@ pub fn effective_decorations(reported: Decorations, platform_draws_caption: bool
     }
 }
 
+/// What a press on the window's drag handle does (#3014).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandlePress {
+    /// Start an interactive move of the window.
+    Move,
+    /// Toggle maximise, the way a double press on a title bar does.
+    Zoom,
+    /// Nothing from the app: the platform runs the handle itself.
+    Platform,
+}
+
+/// Whether the app has to run the drag handle's presses itself.
+///
+/// Linux is the one platform where it does: the window is client-decorated
+/// there (#2813), and gpui's hit-test callback for control areas is a no-op on
+/// Wayland and X11, so nothing moves the window unless the app asks. Windows
+/// answers the `Drag` area from its non-client hit test and runs both the move
+/// and the double-press maximise natively. macOS keeps its own title bar.
+pub const APP_RUNS_DRAG_HANDLE: bool = cfg!(any(target_os = "linux", target_os = "freebsd"));
+
+/// What one press on the drag handle does, from the press's click count.
+///
+/// A second press inside the double-click window maximises instead of starting
+/// another move: that is what every title bar does, and a window whose only
+/// handle is this one has no other way to offer it.
+pub fn handle_press(click_count: usize, app_runs_handle: bool) -> HandlePress {
+    if !app_runs_handle {
+        HandlePress::Platform
+    } else if click_count >= 2 {
+        HandlePress::Zoom
+    } else {
+        HandlePress::Move
+    }
+}
+
 /// The glyph a control paints and the hitbox the platform reads for it.
 ///
 /// The area is what tells the window manager which corner of the surface is a

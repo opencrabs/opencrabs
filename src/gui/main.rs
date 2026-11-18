@@ -165,8 +165,8 @@ use gpui::{
     DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, div, point,
-    prelude::*, px, rems, rgb, rgba, size,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, point, prelude::*, px, rems, rgb,
+    rgba, size,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.
@@ -2315,7 +2315,7 @@ impl Render for Dashboard {
         window.set_window_title(&label);
         // The header is its own surface: a panel one step above the chat and a
         // divider under it, so the title does not read as part of the history.
-        let chrome = div()
+        let chrome = window_controls::drag_handle(div())
             .flex()
             .flex_row()
             .items_center()
@@ -2328,11 +2328,7 @@ impl Render for Dashboard {
             // The header is the window's own bar on Linux, where the
             // compositor draws none (#2813), so a press on it moves the
             // window instead of selecting text. On the chat screen there is no
-            // header (#2596), and the compositor's own gesture moves it there.
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
-                window.start_window_move()
-            })
+            // header (#2596): the rail's brand row is the handle there (#3014).
             .child(icon::banner_logo())
             .child(div().text_lg().child(SharedString::from(label)));
 

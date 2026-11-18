@@ -237,8 +237,9 @@ impl Link {
 /// row is the one place in the rail where a miss costs a whole repaint of the
 /// list underneath it.
 pub(crate) fn header_button(id: &'static str, glyph: impl IntoElement) -> Stateful<Div> {
-    div()
-        .id(id)
+    // The buttons live on the window's drag handle (#3014), so a press on one
+    // stays a press on the button instead of starting a window move.
+    crate::window_controls::inside_drag_handle(div().id(id))
         .flex()
         .flex_none()
         .items_center()

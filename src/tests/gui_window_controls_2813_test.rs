@@ -11,7 +11,9 @@
 
 #![cfg(feature = "gui")]
 
-use crate::ui_core::window_controls::{Control, controls, effective_decorations, glyph};
+use crate::ui_core::window_controls::{
+    Control, HandlePress, controls, effective_decorations, glyph, handle_press,
+};
 use gpui::{Decorations, Tiling, WindowControlArea};
 
 fn client() -> Decorations {
@@ -146,4 +148,54 @@ fn every_control_carries_its_own_area() {
             }
         }
     }
+}
+
+/// #3014: where the app runs the handle, one press moves the window. Before
+/// the fix the chat screen had no handle at all, so nothing ever asked.
+#[test]
+fn a_press_on_the_drag_handle_moves_the_window() {
+    assert_eq!(handle_press(1, true), HandlePress::Move);
+}
+
+/// #3014: a double press maximises, the way a title bar does, instead of
+/// starting a second move.
+#[test]
+fn a_double_press_on_the_drag_handle_maximises() {
+    assert_eq!(handle_press(2, true), HandlePress::Zoom);
+    assert_eq!(handle_press(3, true), HandlePress::Zoom);
+}
+
+/// #3014: where the platform runs the handle itself the app stays out of it,
+/// whatever the click count, so a native move is never doubled.
+#[test]
+fn a_platform_run_handle_gets_nothing_from_the_app() {
+    for clicks in 0..4 {
+        assert_eq!(handle_press(clicks, false), HandlePress::Platform);
+    }
+}
+
+/// #3014: the handle exists on the chat screen, which has no title row. The
+/// rail's brand row and the closed rail's column are both wrapped, and the
+/// header's buttons stop their own press so they never start a move.
+#[test]
+fn the_rail_is_the_windows_drag_handle_open_or_closed() {
+    let sessions = include_str!("../gui/sessions.rs");
+    let (_, header) = sessions
+        .split_once("fn brand_header(")
+        .expect("brand header exists");
+    let (header, _) = header.split_once("#[cfg(test)]").expect("header ends");
+    assert!(header.contains("window_controls::drag_handle(row)"));
+    let (_, closed) = sessions
+        .split_once("pub fn collapsed_rail(")
+        .expect("closed rail exists");
+    let (closed, _) = closed
+        .split_once("/// A compact brand header")
+        .expect("closed rail ends");
+    assert!(closed.contains("window_controls::drag_handle(column)"));
+    let rail_view = include_str!("../gui/rail_view.rs");
+    assert!(rail_view.contains("crate::window_controls::inside_drag_handle(div().id(id))"));
+    let drawing = include_str!("../gui/window_controls.rs");
+    assert!(drawing.contains(".window_control_area(WindowControlArea::Drag)"));
+    assert!(drawing.contains("HandlePress::Move => window.start_window_move()"));
+    assert!(drawing.contains("HandlePress::Zoom => window.zoom_window()"));
 }
