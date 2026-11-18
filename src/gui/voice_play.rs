@@ -336,7 +336,10 @@ fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
         let channels = spec.channels.count().max(1);
         // A fresh buffer per packet: packet sizes vary, and a buffer sized for
         // the first one would be the wrong size for the next.
-        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity(), spec);
+        // SampleBuffer counts a duration in frames, so the decoder's capacity
+        // has to cross from usize into u64. A packet never gets near the
+        // width of either type, so the cast cannot lose a frame.
+        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         buffer.copy_interleaved_ref(decoded);
         let interleaved = buffer.samples();
         if channels == 1 {
