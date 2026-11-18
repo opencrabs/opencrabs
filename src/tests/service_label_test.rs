@@ -16,8 +16,9 @@
 //! against the live `~/Library/LaunchAgents`.
 
 use crate::cli::commands::{
-    any_owned_label_loaded, build_launchagent_plist, launchagent_plist_path_in,
-    managed_service_label, owned_launchctl_rows, parse_launchctl_rows, service_labels_for,
+    LabelMigration, any_owned_label_loaded, build_launchagent_plist, launchagent_plist_path_in,
+    managed_service_label, owned_launchctl_rows, parse_launchctl_rows, plan_label_migration,
+    remove_legacy_plist_in, service_labels_for,
 };
 
 /// A realistic `launchctl list`: a header, a system job, our two labels (one
@@ -142,4 +143,75 @@ fn launchagent_plist_carries_the_label_and_args_it_is_given() {
     assert!(plist.contains("<string>-p</string>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
     assert!(plist.contains("<string>/tmp/err.log</string>"));
+}
+
+/// A throwaway `LaunchAgents` directory: the migration tests exercise the real
+/// file work against this, never `~/Library/LaunchAgents`.
+fn temp_agents_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "opencrabs-launchagents-{}-{tag}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp LaunchAgents dir");
+    dir
+}
+
+fn write_plist(agents_dir: &std::path::Path, label: &str) {
+    std::fs::write(launchagent_plist_path_in(agents_dir, label), "<plist/>")
+        .expect("write plist");
+}
+
+/// The case a long-lived install hits: both labels on disk. The managed plist
+/// must survive and the legacy one must go, leaving the profile with one job.
+#[test]
+fn migration_leaves_only_the_managed_plist_on_a_two_label_home() {
+    let dir = temp_agents_dir("both");
+    write_plist(&dir, "com.opencrabs.agent");
+    write_plist(&dir, "com.opencrabs.daemon");
+
+    assert_eq!(
+        plan_label_migration(&dir, Some("default")),
+        LabelMigration::Retire
+    );
+    assert!(remove_legacy_plist_in(&dir).expect("remove the legacy plist"));
+    assert!(!dir.join("com.opencrabs.agent.plist").exists());
+    assert!(dir.join("com.opencrabs.daemon.plist").exists());
+
+    // A second startup finds nothing left to do, so the hook stays quiet.
+    assert_eq!(
+        plan_label_migration(&dir, Some("default")),
+        LabelMigration::Nothing
+    );
+    assert!(!remove_legacy_plist_in(&dir).expect("second remove is a no-op"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nothing is deleted before a replacement exists: with only the legacy plist
+/// on disk the migration installs the managed one first.
+#[test]
+fn legacy_only_home_installs_the_managed_label_before_retiring() {
+    let dir = temp_agents_dir("legacy-only");
+    write_plist(&dir, "com.opencrabs.agent");
+
+    assert_eq!(
+        plan_label_migration(&dir, None),
+        LabelMigration::InstallThenRetire
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The agent plist belongs to the default profile, so a named profile plans no
+/// work even when both its own label and the legacy one are present.
+#[test]
+fn named_profile_never_retires_the_unscoped_label() {
+    let dir = temp_agents_dir("named");
+    write_plist(&dir, "com.opencrabs.agent");
+    write_plist(&dir, "com.opencrabs.daemon.hermes");
+
+    assert_eq!(
+        plan_label_migration(&dir, Some("hermes")),
+        LabelMigration::Nothing
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

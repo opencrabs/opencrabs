@@ -2106,12 +2106,16 @@ fn launchctl_loaded_rows() -> Vec<(Option<u32>, String)> {
 
 /// `~/Library/LaunchAgents/<label>.plist`.
 #[cfg(target_os = "macos")]
-fn launchagent_plist_path(label: &str) -> Result<std::path::PathBuf> {
-    let agents_dir = dirs::home_dir()
+fn launchagents_dir() -> Result<std::path::PathBuf> {
+    Ok(dirs::home_dir()
         .context("No home dir")?
         .join("Library")
-        .join("LaunchAgents");
-    Ok(launchagent_plist_path_in(&agents_dir, label))
+        .join("LaunchAgents"))
+}
+
+#[cfg(target_os = "macos")]
+fn launchagent_plist_path(label: &str) -> Result<std::path::PathBuf> {
+    Ok(launchagent_plist_path_in(&launchagents_dir()?, label))
 }
 
 /// Remove one label from the gui domain, which also cancels its `KeepAlive`.
@@ -2405,6 +2409,56 @@ fn write_managed_launchagent() -> Result<std::path::PathBuf> {
     Ok(plist_path)
 }
 
+/// What the startup migration should do for one `LaunchAgents` directory.
+///
+/// Split out from the file work so the both-labels case can be tested against a
+/// temp directory instead of the live home (#2837).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LabelMigration {
+    /// Nothing to do: no legacy plist, or a profile that never owned it.
+    Nothing,
+    /// The legacy plist is the only definition. Write the managed one first.
+    InstallThenRetire,
+    /// The managed plist exists. Retire the legacy one.
+    Retire,
+}
+
+/// Decide what a profile's install footprint needs, without touching a thing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn plan_label_migration(
+    agents_dir: &std::path::Path,
+    profile: Option<&str>,
+) -> LabelMigration {
+    // The agent plist carries no `-p`, so it runs the default profile. A named
+    // profile must never remove another profile's service.
+    if let Some(name) = profile
+        && name != "default"
+    {
+        return LabelMigration::Nothing;
+    }
+    if !launchagent_plist_path_in(agents_dir, ONBOARDING_AGENT_LABEL).exists() {
+        return LabelMigration::Nothing;
+    }
+    if launchagent_plist_path_in(agents_dir, &managed_service_label(profile)).exists() {
+        LabelMigration::Retire
+    } else {
+        LabelMigration::InstallThenRetire
+    }
+}
+
+/// Delete the legacy onboarding plist. Nothing else, so the caller keeps
+/// control of whether the job launchd still has loaded must be stopped first.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn remove_legacy_plist_in(agents_dir: &std::path::Path) -> Result<bool> {
+    let agent_plist = launchagent_plist_path_in(agents_dir, ONBOARDING_AGENT_LABEL);
+    if !agent_plist.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&agent_plist)?;
+    Ok(true)
+}
+
 /// Remove the legacy onboarding plist now that a managed one exists (#2837).
 ///
 /// `boot_out_loaded` decides whether a job launchd still has loaded is stopped.
@@ -2416,15 +2470,10 @@ fn write_managed_launchagent() -> Result<std::path::PathBuf> {
 /// the managed label is left to start.
 #[cfg(target_os = "macos")]
 fn retire_legacy_agent_plist(boot_out_loaded: bool) -> Result<bool> {
-    // The agent plist carries no `-p`, so it runs the default profile. A named
-    // profile must never remove another profile's service.
-    if let Some(name) = crate::config::profile::active_profile()
-        && name != "default"
+    let agents_dir = launchagents_dir()?;
+    if plan_label_migration(&agents_dir, crate::config::profile::active_profile())
+        == LabelMigration::Nothing
     {
-        return Ok(false);
-    }
-    let agent_plist = launchagent_plist_path(ONBOARDING_AGENT_LABEL)?;
-    if !agent_plist.exists() {
         return Ok(false);
     }
     if boot_out_loaded
@@ -2434,13 +2483,15 @@ fn retire_legacy_agent_plist(boot_out_loaded: bool) -> Result<bool> {
     {
         bootout_label(ONBOARDING_AGENT_LABEL)?;
     }
-    std::fs::remove_file(&agent_plist)?;
-    tracing::info!(
-        label = ONBOARDING_AGENT_LABEL,
-        booted_out = boot_out_loaded,
-        "service: retired the legacy onboarding label, this profile now owns one managed label"
-    );
-    Ok(true)
+    let removed = remove_legacy_plist_in(&agents_dir)?;
+    if removed {
+        tracing::info!(
+            label = ONBOARDING_AGENT_LABEL,
+            booted_out = boot_out_loaded,
+            "service: retired the legacy onboarding label, this profile now owns one managed label"
+        );
+    }
+    Ok(removed)
 }
 
 /// Startup hook (#2837): a profile owns exactly one service label.
@@ -2451,21 +2502,16 @@ fn retire_legacy_agent_plist(boot_out_loaded: bool) -> Result<bool> {
 pub(crate) fn migrate_legacy_service_label() -> Result<bool> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(name) = crate::config::profile::active_profile()
-            && name != "default"
-        {
-            return Ok(false);
+        let agents_dir = launchagents_dir()?;
+        match plan_label_migration(&agents_dir, crate::config::profile::active_profile()) {
+            LabelMigration::Nothing => Ok(false),
+            // Nothing may be deleted before a working replacement exists.
+            LabelMigration::InstallThenRetire => {
+                write_managed_launchagent()?;
+                remove_legacy_plist_in(&agents_dir)
+            }
+            LabelMigration::Retire => remove_legacy_plist_in(&agents_dir),
         }
-        let agent_plist = launchagent_plist_path(ONBOARDING_AGENT_LABEL)?;
-        if !agent_plist.exists() {
-            return Ok(false);
-        }
-        let managed = managed_service_label(crate::config::profile::active_profile());
-        // Nothing may be deleted before a working replacement exists.
-        if !launchagent_plist_path(&managed)?.exists() {
-            write_managed_launchagent()?;
-        }
-        retire_legacy_agent_plist(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
