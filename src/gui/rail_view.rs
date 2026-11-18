@@ -174,21 +174,25 @@ pub(crate) fn chip_in_flight(kid: &RailTopic) -> bool {
 ///
 /// A folded strip shows three chips, but position is not the rule: a chip with
 /// work in flight is the one the reader needs, so it keeps its place wherever
-/// it sits in the ledger order, and idle chips fill the rest of the budget in
-/// order. The painted order stays the ledger's, so a chip that stays visible
-/// never jumps when a neighbour folds.
+/// it sits in the ledger order. The other slots go to the leading chips that
+/// are not already in, so a busy chip at position four keeps the three idle
+/// chips in front of it instead of replacing one, and the painted order stays
+/// the ledger's. A busy chip never jumps when a neighbour folds.
 pub(crate) fn folded_mask(kids: &[RailTopic]) -> Vec<bool> {
     /// The three chips a folded strip always shows.
     const BUDGET: usize = 3;
     let mut shown = vec![false; kids.len()];
     let mut kept = 0;
+    // 1. Every chip with work in flight is in, wherever it sits.
     for (i, kid) in kids.iter().enumerate() {
         if chip_in_flight(kid) {
             shown[i] = true;
             kept += 1;
         }
     }
-    for slot in shown.iter_mut() {
+    // 2. The leading chips that are not in yet fill the rest of the budget,
+    // in ledger order, so the strip still reads from the top of the list.
+    for (i, slot) in shown.iter_mut().enumerate() {
         if kept >= BUDGET {
             break;
         }
@@ -744,6 +748,8 @@ mod tests {
     fn a_folded_strip_keeps_a_busy_chip_past_the_budget() {
         // #3020: the chip the reader needs is the one with work in flight, so
         // it keeps its place even when three idle chips sit in front of it.
+        // The budget is three chips in total, so the busy fourth takes a slot
+        // from the idle third instead of widening the strip (#3020).
         let kids = vec![
             kid(0, false, false, false),
             kid(1, false, false, false),
@@ -751,7 +757,7 @@ mod tests {
             kid(3, true, false, false),
             kid(4, false, false, false),
         ];
-        assert_eq!(shown(&folded_mask(&kids)), vec![0, 1, 2, 3]);
+        assert_eq!(shown(&folded_mask(&kids)), vec![0, 1, 3]);
     }
 
     #[test]
