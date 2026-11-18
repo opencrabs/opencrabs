@@ -165,3 +165,75 @@ fn launchctl_parse_rejects_lookalike_prefixes() {
         "prefix must anchor at label start; near-misses are not ours to bootout"
     );
 }
+
+/// A daemon with no enabled channels holds neither a token lock nor a service
+/// unit: the instance stamp under `locks/instance/` is its only footprint, so
+/// the token scan above sees nobody and the handover never completes (#2835).
+#[test]
+fn instance_stamp_is_a_preemption_target_on_its_own() {
+    let tmp = TempDir::new().unwrap();
+    let profile = active_profile().unwrap_or("default");
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn a stand-in background instance");
+    let pid = child.id();
+
+    let instance_dir = tmp.path().join("instance");
+    fs::create_dir_all(&instance_dir).unwrap();
+    fs::write(instance_dir.join(format!("{profile}.lock")), format!("{pid}:0")).unwrap();
+
+    let preempted = preempt_instances_in(tmp.path(), false);
+    assert_eq!(
+        preempted.len(),
+        1,
+        "the instance stamp must be found on its own, got {preempted:?}"
+    );
+    assert_eq!(preempted[0].pid, pid);
+    assert_eq!(
+        preempted[0].channels,
+        vec!["instance".to_string()],
+        "the reported channel names the lock it actually held"
+    );
+    assert!(
+        preempted[0].stopped,
+        "the stamped instance must be gone by the time preemption returns"
+    );
+
+    let _ = child.wait();
+}
+
+/// Fail-closed: a stamp whose PID is already gone is refused. Nothing is
+/// signalled and the caller is told nobody was preempted, so a recycled PID
+/// can never be hit on the strength of a leftover file.
+#[test]
+fn stale_instance_stamp_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let profile = active_profile().unwrap_or("default");
+    let dead = {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived process");
+        let pid = child.id();
+        child.wait().expect("reap the short-lived process");
+        pid
+    };
+    assert!(
+        !is_pid_alive(dead),
+        "the stand-in pid must be gone, otherwise this test proves nothing"
+    );
+
+    let instance_dir = tmp.path().join("instance");
+    fs::create_dir_all(&instance_dir).unwrap();
+    fs::write(
+        instance_dir.join(format!("{profile}.lock")),
+        format!("{dead}:0"),
+    )
+    .unwrap();
+
+    let preempted = preempt_instances_in(tmp.path(), false);
+    assert!(
+        preempted.is_empty(),
+        "a dead-PID instance stamp must be refused, got {preempted:?}"
+    );
+}

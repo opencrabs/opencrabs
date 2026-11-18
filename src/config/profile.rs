@@ -1557,10 +1557,10 @@ pub(crate) fn parse_launchctl_labels(output: &str) -> Vec<String> {
 }
 
 pub(crate) fn preempt_instances_in(lock_dir: &Path, stop_services: bool) -> Vec<PreemptedInstance> {
-    // The only mutation of `owners` lives in the Windows handover block
-    // below; on every other target the `mut` genuinely is unused, so the
-    // lint is silenced exactly where it is wrong, never across all targets.
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    // Mutation lives in the instance-stamp fallbacks below (Windows and, since
+    // #2835, unix); on a target with neither the `mut` genuinely is unused, so
+    // the lint is silenced exactly where it is wrong, never across all targets.
+    #[cfg_attr(not(any(windows, unix)), allow(unused_mut))]
     let mut owners = foreign_lock_owners(lock_dir);
 
     // Windows handover gap (tracked as #6): a daemon with NO enabled
@@ -1598,6 +1598,40 @@ pub(crate) fn preempt_instances_in(lock_dir: &Path, stop_services: bool) -> Vec<
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // The same gap on unix (#2835): a daemon with no enabled channels holds
+    // only the instance lock under locks/instance/, which the token scan above
+    // never sees. Preemption then found nobody and the TUI sat in its handover
+    // retry loop while the instance it was waiting for had nothing to release.
+    // Fail-closed: a stamp whose PID is dead, or is this very process, is
+    // refused and nothing is signalled. Confidence is lower than the Windows
+    // path, which proves ownership with the creation time recorded in the
+    // stamp; unix has no equivalent reading, so the live PID is the evidence.
+    #[cfg(unix)]
+    {
+        if owners.is_empty() {
+            let profile = active_profile().unwrap_or("default");
+            let ipath = lock_dir.join("instance").join(format!("{profile}.lock"));
+            if let Ok(contents) = fs::read_to_string(&ipath)
+                && let Some((pid, ticks)) = split_pid_ticks(&contents)
+                && pid != std::process::id()
+                && is_pid_alive(pid)
+            {
+                tracing::debug!(
+                    pid,
+                    profile,
+                    "preempt: instance-lock owner taken as the only foreign instance"
+                );
+                owners.insert(
+                    pid,
+                    ForeignOwner {
+                        creation_ticks: ticks,
+                        channels: vec!["instance".to_string()],
+                    },
+                );
             }
         }
     }
