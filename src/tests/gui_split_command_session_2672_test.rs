@@ -192,7 +192,11 @@ fn the_compaction_and_goal_turns_carry_the_pane_session() {
     let cd = between(src, "C::Cd =>", "other =>");
     let compact: String = cd.split_whitespace().collect();
     assert!(
-        compact.contains("this.push_session_notice(session,"),
-        "the asynchronous /cd reply must land on the session it changed (#2672)"
+        compact.contains("spawn_apply_operator_cd(b.service.clone(),session,"),
+        "the /cd handoff must carry the session it changes (#2672)"
+    );
+    assert!(
+        compact.contains("None=>self.push_session_notice(session,"),
+        "a /cd with no bridge answers on the session it changed (#2672)"
     );
 }
