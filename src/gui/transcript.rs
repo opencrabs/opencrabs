@@ -16,7 +16,7 @@
 //! Phase-0 lessons still bind: 4 MB fetch thread, no migrations, char-safe
 //! truncation everywhere (#2271).
 
-use super::icon::disclosure_icon;
+use super::icon::{collapse_icon, disclosure_icon};
 use crate::palette;
 use crate::topic_icons;
 use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE};
@@ -3116,7 +3116,8 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, card_cap: f32) -> Option<Sta
         .cursor_pointer()
         .hover(|d| d.bg(rgb(palette::current().panel_hi)))
         .child(head);
-    if !body.is_empty() {
+    let open = !body.is_empty();
+    if open {
         card = card.child(
             div()
                 .flex()
@@ -3130,14 +3131,21 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, card_cap: f32) -> Option<Sta
         );
     }
     if let Some(footer) = turn_footer_text(turn) {
-        card = card.child(
-            div()
-                .px_2()
-                .pb_1()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(footer)),
-        );
+        // The same fold the live card carries, so a block that was opened
+        // before the turn settled still says the footer closes it.
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pb_1()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted));
+        if open {
+            bar = bar.child(collapse_icon(palette::current().text_muted, 1.0));
+        }
+        card = card.child(bar.child(SharedString::from(footer)));
     }
     Some(card)
 }
@@ -3703,14 +3711,22 @@ fn live_card(
         card = card.child(live_card_body(lines, drag, press));
     }
     if let Some(footer) = live_card_footer(live, ctx) {
-        card = card.child(
-            div()
-                .px_2()
-                .pb_1()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from(footer)),
-        );
+        // An open card ends in the control that closes it: the head's chevron
+        // keeps pointing down, so without this the only sign that the footer
+        // folds the block was the pointer changing shape over it.
+        let mut bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .pb_1()
+            .text_xs()
+            .text_color(rgb(palette::current().text_muted));
+        if expanded {
+            bar = bar.child(collapse_icon(palette::current().text_muted, 1.0));
+        }
+        card = card.child(bar.child(SharedString::from(footer)));
     }
     card
 }

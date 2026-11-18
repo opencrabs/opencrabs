@@ -87,7 +87,9 @@ fn gpui_svg_colour(colour: u32) -> u32 {
 }
 
 /// Telegram's disclosure control: one rounded, full-size downward chevron.
-/// The control opens and closes the card; it does not change direction.
+/// The head keeps this direction while the card is open, and the footer
+/// carries `collapse_svg` instead, so the way back is visible from the end of
+/// the block the reader just unfolded.
 fn disclosure_svg(colour: u32) -> Vec<u8> {
     let colour = gpui_svg_colour(colour);
     format!(
@@ -96,16 +98,37 @@ fn disclosure_svg(colour: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The disclosure arrow in `colour`, sized in rems.
-pub fn disclosure_icon(colour: u32, size: f32) -> impl IntoElement {
+/// The same control pointing back up: the fold that closes an open card.
+fn collapse_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><path d="m18 15-6-6-6 6" stroke="#{colour:06x}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// One chevron, drawn from the bytes above, sized in rems.
+fn chevron_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
     img(std::sync::Arc::new(Image::from_bytes(
         ImageFormat::Svg,
-        disclosure_svg(colour),
+        svg,
     )))
     .w(rems(size))
     .h(rems(size))
     .flex_none()
     .object_fit(ObjectFit::Contain)
+}
+
+/// The disclosure arrow in `colour`, sized in rems.
+pub fn disclosure_icon(colour: u32, size: f32) -> impl IntoElement {
+    chevron_icon(disclosure_svg(colour), size)
+}
+
+/// The fold arrow in `colour`, sized in rems. It sits in the footer of an
+/// expanded card, so a block with many calls ends in a control that says the
+/// click folds it back instead of leaving the reader to guess.
+pub fn collapse_icon(colour: u32, size: f32) -> impl IntoElement {
+    chevron_icon(collapse_svg(colour), size)
 }
 
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an
@@ -138,7 +161,7 @@ pub fn apply_dock_icon() {}
 
 #[cfg(test)]
 mod tests {
-    use super::disclosure_svg;
+    use super::{collapse_svg, disclosure_svg};
 
     #[test]
     fn the_disclosure_arrow_is_a_full_size_rounded_vector() {
@@ -146,6 +169,20 @@ mod tests {
         assert!(svg.contains(r#"d="m6 9 6 6 6-6""#));
         assert!(!svg.contains(r#"d="m9 6 6 6-6 6""#));
         // GPUI uploads SVG without its usual RGBA-to-BGRA conversion.
+        assert!(svg.contains("stroke=\"#34ab12\""));
+        assert!(svg.contains("stroke-width=\"2.2\""));
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+    }
+
+    /// The footer of an open card carries the same control pointing back up,
+    /// so the fold that closes the block is drawn instead of guessed.
+    #[test]
+    fn the_fold_arrow_points_back_up() {
+        let svg = String::from_utf8(collapse_svg(0x12ab34)).unwrap();
+        assert!(svg.contains(r#"d="m18 15-6-6-6 6""#));
+        assert!(!svg.contains(r#"d="m6 9 6 6 6-6""#));
+        // The same colour cancellation the disclosure arrow needs.
         assert!(svg.contains("stroke=\"#34ab12\""));
         assert!(svg.contains("stroke-width=\"2.2\""));
         assert!(svg.contains("stroke-linecap=\"round\""));
