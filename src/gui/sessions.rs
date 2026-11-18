@@ -11,7 +11,7 @@
 //! builds each row's handler in its own loop turn, then hands the finished
 //! rows to `rail`.
 
-use crate::{icon, palette, platform_icons};
+use crate::{icon, palette, platform_icons, window_controls};
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
@@ -2441,7 +2441,9 @@ pub fn rail(
 /// The closed rail keeps the brand and its reopen button in the same thin
 /// column, without resolving any session rows or filter chrome (#2982).
 pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
-    div()
+    // The thin column is still the window's handle (#3014): hiding the
+    // sidebar must not take away the only place the window is moved from.
+    let column = div()
         .id("session-rail-collapsed")
         .flex()
         .flex_col()
@@ -2455,7 +2457,8 @@ pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
         .border_r_1()
         .border_color(rgb(palette::current().panel_hi))
         .child(icon::banner_logo())
-        .child(toggle)
+        .child(toggle);
+    window_controls::drag_handle(column)
 }
 
 /// A compact brand header instead of a second session counter.
@@ -2489,7 +2492,10 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
     if let Some(actions) = actions {
         row = row.child(actions);
     }
-    row
+    // The brand row is where a title bar would be, on every screen, so it is
+    // the handle the window is moved by (#3014). Its buttons stop their own
+    // presses (`header_button`), so only the bare row moves the window.
+    window_controls::drag_handle(row)
 }
 
 #[cfg(test)]

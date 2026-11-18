@@ -11,11 +11,16 @@
 
 use std::rc::Rc;
 
-use gpui::{App, ClickEvent, Decorations, Div, Stateful, Window, div, prelude::*, rgb};
+use gpui::{
+    App, ClickEvent, Decorations, Div, MouseButton, Stateful, Window, WindowControlArea, div,
+    prelude::*, rgb,
+};
 /// The window's own `match` names the controls, so the type is re-exported
 /// rather than reached through the library path at every use.
 pub use opencrabs::ui_core::window_controls::Control;
-use opencrabs::ui_core::window_controls::{controls, glyph};
+use opencrabs::ui_core::window_controls::{
+    APP_RUNS_DRAG_HANDLE, HandlePress, controls, glyph, handle_press,
+};
 
 use crate::palette;
 
@@ -49,6 +54,33 @@ pub fn button(control: Control) -> Stateful<Div> {
         .window_control_area(area)
         .hover(move |d| d.bg(rgb(hover)).text_color(rgb(shown.text)))
         .child(label)
+}
+
+/// Make `element` a handle the window is moved by (#3014).
+///
+/// The chat screen has no title row (#2596) and on Linux the compositor draws
+/// no title bar either (#2813), so without a handle of the app's own the
+/// window can only be moved with the compositor's modifier gesture. The area
+/// is what Windows reads from its hit test; the listener is what moves the
+/// window on Linux, where that hit test is never asked.
+pub fn drag_handle<E: InteractiveElement>(element: E) -> E {
+    element
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |ev, window, _cx| {
+            match handle_press(ev.click_count, APP_RUNS_DRAG_HANDLE) {
+                HandlePress::Move => window.start_window_move(),
+                HandlePress::Zoom => window.zoom_window(),
+                HandlePress::Platform => {}
+            }
+        })
+}
+
+/// Keep a control that sits inside a drag handle a control (#3014): its press
+/// stops here, so pressing a button never starts a window move under it. The
+/// element's own click still fires, because gpui arms a click before it runs
+/// the element's mouse-down listeners.
+pub fn inside_drag_handle<E: InteractiveElement>(element: E) -> E {
+    element.on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
 /// A control's click, type-erased so a window whose platform runs the buttons
