@@ -879,7 +879,7 @@ impl Dashboard {
     pub(crate) fn open_cd_picker(&mut self, cx: &mut Context<Self>) {
         // The leaf the reader is looking at, not the window's chat leaf. In a
         // split those are different sessions, and reading `chat_session` here
-        // opened the picker seeded with somebody else's directory (#3035).
+        // opened the picker seeded with somebody else's directory (#3036).
         let Some(session) = self.focused_pane() else {
             self.turn
                 .live
@@ -925,7 +925,7 @@ impl Dashboard {
         // The session the picker was opened for, never whatever the window
         // holds now: a switch made while the screen was open used to move the
         // target, and the pick landed on a conversation the reader had left
-        // (#3035).
+        // (#3036).
         let Some(session) = self.cd_session.or_else(|| self.focused_pane()) else {
             self.close_cd_picker(cx);
             return;

@@ -1,4 +1,4 @@
-//! A `/cd` moves the whole project, not one conversation (#3035).
+//! A `/cd` moves the whole project, not one conversation (#3036).
 //!
 //! A topic is a session inside a session (#2301), and a parent with its topics
 //! is one project: the same tree, the same repo, the same rules. Moving only

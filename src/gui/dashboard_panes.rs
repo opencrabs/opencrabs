@@ -884,7 +884,7 @@ impl Dashboard {
     }
 
     /// The place the window footer names: the open conversation's own working
-    /// directory and the branch checked out there (#3035).
+    /// directory and the branch checked out there (#3036).
     ///
     /// Read from the session, not from the process. `launch_cwd()` is the
     /// directory the window started in and nothing ever moves it, so the footer
@@ -943,7 +943,7 @@ impl Dashboard {
         if let Some(bridge) = agent_bridge::bridge() {
             // Each pane names the directory its own conversation works in, so
             // a `/cd` in one leaf never reads as a move of its neighbour
-            // (#3035). Only the directory: the branch would run `git` per pane
+            // (#3036). Only the directory: the branch would run `git` per pane
             // per frame, and the window footer above already names it.
             let dir = bridge.service.get_working_directory_for_session(session);
             parts.push(tilde_path(&dir));

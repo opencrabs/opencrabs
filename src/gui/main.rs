@@ -582,7 +582,7 @@ impl Drop for PreviewSlot {
 }
 
 /// The place the footer names: the open conversation's working directory and
-/// the branch checked out in it (#3035).
+/// the branch checked out in it (#3036).
 ///
 /// The window used to print the directory the process was launched from, which
 /// never moves, so a `/cd` changed where the agent works and left the footer
@@ -1213,7 +1213,7 @@ struct Dashboard {
     /// above: both are read from the same reload.
     metrics: chat_leaf::Metrics,
     /// The footer's place, resolved from the open conversation rather than
-    /// from the process (#3035): the session it was read for, the directory
+    /// from the process (#3036): the session it was read for, the directory
     /// that session works in, and the branch checked out there. The window
     /// used to print the launch directory and a branch read once at startup,
     /// so a `/cd` moved the session and left the footer naming the old place.
@@ -2776,7 +2776,7 @@ impl Render for Dashboard {
                         // name is not printed twice anywhere (#2578).
                         // The place the footer names is the open
                         // conversation's own, never the directory the process
-                        // was started in (#3035): the launch directory never
+                        // was started in (#3036): the launch directory never
                         // moves, so a `/cd` could change where the agent works
                         // and leave this row pointing at the old project. The
                         // branch is read from that same directory, and only
@@ -9701,7 +9701,7 @@ mod tests {
             "the picker's apply never runs on gpui's executor: the row write \
              needs a Tokio reactor and gpui has none"
         );
-        // #3035: the picker names its session when it opens and applies to
+        // #3036: the picker names its session when it opens and applies to
         // that same one. Both ends used to read `chat_session`, so in a split
         // the directory changed in the conversation the window held while the
         // reader was standing in a pane, and a switch made while the screen
@@ -10066,7 +10066,7 @@ mod tests {
         );
     }
 
-    /// The footer names the open conversation's own place (#3035).
+    /// The footer names the open conversation's own place (#3036).
     ///
     /// It printed `launch_cwd()`, the directory the process started in, which
     /// nothing ever moves: a `/cd` changed where the agent worked and left the
@@ -10104,7 +10104,7 @@ mod tests {
     }
 
     /// A receipt is parked with the conversation that asked for it, never
-    /// painted on another chat (#3035).
+    /// painted on another chat (#3036).
     ///
     /// A `/cd` from the picker answers through this door. A switch to another
     /// session parks the live turn, so the fallback printed the receipt on the

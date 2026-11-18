@@ -722,7 +722,7 @@ impl Dashboard {
     /// Put a one-line answer in the conversation that owns it, so a pane never
     /// reads a switch receipt meant for the window chat.
     ///
-    /// The receipt is never allowed to go missing (#3035). A `/cd` from the
+    /// The receipt is never allowed to go missing (#3036). A `/cd` from the
     /// picker applies off the UI thread and answers here, and the reader saw
     /// nothing at all: the line was pushed below the fold of a transcript they
     /// had scrolled, and a conversation that had been parked by a switch had

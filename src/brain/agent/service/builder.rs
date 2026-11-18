@@ -1298,7 +1298,7 @@ impl AgentService {
     }
 
     /// Move one project's sessions to `dir`: the session asked for, and the
-    /// parent and every topic it shares a project with (#3035).
+    /// parent and every topic it shares a project with (#3036).
     ///
     /// A topic is a session inside a session (#2301), and the group is one
     /// project: the parent and every topic under it read the same tree, so a
@@ -1328,7 +1328,7 @@ impl AgentService {
     }
 
     /// The session plus every session in its project: its topics when it is
-    /// the parent, or the parent and the siblings when it is a topic (#3035).
+    /// the parent, or the parent and the siblings when it is a topic (#3036).
     ///
     /// The asked-for session always comes first and is never dropped. A read
     /// failure returns just that one, because a `/cd` must still move the
