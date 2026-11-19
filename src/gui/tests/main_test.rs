@@ -563,11 +563,16 @@ fn only_the_confirm_dialog_reaches_the_delete_bridge() {
         "only the dialog's confirm may call delete_session"
     );
     // Esc is the dialog's cancel, and it must answer the dialog before
-    // the row menu or the turn it would otherwise abort.
-    assert!(
-        src.contains("if self.confirm_delete.take().is_some()"),
-        "Esc must cancel the dialog first"
-    );
+    // the row menu or the turn it would otherwise abort. The dialog takes
+    // its id out to answer, so the branch is the `if let` that owns both
+    // keys, and the ladder is the one below it (#2456).
+    let dialog = src
+        .find("if let Some(id) = self.confirm_delete {")
+        .expect("the dialog branch owns the keys");
+    let ladder = src
+        .find("if ev.keystroke.key == \"escape\" {")
+        .expect("the Esc ladder is in the handler");
+    assert!(dialog < ladder, "Esc must cancel the dialog first");
 }
 
 use crate::*;
