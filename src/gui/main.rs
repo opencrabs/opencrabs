@@ -50,11 +50,11 @@ mod dashboard_projects;
 mod dashboard_rail;
 mod dashboard_render;
 mod dashboard_screens;
-mod dashboard_state;
 mod dashboard_sessions;
 mod dashboard_settings;
 #[cfg(test)]
 mod dashboard_source;
+mod dashboard_state;
 mod dashboard_topics;
 mod dashboard_turns;
 mod editor;

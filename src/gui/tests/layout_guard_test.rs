@@ -152,7 +152,10 @@ fn the_window_file_stays_wiring_only() {
 fn no_new_inline_test_module_appears_under_the_window() {
     let mut current = Vec::new();
     for file in window_files() {
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         let source =
             fs::read_to_string(&file).unwrap_or_else(|e| panic!("cannot read {file:?}: {e}"));
         for module in inline_test_modules(&source) {
@@ -193,7 +196,10 @@ fn every_window_module_file_is_declared() {
 
     let mut undeclared = Vec::new();
     for file in window_files() {
-        let name = file.file_stem().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = file
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if name == "main" {
             continue;
         }
@@ -226,7 +232,10 @@ fn every_test_file_is_declared_in_the_tests_module() {
     let mut undeclared = Vec::new();
     let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {dir:?}: {e}"));
     for file in entries.filter_map(|entry| entry.ok().map(|e| e.path())) {
-        let name = file.file_stem().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = file
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         if name == "mod" {
             continue;
         }
