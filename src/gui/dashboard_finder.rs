@@ -420,9 +420,8 @@ impl Dashboard {
         let recording = phase == SeekerVoicePhase::Recording;
         let theme = palette::current();
         let colour = if recording { theme.amber } else { theme.green };
-        let level = self.seeker_voice_levels.last().copied().unwrap_or(0.0);
         let orb = self.seeker_orb.as_ref()?;
-        orb.update(recording, level, colour);
+        orb.update(recording, &self.seeker_voice_levels, colour);
         Some(command_palette::SeekerVoice {
             recording,
             frame: orb.frame(cx),

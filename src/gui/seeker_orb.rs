@@ -18,11 +18,14 @@ pub(crate) const ORB_PIXELS: u32 = 1024;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const ORB_RADIUS: f32 = 0.92;
 const SINE_STEPS: usize = 4096;
+const VOICE_SAMPLES: usize = super::voice_input::METER_BARS;
 
 #[derive(Clone, Copy)]
 struct OrbInput {
     recording: bool,
-    level: f32,
+    /// Recent microphone peaks, oldest first. Keeping the history instead of
+    /// one scalar lets speech bend different parts of the liquid at once.
+    levels: [f32; VOICE_SAMPLES],
     colour: u32,
 }
 
@@ -39,7 +42,7 @@ impl OrbAnimation {
         let surface = Surface::new(ORB_PIXELS);
         let input = Arc::new(Mutex::new(OrbInput {
             recording: true,
-            level: 0.0,
+            levels: [0.0; VOICE_SAMPLES],
             colour,
         }));
         let first = Arc::new(render(&surface, 0.0, *lock(&input), 0.0));
@@ -56,8 +59,15 @@ impl OrbAnimation {
                 while !worker_stop.load(Ordering::Relaxed) {
                     let began = Instant::now();
                     let input = *lock(&worker_input);
-                    let target = if input.recording { input.level } else { 0.0 };
-                    let rate = if target > energy { 0.42 } else { 0.12 };
+                    let target = if input.recording {
+                        input.levels[VOICE_SAMPLES - 1]
+                    } else {
+                        0.0
+                    };
+                    // Speech should move the liquid on the first syllable.
+                    // Release is slower so a gap between words does not snap
+                    // the whole material back to its idle shape.
+                    let rate = if target > energy { 0.58 } else { 0.16 };
                     energy += (target - energy) * rate;
                     let next = Arc::new(render(
                         &surface,
@@ -83,10 +93,10 @@ impl OrbAnimation {
         }
     }
 
-    pub(crate) fn update(&self, recording: bool, level: f32, colour: u32) {
+    pub(crate) fn update(&self, recording: bool, levels: &[f32], colour: u32) {
         *lock(&self.input) = OrbInput {
             recording,
-            level: level.clamp(0.0, 1.0),
+            levels: microphone_history(levels),
             colour,
         };
     }
@@ -120,6 +130,19 @@ impl Drop for OrbAnimation {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn microphone_history(levels: &[f32]) -> [f32; VOICE_SAMPLES] {
+    let mut history = [0.0; VOICE_SAMPLES];
+    let shown = &levels[levels.len().saturating_sub(history.len())..];
+    let offset = history.len() - shown.len();
+    for (slot, peak) in history[offset..].iter_mut().zip(shown) {
+        // Typical speech peaks are far below full scale. Without this curve a
+        // clear 0.05 reading moved the liquid by only a few thousandths,
+        // which looked identical to silence.
+        *slot = (peak.clamp(0.0, 1.0) * 5.0).sqrt().clamp(0.0, 1.0);
+    }
+    history
 }
 
 /// Screen-space measurements shared by every animation frame.
@@ -166,7 +189,7 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
     let t = time * speed;
     // These are frame-wide uniforms, not per-pixel waves: the whole body of
     // liquid visibly rolls and breathes even when the room is quiet.
-    let roll = (t * 0.32).sin() * 0.18;
+    let roll = (t * 0.32).sin() * (0.18 + level * 0.08);
     let (roll_sin, roll_cos) = roll.sin_cos();
     let sway = (t * 0.72).sin();
     let breathe = 0.5 + 0.5 * (t * 0.90).sin();
@@ -199,14 +222,23 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         // crossing liquid waves through it. The old offsets were too small to
         // read as motion; these deform the bands themselves, not just tint.
         let lens = 0.16 + edge * 0.30;
-        let turbulence = 0.045 + level * 0.070;
+        let turbulence = 0.045 + level * 0.16;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
+        let voice = voice_at(&input.levels, (liquid_x * 0.5 + 0.5).clamp(0.0, 1.0));
+        let voice_envelope = (1.0 - nx * nx).max(0.0).sqrt();
+        let voice_ripple = voice * voice_envelope;
         let wave_x =
             sine(liquid_y * 5.0 + t * 1.35) + sine((liquid_x + liquid_y) * 7.0 - t * 0.80) * 0.45;
         let wave_y = sine(liquid_x * 6.2 - t * 1.05) + sine((liquid_x - liquid_y) * 8.0 + t) * 0.40;
-        let flow_x = x - nx * lens + wave_x * turbulence;
-        let flow_y = y - ny * lens + wave_y * turbulence;
+        // The meter is spatial here, not just a brightness uniform: every
+        // horizontal slice follows its own recent peak, so the liquid ribbon
+        // bends into the same scrolling wave the old meter displayed.
+        let voice_wave = sine(liquid_x * 5.5 - t * 2.2) * voice_ripple;
+        let flow_x = x - nx * lens
+            + wave_x * turbulence
+            + sine(liquid_y * 4.0 + t * 1.7) * voice_ripple * 0.06;
+        let flow_y = y - ny * lens + wave_y * turbulence + voice_wave * 0.22;
         let side = flow_x.abs().clamp(0.0, 1.0);
 
         // A broad, white-hot core sits inside a blue and rose-gold ribbon.
@@ -325,6 +357,15 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
     RenderImage::new(vec![Frame::new(pixels)])
 }
 
+/// Sample the scrolling meter at a horizontal position inside the sphere.
+fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
+    let position = position.clamp(0.0, 1.0) * (levels.len() - 1) as f32;
+    let index = position as usize;
+    let next = (index + 1).min(levels.len() - 1);
+    let fraction = position - index as f32;
+    levels[index] * (1.0 - fraction) + levels[next] * fraction
+}
+
 /// Compact, smooth bell curve without a per-pixel exponential call.
 fn bell(value: f32, width: f32) -> f32 {
     let t = (1.0 - value.abs() / width).clamp(0.0, 1.0);
@@ -386,7 +427,7 @@ mod tests {
             0.0,
             OrbInput {
                 recording: true,
-                level: 0.4,
+                levels: [0.4; VOICE_SAMPLES],
                 colour: 0xffbf47,
             },
             0.4,
@@ -404,7 +445,7 @@ mod tests {
         let surface = Surface::new(96);
         let input = OrbInput {
             recording: true,
-            level: 0.2,
+            levels: [0.2; VOICE_SAMPLES],
             colour: 0xffbf47,
         };
         let first = render(&surface, 0.2, input, 0.2);
@@ -420,8 +461,29 @@ mod tests {
             visibly_changed > before.len() / 200,
             "motion must reshape visible pixels, not merely change one sample"
         );
-        let louder = render(&surface, 0.2, input, 0.9);
-        assert_ne!(first.as_bytes(0), louder.as_bytes(0));
+        let mut spoken = input;
+        for (index, level) in spoken.levels.iter_mut().enumerate() {
+            *level = if index % 2 == 0 { 0.05 } else { 0.95 };
+        }
+        let louder = render(&surface, 0.2, spoken, 0.9);
+        let speech_changed = before
+            .iter()
+            .zip(louder.as_bytes(0).expect("louder frame"))
+            .filter(|(a, b)| (**a).abs_diff(**b) > 8)
+            .count();
+        assert!(
+            speech_changed > before.len() / 200,
+            "the recorded waveform must visibly reshape the liquid"
+        );
+    }
+
+    #[test]
+    fn normal_speech_is_amplified_and_newest_on_the_right() {
+        let history = microphone_history(&[0.05, 0.2]);
+        assert!(history[..history.len() - 2].iter().all(|peak| *peak == 0.0));
+        assert!((history[history.len() - 2] - 0.5).abs() < 0.001);
+        assert!((history[history.len() - 1] - 1.0).abs() < 0.001);
+        assert_eq!(voice_at(&history, 1.0), 1.0);
     }
 
     #[test]
