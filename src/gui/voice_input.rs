@@ -659,16 +659,6 @@ pub(crate) fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     out
 }
 
-/// Encode mono f32 samples as a PCM16 WAV, header included.
-///
-/// Hand-built rather than through `hound`: hound is behind `local-stt`, and a
-/// window built without that feature still has to be able to record. The
-/// layout is the canonical 44-byte one and nothing here assumes a seekable
-/// file, because the bytes go straight to an HTTP body.
-pub(crate) fn wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    wav_bytes_from_pcm(&pcm16(samples), sample_rate)
-}
-
 /// Fold f32 samples to the PCM16 the WAV and the voice note both carry.
 ///
 /// One conversion, shared by both: a clip whose WAV and whose saved voice note
@@ -681,7 +671,12 @@ pub(crate) fn pcm16(samples: &[f32]) -> Vec<i16> {
         .collect()
 }
 
-/// The same WAV, from samples that are already folded.
+/// Encode already-folded samples as a mono PCM16 WAV, header included.
+///
+/// Hand-built rather than through `hound`: hound is behind `local-stt`, and a
+/// window built without that feature still has to be able to record. The
+/// layout is the canonical 44-byte one and nothing here assumes a seekable
+/// file, because the bytes go straight to an HTTP body.
 pub(crate) fn wav_bytes_from_pcm(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     const CHANNELS: u16 = 1;
     const BITS: u16 = 16;
@@ -787,7 +782,7 @@ mod tests {
     #[test]
     fn wav_header_describes_the_samples() {
         let samples = [0.0, 0.5, -0.5];
-        let wav = wav_bytes(&samples, TARGET_RATE);
+        let wav = wav_bytes_from_pcm(&pcm16(&samples), TARGET_RATE);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(&wav[12..16], b"fmt ");
@@ -809,7 +804,7 @@ mod tests {
     /// into the opposite polarity.
     #[test]
     fn wav_samples_are_pcm16_and_clipped() {
-        let wav = wav_bytes(&[0.0, -1.0, 1.0, 1.5, -1.5], 16_000);
+        let wav = wav_bytes_from_pcm(&pcm16(&[0.0, -1.0, 1.0, 1.5, -1.5]), 16_000);
         let sample_at = |i: usize| i16::from_le_bytes([wav[44 + i * 2], wav[44 + i * 2 + 1]]);
         assert_eq!(sample_at(0), 0);
         assert_eq!(sample_at(1), i16::MIN + 1);
@@ -822,7 +817,7 @@ mod tests {
     /// failure path is a clear "no audio" rather than a malformed request.
     #[test]
     fn an_empty_recording_is_a_valid_header_and_nothing_else() {
-        let wav = wav_bytes(&[], TARGET_RATE);
+        let wav = wav_bytes_from_pcm(&pcm16(&[]), TARGET_RATE);
         assert_eq!(wav.len(), 44);
         assert_eq!(u32_at(&wav, 40), 0);
     }
