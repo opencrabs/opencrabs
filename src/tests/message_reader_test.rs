@@ -4,7 +4,7 @@
 //! and what the reader's header calls it. The drawing is in the GUI binary;
 //! these are the rules that decide what it draws.
 
-use opencrabs::ui_core::message_reader::{READER_LINES, TITLE_CHARS, opens_in_reader, title};
+use crate::ui_core::message_reader::{READER_LINES, TITLE_CHARS, opens_in_reader, title};
 
 #[test]
 fn a_short_message_keeps_its_click_free() {
