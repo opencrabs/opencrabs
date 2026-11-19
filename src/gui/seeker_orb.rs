@@ -841,7 +841,9 @@ mod tests {
         let row = size as usize / 2;
         let strip = &bytes[row * size as usize * 4..(row + 1) * size as usize * 4];
         let first = strip
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .position(|pixel| pixel[3] > 0)
             .expect("the orb reaches the centre row");
         let expected = ((1.0 - ORB_RADIUS) * 0.5 * size as f32) as usize;
