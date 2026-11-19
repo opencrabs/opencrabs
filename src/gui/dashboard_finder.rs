@@ -714,6 +714,12 @@ impl Dashboard {
                 let url = docs::url(path);
                 preview::launch(&preview::url_command(&url));
             }
+            PaletteAction::Calc { answer } => {
+                // Spotlight's contract: the answer goes to the clipboard and
+                // the card closes, with no confirmation to dismiss.
+                cx.write_to_clipboard(ClipboardItem::new_string(answer));
+                cx.notify();
+            }
         }
     }
 

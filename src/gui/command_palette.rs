@@ -87,12 +87,23 @@ pub fn status(state: &PaletteState) -> String {
             if rows.is_empty() {
                 // No rows at all: blank words. The roast still says it.
                 roast(query).to_string()
+            } else if rows.len() == 1 && rows[0].item.kind == PaletteKind::Calc {
+                // The field is a sum, so there is no search to count: Enter
+                // copies the answer, the way Spotlight does.
+                "enter copies the result".to_string()
             } else if rows.len() == 1 && rows[0].item.kind == PaletteKind::Ask {
                 "no match. enter asks a fresh session".to_string()
             } else {
                 let matches = rows
                     .iter()
-                    .filter(|row| row.item.kind != PaletteKind::Ask)
+                    // Neither the miss row nor the answer row is a search
+                    // result, so neither counts toward the total.
+                    .filter(|row| {
+                        !matches!(
+                            row.item.kind,
+                            PaletteKind::Ask | PaletteKind::Calc
+                        )
+                    })
                     .count();
                 if matches == 1 {
                     "1 match".to_string()
@@ -1369,5 +1380,17 @@ mod tests {
         // happens to be named like one never does.
         let sessions = rows(&state_with(vec![item("/usage", PaletteKind::Session)]));
         assert!(!sessions[0].missing, "a session row is never terminal only");
+    }
+
+    /// A sum is not a search result: the footer says what Enter does instead of
+    /// counting a match, and the row it describes carries the answer.
+    #[test]
+    fn the_footer_offers_to_copy_a_calculator_answer() {
+        let mut state = state_with(vec![item("Quit", PaletteKind::Command)]);
+        state.insert_text("200/7.1");
+        assert_eq!(status(&state), "enter copies the result");
+        let printed = rows(&state);
+        assert_eq!(printed[0].title, "= 28.1690140845");
+        assert_eq!(printed[0].kind, "calc");
     }
 }

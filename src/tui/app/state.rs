@@ -1057,6 +1057,35 @@ mod sidebar_action_tests {
             "the terminal says where the group modal lives"
         );
     }
+
+    /// The calculator row hands its answer to the same clipboard a message
+    /// copy uses, and a box without one says so instead of pretending.
+    #[test]
+    fn the_calc_row_copies_its_answer() {
+        let source = include_str!("state.rs");
+        let dispatch = source
+            .rsplit("async fn apply_palette_action")
+            .next()
+            .and_then(|tail| tail.split("/// Handle keyboard input").next())
+            .expect("palette dispatch");
+
+        let arm = dispatch
+            .split("PaletteAction::Calc { answer } =>")
+            .nth(1)
+            .expect("the calc arm is in the dispatch");
+        assert!(
+            arm.contains("Self::copy_to_clipboard(&answer)"),
+            "the answer goes to the clipboard"
+        );
+        assert!(
+            arm.contains("No clipboard on this machine"),
+            "a box with no clipboard says so"
+        );
+        assert!(
+            !arm.contains("CommandSubmitted"),
+            "a sum never starts a conversation"
+        );
+    }
 }
 
 impl App {
@@ -4278,6 +4307,17 @@ impl App {
                 self.notification = Some(match opened {
                     Ok(()) => format!("Opening {url}"),
                     Err(err) => format!("Could not open {url}: {err}"),
+                });
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
+            PaletteAction::Calc { answer } => {
+                // Same contract as the window: the answer goes to the
+                // clipboard and the card is already closed. A box with no
+                // clipboard says so instead of pretending it copied.
+                self.notification = Some(if Self::copy_to_clipboard(&answer) {
+                    format!("Copied {answer}")
+                } else {
+                    "No clipboard on this machine".to_string()
                 });
                 self.notification_shown_at = Some(std::time::Instant::now());
             }
