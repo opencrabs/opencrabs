@@ -42,8 +42,8 @@ impl OrbAnimation {
             level: 0.0,
             colour,
         }));
-        let first = render(&surface, 0.0, *lock(&input), 0.0);
-        let latest = Arc::new(Mutex::new(first));
+        let first = Arc::new(render(&surface, 0.0, *lock(&input), 0.0));
+        let latest: Arc<Mutex<Arc<RenderImage>>> = Arc::new(Mutex::new(first));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_input = Arc::clone(&input);
         let worker_latest = Arc::clone(&latest);
@@ -59,8 +59,13 @@ impl OrbAnimation {
                     let target = if input.recording { input.level } else { 0.0 };
                     let rate = if target > energy { 0.42 } else { 0.12 };
                     energy += (target - energy) * rate;
-                    let next = render(&surface, started.elapsed().as_secs_f32(), input, energy);
-                    *lock(&worker_latest) = Arc::new(next);
+                    let next = Arc::new(render(
+                        &surface,
+                        started.elapsed().as_secs_f32(),
+                        input,
+                        energy,
+                    ));
+                    *lock(&worker_latest) = next;
                     let spent = began.elapsed();
                     if spent < FRAME_INTERVAL {
                         std::thread::sleep(FRAME_INTERVAL - spent);
@@ -149,7 +154,7 @@ impl Surface {
 }
 
 /// Render one straight-alpha BGRA frame, the layout GPUI's atlas expects.
-fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> Arc<RenderImage> {
+fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderImage {
     let mut pixels = RgbaImage::new(surface.size, surface.size);
     let tint = rgb(input.colour);
     let level = energy.clamp(0.0, 1.0);
@@ -239,7 +244,7 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> Arc<Ren
             * coverage;
         *pixel = bgra(red, green, blue, alpha);
     }
-    Arc::new(RenderImage::new(vec![Frame::new(pixels)]))
+    RenderImage::new(vec![Frame::new(pixels)])
 }
 
 /// Compact, smooth bell curve without a per-pixel exponential call.
