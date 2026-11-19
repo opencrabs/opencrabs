@@ -132,9 +132,7 @@ use crate::composer_view::{
     command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
 };
 use crate::dashboard_panes::{DividerDrag, PaneDrag, PaneGhost, splitter};
-use crate::dashboard_rail::{
-    RAIL_DEFAULT_REM, RAIL_MAX_REM, RAIL_MIN_REM, set_rail_open_state,
-};
+use crate::dashboard_rail::{RAIL_DEFAULT_REM, RAIL_MAX_REM, RAIL_MIN_REM};
 use crate::dashboard_state::{Dashboard, FooterPlace, Screen, SendOrigin};
 use crate::help_view::{CommandLists, HelpView, help_screen};
 use crate::mission_control_view::{
