@@ -3969,10 +3969,10 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     // The budget only when the turn has measured one. An unknown used figure
     // used to print `ctx: 0/200K 0%`, which reads as a measured empty budget
     // instead of as no measurement yet (#3046).
-    if let Some(used) = ctx.0 {
-        if let Some(segment) = ctx_segment(used, ctx.1) {
-            parts.push(segment);
-        }
+    if let Some(used) = ctx.0
+        && let Some(segment) = ctx_segment(used, ctx.1)
+    {
+        parts.push(segment);
     }
     // The rate is its own segment, so it can appear or drop out without taking
     // the budget with it (#3046). `tokens_per_sec` answers zero when the window
