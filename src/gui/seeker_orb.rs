@@ -54,10 +54,13 @@ impl OrbAnimation {
         let spawned = std::thread::Builder::new()
             .name("gui-seeker-orb".into())
             .spawn(move || {
-                let started = Instant::now();
+                let mut previous_frame = Instant::now();
+                let mut liquid_clock = 0.0_f32;
                 let mut energy = 0.0_f32;
                 while !worker_stop.load(Ordering::Relaxed) {
                     let began = Instant::now();
+                    let elapsed = (began - previous_frame).as_secs_f32().min(0.10);
+                    previous_frame = began;
                     let input = *lock(&worker_input);
                     let target = if input.recording {
                         input.levels[VOICE_SAMPLES - 1]
@@ -69,12 +72,11 @@ impl OrbAnimation {
                     // the whole material back to its idle shape.
                     let rate = if target > energy { 0.58 } else { 0.16 };
                     energy += (target - energy) * rate;
-                    let next = Arc::new(render(
-                        &surface,
-                        started.elapsed().as_secs_f32(),
-                        input,
-                        energy,
-                    ));
+                    // Integrate phase instead of scaling wall time. Recording
+                    // silence keeps a slow viscous drift; speech accelerates
+                    // it smoothly without making the whole orb churn.
+                    liquid_clock += elapsed * (0.20 + energy * 0.85);
+                    let next = Arc::new(render(&surface, liquid_clock, input, energy));
                     *lock(&worker_latest) = next;
                     let spent = began.elapsed();
                     if spent < FRAME_INTERVAL {
@@ -181,12 +183,12 @@ impl Surface {
 }
 
 /// Render one straight-alpha BGRA frame, the layout GPUI's atlas expects.
-fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderImage {
+fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) -> RenderImage {
     let mut pixels = RgbaImage::new(surface.size, surface.size);
     let tint = rgb(input.colour);
     let level = energy.clamp(0.0, 1.0);
-    let speed = if input.recording { 1.65 } else { 0.45 };
-    let t = time * speed;
+    let t = liquid_clock;
+    let liquid_levels = smooth_voice(input.levels);
     // These are frame-wide uniforms, not per-pixel waves: the whole body of
     // liquid visibly rolls and breathes even when the room is quiet.
     let roll = (t * 0.32).sin() * (0.18 + level * 0.08);
@@ -218,27 +220,27 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         let nz = surface.normal_z[index];
         let edge = 1.0 - nz;
 
-        // Refract the internal volume along the sphere normal, then push two
-        // crossing liquid waves through it. The old offsets were too small to
-        // read as motion; these deform the bands themselves, not just tint.
+        // Refract the internal volume along the sphere normal. Broad, crossing
+        // currents make a continuous liquid surface instead of an audio trace.
         let lens = 0.16 + edge * 0.30;
-        let turbulence = 0.045 + level * 0.16;
+        let turbulence = 0.028 + level * 0.065;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
-        let voice = voice_at(&input.levels, (liquid_x * 0.5 + 0.5).clamp(0.0, 1.0));
+        let voice = voice_at(&liquid_levels, (liquid_x * 0.5 + 0.5).clamp(0.0, 1.0));
         let voice_envelope = (1.0 - nx * nx).max(0.0).sqrt();
         let voice_ripple = voice * voice_envelope;
         let wave_x =
-            sine(liquid_y * 5.0 + t * 1.35) + sine((liquid_x + liquid_y) * 7.0 - t * 0.80) * 0.45;
-        let wave_y = sine(liquid_x * 6.2 - t * 1.05) + sine((liquid_x - liquid_y) * 8.0 + t) * 0.40;
-        // The meter is spatial here, not just a brightness uniform: every
-        // horizontal slice follows its own recent peak, so the liquid ribbon
-        // bends into the same scrolling wave the old meter displayed.
-        let voice_wave = sine(liquid_x * 5.5 - t * 2.2) * voice_ripple;
+            sine(liquid_y * 3.2 + t * 0.55) + sine((liquid_x + liquid_y) * 4.5 - t * 0.32) * 0.35;
+        let wave_y =
+            sine(liquid_x * 3.8 - t * 0.38) + sine((liquid_x - liquid_y) * 5.2 + t * 0.42) * 0.30;
+        // Smoothed speech history swells broad regions of the liquid. Remove
+        // its mean so speech bends the surface around the resting centre
+        // rather than dragging the whole ribbon in one direction.
+        let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.14;
         let flow_x = x - nx * lens
             + wave_x * turbulence
-            + sine(liquid_y * 4.0 + t * 1.7) * voice_ripple * 0.06;
-        let flow_y = y - ny * lens + wave_y * turbulence + voice_wave * 0.22;
+            + sine(liquid_y * 2.4 + t * 0.35) * voice_ripple * 0.025;
+        let flow_y = y - ny * lens + wave_y * turbulence + voice_bend;
         let side = flow_x.abs().clamp(0.0, 1.0);
 
         // A broad, white-hot core sits inside a blue and rose-gold ribbon.
@@ -247,8 +249,8 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         let centre_line = 0.02
             + 0.20 * side.powf(1.45)
             + sway * 0.080
-            + sine(flow_x * 3.3 - t * 1.20) * (0.035 + level * 0.045)
-            + sine(flow_x * 7.7 + t * 1.60) * (0.012 + level * 0.018);
+            + sine(flow_x * 3.3 - t * 0.65) * (0.025 + level * 0.035)
+            + sine(flow_x * 4.8 + t * 0.55) * (0.008 + level * 0.012);
         let centre = flow_y - centre_line;
         let belt = bell(
             centre,
@@ -268,16 +270,16 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         // Secondary caustics cross at different depths and drift against the
         // main band. This parallax is what makes the material read as water.
         let upper_line = -0.34 - 0.15 * side.powf(1.6) - sway * 0.045
-            + sine(flow_x * 4.1 + t * 0.95) * (0.030 + level * 0.028);
+            + sine(flow_x * 3.2 + t * 0.45) * (0.025 + level * 0.020);
         let upper =
             bell(flow_y - upper_line, 0.032 + level * 0.014) * (0.38 + side * 0.62) * envelope;
         let lower_line = 0.43
             + 0.20 * side.powf(1.4)
             + sway * 0.055
-            + sine(flow_x * 5.4 - t * 1.15) * (0.036 + level * 0.032);
+            + sine(flow_x * 3.8 - t * 0.50) * (0.026 + level * 0.022);
         let lower_a = bell(flow_y - lower_line, 0.034 + level * 0.014);
         let lower_b = bell(
-            flow_y - 0.57 - 0.12 * side + sine(flow_x * 4.6 + t * 1.05) * (0.030 + level * 0.026),
+            flow_y - 0.57 - 0.12 * side + sine(flow_x * 3.4 + t * 0.42) * (0.022 + level * 0.018),
             0.024 + level * 0.010,
         );
         let caustics = (lower_a * 0.72 + lower_b * 0.48) * envelope;
@@ -304,8 +306,8 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         let specular = side_specular * 0.62 + cap_specular * 0.38;
         let inner_shadow = smooth(0.38, 0.99, radius) * (0.72 - top_left * 0.25);
         let body_shade = 1.0 - inner_shadow * 0.58;
-        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.85))
-            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.72));
+        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.40))
+            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.36));
         let body = (0.006 + nz * 0.014 + wisps * 0.010) * body_shade;
 
         let red = body * 0.80
@@ -357,6 +359,22 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         *pixel = bgra(red, green, blue, alpha);
     }
     RenderImage::new(vec![Frame::new(pixels)])
+}
+
+/// Low-pass the meter before it deforms the liquid. Individual meter bars
+/// remain visible to speech, but their sharp edges do not become sound-wave
+/// spikes in the glass.
+fn smooth_voice(levels: [f32; VOICE_SAMPLES]) -> [f32; VOICE_SAMPLES] {
+    let mut smoothed = [0.0; VOICE_SAMPLES];
+    for (index, output) in smoothed.iter_mut().enumerate() {
+        let mut sum = 0.0;
+        for (tap, weight) in [1.0_f32, 2.0, 3.0, 2.0, 1.0].into_iter().enumerate() {
+            let sample = (index as isize + tap as isize - 2).clamp(0, VOICE_SAMPLES as isize - 1);
+            sum += levels[sample as usize] * weight;
+        }
+        *output = sum / 9.0;
+    }
+    smoothed
 }
 
 /// Sample the scrolling meter at a horizontal position inside the sphere.
