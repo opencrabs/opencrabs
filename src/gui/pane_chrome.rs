@@ -10,8 +10,8 @@
 //! Moved out of the crate root (#2817 follow-up) as pure code motion: the
 //! functions, their constants, their comments and the footer test module are
 //! unchanged, only the module boundary is new. `SendOrigin`, which sat between
-//! the footer and the dim composer, stays where it was: it gates sends, it does
-//! not draw a pane.
+//! the footer and the dim composer, lives with the rest of the window's state
+//! now (#3061): it gates sends, it does not draw a pane.
 
 use gpui::{
     AnyElement, App, ClickEvent, CursorStyle, IntoElement, MouseButton, MouseDownEvent,
