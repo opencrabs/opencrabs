@@ -3151,8 +3151,8 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
         .child(
             div()
                 .flex_shrink_0()
-                .w(px(16.0))
-                .child(disclosure_icon(palette::current().accent, 1.0)),
+                .w(rems(1.15))
+                .child(disclosure_icon(palette::current().accent, 1.15)),
         )
         .child(head_run(glyph.to_string(), palette::current().text_muted, None).flex_shrink_0())
         .child(
@@ -3772,7 +3772,7 @@ fn live_card(
     let mut head = div()
         .flex()
         .flex_row()
-        .items_start()
+        .items_center()
         .gap_1()
         .w_full()
         .min_w_0()
@@ -3782,8 +3782,8 @@ fn live_card(
         .child(
             div()
                 .flex_shrink_0()
-                .w(px(16.0))
-                .child(disclosure_icon(accent, 1.0)),
+                .w(rems(1.15))
+                .child(disclosure_icon(accent, 1.15)),
         );
     // The slot, on the arrow's own line: the clock while the turn has not
     // called or spoken yet, the verdict once it stops. It leaves the slot the
