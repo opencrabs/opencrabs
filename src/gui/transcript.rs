@@ -1381,6 +1381,12 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     let has_tool_tag = m.content.contains("\u{fe0f}\u{20e3}") || m.content.contains("<tool_call>");
     let expandable = m.content.contains("<!-- tools")
         || m.content.contains("<!-- reasoning -->")
+        // A blocked section is a marker the split knows how to fold, so the row
+        // must reach it. Without this arm a phantom iteration persisted by a
+        // model that streams its chain inline (no `<!-- reasoning -->` block,
+        // no tool ledger) missed the split entirely and painted both markers
+        // plus the narration it was supposed to withhold (#3052).
+        || m.content.contains(reasoning_split::BLOCKED_OPEN)
         || lower.contains("<antthinking")
         || lower.contains("<think")
         || lower.contains("<mm:think")
@@ -7060,6 +7066,39 @@ mod tests {
         }
         // A message the user typed is still a row of its own.
         assert_eq!(row_blocks(&row("user", "hello", 1), None).len(), 1);
+    }
+
+    /// #3052: a phantom iteration persisted by a model that streams its chain
+    /// inline carries the blocked marker and nothing else the split used to
+    /// look for, so the row painted both markers and the narration they guard.
+    #[test]
+    fn gui_phantom_blocked_row_never_paints_its_markers() {
+        let content = "<!-- phantom_blocked=1 -->\n\n\
+                       Committed `abc1234` on shared main.\n\n\
+                       <!-- /phantom_blocked=1 -->\n";
+        let blocks = row_blocks(&row("assistant", content, 1), None);
+        assert!(
+            !blocks.is_empty(),
+            "the blocked section still renders as a folded step"
+        );
+        for block in &blocks {
+            let text = block_text(block);
+            assert!(
+                !text.contains("phantom_blocked"),
+                "marker leaked into the row: {text}"
+            );
+            assert!(
+                !matches!(block, Block::Msg { .. }),
+                "blocked narration must never become a message row: {text}"
+            );
+        }
+        let folded = blocks.iter().find_map(|block| match block {
+            Block::Thinking { content } => Some(content.clone()),
+            _ => None,
+        });
+        let folded = folded.expect("the blocked section folds into a thinking block");
+        assert!(folded.contains(reasoning_split::BLOCKED_LABEL));
+        assert!(folded.contains("Committed `abc1234` on shared main."));
     }
 
     /// The card's narration lines, in order, so a test reads the words the

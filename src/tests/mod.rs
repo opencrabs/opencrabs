@@ -794,6 +794,7 @@ pub mod phantom_allowlist_test;
 pub mod phantom_ar_2222_test;
 pub mod phantom_bare_completion_test;
 pub mod phantom_bare_tool_name_test;
+pub mod phantom_blocked_gate_test;
 pub mod phantom_branch_class_test;
 pub mod phantom_clause_boundary_test;
 pub mod phantom_cleanup_intent_test;

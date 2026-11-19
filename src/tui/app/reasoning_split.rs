@@ -37,7 +37,11 @@ use super::ledger_scan::find_at_line_start;
 
 const OPEN: &str = "<!-- reasoning -->";
 const CLOSE: &str = "<!-- /reasoning -->";
-const BLOCKED_OPEN: &str = "<!-- phantom_blocked=1 -->";
+/// Opener of a phantom-blocked section (#1172). Public because both reload
+/// gates (GUI `row_blocks`, TUI `expand_message`) must route a row carrying it
+/// into `split_segments`: a row the gate rejects paints the marker and the
+/// narration it guards (#3052).
+pub const BLOCKED_OPEN: &str = "<!-- phantom_blocked=1 -->";
 const BLOCKED_CLOSE: &str = "<!-- /phantom_blocked=1 -->";
 
 /// Heading a collapsed blocked section carries, so an expanded row says what
