@@ -234,7 +234,7 @@ pub fn apply_dock_icon() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_svg, disclosure_svg};
+    use super::{collapse_svg, disclosure_svg, paperclip_svg};
 
     #[test]
     fn the_disclosure_arrow_is_a_full_size_rounded_vector() {
