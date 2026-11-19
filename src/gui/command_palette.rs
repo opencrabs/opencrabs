@@ -405,7 +405,11 @@ impl Element for SeekerTextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let font = style.font();
         let mut runs = vec![TextRun {
-            len: if empty { display.len() } else { self.query.len() },
+            len: if empty {
+                display.len()
+            } else {
+                self.query.len()
+            },
             font: font.clone(),
             color: rgb(if empty { INK_MUTED } else { INK }).into(),
             background_color: None,
@@ -518,7 +522,11 @@ pub(super) fn query_line(
         placeholder: field_prompt(state),
         // An armed pick lists conversations, so there is nothing to ask: the
         // grey tail belongs to a query, not to a menu (#3066).
-        suffix: if state.pick().is_none() { ASK_SUFFIX } else { "" },
+        suffix: if state.pick().is_none() {
+            ASK_SUFFIX
+        } else {
+            ""
+        },
         caret: before.len(),
         selection,
         caret_on,
@@ -1516,8 +1524,7 @@ mod tests {
             "the grey lift is the complement, so exactly one of the two paints"
         );
         assert!(
-            src.contains(".bg(rgba(FROST_FILL))")
-                && src.contains(".border_color(rgba(RIM_EDGE))"),
+            src.contains(".bg(rgba(FROST_FILL))") && src.contains(".border_color(rgba(RIM_EDGE))"),
             "the card is a whisper of white with its own lit edge"
         );
         assert!(

@@ -485,9 +485,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + GLOW_GAIN * glow
             + BOWL_LIFT * bowl
             + RIM_FALL_GAIN * (-depth / RIM_FALL_SIGMA).exp()
-            + RIM_GAIN
-                * gaussian(radius - RIM_RADIUS, RIM_WIDTH)
-                * (0.05 + 0.95 * rim_key)
+            + RIM_GAIN * gaussian(radius - RIM_RADIUS, RIM_WIDTH) * (0.05 + 0.95 * rim_key)
             + FAR_WALL * gaussian(ny - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
             + SPEC_GAIN * catch * catch)
             .clamp(0.0, 1.0);
@@ -499,11 +497,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let saturation = saturation_at(heat);
         let fringe = DISPERSION * depth.powi(6);
         let warm_hue = BOWL_HUE + (accent_hue - AMBER_HUE) * WARM_FOLLOW;
-        let warm = tinted(
-            warm_hue + (ribbon - 0.5) * 0.10 - fringe,
-            saturation,
-            heat,
-        );
+        let warm = tinted(warm_hue + (ribbon - 0.5) * 0.10 - fringe, saturation, heat);
         let cool = tinted(COOL_HUE + fringe, saturation, heat);
         let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
         let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
@@ -554,12 +548,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let dither = ((BAYER[((row & 3) * 4 + (column & 3)) as usize] - 0.5) * 1.4
             + (hash_noise(index) - 0.5) * 0.8)
             / 255.0;
-        *pixel = bgra(
-            red + dither,
-            green + dither,
-            blue + dither,
-            alpha + dither,
-        );
+        *pixel = bgra(red + dither, green + dither, blue + dither, alpha + dither);
     }
     RenderImage::new(vec![Frame::new(pixels)])
 }
