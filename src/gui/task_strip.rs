@@ -81,7 +81,7 @@ pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>) -> Div {
 
 /// One open task's output as the window last read it.
 pub(crate) struct TaskTail {
-    read_at: std::time::Instant,
-    path: Option<std::path::PathBuf>,
-    text: Option<SharedString>,
+    pub(crate) read_at: std::time::Instant,
+    pub(crate) path: Option<std::path::PathBuf>,
+    pub(crate) text: Option<SharedString>,
 }
