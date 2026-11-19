@@ -29,6 +29,7 @@ mod accent;
 mod agent_bridge;
 mod attachment_view;
 mod bang;
+mod boot;
 mod breakdown;
 mod chat_leaf;
 mod command_palette;
@@ -57,6 +58,7 @@ mod fonts;
 mod help_view;
 mod hint;
 mod icon;
+mod launch;
 mod layout_store;
 mod logging;
 mod markdown;
@@ -109,6 +111,7 @@ mod topic_bar_view;
 mod topic_icons;
 mod topic_tabs;
 mod transcript;
+mod usage_load;
 mod usage_view;
 mod voice_input;
 mod voice_media;
@@ -141,6 +144,13 @@ use crate::screen_keys::{
 use crate::status::status_identity;
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use crate::topic_bar_view::{overflow_chip, topic_label, topic_strip, topic_tab};
+
+use crate::boot::{LoadState, boot_config, ledger_path};
+use crate::launch::{
+    Launch, launch_intent, pick_initial_session, print_launch_help, remember_open_session,
+};
+use crate::usage_load::{load_view, period_word};
+
 use opencrabs::db::models::Message;
 use opencrabs::ui_core::actions;
 use opencrabs::ui_core::channel_status;
@@ -201,12 +211,6 @@ use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
 use opencrabs::ui_core::usage::loader::usage_view;
 use opencrabs::ui_core::usage::view_model::UsageViewModel;
 use opencrabs::ui_core::window_controls::{PLATFORM_DRAWS_CAPTION, effective_decorations};
-
-/// What the window has to draw: the loaded view, or the reason it could not.
-enum LoadState {
-    Loaded(Box<UsageViewModel>),
-    Failed(SharedString),
-}
 
 /// Which pane the right side draws. Chat is the default screen, the usage
 /// ledger is opened with ctrl+u, and the conversation's tracked files with
@@ -277,109 +281,6 @@ impl Render for PaneGhost {
             .text_xs()
             .text_color(rgb(palette::current().text))
             .child(self.title.clone())
-    }
-}
-
-/// The ledger path, unchanged: `config.database.path`, with the same
-/// default (`~/.opencrabs/opencrabs.db`) when config cannot be read at all.
-fn ledger_path() -> std::path::PathBuf {
-    Config::load()
-        .map(|c| c.database.path)
-        .unwrap_or_else(|_| opencrabs::config::opencrabs_home().join("opencrabs.db"))
-}
-
-/// The period's display word for the usage chrome line: the owner asked for
-/// one line reading `OpenCrabs Usage · All Time · v0.5.15`, the middle word
-/// tracking the period switch (t/w/m/a).
-fn period_word(p: Period) -> &'static str {
-    match p {
-        Period::Today => "Today",
-        Period::Week => "Weekly",
-        Period::Month => "Monthly",
-        Period::AllTime => "All Time",
-    }
-}
-
-/// The config the window boots with, provisioned on a home that has none
-/// (#2375).
-///
-/// A window shipped without this step: it loaded whatever config happened to
-/// exist, so a fresh install opened with no provider at all and the first
-/// message died on "No provider configured", with no terminal to run the
-/// wizard from. The order mirrors the CLI's own startup, and each line is
-/// load-bearing:
-///
-/// 1. Write the documented `config.toml` and `keys.toml` when absent. The
-///    built-in provider gets its section from that file, so provisioning
-///    before this would have nowhere to write.
-/// 2. Re-read the config. The file loaded before seeding carries no provider
-///    sections, and `provision_builtin_provider` decides from `enabled`, so
-///    the old value would have skipped the token request (#2151).
-/// 3. Seed the brain templates, offline-safe and idempotent, so a first-run
-///    window has a personality instead of an empty prompt (#1382).
-/// 4. Ask the proxy for this install's token. The request needs a reactor,
-///    and the main thread has the stack for the current-thread runtime
-///    `Config::load` must not run on a gpui worker (see `load_view`).
-///
-/// Every step is idempotent and only fills a blank home, so a configured
-/// install boots exactly as before.
-fn boot_config() -> Result<Config, String> {
-    if opencrabs::config::seed::ensure_config_seeded() {
-        opencrabs::config::seed::ensure_keys_seeded();
-        logging::info("first run: documented config and keys written");
-    }
-    let mut config = Config::load().map_err(|e| format!("config load: {e}"))?;
-    opencrabs::config::profile::ensure_brain_seeded();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("first run: no runtime for provisioning: {e}"))?;
-    if runtime.block_on(
-        opencrabs::brain::provider::opencrabs_acquire::provision_builtin_provider(&mut config),
-    ) {
-        logging::info("first run: built-in provider token acquired");
-    }
-    Ok(config)
-}
-
-/// Fetch the real view on a thread with a real stack. The GUI is a separate
-/// process with no pool of its own, so it uses the loader's by-path door,
-/// which opens the ledger read-only and runs no migrations: the daemon and
-/// the TUI stay the owners of the schema.
-///
-/// The db path arrives pre-resolved, read from the config once on the main
-/// thread before the window opens. Nothing in here may touch `Config::load`:
-/// gpui's background executor polls its async tasks on Apple dispatch-queue
-/// worker threads whose stacks are tiny, and `Config::load`'s frame chain
-/// (thread-locals, dyld TLV instantiation) blows that stack with a silent
-/// SIGILL. Crash receipt 2026-10-30 08:33:39, exception "Thread stack size
-/// exceeded", frames `ledger_path -> Config::load -> resolve_profile_home
-/// -> _tlv_get_addr`. The tokio runtime and the sqlx work therefore run on
-/// this dedicated 4 MB thread; the future only awaits the result channel.
-async fn load_view(db_path: std::path::PathBuf, period: Period) -> LoadState {
-    let (tx, rx) = oneshot::channel::<LoadState>();
-    let spawned = std::thread::Builder::new()
-        .name("usage-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => match rt.block_on(usage_view(&db_path, period)) {
-                    Ok(vm) => LoadState::Loaded(Box::new(vm)),
-                    Err(e) => LoadState::Failed(format!("{e:#}").into()),
-                },
-                Err(e) => LoadState::Failed(format!("tokio runtime failed: {e}").into()),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(state) => state,
-            Err(_) => LoadState::Failed("fetch thread dropped its result".into()),
-        },
-        Err(e) => LoadState::Failed(format!("fetch thread failed to spawn: {e}").into()),
     }
 }
 
@@ -4869,77 +4770,6 @@ fn splitter(
                 .hover(|d| d.bg(rgb(palette::current().accent))),
         )
         .on_mouse_down(MouseButton::Left, grab)
-}
-
-/// The conversation a launch opens: the one the user was in last time when it
-/// is still on the rail, else the newest. Pure, so the choice is testable
-/// without a window. A pointer at a session that was deleted (or a first run
-/// with no pointer at all) falls back to the rail's order, which is newest
-/// first (#2444).
-fn pick_initial_session(
-    items: &[opencrabs::db::models::Session],
-    last: Option<Uuid>,
-) -> Option<Uuid> {
-    match last {
-        Some(id) if items.iter().any(|s| s.id == id) => Some(id),
-        _ => items.first().map(|s| s.id),
-    }
-}
-
-/// Record the conversation the window is showing, so the next launch (this
-/// surface or the terminal) reopens it. Split out from `open_session` so the
-/// write is exercised on its own, under a scratch home, instead of through a
-/// whole Dashboard.
-fn remember_open_session(id: Uuid) {
-    opencrabs::utils::last_session::write(id);
-}
-
-/// What a launch asks the window to do before it builds anything (#2841).
-///
-/// A packaging step, a smoke test or a hash check runs `opencrabs-gui
-/// --version` and expects a string back. Without this the flag was ignored and
-/// the whole application booted: the ledger opened, the channel connectors
-/// started and the A2A listener bound its port. That turned a version check
-/// into a second live instance, which is a known conflict on one bot token.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Launch {
-    /// Open the window.
-    Window,
-    /// Print the version and exit 0.
-    Version,
-    /// Print the flags and exit 0.
-    Help,
-    /// A flag this binary does not answer. Rejected rather than booted.
-    Refused(String),
-}
-
-/// Read the launch intent from the arguments, with the program name already
-/// skipped.
-///
-/// Only the two flags every packaging tool assumes are answered. A bare word
-/// is left alone on purpose: the protocol handler starts this binary with the
-/// activation URI in argv (#2751), and that launch has to open the window. A
-/// dash-prefixed word that matches nothing is refused, because a typo in a
-/// script must fail loudly instead of starting the app.
-fn launch_intent<I: IntoIterator<Item = String>>(args: I) -> Launch {
-    for arg in args {
-        match arg.as_str() {
-            "--version" | "-V" => return Launch::Version,
-            "--help" | "-h" => return Launch::Help,
-            flag if flag.starts_with('-') => return Launch::Refused(arg),
-            _ => {}
-        }
-    }
-    Launch::Window
-}
-
-/// The flags this binary answers, so a caller does not have to read the source
-/// to find out (#2841).
-fn print_launch_help() {
-    println!(
-        "opencrabs-gui {}\n\nUSAGE:\n    opencrabs-gui [--version] [--help]\n\nOPTIONS:\n    -V, --version    Print the version and exit\n    -h, --help       Print this help and exit",
-        env!("CARGO_PKG_VERSION")
-    );
 }
 
 fn main() {
