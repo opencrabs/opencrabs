@@ -220,69 +220,58 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let nz = surface.normal_z[index];
         let edge = 1.0 - nz;
 
-        // Refract the internal volume along the sphere normal. Broad, crossing
-        // currents make a continuous liquid surface instead of an audio trace.
-        let lens = 0.16 + edge * 0.30;
-        let turbulence = 0.028 + level * 0.065;
+        // Bend one continuous optical surface. Wide, low-frequency currents
+        // keep the highlights clean; speech changes their curvature without
+        // introducing the small ripples that made this read as an audio trace.
+        let lens = 0.20 + edge * 0.34;
+        let turbulence = 0.012 + level * 0.024;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
         let voice = voice_at(&liquid_levels, (liquid_x * 0.5 + 0.5).clamp(0.0, 1.0));
         let voice_envelope = (1.0 - nx * nx).max(0.0).sqrt();
         let voice_ripple = voice * voice_envelope;
-        let wave_x =
-            sine(liquid_y * 3.2 + t * 0.55) + sine((liquid_x + liquid_y) * 4.5 - t * 0.32) * 0.35;
-        let wave_y =
-            sine(liquid_x * 3.8 - t * 0.38) + sine((liquid_x - liquid_y) * 5.2 + t * 0.42) * 0.30;
-        // Smoothed speech history swells broad regions of the liquid. Remove
-        // its mean so speech bends the surface around the resting centre
-        // rather than dragging the whole ribbon in one direction.
-        let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.14;
-        let flow_x = x - nx * lens
-            + wave_x * turbulence
-            + sine(liquid_y * 2.4 + t * 0.35) * voice_ripple * 0.025;
-        let flow_y = y - ny * lens + wave_y * turbulence + voice_bend;
+        let current_x = sine(liquid_y * 1.55 + t * 0.38);
+        let current_y = sine(liquid_x * 1.75 - t * 0.30);
+        let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.065;
+        let flow_x = x - nx * lens + current_x * turbulence;
+        let flow_y = y - ny * lens + current_y * turbulence + voice_bend;
         let side = flow_x.abs().clamp(0.0, 1.0);
 
-        // A broad, white-hot core sits inside a blue and rose-gold ribbon.
-        // Its curvature and position evolve with the liquid, so the highlight
-        // belongs to the volume instead of looking painted on the window.
-        let centre_line = 0.02
-            + 0.20 * side.powf(1.45)
-            + sway * 0.080
-            + sine(flow_x * 3.3 - t * 0.65) * (0.025 + level * 0.035)
-            + sine(flow_x * 4.8 + t * 0.55) * (0.008 + level * 0.012);
+        // One soft coloured volume and one narrow lens flare replace the
+        // stacked noisy ribbons. Their broad gradients fade smoothly into
+        // the darker glass instead of drawing several parallel wave lines.
+        let centre_line = 0.025
+            + 0.17 * side.powf(1.55)
+            + sway * 0.055
+            + sine(flow_x * 1.8 - t * 0.42) * (0.012 + level * 0.022);
         let centre = flow_y - centre_line;
         let belt = bell(
             centre,
-            0.075 + (1.0 - side) * 0.075 + level * 0.035 + breathe * 0.018,
+            0.060 + (1.0 - side) * 0.050 + level * 0.022 + breathe * 0.010,
         );
-        let sharp = bell(centre, 0.030 + level * 0.016);
+        let sharp = bell(centre, 0.017 + level * 0.008);
         let warm = bell(flow_x, 0.55);
-        let band_r = 0.34 * (1.0 - warm) + warm;
-        let band_g = 0.68 * (1.0 - warm) + 0.62 * warm;
-        let band_b = (1.0 - warm) + 0.34 * warm;
-        let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.82;
-        let band = belt * (0.88 + level * 0.48) * envelope;
-        let hot = sharp * warm * envelope;
-        let centre_light = bell(flow_x, 0.38) * bell(centre, 0.24) * envelope;
-        let core = bell(flow_x, 0.18) * bell(centre, 0.105) * envelope;
+        let band_r = 0.30 * (1.0 - warm) + warm;
+        let band_g = 0.64 * (1.0 - warm) + 0.64 * warm;
+        let band_b = (1.0 - warm) + 0.36 * warm;
+        let envelope = 1.0 - smooth(0.80, 1.0, radius) * 0.88;
+        let band = belt * (0.76 + level * 0.40) * envelope;
+        let hot = sharp * (0.42 + warm * 0.58) * envelope;
+        let centre_light = bell(flow_x, 0.43) * bell(centre, 0.29) * envelope;
+        let core = bell(flow_x, 0.22) * bell(centre, 0.12) * envelope;
 
-        // Secondary caustics cross at different depths and drift against the
-        // main band. This parallax is what makes the material read as water.
-        let upper_line = -0.34 - 0.15 * side.powf(1.6) - sway * 0.045
-            + sine(flow_x * 3.2 + t * 0.45) * (0.025 + level * 0.020);
-        let upper =
-            bell(flow_y - upper_line, 0.032 + level * 0.014) * (0.38 + side * 0.62) * envelope;
+        // A single opposing caustic gives the sphere a second depth plane.
+        // It uses the same broad current as the main flare, not another wave.
         let lower_line = 0.43
-            + 0.20 * side.powf(1.4)
-            + sway * 0.055
-            + sine(flow_x * 3.8 - t * 0.50) * (0.026 + level * 0.022);
-        let lower_a = bell(flow_y - lower_line, 0.034 + level * 0.014);
-        let lower_b = bell(
-            flow_y - 0.57 - 0.12 * side + sine(flow_x * 3.4 + t * 0.42) * (0.022 + level * 0.018),
-            0.024 + level * 0.010,
-        );
-        let caustics = (lower_a * 0.72 + lower_b * 0.48) * envelope;
+            + 0.17 * side.powf(1.5)
+            + sway * 0.035
+            + sine(flow_x * 1.9 - t * 0.34) * (0.010 + level * 0.016);
+        let lower_glow = bell(flow_y - lower_line, 0.115 + level * 0.020) * envelope;
+        let lower_flare = bell(flow_y - lower_line, 0.022 + level * 0.007) * envelope;
+        let upper = bell(flow_y + 0.40 + side * 0.10 + sway * 0.025, 0.095)
+            * (0.28 + side * 0.48)
+            * envelope;
+        let caustics = lower_glow * 0.32 + lower_flare * 0.54;
 
         // A hairline Fresnel reflection defines the glass without becoming a
         // thick neon ring. Almost the whole circumference stays white-hot;
@@ -306,9 +295,13 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let specular = side_specular * 0.62 + cap_specular * 0.38;
         let inner_shadow = smooth(0.38, 0.99, radius) * (0.72 - top_left * 0.25);
         let body_shade = 1.0 - inner_shadow * 0.58;
-        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.40))
-            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.36));
-        let body = (0.006 + nz * 0.014 + wisps * 0.010) * body_shade;
+        // Smooth absorption and a single broad light field provide the dark
+        // volume. No high-frequency wisps: the clean gradient is what lets
+        // the narrow highlights read as light inside a drop of water.
+        let absorption = nz.powf(1.35);
+        let light_field = (0.5 + 0.5 * sine(nx * 0.85 - ny * 1.10 + t * 0.16))
+            * (0.45 + absorption * 0.55);
+        let body = (0.004 + absorption * 0.010 + light_field * 0.014) * body_shade;
 
         let red = body * 0.80
             + band * band_r * body_shade
