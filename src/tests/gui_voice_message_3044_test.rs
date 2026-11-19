@@ -30,6 +30,7 @@ const VOICE_INPUT: &str = include_str!("../gui/voice_input.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 const IMAGE_UTILS: &str = include_str!("../utils/image.rs");
 
 /// The source between two of its neighbours, so an assertion cannot be
@@ -438,5 +439,25 @@ fn a_spoken_turn_is_answered_aloud() {
     assert!(
         region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}").contains("Builder::new()"),
         "the synthesis runs on its own stack: gpui workers are far too small for a provider call"
+    );
+}
+
+/// The take's colour is the glass itself, not a caption over it: the orb
+/// worker is handed amber while the device is open and green from the hand-off
+/// to the transcriber, which is what lets the bubble stay bare (#3044).
+#[test]
+fn the_glass_carries_the_phase_colour() {
+    let view = region_in(
+        FINDER,
+        "pub(crate) fn seeker_voice_view(",
+        "/// Retire the currently",
+    );
+    assert!(
+        view.contains("let colour = if recording { theme.amber } else { theme.green };"),
+        "yellow while the device is open, green from the hand-off to the transcriber"
+    );
+    assert!(
+        view.contains("orb.update(recording, &self.seeker_voice_levels, colour)"),
+        "the colour reaches the material, so nothing has to be drawn over the glass"
     );
 }

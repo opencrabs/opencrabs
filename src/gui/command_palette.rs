@@ -1077,10 +1077,12 @@ mod tests {
         let end = tail.find("\n}\n").expect("seeker_bubble closes");
         let drawn = tail.get(..end).expect("the bubble body ends on a glyph");
         assert!(
-            drawn.contains("if voice.recording {")
-                && drawn.contains("theme.amber")
-                && drawn.contains("theme.green"),
-            "yellow while the device is open, green from the hand-off to the transcriber"
+            !drawn.contains("theme.amber") && !drawn.contains("theme.green"),
+            "the phase colour rides the material the worker paints, so the bubble draws nothing over the glass"
+        );
+        assert!(
+            drawn.contains(".when(voice.recording,"),
+            "the pointer cursor follows the device, which is the one state the glass answers"
         );
         assert!(
             drawn.contains(".size(rems(TAKE_BUBBLE))")
