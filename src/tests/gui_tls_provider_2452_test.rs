@@ -6,7 +6,12 @@
 //! terminal binary, which had installed the provider, kept connecting. The
 //! window has no headless harness, so the wiring is read from source.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const TERMINAL_MAIN: &str = include_str!("../main.rs");
 
 const INSTALL: &str = "rustls::crypto::ring::default_provider().install_default()";

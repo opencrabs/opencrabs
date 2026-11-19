@@ -10,7 +10,12 @@
 //! `gui::plan_strip::tests`, over a real plan file. No audio is asserted here:
 //! CI has no output device.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 /// The event arms moved into a module of their own (#2822).
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 /// So did the chime pass and the player it calls.

@@ -117,7 +117,12 @@ fn document_preview_gui_keeps_io_parsing_scrolling_and_lifetime_wired() {
     assert!(preview.contains("Home End"));
 
     let keys = include_str!("../gui/dashboard_keys.rs");
-    let main = include_str!("../gui/main.rs");
+    let main = concat!(
+        include_str!("../gui/main.rs"),
+        include_str!("../gui/app.rs"),
+        include_str!("../gui/dashboard_render.rs"),
+        include_str!("../gui/dashboard_state.rs"),
+    );
     let middle = include_str!("../gui/middle_scroll.rs");
     let sessions = include_str!("../gui/dashboard_sessions.rs");
     assert!(keys.contains("self.preview_key(ev, window, cx);"));

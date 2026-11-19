@@ -10,7 +10,12 @@
 
 use crate::tests::gui_dashboard_source::DASHBOARD;
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 /// The window's menu doors moved into a module of their own (#2822).
 const DASHBOARD_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
 const DASHBOARD_TOPICS: &str = include_str!("../gui/dashboard_topics.rs");

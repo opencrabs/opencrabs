@@ -21,7 +21,12 @@ use uuid::Uuid;
 
 const SESSIONS_RS: &str = include_str!("../tui/render/sessions.rs");
 const GUI_SESSIONS_RS: &str = include_str!("../gui/sessions.rs");
-const GUI_MAIN_RS: &str = include_str!("../gui/main.rs");
+const GUI_MAIN_RS: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 /// The rail's per frame reads moved into a module of their own (#2822).
 const DASHBOARD_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
 

@@ -7,7 +7,12 @@ use crate::ui_core::scroll::{
     AUTO_SCROLL_MAX_SPEED_PX_PER_SEC, auto_scroll_delta, auto_scroll_landing,
 };
 
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const MIDDLE_SCROLL: &str = include_str!("../gui/middle_scroll.rs");
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");

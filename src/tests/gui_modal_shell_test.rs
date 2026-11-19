@@ -52,7 +52,12 @@ fn shared_modal_close_is_a_compact_right_edge_glyph() {
 #[test]
 fn theme_transparency_reaches_config_native_alpha_and_the_whole_root() {
     let types = include_str!("../config/types.rs");
-    let main = include_str!("../gui/main.rs");
+    let main = concat!(
+        include_str!("../gui/main.rs"),
+        include_str!("../gui/app.rs"),
+        include_str!("../gui/dashboard_render.rs"),
+        include_str!("../gui/dashboard_state.rs"),
+    );
     let dashboard = include_str!("../gui/dashboard_screens.rs");
     let theme = include_str!("../gui/themes_view.rs");
     assert!(types.contains("pub transparency: u8"));

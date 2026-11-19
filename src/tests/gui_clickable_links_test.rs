@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 
 const MARKDOWN: &str = include_str!("../gui/markdown.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const PANES: &str = include_str!("../gui/dashboard_panes.rs");
 const SESSIONS: &str = include_str!("../gui/dashboard_sessions.rs");
 

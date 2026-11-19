@@ -4,7 +4,12 @@
 //! second pane with no header, a divider that could not resize, a caret that
 //! could not move between panes, and a split that could not split again.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 /// The dashboard's inherent impl split into modules by concern (#2822). Each
 /// region below reads the one file the code it pins now lives in.
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");

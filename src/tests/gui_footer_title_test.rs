@@ -2,7 +2,12 @@
 //! TUI footer (#2365). The other screens keep their title above the body. The
 //! window has no headless harness, so these checks read source.
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 
 #[test]
 fn the_header_is_left_off_the_chat_screen() {

@@ -8,7 +8,12 @@
 //! headless harness, and the drawing lives in the gui binary.
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 const PREVIEW: &str = include_str!("../gui/preview.rs");
 const PREVIEW_DOCUMENT: &str = include_str!("../gui/preview_document.rs");

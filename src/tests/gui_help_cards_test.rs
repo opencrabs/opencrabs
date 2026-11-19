@@ -8,7 +8,12 @@
 
 const HELP_VIEW: &str = include_str!("../gui/help_view.rs");
 const OVERLAYS: &str = include_str!("../gui/overlays.rs");
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 
 #[test]
 fn the_cards_read_the_shared_table_and_its_order() {

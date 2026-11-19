@@ -6,7 +6,12 @@
 
 use crate::tests::gui_dashboard_source::DASHBOARD;
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
 // The card, its item and the popover moved out of the session rail so the
 // transcript can draw its own message menu without depending on it (#2613).

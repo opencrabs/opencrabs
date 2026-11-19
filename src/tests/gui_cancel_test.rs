@@ -17,7 +17,12 @@ const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 const DASHBOARD_COMMANDS: &str = include_str!("../gui/dashboard_commands.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const DASHBOARD_NAV: &str = include_str!("../gui/dashboard_nav.rs");
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 
 /// The Esc branch, cut at the line where a stopped turn reports itself.
 fn esc_stop_block() -> &'static str {

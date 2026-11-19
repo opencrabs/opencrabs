@@ -12,7 +12,12 @@ const GUI_COMMAND_DISPATCH: &str = include_str!("../gui/dashboard_commands.rs");
 const GUI_COMPOSER_VIEW: &str = include_str!("../gui/composer_view.rs");
 const GUI_EDITOR: &str = include_str!("../gui/editor.rs");
 const GUI_FINDER: &str = include_str!("../gui/dashboard_finder.rs");
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const GUI_SETTINGS: &str = include_str!("../gui/dashboard_settings.rs");
 const GUI_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 const GUI_NAV: &str = include_str!("../gui/dashboard_nav.rs");

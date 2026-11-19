@@ -10,7 +10,12 @@
 
 use crate::tests::gui_dashboard_source::DASHBOARD;
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 /// The key handler moved into a module of its own (#2822).
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 const SCREEN_KEYS: &str = include_str!("../gui/screen_keys.rs");

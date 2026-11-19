@@ -9,7 +9,12 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 use crate::ui_core::message_select::MessageAction;
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 /// The menu is the set of actions that can actually be carried out, in the

@@ -522,7 +522,12 @@ fn both_clickable_platforms_are_wired_and_the_gui_takes_the_uri() {
     ] {
         assert!(SOURCE.contains(needle), "the windows arm lost {needle:?}");
     }
-    let gui = include_str!("../gui/main.rs");
+    let gui = concat!(
+        include_str!("../gui/main.rs"),
+        include_str!("../gui/app.rs"),
+        include_str!("../gui/dashboard_render.rs"),
+        include_str!("../gui/dashboard_state.rs"),
+    );
     assert!(
         gui.contains("post_activation_from_args(std::env::args().skip(1))"),
         "the window takes the activation URI off argv"
