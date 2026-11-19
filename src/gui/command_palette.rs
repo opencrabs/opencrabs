@@ -400,6 +400,7 @@ pub(super) fn query_line(
         .id("seeker-query-field")
         .flex_1()
         .min_w_0()
+        .overflow_hidden()
         .text_2xl()
         .cursor(CursorStyle::IBeam)
         .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
