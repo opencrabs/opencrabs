@@ -604,10 +604,11 @@ fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
 
 /// The take, as one animated glass bubble in the middle of the window (#3044).
 ///
-/// The worker supplies the transparent 1024 px material. GPUI paints it as an
-/// image rather than stacking static circles, so the liquid ribbons, rim and
-/// microphone response move together. Nothing sits over the glass: the whole
-/// bubble remains the click target that ends the take for editing.
+/// The worker supplies the transparent material, sized to this bubble. GPUI
+/// paints it as an image rather than stacking static circles, so the liquid
+/// ribbons and the microphone response move together. Nothing sits over the
+/// glass: the whole bubble remains the click target that ends the take for
+/// editing.
 fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoElement {
     div()
         .id("seeker-take-bubble")
