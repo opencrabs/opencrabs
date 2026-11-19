@@ -11,7 +11,8 @@
 //!   silhouette, and one thin specular ring sitting on it, keyed to the upper
 //!   left where the reference's own ring is brightest;
 //! - a horizon, cool above and warm below, with a thin band of light on the
-//!   seam;
+//!   seam that tips and ripples with the voice, so recording reads as motion
+//!   rather than as a still;
 //! - density from geometry rather than from light, so the dome is deep black
 //!   crystal and the page behind it stops showing through;
 //! - chromatic caustics on the two inner walls, cold above the seam and warm
@@ -202,6 +203,33 @@ const BOW_BOWL: f32 = 0.10;
 /// a seam that never moves reads as a printed decal. A hundredth of the radius
 /// is invisible as a shift on its own and is what carries the breathing.
 const BREATHE: f32 = 0.010;
+
+/// How far the seam tips about the centre at full voice, as a fraction of the
+/// radius.
+///
+/// `BREATHE` alone moves the whole band up and down by a hundredth of the
+/// radius, which is mathematically animated and visually still: under two
+/// pixels at the shipped size, and the same shift on both sides at once. A tilt
+/// is what the eye reads as liquid, because one end of the horizon climbs while
+/// the other drops. It is scaled by the voice level, so silence leaves the
+/// marble at rest and a syllable tips it.
+const SLOSH: f32 = 0.075;
+
+/// The swell that travels outwards along the seam, as a fraction of the radius.
+///
+/// Weighted by the square of the horizontal position, so the middle of the band
+/// stays put and the outer thirds ripple. A single travelling wave across the
+/// whole band would slide the light sideways; a swell lifts it and drops it,
+/// which is what water under a bright surface does.
+const SWELL: f32 = 0.045;
+
+/// How much the band brightens on a voice peak, as a fraction of its own gain.
+///
+/// A seam that only moves still reads as a passive object. The shimmer rides
+/// the same smoothed history the lens bends with, so the bright part of the
+/// band lifts where the loudest sample sits: a syllable lands as a pulse
+/// instead of the whole strip sliding through one slow swell.
+const SHIMMER: f32 = 0.42;
 
 /// The two temperatures the seam splits the body into, as hues.
 ///
@@ -558,7 +586,19 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // bows towards the wall through the same lens the ribbons ride. It
         // gives the marble a top and a bottom, which is the difference between
         // an object and a lit plate.
-        let horizon = HORIZON + BOW_BOWL * (1.0 - nz) + BREATHE * sine(t * 0.70);
+        //
+        // The seam is also a liquid surface, not a drawn line. It tips about the
+        // centre with the voice, and two swells travel outwards along it, so a
+        // syllable lifts one end of the horizon and drops the other while the
+        // outer thirds ripple. Both terms vanish at rest, which leaves the
+        // reference's own still seam in silence.
+        let slosh = SLOSH * level * sine(t * 0.55);
+        let swell = SWELL * level * sine(nx * 2.60 - t * 1.05) * nx * nx;
+        let horizon = HORIZON
+            + BOW_BOWL * (1.0 - nz)
+            + BREATHE * sine(t * 0.70)
+            + slosh * nx
+            + swell;
         // The band rides a slightly different seam from the bowl's: it is the
         // horizon reflected off the inside of the sphere, so it rises towards
         // the wall while the bowl's own boundary falls away.
@@ -567,7 +607,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // The falloff keeps its spherical shape but no longer runs to nothing at
         // the limb, which is what left the glow short of both inner walls.
         let lateral = BAND_WALL + (1.0 - BAND_WALL) * gaussian(nx, BAND_REACH);
-        let band = gaussian(offset, BAND_SIGMA) * lateral;
+        // The band answers the microphone: the smoothed history lifts the part
+        // of the strip it sits over, so a syllable reads as a pulse. At rest
+        // the gain is one and the reference's own band is what renders.
+        let shimmer = 1.0 + SHIMMER * voice * level;
+        let band = gaussian(offset, BAND_SIGMA) * lateral * shimmer;
         // The halo carries the only asymmetry in the light: the key is upper
         // left, so the halo is pushed that way and the seam's brightest point
         // sits left of centre. Nothing else in the material is directional, and
@@ -894,6 +938,25 @@ mod tests {
 
     fn luma(colour: (f32, f32, f32, u8)) -> f32 {
         0.2126 * colour.0 + 0.7152 * colour.1 + 0.0722 * colour.2
+    }
+
+    /// The luma-weighted row of the band inside one column, in radius units.
+    ///
+    /// The band is the only thing this bright in the middle of the glass, so
+    /// its own brightness is the weight and no threshold has to be picked. A
+    /// window narrow enough to miss the rim and the softbox leaves the seam as
+    /// the only event in it.
+    fn band_centroid(bytes: &[u8], size: u32, nx: f32) -> f32 {
+        let mut weight = 0.0;
+        let mut rows = 0.0;
+        let mut ny = -0.30;
+        while ny < 0.30 {
+            let brightness = luma(sample(bytes, size, nx, ny));
+            weight += brightness;
+            rows += brightness * ny;
+            ny += 0.005;
+        }
+        rows / weight
     }
 
     #[test]
@@ -1250,6 +1313,48 @@ mod tests {
         assert!(
             speech_changed > before.len() / 200,
             "the recorded waveform must visibly reshape the liquid"
+        );
+    }
+
+    #[test]
+    fn the_seam_moves_more_when_someone_is_speaking() {
+        // A seam that only breathes shifts by a hundredth of the radius, which
+        // is under two pixels at the shipped size and reads as a still image.
+        // The fix is a tilt scaled by the voice level, so the same pair of
+        // clocks has to move the band much further while someone speaks than
+        // it does in silence. The column sits out towards the wall, where the
+        // tilt has an arm to work with.
+        let size = ORB_PIXELS;
+        let surface = Surface::new(size);
+        let quiet = OrbInput {
+            recording: true,
+            levels: [0.0; VOICE_SAMPLES],
+            colour: 0xffbf47,
+        };
+        let loud = OrbInput {
+            recording: true,
+            levels: [1.0; VOICE_SAMPLES],
+            colour: 0xffbf47,
+        };
+        let column = 0.70;
+        let resting_first = render(&surface, 0.2, quiet, 0.0);
+        let resting_later = render(&surface, 1.4, quiet, 0.0);
+        let speaking_first = render(&surface, 0.2, loud, 1.0);
+        let speaking_later = render(&surface, 1.4, loud, 1.0);
+        let centroid = |frame: &gpui::RenderImage| {
+            band_centroid(frame.as_bytes(0).expect("one frame"), size, column)
+        };
+        let resting = (centroid(&resting_later) - centroid(&resting_first)).abs();
+        let speaking = (centroid(&speaking_later) - centroid(&speaking_first)).abs();
+        assert!(
+            speaking > 0.02,
+            "the seam must travel a visible distance on speech, moved \
+             {speaking:.3} of the radius"
+        );
+        assert!(
+            speaking > resting * 3.0,
+            "speech must move the seam far more than the idle breathe: \
+             {speaking:.3} against {resting:.3}"
         );
     }
 
