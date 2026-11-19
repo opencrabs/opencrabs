@@ -7891,9 +7891,7 @@ mod tests {
         // words without searching them, so a half-heard query can be read and
         // corrected first.
         let edit = "pub(crate) fn seeker_stop_for_edit(";
-        let stop = code
-            .find(edit)
-            .expect("the glass click has a handler");
+        let stop = code.find(edit).expect("the glass click has a handler");
         let tail = code.get(stop..).expect("the handler starts on a glyph");
         let stop_body = tail.split("\n    }\n").next().expect("the stop body");
         assert!(
