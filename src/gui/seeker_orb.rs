@@ -243,7 +243,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // A nearly level horizon carries a diffuse optical bloom, not a solid
         // arc. It reaches both sides of the lens, becoming thinner and dimmer
         // as the curved wall bends away at the outer rim (#3050).
-        let centre_line = 0.010 - 0.022 * side.powf(2.0)
+        let centre_line = 0.010 - 0.050 * side.powf(2.0)
             + sway * 0.006
             + sine(flow_x * 1.2 - t * 0.28) * (0.002 + level * 0.004);
         let centre = flow_y - centre_line;
@@ -251,7 +251,10 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let horizon_span = horizon_taper;
         let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.38 + horizon_taper * 0.62);
         let horizon = diffuse(centre, bloom_width * 1.65) * horizon_span;
-        let white = diffuse(centre, bloom_width) * horizon_span;
+        // Keep the white hotspot in the middle 40%. At the curved outer wall
+        // only the softer transmitted amber and blue should remain.
+        let white_hotspot = 1.0 - smooth(0.20, 0.48, side);
+        let white = diffuse(centre, bloom_width) * horizon_span * white_hotspot;
 
         // Invert the transmitted horizon: warm light sits above its white
         // core, while the cool reflection extends softly into the lower half.
@@ -304,7 +307,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + cool_wall * 0.025
             + sheen * 0.20
             + top_arc * 1.70
-            + bottom_arc * 1.18
+            + bottom_arc * 0.72
             + chromatic * (0.018 + warm_edge * 0.052);
         let green = body * 0.72
             + horizon * 0.25 * body_shade
@@ -315,7 +318,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + cool_wall * 0.18
             + sheen * 0.26
             + top_arc * 1.82
-            + bottom_arc * 0.48
+            + bottom_arc * 1.08
             + chromatic * 0.022;
         let blue = body * 0.96
             + horizon * 0.34 * body_shade
@@ -326,7 +329,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + cool_wall * 0.42
             + sheen * 0.34
             + top_arc * 2.00
-            + bottom_arc * 0.10
+            + bottom_arc * 1.30
             + chromatic * (0.018 + (1.0 - warm_edge) * 0.058);
         let alpha = (0.035
             + edge * 0.13
