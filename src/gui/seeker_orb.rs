@@ -1157,10 +1157,14 @@ mod tests {
             ),
             "the ring is keyed across the silhouette, not drawn at one brightness"
         );
-        assert!(
-            RIM_TILT_X > 0.0 && RIM_TILT_Y > 0.0,
-            "the key is aimed at the upper left, where the reference's ring is bright"
-        );
+        // The tilt constants are compile time values, so the direction they
+        // point is a const assertion rather than a runtime one.
+        const {
+            assert!(
+                RIM_TILT_X > 0.0 && RIM_TILT_Y > 0.0,
+                "the key is aimed at the upper left, where the reference's ring is bright"
+            );
+        }
     }
 
     #[test]
