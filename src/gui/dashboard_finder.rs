@@ -6,10 +6,10 @@
 
 use super::*;
 
-/// How often the Seeker's voice loop drains the microphone and the
-/// transcription (#3044). The composer's own tick: the two strips are driven by
-/// the same kind of timer, so they move at the same speed.
-const SEEKER_VOICE_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+/// Drain audio and repaint the procedural orb at about thirty frames a second.
+/// Pixel generation stays on its own worker; this timer only hands over the
+/// newest frame and microphone level (#3044).
+const SEEKER_VOICE_TICK: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// What the Seeker's microphone is doing (#3044).
 ///
@@ -95,7 +95,7 @@ impl Dashboard {
         // A take belongs to the card that started it (#3044): closing the card
         // stops the device instead of leaving the microphone open behind a
         // surface that no longer draws a counter or a stop.
-        self.seeker_voice_reset();
+        self.seeker_voice_reset(cx);
         self.refocus_screen();
         cx.notify();
     }
@@ -363,6 +363,7 @@ impl Dashboard {
                 self.seeker_voice_send = true;
                 self.seeker_voice_secs = 0;
                 self.seeker_voice_levels.clear();
+                self.seeker_orb = Some(seeker_orb::OrbAnimation::start(palette::current().amber));
                 self.pump_seeker_voice(cx);
             }
             SeekerVoicePhase::Recording => {
@@ -410,25 +411,40 @@ impl Dashboard {
         }
     }
 
-    /// What the bubble paints, or `None` when the microphone is idle.
-    pub(crate) fn seeker_voice_view(&self) -> Option<command_palette::SeekerVoice> {
+    /// What the bubble paints, or `None` when the microphone is idle. The
+    /// worker has already made the pixels; painting only swaps the texture.
+    pub(crate) fn seeker_voice_view(&self, cx: &mut App) -> Option<command_palette::SeekerVoice> {
         let phase = self.seeker_voice_phase();
         if phase == SeekerVoicePhase::Idle {
             return None;
         }
+        let recording = phase == SeekerVoicePhase::Recording;
+        let theme = palette::current();
+        let colour = if recording { theme.amber } else { theme.green };
+        let level = self.seeker_voice_levels.last().copied().unwrap_or(0.0);
+        let orb = self.seeker_orb.as_ref()?;
+        orb.update(recording, level, colour);
         Some(command_palette::SeekerVoice {
-            recording: phase == SeekerVoicePhase::Recording,
+            recording,
             secs: self.seeker_voice_secs,
-            levels: self.seeker_voice_levels.clone(),
+            frame: orb.frame(cx),
         })
+    }
+
+    /// Retire the currently presented texture before dropping the renderer.
+    fn clear_seeker_orb(&mut self, cx: &mut App) {
+        if let Some(orb) = self.seeker_orb.take() {
+            orb.dispose(cx);
+        }
     }
 
     /// Drop the take and everything it owns. Dropping the capture is what
     /// closes the device: its stop flag is the only thing the capture thread
     /// watches, so the stream ends at the next tick.
-    fn seeker_voice_reset(&mut self) {
+    fn seeker_voice_reset(&mut self, cx: &mut Context<Self>) {
         self.seeker_capture = None;
         self.seeker_transcription = None;
+        self.clear_seeker_orb(cx);
         self.seeker_voice_levels.clear();
         self.seeker_voice_secs = 0;
         self.seeker_voice_finishing = false;

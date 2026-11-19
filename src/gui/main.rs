@@ -88,6 +88,7 @@ mod rail_activity;
 // the last one replays the prepaint instead of rebuilding every listener.
 mod rail_view;
 mod screen_keys;
+mod seeker_orb;
 mod sessions;
 mod settings_modal;
 mod settings_view;
@@ -673,6 +674,8 @@ struct Dashboard {
     /// land where the person was already typing.
     seeker_capture: Option<voice_input::Capture>,
     seeker_transcription: Option<voice_input::Transcription>,
+    /// The high-resolution procedural glass drawn while this take is live.
+    seeker_orb: Option<seeker_orb::OrbAnimation>,
     /// How long the take has run, and the meter the card draws beside it.
     seeker_voice_secs: u64,
     seeker_voice_levels: Vec<f32>,
@@ -6138,6 +6141,7 @@ fn main() {
                         finder_selecting: false,
                         seeker_capture: None,
                         seeker_transcription: None,
+                        seeker_orb: None,
                         seeker_voice_secs: 0,
                         seeker_voice_levels: Vec::new(),
                         seeker_voice_finishing: false,
