@@ -5,6 +5,7 @@
 //! live here rather than in `src/tests/` because that tree belongs to the
 //! library, which cannot see the window at all.
 
+mod layout_guard_test;
 mod main_test;
 mod sidebar_action_test;
 mod window_test;
