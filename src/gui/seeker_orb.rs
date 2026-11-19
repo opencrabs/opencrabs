@@ -1,9 +1,21 @@
 //! Procedural Siri-style glass for the Seeker's recording bubble (#3044).
 //!
 //! GPUI cannot sample and refract the window behind one element, so this draws
-//! the material itself: one tonal field moved by dodge and burn, one emissive
-//! ramp derived from the accent colour, and a lamp for the specular core. A
-//! worker produces the frames and the UI only uploads the newest one, keeping
+//! the material itself, per pixel, from a sphere's own geometry:
+//!
+//! - a real surface normal, so the body is lit from one direction instead of
+//!   fading evenly in every direction;
+//! - the five values a retoucher builds by hand, moved with dodge and burn
+//!   rather than mixed towards white;
+//! - a border with thickness: an exponential shoulder just inside the
+//!   silhouette, and one thin specular ring sitting on it, keyed to the upper
+//!   left where the reference's own ring is brightest;
+//! - a horizon, cool above and warm below, with a thin band of light on the
+//!   seam;
+//! - a hard circular silhouette, so the image's own square boundary never
+//!   paints a wash over the scrim.
+//!
+//! A worker produces the frames and the UI only uploads the newest one, keeping
 //! the pixel math off the UI thread.
 
 use gpui::{App, RenderImage};
@@ -24,34 +36,194 @@ use std::time::{Duration, Instant};
 /// cost 22.79 ms to build, and this one carries a tenth of the pixels.
 pub(crate) const ORB_PIXELS: u32 = 320;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-const ORB_RADIUS: f32 = 0.92;
+/// How much of the half-frame the glass fills.
+///
+/// The margin is the anti-aliased edge's room to run in, nothing more. A
+/// narrower orb looked identical and cost the Fresnel rim its last two pixels,
+/// because the rim lives exactly where a tighter mask was fading out: the one
+/// bright thing in the material was being multiplied away by the silhouette.
+const ORB_RADIUS: f32 = 0.98;
 const SINE_STEPS: usize = 4096;
 const VOICE_SAMPLES: usize = super::voice_input::METER_BARS;
 
-/// The key light: upper left, and forward enough that the terminator crosses
-/// the body instead of falling outside it.
+/// The light budget, and the one number that decides whether this reads as
+/// glass or as paint.
 ///
-/// The forward component alone decides where the terminator lands. For a
-/// sphere it crosses at `radius = KEY[2]`, so a light pushed much past 0.8
-/// leaves every visible pixel lit and the orb reads as a flat plate no matter
-/// how good the falloff is. The shipped 1024 px lens had no light direction at
-/// all, which is why its two sides differed by 0.002 alpha.
-const KEY: [f32; 3] = [-0.60, -0.36, 0.72];
+/// `heat` is the pixel's brightness as a fraction of white, so the field below
+/// is measured directly against the reference: point a probe at a latitude and
+/// the value it returns is the luma that latitude should carry, nought to one.
+/// Fitted to the reference's own pixels at thirteen latitudes, residual 0.016.
+///
+/// The shipped version instead mixed a lambert dodge into `HEAT_BASE` and
+/// pushed the total through a ramp whose darkest stop was a saturated amber at
+/// luma 54. Every pixel therefore carried gold paint and no part of the body
+/// could reach the reference's `(16, 18, 20)`, so a dark marble rendered as a
+/// solid lit sphere. Nothing about the falloff could fix that; the ramp had to
+/// stop owning brightness.
+const AMBIENT: f32 = 0.0672;
 
-/// Where the dodge starts and finishes on `lambert`.
+/// The band is the one hot thing in the material: a narrow spike on the seam.
+/// Its width is what makes or breaks the figure. Wide enough and it becomes a
+/// stripe painted across a disc; this width puts its half-maximum 0.13 of the
+/// radius apart, which is a lens catching a backlight.
+const BAND_GAIN: f32 = 0.3886;
+const BAND_SIGMA: f32 = 0.0562;
+
+/// How far the seam reaches sideways before it dies out.
 ///
-/// The top of this range is the part that makes or breaks the figure. A dodge
-/// that saturates early is full over most of the visible disc, the heat clips,
-/// and the ramp returns its near-white stop across a wide area: a lit plate.
-/// Pushing the finish past the mirror point leaves a gradient across the whole
-/// lit half while the range still bottoms out below the terminator.
-const DODGE_FROM: f32 = -0.10;
-const DODGE_TO: f32 = 0.62;
-const HEAT_BASE: f32 = 0.10;
-const DODGE_GAIN: f32 = 0.72;
-const CORE_DEPTH: f32 = 0.30;
-const BOUNCE_LIFT: f32 = 0.16;
-const LAMP_GAIN: f32 = 0.14;
+/// A horizon with no lateral falloff runs to the silhouette at full brightness,
+/// and a stripe that hits both edges at once is paint, not light: the eye reads
+/// it as laid over a disc rather than coming from inside one. A lens stops
+/// lighting the seam where the glass turns away, so this fades the band and the
+/// halo out well before the wall.
+const BAND_REACH: f32 = 0.55;
+
+/// The halo the band throws into both halves, which is what stops the seam
+/// reading as a drawn line and lets the temperature bleed into the bowl.
+const GLOW_GAIN: f32 = 0.585;
+const GLOW_SIGMA: f32 = 0.1922;
+
+/// A low lift under the horizon, so the lower half has depth behind the glass
+/// instead of black showing through it. Small on purpose: the reference's bowl
+/// falls to luma 35 and stays there.
+const BOWL_LIFT: f32 = 0.0192;
+
+/// How far the key pushes the halo towards the upper left.
+///
+/// A purely vertical field is a surface of revolution, and a surface of
+/// revolution reads as a flat graphic however good its profile is. This is the
+/// only asymmetry in the light, and it is deliberately small: measured against
+/// the reference, the left of the band carries about 28 more luma than the
+/// right, and nothing in the bowl, which is near black on both sides.
+const SIDE_BIAS: f32 = 0.26;
+
+/// The border the glass presents at its own silhouette, as three terms.
+///
+/// Measured off the reference's own edge, sampling radially from its centre at
+/// (118, 107) with a radius of 95.5 px:
+///
+/// * outside the disc, 17 luma;
+/// * one pixel of rim, 63 luma;
+/// * the ring's peak, at r 0.995, 88 luma;
+/// * two pixels inside it, 39 luma;
+/// * five pixels inside it, 28 luma;
+/// * the body's floor below r 0.85, 18 luma.
+///
+/// So the border is one thin bright ring sitting ON the silhouette, and
+/// everything inside it falls away exponentially. There is no second bright
+/// ring further in and no black trough: an earlier pass put a bevel at r 0.80
+/// and a 0.34-deep trough at r 0.90, both invented, and that pair is exactly
+/// what read as a soft double ring.
+///
+/// The ring is the only hard event in the material, which is why its width is a
+/// hundredth of the radius: wide enough to still land on a pixel at
+/// `ORB_PIXELS`, narrow enough to stay a specular edge rather than a drawn
+/// outline. `RIM_TILT_*` aims it at the upper left, where the reference's ring
+/// is bright (88 luma at the top, 64 at the left, 30 at the bottom).
+const RIM_RADIUS: f32 = 0.995;
+const RIM_WIDTH: f32 = 0.0058;
+const RIM_GAIN: f32 = 0.345;
+const RIM_TILT_X: f32 = 0.55;
+const RIM_TILT_Y: f32 = 0.83;
+
+/// The shoulder the glass shows as it turns away, just inside the ring. This is
+/// what gives the edge thickness: without it the ring floats on the silhouette
+/// with nothing behind it and the object reads as a sticker.
+const RIM_FALL_GAIN: f32 = 0.11;
+const RIM_FALL_SIGMA: f32 = 0.045;
+
+/// The horizon: the seam between the cool dome and the warm bowl, plus the
+/// thin band of light that sits on it.
+///
+/// The seam sits on the equator rather than above it, because the reference's
+/// brightest pixel is at the centre to within a hundredth of the radius. The
+/// bow is small and grows towards the wall through the same lens the ribbons
+/// ride, so the marble has a top and a bottom instead of one radial fade. One
+/// radial fade is exactly what reads as a lit plate.
+const HORIZON: f32 = 0.0;
+const BOW_BOWL: f32 = 0.10;
+
+/// The seam breathes, and this is by how much of the radius.
+///
+/// The reference is a single still, so its band is at rest. The orb is not, and
+/// a seam that never moves reads as a printed decal. A hundredth of the radius
+/// is invisible as a shift on its own and is what carries the breathing.
+const BREATHE: f32 = 0.010;
+
+/// The two temperatures the seam splits the body into, as hues.
+///
+/// Only hue follows the theme now. Brightness is the light field's job and
+/// saturation comes from the reference, because those two are what make the
+/// material; letting the accent drive them is what turned every theme's orb
+/// into a solid gold ball. The dome's cool is fixed: rotating a green accent by
+/// whatever angle cools an amber one lands somewhere else entirely, so a
+/// derived cool loses the split on half the themes.
+const COOL_HUE: f32 = 0.586;
+
+/// The reference's warm hue, and the accent hue the fit was measured at.
+///
+/// `WARM_FOLLOW` moves the warm side a quarter of the way from that reference
+/// point towards the live accent, so a themed orb keeps a trace of its palette
+/// without the bowl leaving the range a glass bowl occupies.
+const BOWL_HUE: f32 = 0.055;
+const AMBER_HUE: f32 = 0.109;
+const WARM_FOLLOW: f32 = 0.25;
+
+/// Saturation against brightness, which is the curve that keeps the middle warm
+/// without the ends turning to paint.
+///
+/// A tonal ramp cannot carry this: the same amber that reads as glass at
+/// mid-brightness reads as gold leaf at full brightness, so saturation has to
+/// fall away as the value climbs, and it has to fall away again below the band
+/// or the shadow side turns to mud. Measured off the reference at seven levels.
+const HEAT_STOPS: [f32; 7] = [0.00, 0.15, 0.30, 0.50, 0.75, 0.93, 1.00];
+const SAT_STOPS: [f32; 7] = [0.10, 0.15, 0.34, 0.50, 0.55, 0.18, 0.05];
+
+/// How much of the backdrop the material passes.
+///
+/// This is what makes it glass rather than a painting of glass. The body is
+/// smoke: it lets the page behind it through, and only the band and the ring go
+/// dense. The floor is where the darkest part sits, because a body that went
+/// fully opaque would hide the scrim and read as a solid again.
+const GLASS_FLOOR: f32 = 0.34;
+
+/// What the glass is composited onto, as the luma of that resolved colour.
+///
+/// The Seeker scrim is `rgba(0x08080acc)` over the dark window's `0x101010`
+/// background, which resolves to `(10, 10, 11)` and a luma of 0.0395. The
+/// lifted emission below needs this number, so it is written down rather than
+/// assumed: getting it wrong darkens or washes the whole marble by a visible
+/// margin.
+const SCRIM_LUMA: f32 = 0.0395;
+
+/// The most the emission may be lifted before the correction gives up.
+///
+/// In the darkest smoke the lift is already large; letting it run free would
+/// push the near-black body to a visible grey and destroy the shadow that gives
+/// the object its depth.
+const MAX_LIFT: f32 = 3.4;
+
+/// Depth: the far wall, and the fringe at the silhouette.
+///
+/// `FAR_LIFT` is the band's image refracted through the body, so it sits low,
+/// off the seam, and dim. It is the only cue in the material that says there is
+/// a second surface behind the first, and without it the orb is a disc.
+///
+/// `DISPERSION` splits the rim sliver by a few hundredths of a turn of hue,
+/// which is what glass does at a silhouette.
+const FAR_WALL: f32 = 0.041;
+const FAR_LIFT: f32 = 0.42;
+const DISPERSION: f32 = 0.022;
+
+/// One thin specular catch where the key enters the glass.
+///
+/// Tight on purpose. The reference's only sharp event is a small hard glint on
+/// the upper left; a soft one reads as a smudge, and smoothing every highlight
+/// is what made the earlier passes look like a painted sphere.
+const SPEC_X: f32 = -0.44;
+const SPEC_Y: f32 = -0.62;
+const SPEC_WIDTH: f32 = 0.13;
+const SPEC_GAIN: f32 = 0.22;
 
 /// A 4x4 ordered dither, already normalised so the loop only subtracts.
 const BAYER: [f32; 16] = [
@@ -227,20 +399,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
     let level = energy.clamp(0.0, 1.0);
     let t = liquid_clock;
     let liquid_levels = smooth_voice(input.levels);
-    let ramp = orb_ramp(input.colour);
-    let flat = (KEY[0] * KEY[0] + KEY[1] * KEY[1]).sqrt();
-    let face_x = KEY[0] / flat;
-    let face_y = KEY[1] / flat;
+    let accent_hue = rgb_hsv(input.colour).0;
     // Frame-wide uniforms, not per-pixel waves: the liquid rolls and breathes
     // as one body even when the room is quiet.
     let roll = (t * 0.30).sin() * (0.26 + level * 0.12);
     let (roll_sin, roll_cos) = roll.sin_cos();
-    let breathe = 0.5 + 0.5 * (t * 0.85).sin();
-    // The bloom sits just off centre along the key direction, so it is never
-    // concentric with the body it lies on. A luminous marble carries no jewel
-    // specular: the lamp is a soft bloom near the middle, and the direction is
-    // read from the body's dodge rather than from where the highlight sits.
-    let push = (0.15 + 0.06 * level) * ORB_RADIUS;
     let size = surface.size;
     for (index, pixel) in pixels.pixels_mut().enumerate() {
         let radius = surface.radius[index];
@@ -249,30 +412,10 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let nx = x / ORB_RADIUS;
         let ny = y / ORB_RADIUS;
 
-        // The body is light leaving the sphere rather than a disc with an
-        // outline, so its density follows a flat-topped curve with a long
-        // tail. That tail is the bloom, and it is what lets the orb sit on the
-        // scrim without a drawn edge (#3085).
-        let body = quartic(radius, 0.62);
-        let lamp_x = x - face_x * push;
-        let lamp_y = y - face_y * push;
-        let lamp = quartic((lamp_x * lamp_x + lamp_y * lamp_y).sqrt() / ORB_RADIUS, 0.16);
-
-        // A real surface normal, not a flat direction. `nz` collapses at the
-        // limb, so the far side turns out of the key instead of merely fading.
-        // A flat direction leaves the falloff identical in every direction,
-        // which is what read as a plate with a gradient painted on it.
+        // The surface normal's forward component, which collapses at the limb.
+        // Everything that has to know how far the glass has turned away reads
+        // it: the bow of the seam and the lens.
         let nz = surface.normal_z[index];
-        let lambert = nx * KEY[0] + ny * KEY[1] + nz * KEY[2];
-
-        // The five values a retoucher builds by hand: a lit side, a terminator
-        // that actually turns, a core shadow just past it, and a bounce at the
-        // far limb. Smoothing this away was the mistake worth undoing: the eye
-        // reads volume off the edges between value zones, never off the values
-        // themselves.
-        let dodge = smooth(DODGE_FROM, DODGE_TO, lambert);
-        let core_shadow = bell(lambert + 0.34, 0.30);
-        let bounce = bell(lambert + 0.86, 0.26);
 
         // A spherical lens compresses what it holds towards the rim, so the
         // internal light stretches where the wall bends away (#3050). GPUI
@@ -287,34 +430,107 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let envelope = (1.0 - nx * nx).max(0.0).sqrt();
         let bend = (voice - level * 0.40) * envelope * 0.34;
         // Three travelling waves at different angles and speeds. They are hue
-        // only: they move where the ramp gets sampled and never add light, so
+        // only: they move where the colour is sampled and never add light, so
         // the ribbons stay under the surface instead of painting over it.
         let ribbon = 0.52 * (0.5 + 0.5 * sine(u * 1.45 + v * 0.90 + t * 0.28))
             + 0.30 * (0.5 + 0.5 * sine(v * 2.05 - u * 1.00 - t * 0.22))
             + 0.18 * (0.5 + 0.5 * sine((u + bend) * 3.10 + t * 0.16));
 
-        let heat = (body
-            * (HEAT_BASE + DODGE_GAIN * dodge - CORE_DEPTH * core_shadow
-                + BOUNCE_LIFT * bounce
-                + (ribbon - 0.5) * 0.13)
-            + LAMP_GAIN * lamp
-            + 0.03 * breathe)
-            .clamp(0.04, 1.0);
-        let (mut red, mut green, mut blue) = ramp_sample(&ramp, heat);
+        // How far this pixel sits inside the silhouette, which is the only
+        // measure the border terms need: the ring lives ON the edge, so its
+        // coordinate is distance from the edge and not from the centre.
+        let depth = (1.0 - radius).max(0.0);
 
-        // The bloom lifts the core towards white on its own curve instead of
-        // inheriting the body's ramp, so the centre stays luminous while the
-        // surrounding hue keeps its saturation.
-        let toe = lamp * lamp * lamp * 0.62;
-        red += (1.00 - red) * toe;
-        green += (0.99 - green) * toe;
-        blue += (0.96 - blue) * toe;
+        // The horizon is the seam between a cool dome and a warm bowl, and it
+        // bows towards the wall through the same lens the ribbons ride. It
+        // gives the marble a top and a bottom, which is the difference between
+        // an object and a lit plate.
+        let horizon = HORIZON + BOW_BOWL * (1.0 - nz) + BREATHE * sine(t * 0.70);
+        let offset = ny - horizon;
+        let lateral = gaussian(nx, BAND_REACH);
+        let band = gaussian(offset, BAND_SIGMA) * lateral;
+        // The halo carries the only asymmetry in the light: the key is upper
+        // left, so the halo is pushed that way and the seam's brightest point
+        // sits left of centre. Nothing else in the material is directional, and
+        // a field that is a pure surface of revolution reads as a flat graphic
+        // however good its profile is.
+        let glow = gaussian(offset, GLOW_SIGMA) * (1.0 + SIDE_BIAS * -nx) * lateral;
+        let bowl = smooth(horizon, horizon + 0.60, ny);
+        let dome = smooth(-0.04, 0.04, -ny);
 
-        // The tail is the bloom and it reaches the corners of the frame. A
-        // soft window closes it, so the image carries a clear margin instead
-        // of painting a square wash over the scrim it is composited onto.
-        let halo = 1.0 - smooth(1.05, 1.45, radius);
-        let alpha = ((body * (1.28 + 0.10 * level) + 0.03) * halo).clamp(0.0, 1.0);
+        // The light field itself: how bright this pixel is, nought to one. The
+        // border is two terms: the shoulder the glass shows as it turns away,
+        // and the specular ring that sits on the silhouette itself. There is no
+        // second ring further in and no dark trough, because the reference has
+        // neither: sampling its own edge radially gives 63 luma on the ring's
+        // first pixel, 88 at its peak, then 39 and 28 on the way in.
+        // The ring is keyed to the upper left, where the reference's is bright.
+        let rim_key = (0.5 - 0.5 * (nx * RIM_TILT_X + ny * RIM_TILT_Y)).max(0.0);
+        // The thin catch, squared so it stays a streak instead of a disc.
+        let catch = gaussian((nx - SPEC_X).hypot(ny - SPEC_Y), SPEC_WIDTH);
+        let heat = (AMBIENT
+            + BAND_GAIN * band
+            + GLOW_GAIN * glow
+            + BOWL_LIFT * bowl
+            + RIM_FALL_GAIN * (-depth / RIM_FALL_SIGMA).exp()
+            + RIM_GAIN
+                * gaussian(radius - RIM_RADIUS, RIM_WIDTH)
+                * (0.05 + 0.95 * rim_key)
+            + FAR_WALL * gaussian(ny - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
+            + SPEC_GAIN * catch * catch)
+            .clamp(0.0, 1.0);
+
+        // Two colours of equal brightness, crossfaded. Interpolating the hue
+        // instead would walk from the warm side to the cool one through green,
+        // and the band is exactly where both masks overlap, so the core of the
+        // light came out green. Crossfading in light space cannot do that.
+        let saturation = saturation_at(heat);
+        let fringe = DISPERSION * depth.powi(6);
+        let warm_hue = BOWL_HUE + (accent_hue - AMBER_HUE) * WARM_FOLLOW;
+        let warm = tinted(
+            warm_hue + (ribbon - 0.5) * 0.10 - fringe,
+            saturation,
+            heat,
+        );
+        let cool = tinted(COOL_HUE + fringe, saturation, heat);
+        let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
+        let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
+        let mut blue = warm.2 * (1.0 - dome) + cool.2 * dome;
+        // How much of the page this pixel lets through. The body is smoke and
+        // the hot events are dense, which is the difference between glass and a
+        // painting of glass.
+        let glass = GLASS_FLOOR + (1.0 - GLASS_FLOOR) * heat;
+
+        // The fitted values are the reference's *composited* pixels, so over the
+        // dark scrim the emitted colour has to be lifted to land on them:
+        // solving `over = emit * alpha + scrim * (1 - alpha)` for `emit` is what
+        // keeps the translucency from simply darkening the object. Without this
+        // the marble came out a third too dark and no amount of extra light in
+        // the field fixed it, because the field was already correct.
+        if glass > 1e-4 {
+            let emitted = relative_luma(red, green, blue);
+            if emitted > 1e-4 {
+                let composited = (heat - SCRIM_LUMA * (1.0 - glass)) / glass;
+                let gain = (composited.max(0.0) / emitted).min(MAX_LIFT);
+                red = (red * gain).min(1.0);
+                green = (green * gain).min(1.0);
+                blue = (blue * gain).min(1.0);
+            }
+        }
+
+        // A hard circular silhouette with a one-pixel anti-aliased ramp. The
+        // body no longer feathers to nothing across the whole frame, so the
+        // image's own square boundary cannot paint a wash over the scrim it is
+        // composited onto (#3085). The margin left by `ORB_RADIUS` is what the
+        // ramp has to run in.
+        //
+        // The ramp saturates at one inside the silhouette, and it has to be
+        // clamped BEFORE it meets the glass, not after. Multiplying first turns
+        // a ramp that is thirty-plus deep in the body into a clamp that pins
+        // every inner pixel to fully opaque, which is exactly how the glass
+        // ended up with no transmission at all.
+        let edge = ((1.0 - radius) * ORB_RADIUS * size as f32 * 0.5).clamp(0.0, 1.0);
+        let alpha = (glass * edge).clamp(0.0, 1.0);
         if alpha <= 0.0 {
             continue;
         }
@@ -361,83 +577,63 @@ fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
     levels[index] * (1.0 - fraction) + levels[next] * fraction
 }
 
-/// Compact, smooth bell curve without a per-pixel exponential call.
-fn bell(value: f32, width: f32) -> f32 {
-    let t = (1.0 - value.abs() / width).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+/// A Gaussian ring, which is what the thin bands of the material are built
+/// from.
+///
+/// A linear falloff would end exactly at `width`, and a band whose value
+/// reaches zero at a fixed radius prints a faint ring of its own. A Gaussian
+/// has no edge to print.
+fn gaussian(value: f32, width: f32) -> f32 {
+    let scaled = value / width;
+    (-scaled * scaled).exp()
 }
 
-/// 1/(1 + (value/scale)^4): the cheap stand-in for a super-gaussian.
-///
-/// Two of these run per pixel per frame, and the generic `powf` they replace
-/// cost more than the rest of the shader put together. The shape is what the
-/// orb needs: a flat top over the core, a soft shoulder, and a long tail with
-/// no boundary that could read as a stroke.
-fn quartic(value: f32, scale: f32) -> f32 {
-    let scaled = value / scale;
-    let squared = scaled * scaled;
-    1.0 / (1.0 + squared * squared)
-}
-
-/// Six emissive stops built once a frame from the accent colour.
-///
-/// The orb has to follow the theme, so the ramp is derived from the accent hue
-/// rather than hardcoding one palette. The hue walks warmer as the value drops
-/// and cooler as it climbs, and saturation only falls at the very top: a dim,
-/// desaturated stop is precisely what turns amber into khaki, which is what an
-/// earlier pass kept doing.
-fn orb_ramp(colour: u32) -> [(f32, f32, f32); 6] {
-    let (hue, saturation, value) = rgb_hsv(colour);
-    [
-        hsv_rgb(hue - 0.034, saturation * 1.38, value * 0.40),
-        hsv_rgb(hue - 0.022, saturation * 1.30, value * 0.60),
-        hsv_rgb(hue - 0.009, saturation * 1.12, value * 0.80),
-        hsv_rgb(hue + 0.005, saturation * 0.92, value * 0.94),
-        hsv_rgb(hue + 0.021, saturation * 0.60, value * 1.00),
-        hsv_rgb(hue + 0.037, saturation * 0.14, value * 1.00),
-    ]
-}
-
-/// Where each ramp stop sits on the heat axis.
-///
-/// The stops are not evenly spaced. More than half the ramp sits below the
-/// midpoint, because the terminator and the core shadow are what carry the
-/// form and they live down there. Sampling on even fifths drags the warm stops
-/// into the shadow and greys the sphere.
-const RAMP_STOPS: [f32; 6] = [0.00, 0.22, 0.44, 0.66, 0.84, 1.00];
-
-/// Sample the ramp between its stops.
-///
-/// The blend runs on the squares and then takes the root. A straight linear
-/// blend between two emissive stops greys the midpoint, and the ramp is the one
-/// place the orb cannot afford to grey.
-fn ramp_sample(ramp: &[(f32, f32, f32); 6], position: f32) -> (f32, f32, f32) {
-    let position = position.clamp(0.0, 1.0);
-    if position <= RAMP_STOPS[0] {
-        return ramp[0];
+/// Saturation for a given brightness, read off the reference.
+fn saturation_at(heat: f32) -> f32 {
+    if heat <= HEAT_STOPS[0] {
+        return SAT_STOPS[0];
     }
-    for index in 0..5 {
-        let (low, high) = (RAMP_STOPS[index], RAMP_STOPS[index + 1]);
-        if position <= high {
+    for index in 0..HEAT_STOPS.len() - 1 {
+        let (low, high) = (HEAT_STOPS[index], HEAT_STOPS[index + 1]);
+        if heat <= high {
             let span = high - low;
             let k = if span <= 0.0 {
                 0.0
             } else {
-                (position - low) / span
+                (heat - low) / span
             };
-            let mix =
-                |from: f32, to: f32| (from * from * (1.0 - k) + to * to * k).max(0.0).sqrt();
-            return (
-                mix(ramp[index].0, ramp[index + 1].0),
-                mix(ramp[index].1, ramp[index + 1].1),
-                mix(ramp[index].2, ramp[index + 1].2),
-            );
+            return SAT_STOPS[index] * (1.0 - k) + SAT_STOPS[index + 1] * k;
         }
     }
-    ramp[5]
+    SAT_STOPS[SAT_STOPS.len() - 1]
 }
 
-/// Accent colour to HSV, so the ramp can walk the hue around it.
+/// A colour of the requested hue and saturation, scaled so its luma is exactly
+/// `heat`.
+///
+/// Scaling by luma is the whole trick: it lets brightness be decided once, by
+/// the light field, and colour be decided independently. Mixing the two is what
+/// made every theme's orb a solid gold ball.
+fn tinted(hue: f32, saturation: f32, heat: f32) -> (f32, f32, f32) {
+    let base = hsv_rgb(hue, saturation, 1.0);
+    let brightness = relative_luma(base.0, base.1, base.2);
+    if brightness < 1e-4 {
+        return (heat, heat, heat);
+    }
+    let scale = heat / brightness;
+    (
+        (base.0 * scale).min(1.0),
+        (base.1 * scale).min(1.0),
+        (base.2 * scale).min(1.0),
+    )
+}
+
+/// Rec. 709 relative luma, the weights the reference's own values assume.
+fn relative_luma(red: f32, green: f32, blue: f32) -> f32 {
+    0.2126 * red + 0.7152 * green + 0.0722 * blue
+}
+
+/// Accent colour to HSV, so the warm side can lean towards the theme.
 fn rgb_hsv(colour: u32) -> (f32, f32, f32) {
     let (red, green, blue) = rgb(colour);
     let high = red.max(green).max(blue);
@@ -582,14 +778,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_light_comes_from_the_upper_left_and_the_far_side_turns_away() {
-        // The whole point of the rebuild: a real light direction. The shipped
-        // lens differed by 0.002 alpha between its two sides, which is why it
-        // read as a plate with a gradient rather than as a lit volume.
-        let size = 160;
+    /// The frame the structural tests share: one frame, idle level, no speech.
+    fn glass_frame(size: u32) -> gpui::RenderImage {
         let surface = Surface::new(size);
-        let frame = render(
+        render(
             &surface,
             0.2,
             OrbInput {
@@ -598,36 +790,171 @@ mod tests {
                 colour: 0xffbf47,
             },
             0.3,
-        );
+        )
+    }
+
+    #[test]
+    fn the_orb_stops_at_a_hard_round_edge_and_leaves_the_frame_clear() {
+        // The shipped lens feathered to nothing across the whole quad, so the
+        // image's square boundary painted a wash over the scrim and the user
+        // saw a rectangle around the orb. A marble has a silhouette instead:
+        // a hard circular boundary with a ramp narrow enough to read as an
+        // edge rather than as a fade. The body is translucent by design now, so
+        // the silhouette is measured by where the frame starts carrying
+        // anything at all, not by where it becomes fully opaque.
+        let size = 160;
+        let frame = glass_frame(size);
         let bytes = frame.as_bytes(0).expect("one frame");
-        let left = luma(sample(bytes, size, -0.5, 0.0));
-        let right = luma(sample(bytes, size, 0.5, 0.0));
         assert!(
-            left > right + 25.0,
-            "the key side must outshine the away side, got {left:.1} against {right:.1}"
+            sample(bytes, size, 0.0, 0.0).3 > 200,
+            "the middle of the marble is dense"
         );
-        let upper = luma(sample(bytes, size, -0.45, -0.35));
-        let lower = luma(sample(bytes, size, 0.45, 0.35));
         assert!(
-            upper > lower + 30.0,
-            "the key is upper left, so that quadrant must be the lit one, got \
-             {upper:.1} against {lower:.1}"
+            sample(bytes, size, 0.90, 0.0).3 > 0,
+            "the body still carries density close to the edge"
+        );
+        assert_eq!(
+            sample(bytes, size, 1.02, 0.0).3,
+            0,
+            "one step past the radius the frame carries nothing"
+        );
+        assert_eq!(
+            sample(bytes, size, 0.99, 0.99).3,
+            0,
+            "the frame's corners are clear, not a wash"
+        );
+        // Walking in along the centre row, the first pixel that carries
+        // anything must be at the radius itself: a wider approach means the
+        // silhouette is fading rather than ending.
+        let row = size as usize / 2;
+        let strip = &bytes[row * size as usize * 4..(row + 1) * size as usize * 4];
+        let first = strip
+            .chunks_exact(4)
+            .position(|pixel| pixel[3] > 0)
+            .expect("the orb reaches the centre row");
+        let expected = ((1.0 - ORB_RADIUS) * 0.5 * size as f32) as usize;
+        assert!(
+            first.abs_diff(expected) <= 2,
+            "the silhouette must begin at the radius, expected about {expected}, got {first}"
         );
     }
 
     #[test]
-    fn the_ramp_stays_in_the_accent_hue_family() {
-        // Amber is the shipped accent. A ramp that drifts into the yellow-green
-        // gap turns the dim end khaki, which is the failure this pins: an
-        // earlier pass darkened a pale stop and got khaki instead of amber.
-        let ramp = orb_ramp(0xffbf47);
-        for (index, stop) in ramp.iter().enumerate() {
-            let hue = hue_of(*stop);
-            assert!(
-                (0.06..0.16).contains(&hue),
-                "ramp stop {index} drifted to hue {hue:.3}, outside the amber family"
-            );
-        }
+    fn the_border_is_one_thin_ring_with_an_exponential_shoulder() {
+        // The border is one hard event and nothing else. Sampling the
+        // reference radially from its centre gives 88 luma at the ring's peak
+        // on the silhouette, 39 two pixels inside it, 28 five pixels inside and
+        // 18 in the body. There is no second bright ring further in and no dark
+        // trough between them: an earlier pass invented a bevel at r 0.80 and a
+        // 0.34-deep trough at r 0.90, and that invented pair is what read as a
+        // soft double ring.
+        // The ring is narrower than a pixel at the test's default size, so this
+        // reads the shipped size: at 160 the ring can fall between two pixel
+        // centres and measure nothing at all.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let rim = luma(sample(bytes, size, 0.0, -RIM_RADIUS));
+        let shoulder = luma(sample(bytes, size, 0.0, -0.96));
+        let inside = luma(sample(bytes, size, 0.0, -0.90));
+        let body = luma(sample(bytes, size, 0.0, -0.60));
+        // Measured on the shipped maths: 165.7, 55.4, 35.8 and 28.7 emitted.
+        // The reference's own rim composites to 88 luma over the scrim, which
+        // is what these emitted values land on once the alpha is applied.
+        assert!(
+            rim > shoulder + 35.0,
+            "the ring must beat the shoulder behind it, got {rim:.1} against {shoulder:.1}"
+        );
+        assert!(
+            shoulder > inside,
+            "the shoulder must fall away into the body, got {shoulder:.1} against {inside:.1}"
+        );
+        assert!(
+            inside >= body - 2.0,
+            "no trough sits between the shoulder and the body, got {inside:.1} and {body:.1}"
+        );
+    }
+
+    #[test]
+    fn the_ring_is_keyed_to_the_upper_arc() {
+        // The reference's own ring measures 88 luma at the top, 64 on the left
+        // and 30 at the bottom, so the key enters the glass from above. A ring
+        // of even brightness is a drawn outline; a keyed one is a specular.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let top = luma(sample(bytes, size, 0.0, -RIM_RADIUS));
+        let bottom = luma(sample(bytes, size, 0.0, RIM_RADIUS));
+        let left = luma(sample(bytes, size, -RIM_RADIUS, 0.0));
+        let right = luma(sample(bytes, size, RIM_RADIUS, 0.0));
+        // Measured 165.7, 107.0, 162.2 and 117.5 emitted.
+        assert!(
+            top > bottom + 30.0,
+            "the ring must be brighter above than below, got {top:.1} against {bottom:.1}"
+        );
+        assert!(
+            left > right + 30.0,
+            "the ring must be brighter on the left than the right, got {left:.1} against {right:.1}"
+        );
+    }
+
+    #[test]
+    fn the_horizon_splits_a_cool_dome_from_a_warm_bowl() {
+        // One radial gradient is a lit plate no matter how smooth it is. The
+        // object gains a top and a bottom from a temperature split across a
+        // thin band of light: cool above, warm below, hotspot on the seam.
+        let size = 160;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let dome = sample(bytes, size, 0.0, -0.20);
+        let band = luma(sample(bytes, size, 0.0, 0.02));
+        let bowl = sample(bytes, size, 0.0, 0.20);
+        // Measured: dome blue leads red by 43 of 255, bowl red leads blue by
+        // 51, band luma 255 against a dome at 121 and a bowl at 130.
+        assert!(
+            dome.2 - dome.0 > 15.0,
+            "the dome must run cool, got blue minus red of {:.1}",
+            dome.2 - dome.0
+        );
+        assert!(
+            bowl.0 - bowl.2 > 15.0,
+            "the bowl must keep the accent's warmth, got red minus blue of {:.1}",
+            bowl.0 - bowl.2
+        );
+        assert!(
+            band > luma(dome) + 80.0,
+            "the horizon band is the brightest thing in the frame, got {band:.1} against {:.1}",
+            luma(dome)
+        );
+        assert!(
+            band > luma(bowl) + 80.0,
+            "the band must also outshine the bowl under it, got {band:.1} against {:.1}",
+            luma(bowl)
+        );
+    }
+
+    #[test]
+    fn the_body_passes_the_page_through_and_only_the_light_is_dense() {
+        // Glass over a page, not a painting of glass. The dark body is smoke:
+        // it lets a large part of the backdrop through, and only the band and
+        // the rim go dense. Pinned as alpha, because alpha is exactly what the
+        // compositor uses to decide how much of the text behind reaches the
+        // user's eye.
+        let size = 160;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let body = sample(bytes, size, 0.0, -0.60).3;
+        let band = sample(bytes, size, 0.0, 0.02).3;
+        // Measured 97 in the body and 255 on the band.
+        assert!(
+            body < 140,
+            "the dark body must stay translucent, got alpha {body}"
+        );
+        assert!(body > 40, "the body must still carry density, got {body}");
+        assert!(
+            band > 240,
+            "the band is the one dense event in the material, got alpha {band}"
+        );
     }
 
     #[test]
@@ -685,25 +1012,6 @@ mod tests {
         assert!((history[history.len() - 2] - 0.5).abs() < 0.001);
         assert!((history[history.len() - 1] - 1.0).abs() < 0.001);
         assert_eq!(voice_at(&history, 1.0), 1.0);
-    }
-
-    /// Hue of a colour in turns, so the ramp test can say where a stop landed
-    /// without going through the packed accent type.
-    fn hue_of(colour: (f32, f32, f32)) -> f32 {
-        let high = colour.0.max(colour.1).max(colour.2);
-        let low = colour.0.min(colour.1).min(colour.2);
-        let span = high - low;
-        if span <= 0.0 {
-            return 0.0;
-        }
-        let raw = if high == colour.0 {
-            ((colour.1 - colour.2) / span) / 6.0
-        } else if high == colour.1 {
-            (2.0 + (colour.2 - colour.0) / span) / 6.0
-        } else {
-            (4.0 + (colour.0 - colour.1) / span) / 6.0
-        };
-        raw.rem_euclid(1.0)
     }
 
     #[test]
