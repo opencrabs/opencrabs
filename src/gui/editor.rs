@@ -255,15 +255,9 @@ pub fn marker_paths(text: &str) -> Vec<PathBuf> {
 pub fn split_audio_marker(text: &str) -> Option<(String, String)> {
     let mut rest = text;
     while let Some(start) = rest.find("<<") {
-        let Some(after) = rest.get(start + 2..) else {
-            return None;
-        };
-        let Some(end) = after.find(">>") else {
-            return None;
-        };
-        let Some(marker) = after.get(..end) else {
-            return None;
-        };
+        let after = rest.get(start + 2..)?;
+        let end = after.find(">>")?;
+        let marker = after.get(..end)?;
         if let Some((kind, path)) = marker.split_once(':')
             && kind == "AUD"
             && !path.is_empty()
@@ -3796,9 +3790,9 @@ fn write_clipboard_image(image: &(ImageFormat, Vec<u8>)) -> Option<PathBuf> {
 mod tests {
     use super::{
         Attachment, CLIPBOARD_IMAGE_HINT, COPIED_NOTICE, NOTICE_TTL, caret_in_row,
-        image_format_extension, line_col, line_count, line_len, line_start, marker_paths,
-        message_with_markers, next_word_end, notice_expired, previous_word_start, strip_markers,
-        vertical_row_target, write_clipboard_image,
+        dictation_insertion, image_format_extension, line_col, line_count, line_len, line_start,
+        marker_paths, message_with_markers, next_word_end, notice_expired, previous_word_start,
+        strip_markers, vertical_row_target, write_clipboard_image,
     };
     use gpui::{ImageFormat, px};
     use std::path::PathBuf;
