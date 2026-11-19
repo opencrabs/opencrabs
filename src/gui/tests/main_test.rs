@@ -1,10 +1,12 @@
 use crate::composer_view::{composer_hint_for, queue_rows};
+use crate::dashboard_messages::{MSG_MENU_TTL, msg_menu_expiry_due};
 use crate::dashboard_source::{DASHBOARD, production_half};
+use crate::launch::{Launch, launch_intent, pick_initial_session, remember_open_session};
 use crate::overlays::cd_entries_for;
 use crate::pane_chrome::CHAT_MEASURE_PX;
 use crate::status::help_rows;
 use crate::topic_bar_view::topic_label;
-use crate::{Launch, launch_intent, pick_initial_session, remember_open_session};
+use crate::window_input::{QUIT_WINDOW, WHEEL_LINE_PX};
 use opencrabs::brain::mission_control::McAnalytics;
 
 /// A leaf is its own view now (#2805): its state and the transcript it

@@ -12,11 +12,21 @@
 //! in; this constant is for "the dashboard contains this", which is what the
 //! single-file scan meant before the split.
 
-/// The modules come first so a scan that cuts at the first module's inline
-/// test block still sees every module before it. The window file itself is
-/// last and carries no inline tests: its tests live in `gui/tests/` now, so
-/// the whole of this text is production.
+/// The window's boot, input and launch helpers are listed first because they
+/// moved out of the window file (#3060): a rule pinning what the window does
+/// at startup or on a keystroke reads them here, where they now live. The
+/// window file itself is last and carries no inline tests: its tests live in
+/// `gui/tests/` now, so the whole of this text is production.
 pub const DASHBOARD: &str = concat!(
+    include_str!("../gui/boot.rs"),
+    include_str!("../gui/channel_chip.rs"),
+    include_str!("../gui/launch.rs"),
+    include_str!("../gui/live_fold.rs"),
+    include_str!("../gui/pane_focus.rs"),
+    include_str!("../gui/task_strip.rs"),
+    include_str!("../gui/turn_swap.rs"),
+    include_str!("../gui/usage_load.rs"),
+    include_str!("../gui/window_input.rs"),
     include_str!("../gui/dashboard_commands.rs"),
     include_str!("../gui/dashboard_config.rs"),
     include_str!("../gui/dashboard_finder.rs"),

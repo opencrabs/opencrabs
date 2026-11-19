@@ -177,7 +177,7 @@ fn a_provisioned_home_resolves_the_builtin_provider() {
 /// can still change. All three empty means nothing to read.
 #[test]
 fn a_preview_refresh_follows_any_live_work() {
-    use crate::previews_can_move;
+    use crate::dashboard_rail::previews_can_move;
     assert!(previews_can_move(true, false, 0), "the open turn streams");
     assert!(
         previews_can_move(false, true, 0),
