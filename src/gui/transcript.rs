@@ -3244,7 +3244,11 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
                 .child(disclosure_icon(palette::current().accent, 1.0)),
         )
         .child(head_run(glyph.to_string(), palette::current().text_muted, None).flex_shrink_0())
-        .child(head_run(verb.to_string(), accent, Some(1)).flex_shrink_0().min_w_0());
+        .child(
+            head_run(verb.to_string(), accent, Some(1))
+                .flex_shrink_0()
+                .min_w_0(),
+        );
     // The count, the ctx and the clock ride the verdict's own line (#3042),
     // behind the same dot the live head divides its segments with (#3046), so
     // the finished card is one sentence in one colour instead of a verdict with
@@ -7529,8 +7533,7 @@ mod tests {
         );
         assert!(
             src_at(head, "segments.push(paragraph.clone())") < src_at(head, "segments.push(lead)")
-                && src_at(head, "segments.push(lead)")
-                    < src_at(head, "segments.push(footer)"),
+                && src_at(head, "segments.push(lead)") < src_at(head, "segments.push(footer)"),
             "the order is the turn's own: the sentence, then the call, then the numbers"
         );
         let status = head

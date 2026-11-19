@@ -433,7 +433,9 @@ impl RailView {
             // One glyph cell, from the rail's own clock, so a list of busy rows
             // blinks as one spinner instead of ten (#2636). Only a live turn
             // spins; a plan badge holds still (#2842).
-            badge: row.flags.mark
+            badge: row
+                .flags
+                .mark
                 .badge
                 .map(|badge| rail_activity::glyph(badge, phase)),
             preview: row.flags.preview.clone(),
@@ -806,8 +808,14 @@ mod tests {
         // #3020: a spinner, a plan waiting for approval and an active plan are
         // three different reasons the reader may need the chip.
         assert!(chip_in_flight(&kid(0, true, false, false)), "a live turn");
-        assert!(chip_in_flight(&kid(1, false, true, false)), "a waiting plan");
-        assert!(chip_in_flight(&kid(2, false, false, true)), "a running plan");
+        assert!(
+            chip_in_flight(&kid(1, false, true, false)),
+            "a waiting plan"
+        );
+        assert!(
+            chip_in_flight(&kid(2, false, false, true)),
+            "a running plan"
+        );
         assert!(
             !chip_in_flight(&kid(3, false, false, false)),
             "an idle topic folds with the rest"

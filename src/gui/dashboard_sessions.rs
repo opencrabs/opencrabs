@@ -492,9 +492,8 @@ impl Dashboard {
         let generation = self.preview_document_generation.wrapping_add(1);
         self.preview_document_generation = generation;
         let document_kind = opencrabs::ui_core::local_document::DocumentKind::of_path(&path);
-        self.preview_document = document_kind.map(|_| {
-            preview_document::DocumentState::loading(path.clone(), generation)
-        });
+        self.preview_document = document_kind
+            .map(|_| preview_document::DocumentState::loading(path.clone(), generation));
         // A clip's poster frame and length are still probed on the click, as
         // before. Document bytes and Markdown parsing use the async path below.
         self.preview_video = if open.kind == preview::PreviewKind::Video {
@@ -526,10 +525,7 @@ impl Dashboard {
                     .spawn(async move { preview_document::parse(&load_path, kind) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let visible = this
-                        .preview
-                        .as_ref()
-                        .is_some_and(|open| open.path == path);
+                    let visible = this.preview.as_ref().is_some_and(|open| open.path == path);
                     let current = this
                         .preview_document
                         .as_ref()
@@ -589,18 +585,15 @@ impl Dashboard {
             }
         });
         let middle_click = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-            this.middle_scroll_down(
-                middle_scroll::MiddleScrollTarget::Preview,
-                ev.position,
-                cx,
-            );
+            this.middle_scroll_down(middle_scroll::MiddleScrollTarget::Preview, ev.position, cx);
         });
-        let document = self.preview_document.as_ref().map(|state| {
-            preview::DocumentBody {
+        let document = self
+            .preview_document
+            .as_ref()
+            .map(|state| preview::DocumentBody {
                 state,
                 height: document_height,
-            }
-        });
+            });
         preview::body(
             open,
             preview::actions_row(

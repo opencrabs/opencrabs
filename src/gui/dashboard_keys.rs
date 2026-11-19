@@ -9,12 +9,7 @@ impl Dashboard {
     /// A preview is modal: unsupported keys go nowhere instead of reaching the
     /// composer, tasks or transcript underneath it. Documents own their scroll
     /// directly and have no transcript follow flag to reconcile (#3041).
-    fn preview_key(
-        &mut self,
-        ev: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn preview_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = ev.keystroke.key.as_str();
         if key == "escape" {
             self.close_preview();

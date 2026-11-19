@@ -22,10 +22,7 @@ pub(crate) const RAIL_CHIPS_IDLE_FOLD: std::time::Duration = std::time::Duration
 /// one `now`, and so the threshold can be tested without a clock or a window.
 /// `saturating_duration_since` keeps a clock that moved backwards from folding
 /// a strip the reader just opened.
-pub(crate) fn chips_idle_fold_due(
-    opened: std::time::Instant,
-    now: std::time::Instant,
-) -> bool {
+pub(crate) fn chips_idle_fold_due(opened: std::time::Instant, now: std::time::Instant) -> bool {
     now.saturating_duration_since(opened) >= RAIL_CHIPS_IDLE_FOLD
 }
 

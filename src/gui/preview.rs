@@ -860,7 +860,11 @@ pub fn overlay(
     let body = if document_open {
         body
     } else {
-        div().w_full().overflow_hidden().child(body).into_any_element()
+        div()
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .into_any_element()
     };
     modal_shell::render(
         modal_shell::ModalView {
