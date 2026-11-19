@@ -1056,3 +1056,42 @@ impl Drop for PreviewSlot {
         self.0.set(self.0.get().saturating_sub(1));
     }
 }
+
+/// The rail's default width, and the floor it may be dragged to. At the
+/// floor the splitter closes the rail instead of leaving a sliver: a 3-rem
+/// column shows titles cut to nothing, which is worse than no column.
+pub(crate) const RAIL_DEFAULT_REM: f32 = 17.0;
+pub(crate) const RAIL_MIN_REM: f32 = 11.0;
+pub(crate) const RAIL_MAX_REM: f32 = 32.0;
+
+/// Apply sidebar visibility without letting a closed rail retain keyboard
+/// focus or a hidden filter. Width belongs to the window layout and is not
+/// part of this transition.
+///
+/// Opening is a request to walk the list, so the rail takes the keyboard on
+/// the way in and the cursor stands on the open conversation (#2665). It used
+/// to arrive unfocused, which left up and down dead until a Tab.
+pub(crate) fn set_rail_open_state(
+    open: bool,
+    rail_open: &mut bool,
+    rail_focused: &mut bool,
+    sessions: &mut sessions::SessionsState,
+) {
+    *rail_open = open;
+    if open {
+        *rail_focused = true;
+        sessions.cursor = sessions.cursor.or(sessions.selected);
+    } else {
+        *rail_focused = false;
+        sessions.filter.clear();
+        sessions.filter_active = false;
+        // The filter menu clears with the rail (#2719): a reopened rail
+        // starts from the default rule, never a stale chip from last time.
+        sessions.rail_filter = sessions::RailFilter::default();
+        // The open chip panel folds with the rail too (#2787).
+        sessions.rail_filter_open = false;
+        // The deep hits clear with the rail too (#2720): a reopened rail
+        // starts unsearched, never showing snippets from the last query.
+        sessions.content_matches.clear();
+    }
+}
