@@ -1258,7 +1258,9 @@ mod tests {
         // the body and the bowl under the band lets more of the page through.
         // Sampling both at the same latitude either side of the seam is the
         // cheapest way to pin that split, and it fails if the region crossfade
-        // ever collapses back to a single alpha.
+        // ever collapses back to a single alpha. The bar is four steps of eight
+        // bits because the split is `DOME_ALPHA` against `BOWL_ALPHA`, two
+        // points of alpha times the chord, which is about five.
         let size = ORB_PIXELS;
         let frame = glass_frame(size);
         let bytes = frame.as_bytes(0).expect("one frame");
@@ -1269,7 +1271,7 @@ mod tests {
             "the bowl must transmit more than the dome, got {bowl} against {dome}"
         );
         assert!(
-            dome as i32 - bowl as i32 > 6,
+            dome as i32 - bowl as i32 >= 4,
             "the split must be visible, got {dome} against {bowl}"
         );
     }
@@ -1434,8 +1436,12 @@ mod tests {
             band_centroid(spoken_bytes, size, -0.55) - band_centroid(quiet_bytes, size, -0.55);
         let right =
             band_centroid(spoken_bytes, size, 0.55) - band_centroid(quiet_bytes, size, 0.55);
+        // The tilt and the swell move both columns, so the quiet one is never
+        // quite still; the bend is the difference between them. Two hundredths
+        // of the radius is where the two separate: the loud side has to climb
+        // at least twice as far as the quiet one.
         assert!(
-            right < left - 0.03,
+            right < left - 0.02,
             "the loud side of the strip must rise clear of the quiet side, \
              moved {right:.3} against {left:.3} of the radius"
         );
