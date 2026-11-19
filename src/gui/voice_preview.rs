@@ -218,8 +218,20 @@ fn pause_mark() -> Div {
         .items_center()
         .justify_center()
         .gap(px(3.0))
-        .child(div().w(px(3.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(0xffffff)))
-        .child(div().w(px(3.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(0xffffff)))
+        .child(
+            div()
+                .w(px(3.0))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .bg(rgb(0xffffff)),
+        )
+        .child(
+            div()
+                .w(px(3.0))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .bg(rgb(0xffffff)),
+        )
 }
 
 fn fallback_peaks(levels: &[f32]) -> Vec<f32> {

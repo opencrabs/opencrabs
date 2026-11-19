@@ -3073,14 +3073,12 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                     .overflow_hidden()
                     .rounded(px(6.0))
                     .bg(rgb(palette::current().panel_hi))
-                    .child(
-                        div().flex_1().min_w_0().child(crate::voice_preview::player(
-                            &format!("attachment-voice-{index}"),
-                            &attachment.path,
-                            None,
-                            &[],
-                        )),
-                    )
+                    .child(div().flex_1().min_w_0().child(crate::voice_preview::player(
+                        &format!("attachment-voice-{index}"),
+                        &attachment.path,
+                        None,
+                        &[],
+                    )))
                     .child(
                         div()
                             .id(ElementId::Name(format!("attachment-remove-{index}").into()))
@@ -3393,14 +3391,12 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(crate::voice_preview::player(
-                        "recorded-draft",
-                        &draft.clip,
-                        Some(draft.seconds),
-                        &draft.levels,
-                    )),
-                )
+                .child(div().flex_1().min_w_0().child(crate::voice_preview::player(
+                    "recorded-draft",
+                    &draft.clip,
+                    Some(draft.seconds),
+                    &draft.levels,
+                )))
                 .child(
                     div()
                         .id("voice-preview-discard")

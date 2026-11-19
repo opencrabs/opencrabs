@@ -79,7 +79,10 @@ fn load_visual(path: PathBuf) {
             }))
         }
         Ok(_) => {
-            logging::error(&format!("voice waveform: {} holds no audio", path.display()));
+            logging::error(&format!(
+                "voice waveform: {} holds no audio",
+                path.display()
+            ));
             None
         }
         Err(reason) => {
@@ -152,7 +155,11 @@ fn peaks(samples: &[f32]) -> Vec<f32> {
     let mut peaks: Vec<f32> = samples
         .chunks(chunk)
         .take(WAVE_BARS)
-        .map(|samples| samples.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs())))
+        .map(|samples| {
+            samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        })
         .collect();
     let loudest = peaks.iter().fold(0.0_f32, |peak, sample| peak.max(*sample));
     if loudest > 0.0 {
@@ -190,7 +197,12 @@ pub(crate) fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
     registry.register_all::<OpusDecoder>();
     let mut decoder = registry
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("{} needs a codec this build does not carry: {e}", path.display()))?;
+        .map_err(|e| {
+            format!(
+                "{} needs a codec this build does not carry: {e}",
+                path.display()
+            )
+        })?;
     let mut mono = Vec::new();
     let mut rate = 0u32;
     loop {

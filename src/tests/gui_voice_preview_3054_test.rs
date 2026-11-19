@@ -22,11 +22,7 @@ fn region(source: &'static str, start: &str, end: &str) -> &'static str {
 
 #[test]
 fn every_audio_surface_uses_the_same_horizontal_player() {
-    let history = region(
-        TRANSCRIPT,
-        "fn history_attachments(",
-        "fn attachment_cell(",
-    );
+    let history = region(TRANSCRIPT, "fn history_attachments(", "fn attachment_cell(");
     assert!(history.contains("crate::voice_preview::player("));
     assert!(history.contains(".max_w(px(420.0))"));
     assert!(
@@ -64,7 +60,10 @@ fn the_player_pauses_resumes_and_seeks_by_pointer() {
         PREVIEW.contains("static TRACKS:") && PREVIEW.contains("static DRAG:"),
         "track bounds and drag identity survive repaints"
     );
-    assert!(PREVIEW.contains("let played ="), "played bars use the accent");
+    assert!(
+        PREVIEW.contains("let played ="),
+        "played bars use the accent"
+    );
 
     assert!(PLAY.contains("sink.pause();"));
     assert!(PLAY.contains("sink.play();"));

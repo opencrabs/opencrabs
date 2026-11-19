@@ -2862,9 +2862,9 @@ fn history_attachments(
     // Audio gets its own horizontal rows. Square planning applies only to the
     // remaining images, videos and documents, so mixed messages keep both
     // kinds of preview without squeezing a player into a thumbnail (#3054).
-    let (audio, files): (Vec<_>, Vec<_>) = paths.iter().partition(|path| {
-        Attachment::for_display((*path).to_path_buf()).is_audio()
-    });
+    let (audio, files): (Vec<_>, Vec<_>) = paths
+        .iter()
+        .partition(|path| Attachment::for_display((*path).to_path_buf()).is_audio());
     let mut strip = div()
         .flex()
         .flex_col()
@@ -2874,18 +2874,9 @@ fn history_attachments(
         .pt_1();
     for (index, path) in audio.into_iter().enumerate() {
         let key = path.to_string_lossy();
-        strip = strip.child(
-            div()
-                .w_full()
-                .max_w(px(420.0))
-                .min_w_0()
-                .child(crate::voice_preview::player(
-                    &format!("history-{key}-{index}"),
-                    path,
-                    None,
-                    &[],
-                )),
-        );
+        strip = strip.child(div().w_full().max_w(px(420.0)).min_w_0().child(
+            crate::voice_preview::player(&format!("history-{key}-{index}"), path, None, &[]),
+        ));
     }
     if files.is_empty() {
         return strip;
