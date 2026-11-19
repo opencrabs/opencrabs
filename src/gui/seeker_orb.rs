@@ -213,15 +213,46 @@ const BREATHE: f32 = 0.010;
 /// is what the eye reads as liquid, because one end of the horizon climbs while
 /// the other drops. It is scaled by the voice level, so silence leaves the
 /// marble at rest and a syllable tips it.
-const SLOSH: f32 = 0.075;
+///
+/// Speed matters as much as distance. The first pass tipped at 0.55 radians per
+/// second, which is a fourteen second swing once the clock is slowed to the
+/// liquid's own rate, so a syllable moved the seam by about a pixel and the
+/// whole term read as frozen. A slosh has to complete a swing inside a word,
+/// not inside a sentence.
+const SLOSH: f32 = 0.150;
+const SLOSH_SPEED: f32 = 2.40;
 
 /// The swell that travels outwards along the seam, as a fraction of the radius.
 ///
 /// Weighted by the square of the horizontal position, so the middle of the band
 /// stays put and the outer thirds ripple. A single travelling wave across the
 /// whole band would slide the light sideways; a swell lifts it and drops it,
-/// which is what water under a bright surface does.
-const SWELL: f32 = 0.045;
+/// which is what water under a bright surface does. `SWELL_REACH` puts about a
+/// wavelength across the strip, so a crest is visible at each end rather than a
+/// single slow bulge across the middle.
+const SWELL: f32 = 0.090;
+const SWELL_SPEED: f32 = 2.60;
+const SWELL_REACH: f32 = 4.40;
+
+/// How far the loudest recent sample lifts the strip above it, as a fraction of
+/// the radius.
+///
+/// This is the term that makes recording read as recording. The band's own
+/// history is sampled across its width, so the part of the strip sitting over a
+/// loud sample climbs while the part over silence does not: the seam bends into
+/// the waveform instead of sliding as one rigid line. The newest reading is on
+/// the right, so a syllable enters there and travels left as the history
+/// shifts, which is a wave moving through the light rather than a pulse painted
+/// on top of it.
+const LIFT: f32 = 0.075;
+
+/// How much the strip thickens over a loud sample, as a fraction of its own
+/// width.
+///
+/// A band that only moves is a line being dragged. Letting it swell where the
+/// microphone is loud makes the light itself change volume, which is the
+/// difference between a surface moving under a lamp and a surface catching it.
+const BAND_PULSE: f32 = 0.30;
 
 /// How much the band brightens on a voice peak, as a fraction of its own gain.
 ///
@@ -229,7 +260,7 @@ const SWELL: f32 = 0.045;
 /// the same smoothed history the lens bends with, so the bright part of the
 /// band lifts where the loudest sample sits: a syllable lands as a pulse
 /// instead of the whole strip sliding through one slow swell.
-const SHIMMER: f32 = 0.42;
+const SHIMMER: f32 = 0.55;
 
 /// The two temperatures the seam splits the body into, as hues.
 ///
@@ -426,8 +457,11 @@ impl OrbAnimation {
                     energy += (target - energy) * rate;
                     // Integrate phase instead of scaling wall time. Recording
                     // silence keeps a slow viscous drift; speech accelerates
-                    // it smoothly without making the whole orb churn.
-                    liquid_clock += elapsed * (0.20 + energy * 0.85);
+                    // it smoothly without making the whole orb churn. The rate
+                    // has to reach and pass one: the liquid terms are tuned in
+                    // seconds, and a clock that crawls under speech is how the
+                    // seam ended up moving a pixel per word.
+                    liquid_clock += elapsed * (0.16 + energy * 1.25);
                     let next = Arc::new(render(&surface, liquid_clock, input, energy));
                     *lock(&worker_latest) = next;
                     let spent = began.elapsed();
@@ -587,13 +621,19 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // gives the marble a top and a bottom, which is the difference between
         // an object and a lit plate.
         //
-        // The seam is also a liquid surface, not a drawn line. It tips about the
-        // centre with the voice, and two swells travel outwards along it, so a
-        // syllable lifts one end of the horizon and drops the other while the
-        // outer thirds ripple. Both terms vanish at rest, which leaves the
-        // reference's own still seam in silence.
-        let slosh = SLOSH * level * sine(t * 0.55);
-        let swell = SWELL * level * sine(nx * 2.60 - t * 1.05) * nx * nx;
+        // The seam is also a liquid surface, not a drawn line, and it moves in
+        // three ways at once. It tips about the centre, so one end of the
+        // horizon climbs while the other drops; a swell travels outwards along
+        // it, so the outer thirds ripple; and the strip's own microphone
+        // history lifts it where the loudest recent sample sits, so a syllable
+        // bends the light instead of dragging it. All three vanish at rest,
+        // which leaves the reference's own still seam in silence.
+        let slosh = SLOSH * level * sine(t * SLOSH_SPEED);
+        let swell = SWELL * level * sine(nx * SWELL_REACH - t * SWELL_SPEED) * nx * nx;
+        // Sampled in screen space, not through the lens: the light should bend
+        // where the sound is, and the lens rotates underneath it on its own.
+        let waveform = voice_at(&liquid_levels, (nx * 0.5 + 0.5).clamp(0.0, 1.0));
+        let lift = LIFT * level * waveform;
         let horizon = HORIZON
             + BOW_BOWL * (1.0 - nz)
             + BREATHE * sine(t * 0.70)
@@ -601,17 +641,21 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + swell;
         // The band rides a slightly different seam from the bowl's: it is the
         // horizon reflected off the inside of the sphere, so it rises towards
-        // the wall while the bowl's own boundary falls away.
-        let seam = horizon - BAND_ARCH * (1.0 - nz);
+        // the wall while the bowl's own boundary falls away. The voice lifts it
+        // on top of that, which is what turns a line into a surface.
+        let seam = horizon - BAND_ARCH * (1.0 - nz) - lift;
         let offset = ny - seam;
         // The falloff keeps its spherical shape but no longer runs to nothing at
         // the limb, which is what left the glow short of both inner walls.
         let lateral = BAND_WALL + (1.0 - BAND_WALL) * gaussian(nx, BAND_REACH);
         // The band answers the microphone: the smoothed history lifts the part
-        // of the strip it sits over, so a syllable reads as a pulse. At rest
-        // the gain is one and the reference's own band is what renders.
+        // of the strip it sits over, so a syllable reads as a pulse, and the
+        // strip thickens where that sample is loud, so the light swells instead
+        // of only travelling. At rest the gain is one and the reference's own
+        // band is what renders.
         let shimmer = 1.0 + SHIMMER * voice * level;
-        let band = gaussian(offset, BAND_SIGMA) * lateral * shimmer;
+        let band_width = BAND_SIGMA * (1.0 + BAND_PULSE * waveform * level);
+        let band = gaussian(offset, band_width) * lateral * shimmer;
         // The halo carries the only asymmetry in the light: the key is upper
         // left, so the halo is pushed that way and the seam's brightest point
         // sits left of centre. Nothing else in the material is directional, and
@@ -1324,6 +1368,12 @@ mod tests {
         // clocks has to move the band much further while someone speaks than
         // it does in silence. The column sits out towards the wall, where the
         // tilt has an arm to work with.
+        //
+        // The bar is a tenth of the radius rather than the two hundredths that
+        // shipped first: at two hundredths the seam moved about three pixels
+        // across a whole second and the owner's verdict was "almost not
+        // noticeable". A test that only asks for motion the eye cannot see is
+        // how that shipped twice.
         let size = ORB_PIXELS;
         let surface = Surface::new(size);
         let quiet = OrbInput {
@@ -1347,14 +1397,50 @@ mod tests {
         let resting = (centroid(&resting_later) - centroid(&resting_first)).abs();
         let speaking = (centroid(&speaking_later) - centroid(&speaking_first)).abs();
         assert!(
-            speaking > 0.02,
-            "the seam must travel a visible distance on speech, moved \
-             {speaking:.3} of the radius"
+            speaking > 0.05,
+            "the seam must travel a distance the eye can follow on speech, \
+             moved {speaking:.3} of the radius"
         );
         assert!(
             speaking > resting * 3.0,
             "speech must move the seam far more than the idle breathe: \
              {speaking:.3} against {resting:.3}"
+        );
+    }
+
+    #[test]
+    fn a_syllable_bends_the_seam_where_the_sound_is() {
+        // A tilt and a travelling swell both move the strip as one line, so a
+        // word shows up as the same still image nudged sideways. The strip has
+        // to bend: the part over the loud sample climbs while the part over
+        // silence stays where the reference put it. Comparing the two columns
+        // against a silent frame at the same clock isolates that bend from the
+        // swell, which is present in both frames.
+        let size = ORB_PIXELS;
+        let surface = Surface::new(size);
+        let silent = OrbInput {
+            recording: true,
+            levels: [0.0; VOICE_SAMPLES],
+            colour: 0xffbf47,
+        };
+        let mut half = silent;
+        // The newest half of the window carries the syllable, which is the
+        // right of the strip.
+        for level in half.levels.iter_mut().skip(VOICE_SAMPLES / 2) {
+            *level = 1.0;
+        }
+        let quiet = render(&surface, 0.0, silent, 0.0);
+        let spoken = render(&surface, 0.0, half, 1.0);
+        let quiet_bytes = quiet.as_bytes(0).expect("quiet frame");
+        let spoken_bytes = spoken.as_bytes(0).expect("spoken frame");
+        let left = band_centroid(spoken_bytes, size, -0.55)
+            - band_centroid(quiet_bytes, size, -0.55);
+        let right = band_centroid(spoken_bytes, size, 0.55)
+            - band_centroid(quiet_bytes, size, 0.55);
+        assert!(
+            right < left - 0.03,
+            "the loud side of the strip must rise clear of the quiet side, \
+             moved {right:.3} against {left:.3} of the radius"
         );
     }
 
