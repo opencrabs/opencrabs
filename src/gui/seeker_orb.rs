@@ -185,7 +185,19 @@ const SAT_STOPS: [f32; 7] = [0.10, 0.15, 0.34, 0.50, 0.55, 0.18, 0.05];
 /// smoke: it lets the page behind it through, and only the band and the ring go
 /// dense. The floor is where the darkest part sits, because a body that went
 /// fully opaque would hide the scrim and read as a solid again.
-const GLASS_FLOOR: f32 = 0.34;
+///
+/// The floor is almost the whole story, too: at 0.34 it carried about eighty
+/// percent of the body's opacity, with the entire light field accounting for
+/// the rest. Lowering it to 0.15 takes the body from forty-two percent paint to
+/// twenty-two, which is the difference between the page showing through and the
+/// page being veiled by a grey film. The band does not move at all, because
+/// `heat` saturates there and the glass is already at one.
+///
+/// 0.15 is the no-clip boundary, not a taste call: the worst lift the body asks
+/// for is 3.33 against `MAX_LIFT` at 3.4. Below that the correction clips and
+/// the body starts reading darker than the reference, which is why the two
+/// constants are documented against each other.
+const GLASS_FLOOR: f32 = 0.15;
 
 /// What the glass is composited onto, as the luma of that resolved colour.
 ///
@@ -945,7 +957,7 @@ mod tests {
         let bytes = frame.as_bytes(0).expect("one frame");
         let body = sample(bytes, size, 0.0, -0.60).3;
         let band = sample(bytes, size, 0.0, 0.02).3;
-        // Measured 97 in the body and 255 on the band.
+        // Measured 53 in the body and 252 on the band.
         assert!(
             body < 140,
             "the dark body must stay translucent, got alpha {body}"
