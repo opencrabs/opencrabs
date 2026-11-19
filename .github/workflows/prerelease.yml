@@ -129,18 +129,28 @@ jobs:
           # with "version `GLIBC_2.43' not found" (#2206). The arm64 entry below
           # is pinned for the same reason. Both stay on the oldest image we
           # support.
+          #
+          # Thin LTO on both Linux targets, for the reason release.yml gives:
+          # the fat-LTO link of the whole binary takes one rustc past 14.8 GB
+          # RSS on a hosted runner (16 GB, no real swap), the VM freezes, and
+          # GitHub kills it with exit 143 after 25 to 30 silent minutes.
+          #
+          # amd64 used to survive the fat link here, so this row kept the
+          # Cargo.toml profile while arm64 went thin. It does not survive it
+          # any more: two dispatches on 2026-11-19 died the same way, about 25
+          # and 30 minutes into the link (runs 44476819732 and 44576020995,
+          # "the hosted runner lost communication with the server" and a
+          # shutdown signal with exit 143), while arm64 finished both times.
+          # That is the margin release.yml already stopped relying on when
+          # gpui, blade-graphics, ash and the wayland and x11 stacks joined the
+          # link. A few extra minutes of link time is the cheaper side (#3080).
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset_suffix: linux-amd64
+            release_lto: thin
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_suffix: linux-arm64
-            # Thin LTO on this target only, for the reason release.yml gives:
-            # the fat-LTO link of the whole binary takes one rustc past 14.8 GB
-            # RSS on the hosted arm runner (16 GB, no real swap), the VM
-            # freezes, and GitHub kills it with exit 143 after 25 to 30 silent
-            # minutes. Run 41604279570 died exactly there. The amd64 runner
-            # squeaks through the same link, so it keeps the Cargo.toml profile.
             release_lto: thin
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
