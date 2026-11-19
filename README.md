@@ -813,6 +813,8 @@ Matching anchors on word starts and falls back to a full-token run, so `ção` s
 
 Seeker also runs a deep search over stored message content, on the terminal and the window alike. Type a word that only appears inside a conversation and that conversation still surfaces, with the matching snippet in place of its date. The search waits for a pause in typing, only the newest query lands, and a repeated query rebuilds from cache without another read. Your query and caret stay put while the rows refresh.
 
+A field that is pure arithmetic is a calculator: `200/7.1` prints `= 28.1690140845` above every row, `enter` copies it, and the operators are `+ - * / % ^` with parentheses and decimals.
+
 ### Debug Logging
 
 OpenCrabs writes structured debug logs to files when debug logging is active. Two ways to turn it on:
