@@ -1412,3 +1412,24 @@ fn reply_label(rows: &[Message]) -> (String, String) {
     let preview = transcript::reply_preview(row);
     (author, preview)
 }
+
+/// How many destinations the forward picker lists at once (#2608). The rail
+/// can hold hundreds of sessions; the picker is a bar, not a list, so it shows
+/// the head of the match and the query narrows from there.
+pub(crate) const FORWARD_PICKER_ROWS: usize = 6;
+
+/// A message actions menu never stays parked over history (#2862).
+pub(crate) const MSG_MENU_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a row's copy icon shows a check before it goes back to the copy
+/// mark (#2750). Short enough to be a receipt, long enough to be seen.
+pub(crate) const COPIED_ICON_TTL: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// Only the timer belonging to the menu still on screen may close it.
+pub(crate) fn msg_menu_expiry_due(
+    open: bool,
+    current_generation: u64,
+    timer_generation: u64,
+) -> bool {
+    open && current_generation == timer_generation
+}

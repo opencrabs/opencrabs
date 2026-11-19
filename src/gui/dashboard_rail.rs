@@ -1031,3 +1031,28 @@ mod tests {
         assert!(!chips_idle_fold_due(now + Duration::from_secs(5), now));
     }
 }
+
+/// Whether a rail preview refresh can actually change a line.
+///
+/// The first version asked `rail.streaming_count()`, which counts only
+/// sessions streaming with no pane of their own. A turn in the open
+/// conversation never joins that set (its progress is handled inline) and a
+/// parked turn returns from `fold_pane_progress` before the set is touched, so
+/// the count read zero for the whole of a normal turn: the badge spun while
+/// the preview line, the cost and the row order stayed frozen until `Done`.
+/// Ask about the work instead of the set.
+pub(crate) fn previews_can_move(busy: bool, stashed_live: bool, streaming: usize) -> bool {
+    busy || stashed_live || streaming > 0
+}
+
+/// Holds a rail preview read's in-flight slot, and gives it back on drop.
+///
+/// A detached task whose view has gone away still unwinds through this, so the
+/// slot can never be wedged by a cancelled read (#2817).
+pub(crate) struct PreviewSlot(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}

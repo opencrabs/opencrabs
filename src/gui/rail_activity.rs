@@ -968,3 +968,15 @@ mod tests {
         assert_eq!(motion(mixed, phase).glyph, Some(frame(phase)));
     }
 }
+
+/// Poll ticks between repaints a live turn asks for. The poll runs at 20 Hz;
+/// the only things moving in that branch are a spinner and a clock, and every
+/// one of those repaints walks every pane's transcript (#2688). Five frames a
+/// second keeps the animation alive at a quarter of the rebuilds.
+pub(crate) const BUSY_REPAINT_TICKS: u64 = 4;
+
+/// True on the poll tick that paints a live turn's animation. Pure, so the
+/// cadence stays a rule rather than an accident of where the counter is bumped.
+pub(crate) fn busy_repaint_due(tick: u64) -> bool {
+    tick.is_multiple_of(BUSY_REPAINT_TICKS)
+}

@@ -164,6 +164,7 @@ use crate::launch::{
 };
 use crate::live_fold::{fold_live, rail_activity_line};
 use crate::pane_focus::resolve_split_focus;
+use crate::rail_activity::busy_repaint_due;
 use crate::task_strip::{StripTap, TaskTail, task_strip};
 use crate::turn_swap::{
     SETTLE_BUDGET, SETTLE_RECHECK, SETTLE_RECHECKS, settle_landed, swap_visible_turn,
@@ -312,48 +313,6 @@ impl Render for PaneGhost {
 const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
-
-/// How many destinations the forward picker lists at once (#2608). The rail
-/// can hold hundreds of sessions; the picker is a bar, not a list, so it shows
-/// the head of the match and the query narrows from there.
-const FORWARD_PICKER_ROWS: usize = 6;
-
-/// A message actions menu never stays parked over history (#2862).
-const MSG_MENU_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// How long a row's copy icon shows a check before it goes back to the copy
-/// mark (#2750). Short enough to be a receipt, long enough to be seen.
-const COPIED_ICON_TTL: std::time::Duration = std::time::Duration::from_millis(1200);
-
-/// Only the timer belonging to the menu still on screen may close it.
-fn msg_menu_expiry_due(open: bool, current_generation: u64, timer_generation: u64) -> bool {
-    open && current_generation == timer_generation
-}
-
-/// Whether a rail preview refresh can actually change a line.
-///
-/// The first version asked `rail.streaming_count()`, which counts only
-/// sessions streaming with no pane of their own. A turn in the open
-/// conversation never joins that set (its progress is handled inline) and a
-/// parked turn returns from `fold_pane_progress` before the set is touched, so
-/// the count read zero for the whole of a normal turn: the badge spun while
-/// the preview line, the cost and the row order stayed frozen until `Done`.
-/// Ask about the work instead of the set.
-fn previews_can_move(busy: bool, stashed_live: bool, streaming: usize) -> bool {
-    busy || stashed_live || streaming > 0
-}
-
-/// Holds a rail preview read's in-flight slot, and gives it back on drop.
-///
-/// A detached task whose view has gone away still unwinds through this, so the
-/// slot can never be wedged by a cancelled read (#2817).
-struct PreviewSlot(std::rc::Rc<std::cell::Cell<usize>>);
-
-impl Drop for PreviewSlot {
-    fn drop(&mut self) {
-        self.0.set(self.0.get().saturating_sub(1));
-    }
-}
 
 /// The place the footer names: the open conversation's working directory and
 /// the branch checked out in it (#3036).
@@ -1066,18 +1025,6 @@ fn set_rail_open_state(
         // starts unsearched, never showing snippets from the last query.
         sessions.content_matches.clear();
     }
-}
-
-/// Poll ticks between repaints a live turn asks for. The poll runs at 20 Hz;
-/// the only things moving in that branch are a spinner and a clock, and every
-/// one of those repaints walks every pane's transcript (#2688). Five frames a
-/// second keeps the animation alive at a quarter of the rebuilds.
-const BUSY_REPAINT_TICKS: u64 = 4;
-
-/// True on the poll tick that paints a live turn's animation. Pure, so the
-/// cadence stays a rule rather than an accident of where the counter is bumped.
-pub(crate) fn busy_repaint_due(tick: u64) -> bool {
-    tick.is_multiple_of(BUSY_REPAINT_TICKS)
 }
 
 impl Render for Dashboard {
