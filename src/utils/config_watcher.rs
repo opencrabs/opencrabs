@@ -295,10 +295,10 @@ pub fn spawn(
             let outcome = reload_once();
             // A pass that did not apply cleanly says so in the same words the
             // window uses; only the delivery differs.
-            if let Some(message) = notice(&outcome) {
-                if let Some(ref notify) = notify {
-                    notify(message);
-                }
+            if let Some(message) = notice(&outcome)
+                && let Some(ref notify) = notify
+            {
+                notify(message);
             }
             let Some(config) = outcome.config() else {
                 continue;
