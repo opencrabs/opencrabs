@@ -272,7 +272,11 @@ fn sine(value: f32) -> f32 {
     let position = (value / TAU).rem_euclid(1.0) * SINE_STEPS as f32;
     let index = position as usize;
     let fraction = position - index as f32;
-    table[index] * (1.0 - fraction) + table[index + 1] * fraction
+    // Rounding can put a value just below one full turn on the table's end.
+    // Wrap both lookups so interpolation never indexes past the allocation.
+    let from = index % SINE_STEPS;
+    let to = (from + 1) % SINE_STEPS;
+    table[from] * (1.0 - fraction) + table[to] * fraction
 }
 
 fn rgb(colour: u32) -> (f32, f32, f32) {
@@ -330,5 +334,15 @@ mod tests {
         assert_ne!(first.as_bytes(0), later.as_bytes(0));
         let louder = render(&surface, 0.2, input, 0.9);
         assert_ne!(first.as_bytes(0), louder.as_bytes(0));
+    }
+
+    #[test]
+    fn sine_wraps_when_rounding_reaches_the_table_end() {
+        let almost_one_turn = f32::from_bits(0x3f7f_ffff);
+        assert_eq!(
+            (almost_one_turn * SINE_STEPS as f32) as usize,
+            SINE_STEPS
+        );
+        assert!(sine(TAU * almost_one_turn).abs() < 0.001);
     }
 }
