@@ -134,9 +134,11 @@ mod tests {
 
     /// The separator and its one negative gutter, plus the window's own copy of
     /// the accent: the strip moved to `topic_bar_view`, the window kept the
-    /// other call (#2817).
-    const TOPIC_SEPARATORS: &str =
-        concat!(include_str!("topic_bar_view.rs"), include_str!("main.rs"),);
+    /// other call (#2817), which draws with the pane body.
+    const TOPIC_SEPARATORS: &str = concat!(
+        include_str!("topic_bar_view.rs"),
+        include_str!("dashboard_panes.rs"),
+    );
 
     #[test]
     fn topic_orientation_navigation_runs_counterclockwise() {

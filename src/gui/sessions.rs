@@ -4327,13 +4327,13 @@ mod tests {
             buttons.contains("dash.rail_toggle_filter_menu(cx)"),
             "and the header button in the view is what asks for it"
         );
-        let main_source = include_str!("main.rs");
+        let rail_set_source = include_str!("dashboard_rail.rs");
         let state_source = include_str!("sessions.rs");
         assert!(
             state_source.contains("pub rail_filter_open: bool"),
             "the panel state lives on the rail state, so it survives repaints"
         );
-        let reset = main_source
+        let reset = rail_set_source
             .split("fn set_rail_open_state(")
             .nth(1)
             .expect("rail open state")

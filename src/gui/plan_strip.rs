@@ -948,7 +948,7 @@ mod tests {
         let main = concat!(
             include_str!("dashboard_panes.rs"),
             include_str!("dashboard_turns.rs"),
-            include_str!("main.rs"),
+            include_str!("dashboard_render.rs"),
         );
         let panes = main
             .split("fn panes_body(")
