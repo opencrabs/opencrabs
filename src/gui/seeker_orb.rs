@@ -75,8 +75,28 @@ const BAND_SIGMA: f32 = 0.0562;
 /// and a stripe that hits both edges at once is paint, not light: the eye reads
 /// it as laid over a disc rather than coming from inside one. A lens stops
 /// lighting the seam where the glass turns away, so this fades the band and the
-/// halo out well before the wall.
+/// halo out towards the wall.
 const BAND_REACH: f32 = 0.55;
+
+/// What the band and its halo still carry at the wall, as a fraction of the
+/// centre.
+///
+/// A plain gaussian with `BAND_REACH` is already down to a fifth by the
+/// silhouette, which is the dark gap at the ends of the glow: the light stopped
+/// before the glass did. Holding a floor at the limb lets the glow meet the
+/// inner wall, while the gaussian above it still gives the falloff its
+/// spherical shape.
+const BAND_WALL: f32 = 0.32;
+
+/// How far the band's own seam rises towards the wall, as a fraction of the
+/// radius.
+///
+/// The bowl's seam bows down (`BOW_BOWL`), which is right for where the warm
+/// side starts, but the band itself is the horizon reflected off the inside of
+/// a sphere, and that rises at the limb. Giving the strip its own arch is what
+/// wraps it onto the glass instead of running it flat and stopping it short of
+/// both walls.
+const BAND_ARCH: f32 = 0.16;
 
 /// The halo the band throws into both halves, which is what stops the seam
 /// reading as a drawn line and lets the temperature bleed into the bowl.
@@ -122,9 +142,34 @@ const SIDE_BIAS: f32 = 0.26;
 /// is bright (88 luma at the top, 64 at the left, 30 at the bottom).
 const RIM_RADIUS: f32 = 0.995;
 const RIM_WIDTH: f32 = 0.0058;
-const RIM_GAIN: f32 = 0.345;
+const RIM_GAIN: f32 = 0.26;
+const RIM_BASE: f32 = 0.02;
 const RIM_TILT_X: f32 = 0.55;
 const RIM_TILT_Y: f32 = 0.83;
+
+/// The overhead key's own catch on the top arc, ten o'clock to two.
+///
+/// The keyed ring above is one gradient running the whole silhouette, so the
+/// brightest it can be overhead is the same gain that also has to stay dim
+/// along the bottom. The reference does not work that way: its top arc is a
+/// separate, much brighter event, a sharp silver-white band that exists only
+/// overhead and falls off by ten and two. This term is that event, and it is
+/// what makes the ring read as a reflection rather than as an outline.
+///
+/// Its width is narrower than the ring's so the catch stays a one-pixel
+/// specular at `ORB_PIXELS` instead of blooming into the shoulder behind it.
+const RIM_TOP_GAIN: f32 = 0.42;
+const RIM_TOP_WIDTH: f32 = 0.0050;
+const RIM_TOP_EDGE: f32 = -0.50;
+const RIM_TOP_FULL: f32 = -0.90;
+
+/// How far the overhead catch is pulled towards white.
+///
+/// A specular that bright has lost nearly all of its hue, and the reference's
+/// top arc reads silver rather than cyan. The pull is applied after the tonal
+/// colour and before the composite correction, so it moves hue only: the
+/// correction still lands the pixel on the light field's own brightness.
+const RIM_SILVER: f32 = 0.50;
 
 /// The shoulder the glass shows as it turns away, just inside the ring. This is
 /// what gives the edge thickness: without it the ring floats on the silhouette
@@ -227,14 +272,24 @@ const FAR_WALL: f32 = 0.041;
 const FAR_LIFT: f32 = 0.42;
 const DISPERSION: f32 = 0.022;
 
-/// One thin specular catch where the key enters the glass.
+/// The dome's softbox: a wide, shallow arc on the upper left.
 ///
-/// Tight on purpose. The reference's only sharp event is a small hard glint on
-/// the upper left; a soft one reads as a smudge, and smoothing every highlight
-/// is what made the earlier passes look like a painted sphere.
-const SPEC_X: f32 = -0.44;
-const SPEC_Y: f32 = -0.62;
-const SPEC_WIDTH: f32 = 0.13;
+/// Measured off the reference, this is not a glint. It is a soft-edged slab
+/// that follows the spherical contour from about nine o'clock to twelve, so it
+/// has to be placed by radius and by direction rather than by distance from one
+/// point: a point-and-sigma catch is a round dot, and a round dot is exactly
+/// what read as a painted highlight on the earlier passes.
+///
+/// The arc sits at 0.76 of the radius along a bearing of roughly 10:30, which
+/// is where the reference's slab sits. `SPEC_WIDTH` is its radial thickness and
+/// the span terms cut it off by angle, so the shape is a trapezoid bent to the
+/// glass instead of a disc.
+const SPEC_RADIUS: f32 = 0.76;
+const SPEC_DIR_X: f32 = -0.579;
+const SPEC_DIR_Y: f32 = -0.815;
+const SPEC_WIDTH: f32 = 0.105;
+const SPEC_SPAN_LOW: f32 = 0.62;
+const SPEC_SPAN_HIGH: f32 = 0.97;
 const SPEC_GAIN: f32 = 0.22;
 
 /// A 4x4 ordered dither, already normalised so the loop only subtracts.
@@ -458,8 +513,14 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // gives the marble a top and a bottom, which is the difference between
         // an object and a lit plate.
         let horizon = HORIZON + BOW_BOWL * (1.0 - nz) + BREATHE * sine(t * 0.70);
-        let offset = ny - horizon;
-        let lateral = gaussian(nx, BAND_REACH);
+        // The band rides a slightly different seam from the bowl's: it is the
+        // horizon reflected off the inside of the sphere, so it rises towards
+        // the wall while the bowl's own boundary falls away.
+        let seam = horizon - BAND_ARCH * (1.0 - nz);
+        let offset = ny - seam;
+        // The falloff keeps its spherical shape but no longer runs to nothing at
+        // the limb, which is what left the glow short of both inner walls.
+        let lateral = BAND_WALL + (1.0 - BAND_WALL) * gaussian(nx, BAND_REACH);
         let band = gaussian(offset, BAND_SIGMA) * lateral;
         // The halo carries the only asymmetry in the light: the key is upper
         // left, so the halo is pushed that way and the seam's brightest point
@@ -471,23 +532,34 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let dome = smooth(-0.04, 0.04, -ny);
 
         // The light field itself: how bright this pixel is, nought to one. The
-        // border is two terms: the shoulder the glass shows as it turns away,
-        // and the specular ring that sits on the silhouette itself. There is no
-        // second ring further in and no dark trough, because the reference has
-        // neither: sampling its own edge radially gives 63 luma on the ring's
-        // first pixel, 88 at its peak, then 39 and 28 on the way in.
+        // border is three terms: the shoulder the glass shows as it turns away,
+        // the specular ring that sits on the silhouette, and the overhead key's
+        // own brighter catch on the top arc. There is no second ring further in
+        // and no dark trough, because the reference has neither: sampling its
+        // own edge radially gives 63 luma on the ring's first pixel, 88 at its
+        // peak, then 39 and 28 on the way in.
         // The ring is keyed to the upper left, where the reference's is bright.
         let rim_key = (0.5 - 0.5 * (nx * RIM_TILT_X + ny * RIM_TILT_Y)).max(0.0);
-        // The thin catch, squared so it stays a streak instead of a disc.
-        let catch = gaussian((nx - SPEC_X).hypot(ny - SPEC_Y), SPEC_WIDTH);
+        let rim_ring = gaussian(radius - RIM_RADIUS, RIM_WIDTH);
+        // The overhead catch: the same silhouette, a narrower profile, and a key
+        // that only exists between ten o'clock and two.
+        let rim_arc = smooth(RIM_TOP_EDGE, RIM_TOP_FULL, ny);
+        let rim_top = gaussian(radius - RIM_RADIUS, RIM_TOP_WIDTH) * rim_arc;
+        // The softbox is an arc, so it is placed by radius and bearing: a ring
+        // cut by angle, not a disc around one point.
+        let spec_radius = (nx * nx + ny * ny).sqrt().max(1e-4);
+        let spec_bearing = (nx * SPEC_DIR_X + ny * SPEC_DIR_Y) / spec_radius;
+        let catch = gaussian(spec_radius - SPEC_RADIUS, SPEC_WIDTH)
+            * smooth(SPEC_SPAN_LOW, SPEC_SPAN_HIGH, spec_bearing);
         let heat = (AMBIENT
             + BAND_GAIN * band
             + GLOW_GAIN * glow
             + BOWL_LIFT * bowl
             + RIM_FALL_GAIN * (-depth / RIM_FALL_SIGMA).exp()
-            + RIM_GAIN * gaussian(radius - RIM_RADIUS, RIM_WIDTH) * (0.05 + 0.95 * rim_key)
+            + RIM_GAIN * rim_ring * (RIM_BASE + (1.0 - RIM_BASE) * rim_key)
+            + RIM_TOP_GAIN * rim_top
             + FAR_WALL * gaussian(ny - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
-            + SPEC_GAIN * catch * catch)
+            + SPEC_GAIN * catch)
             .clamp(0.0, 1.0);
 
         // Two colours of equal brightness, crossfaded. Interpolating the hue
@@ -502,6 +574,14 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
         let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
         let mut blue = warm.2 * (1.0 - dome) + cool.2 * dome;
+        // A specular that bright has lost most of its hue. Pulling the overhead
+        // catch towards white is what makes it read as silver rather than as a
+        // lit cyan edge; the composite correction below restores the luma, so
+        // this moves colour only.
+        let silver = (RIM_SILVER * rim_top).clamp(0.0, 1.0);
+        red += (1.0 - red) * silver;
+        green += (1.0 - green) * silver;
+        blue += (1.0 - blue) * silver;
         // How much of the page this pixel lets through. The body is smoke and
         // the hot events are dense, which is the difference between glass and a
         // painting of glass.
@@ -861,9 +941,9 @@ mod tests {
         let shoulder = luma(sample(bytes, size, 0.0, -0.96));
         let inside = luma(sample(bytes, size, 0.0, -0.90));
         let body = luma(sample(bytes, size, 0.0, -0.60));
-        // Measured on the shipped maths: 165.7, 55.4, 35.8 and 28.7 emitted.
-        // The reference's own rim composites to 88 luma over the scrim, which
-        // is what these emitted values land on once the alpha is applied.
+        // The assertions are the contract, not a table of numbers: the rim is
+        // re-measured whenever the light field changes, and a recorded sample
+        // would only be a stale copy of the maths sitting next to it.
         assert!(
             rim > shoulder + 35.0,
             "the ring must beat the shoulder behind it, got {rim:.1} against {shoulder:.1}"
@@ -890,7 +970,8 @@ mod tests {
         let bottom = luma(sample(bytes, size, 0.0, RIM_RADIUS));
         let left = luma(sample(bytes, size, -RIM_RADIUS, 0.0));
         let right = luma(sample(bytes, size, RIM_RADIUS, 0.0));
-        // Measured 165.7, 107.0, 162.2 and 117.5 emitted.
+        // The ring is one gradient plus the overhead catch, so the top sits well
+        // clear of the bottom by construction; this pins that it does.
         assert!(
             top > bottom + 30.0,
             "the ring must be brighter above than below, got {top:.1} against {bottom:.1}"
@@ -898,6 +979,45 @@ mod tests {
         assert!(
             left > right + 30.0,
             "the ring must be brighter on the left than the right, got {left:.1} against {right:.1}"
+        );
+    }
+
+    #[test]
+    fn the_horizon_glow_reaches_both_inner_walls() {
+        // The band used to fall to a fifth of its centre brightness by the
+        // silhouette, which left a dark gap between the end of the glow and the
+        // glass it is meant to be inside. `BAND_WALL` holds a floor at the limb,
+        // so the strip still has to be lit where it meets the wall.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let wall = luma(sample(bytes, size, 0.94, -0.05));
+        let body = luma(sample(bytes, size, 0.0, -0.60));
+        assert!(
+            wall > body + 40.0,
+            "the glow must still be lit at the wall, got {wall:.1} against a body at {body:.1}"
+        );
+    }
+
+    #[test]
+    fn the_softbox_is_an_arc_not_a_dot() {
+        // A point-and-sigma catch lights one spot and nothing either side of it.
+        // The reference's upper-left reflection is a slab that follows the
+        // contour, so both ends of the arc have to carry light, not just its
+        // middle.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let body = luma(sample(bytes, size, 0.0, -0.60));
+        let low = luma(sample(bytes, size, -0.053, -0.758));
+        let high = luma(sample(bytes, size, -0.699, -0.298));
+        assert!(
+            low > body + 20.0,
+            "the arc's upper end must carry light, got {low:.1} against a body at {body:.1}"
+        );
+        assert!(
+            high > body + 20.0,
+            "the arc's lower end must carry light, got {high:.1} against a body at {body:.1}"
         );
     }
 
