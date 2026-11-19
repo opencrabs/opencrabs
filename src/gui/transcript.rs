@@ -7549,16 +7549,18 @@ mod tests {
             !slot.contains("SPINNER_FRAMES"),
             "and it never animates: the clock is the progress"
         );
-        // Written once, in one of the two places, decided together.
+        // Written once, in one of the two places, decided together: the slice
+        // from the idle test to the join holds the clock's build and the branch
+        // that seats it, and no other clock is built anywhere in it.
         let segments = card
-            .split_once("let clock = clock_glyph(live.elapsed_secs());")
-            .expect("the clock")
+            .split_once("let idle = live.tools.is_empty()")
+            .expect("the idle test")
             .1
             .split_once("let status_line = segments.join(")
             .expect("the join")
             .0;
         assert!(
-            segments.contains("let idle = live.tools.is_empty()"),
+            card.contains("let idle = live.tools.is_empty()"),
             "nothing called yet is the only state that lets the clock lead"
         );
         assert!(
@@ -7581,8 +7583,9 @@ mod tests {
             segments.contains("segments.push(clock);"),
             "the first call or the first narration ends the line on the clock"
         );
-        assert!(
-            !segments.contains("live.elapsed_secs())"),
+        assert_eq!(
+            segments.matches("live.elapsed_secs()").count(),
+            1,
             "built once, then moved: no second clock to disagree with the first"
         );
         let footer = SRC
@@ -7625,7 +7628,7 @@ mod tests {
             .expect("the stats line's end")
             .0;
         assert!(
-            stats.contains("\u{b7}"),
+            stats.contains(&["parts.join(\" \\u", "{b7} \")"].concat()),
             "the clauses are divided by the middle dot"
         );
         let settled = SRC

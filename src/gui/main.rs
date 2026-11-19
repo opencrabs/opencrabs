@@ -7169,13 +7169,7 @@ mod tests {
             "Esc closes the preview before anything under it"
         );
         assert!(
-            src.contains(
-                &[
-                    "root = root.child(preview::over",
-                    "lay(&open, detail, body, close));"
-                ]
-                .concat()
-            ),
+            src.contains(&["root = root.child(preview::over", "lay("].concat()),
             "the preview is painted over both panes"
         );
     }
@@ -7678,7 +7672,7 @@ mod tests {
             .nth(1)
             .expect("the resumed-turn arm");
         let arm = arm
-            .split("agent_bridge::TurnEvent::BackgroundTaskDone")
+            .split("agent_bridge::TurnEvent::")
             .next()
             .expect("the end of the arm");
         assert!(

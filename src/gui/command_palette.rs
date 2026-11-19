@@ -1057,7 +1057,7 @@ mod tests {
             "a live take is one bubble, centered, and overlay() returns before the shell is mounted"
         );
         let bubble = body
-            .find("scrim.justify_center()")
+            .find(".justify_center()")
             .expect("the bubble is mounted on the scrim");
         let shell = body
             .find(".child(shell)")

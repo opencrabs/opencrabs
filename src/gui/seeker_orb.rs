@@ -587,8 +587,13 @@ mod tests {
 
     #[test]
     fn sine_wraps_when_rounding_reaches_the_table_end() {
+        // The largest float below one full turn, times the table size, lands a
+        // hair under the last step. The lookup takes that final cell and
+        // interpolates toward the wrapped first one instead of indexing past
+        // the allocation.
         let almost_one_turn = f32::from_bits(0x3f7f_ffff);
-        assert_eq!((almost_one_turn * SINE_STEPS as f32) as usize, SINE_STEPS);
+        let position = almost_one_turn * SINE_STEPS as f32;
+        assert_eq!(position as usize, SINE_STEPS - 1);
         assert!(sine(TAU * almost_one_turn).abs() < 0.001);
     }
 }
