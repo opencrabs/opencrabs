@@ -1680,12 +1680,17 @@ fn a_split_keeps_the_topics_bar_on_the_pane_that_carries_it() {
     // topics repeated one bar per pane and each bar claimed topics that
     // belong to a different pane.
     let src = DASHBOARD;
+    // The rule reads `pane_topics`, where the strip is gated, so the scan
+    // takes that body instead of hoping the concat happens to spell the
+    // condition the way an older revision did (#3060).
+    let pane = fn_body(src, "pane_topics");
+    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        src.contains("let carries_topics = leaves.len() == 1 || pane_root == *session;"),
+        flat.contains("let carries_topics = leaves.len() == 1 || pane_root == session;"),
         "only the pane carrying the topics draws the strip"
     );
     assert!(
-        src.contains("if carries_topics && self.sessions.is_topic_enabled(pane_root) {"),
+        flat.contains("if !carries_topics || !self.sessions.is_topic_enabled(pane_root)"),
         "and the strip is gated on it"
     );
 }
