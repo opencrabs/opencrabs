@@ -225,7 +225,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // the edge while the centre stays calm. GPUI does not expose the real
         // backdrop to this image, so these coordinates refract the material,
         // not the text painted behind the window (#3050).
-        let lens = 0.12 + edge.powf(2.4) * 0.76;
+        let lens = 0.10 + edge.powf(2.4) * 0.78;
         let turbulence = 0.010 + level * 0.018;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
@@ -237,42 +237,44 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.050;
         let flow_x = x - nx * lens + current_x * turbulence;
         let flow_y = y - ny * lens + current_y * turbulence + voice_bend;
-        let side = flow_x.abs().clamp(0.0, 1.0);
+        let side = nx.abs().clamp(0.0, 1.0);
         let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.92;
 
-        // One continuous sunset environment crosses the lens. The white
-        // horizon has a broad amber foot and a cool blue crown; none of them
-        // is a grey line or an independent oval reflection (#3050).
+        // The horizon follows the lens curvature across its full width.
+        // Separate additive colour fields keep the white core luminous, the
+        // crown vividly blue and the foot warmly amber (#3050).
         let centre_line = 0.015
-            + 0.10 * side.powf(1.8)
+            + 0.14 * side.powf(1.7)
             + sway * 0.026
             + sine(flow_x * 1.2 - t * 0.28) * (0.008 + level * 0.012);
         let centre = flow_y - centre_line;
-        let horizon =
-            bell(centre, 0.17 + level * 0.020 + breathe * 0.010) * bell(flow_x, 0.88) * envelope;
-        let white = bell(centre, 0.045 + level * 0.006) * bell(flow_x, 0.50) * envelope;
-        let amber = bell(centre - 0.20, 0.34) * bell(flow_x, 0.80) * envelope;
-        let blue_crown = bell(centre + 0.18, 0.31) * bell(flow_x, 0.78) * envelope;
+        let horizon_span = 1.0 - smooth(0.94, 1.0, radius) * 0.26;
+        let horizon = bell(centre, 0.18 + level * 0.020 + breathe * 0.010) * horizon_span;
+        let white = bell(centre, 0.052 + level * 0.006) * horizon_span;
+        let amber = bell(centre - 0.20, 0.36) * horizon_span;
+        let blue_crown = bell(centre + 0.18, 0.33) * horizon_span;
 
-        // A narrow specular band gives the poles a wet, glassy edge. The
-        // wider bloom stays faint so it cannot become a uniform white stroke.
+        // Inset cool and warm arcs replace a uniform outline. Both vanish at
+        // the middle sides; the upper light favours the top-left shoulder.
         let fresnel = edge.powf(3.8);
-        let poles = smooth(0.08, 0.90, ny.abs());
-        let direction = 0.035 + poles * 0.965;
-        let pole_balance = 0.96 - ny * 0.04;
+        let top_pole = smooth(0.03, 0.88, -ny);
+        let bottom_pole = smooth(0.03, 0.88, ny);
+        let pole_light = (top_pole + bottom_pole).clamp(0.0, 1.0);
+        let top_left = 0.90 + 0.10 * smooth(0.0, 0.80, -nx);
         let shimmer = 0.985 + 0.015 * sine(ny * 2.0 + t * 0.30);
-        let rim = smooth(0.970, 0.997, radius) * direction * pole_balance * shimmer;
-        let rim_bloom = bell(radius - 0.965, 0.070) * direction * 0.16;
-        let chromatic = fresnel * (0.25 + direction * 0.75);
-        let warm_edge = (nx * 0.5 + 0.5).clamp(0.0, 1.0);
+        let top_arc = bell(radius - 0.970, 0.046) * top_pole * top_left * shimmer;
+        let bottom_arc = bell(radius - 0.972, 0.040) * bottom_pole * shimmer;
+        let chromatic = fresnel * pole_light;
+        let warm_edge = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
 
-        // Broad absorption and a vertical light gradient provide the volume.
-        // Only the upper glossy sheen remains; the old lower oval is gone.
+        // A soft inner vignette and brighter centre suggest lens depth without
+        // blurring the material or introducing a backdrop GPUI cannot sample.
         let absorption = nz.powf(1.30);
-        let inner_shadow = smooth(0.30, 0.99, radius) * (0.68 - poles * 0.18);
-        let body_shade = 1.0 - inner_shadow * 0.64;
+        let inner_shadow = smooth(0.30, 0.99, radius) * (0.68 - pole_light * 0.18);
+        let inner_vignette = smooth(0.48, 0.99, radius) * (1.0 - pole_light) * 0.22;
+        let body_shade = (1.0 - inner_shadow * 0.60 - inner_vignette).max(0.18);
         let vertical = 0.5 - ny * 0.5;
-        let light_field = (0.35 + absorption * 0.45 + vertical * 0.20) * body_shade;
+        let light_field = (0.31 + absorption * 0.52 + vertical * 0.20) * body_shade;
         let body = 0.004 + light_field * 0.022;
         let sheen = bell(flow_x + 0.18, 0.62)
             * bell(flow_y + 0.47, 0.28)
@@ -280,40 +282,40 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             * envelope;
 
         let red = body * 0.50
-            + horizon * 0.18 * body_shade
-            + white * 1.65
-            + amber * 1.08 * body_shade
-            + blue_crown * 0.045
+            + horizon * 0.20 * body_shade
+            + white * 2.25
+            + amber * 1.42 * body_shade
+            + blue_crown * 0.025
             + sheen * 0.20
-            + rim * 1.35
-            + rim_bloom * 0.32
-            + chromatic * (0.018 + warm_edge * 0.042);
+            + top_arc * 1.70
+            + bottom_arc * 1.18
+            + chromatic * (0.018 + warm_edge * 0.052);
         let green = body * 0.72
-            + horizon * 0.23 * body_shade
-            + white * 1.58
-            + amber * 0.38 * body_shade
-            + blue_crown * 0.38
+            + horizon * 0.25 * body_shade
+            + white * 2.18
+            + amber * 0.52 * body_shade
+            + blue_crown * 0.52
             + sheen * 0.26
-            + rim * 1.38
-            + rim_bloom * 0.36
+            + top_arc * 1.82
+            + bottom_arc * 0.48
             + chromatic * 0.022;
         let blue = body * 0.96
-            + horizon * 0.30 * body_shade
-            + white * 1.50
-            + amber * 0.055 * body_shade
-            + blue_crown * 1.02
+            + horizon * 0.34 * body_shade
+            + white * 2.08
+            + amber * 0.035 * body_shade
+            + blue_crown * 1.42
             + sheen * 0.34
-            + rim * 1.42
-            + rim_bloom * 0.44
-            + chromatic * (0.018 + (1.0 - warm_edge) * 0.050);
+            + top_arc * 2.00
+            + bottom_arc * 0.10
+            + chromatic * (0.018 + (1.0 - warm_edge) * 0.058);
         let alpha = (0.035
             + edge * 0.13
-            + rim * 0.55
-            + rim_bloom * 0.08
-            + horizon * 0.12
-            + white * 0.46
-            + amber * 0.17
-            + blue_crown * 0.13
+            + top_arc * 0.70
+            + bottom_arc * 0.48
+            + horizon * 0.17
+            + white * 0.64
+            + amber * 0.25
+            + blue_crown * 0.22
             + sheen * 0.025)
             .clamp(0.0, 0.96)
             * coverage;
