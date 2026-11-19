@@ -934,15 +934,6 @@ impl Editor {
 
     /// Put a finished dictation in the field at the caret (#3044).
     ///
-    /// The card records in place, so this runs only for a take that was still
-    /// in flight when the card closed: the words go where the keyboard went
-    /// instead of being thrown away.
-    pub(crate) fn dictate_words(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.insert_dictation(text, cx);
-    }
-
-    /// Put a finished dictation in the field at the caret (#3044).
-    ///
     /// The same door a typed character takes, without the window the input
     /// handler carries: the tick that delivers a transcript has no frame to
     /// hand one. Whether a space goes in is `dictation_insertion`'s call.
