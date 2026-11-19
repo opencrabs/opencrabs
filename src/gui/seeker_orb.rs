@@ -243,7 +243,9 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // A nearly level horizon carries a diffuse optical bloom, not a solid
         // arc. It reaches both sides of the lens, becoming thinner and dimmer
         // as the curved wall bends away at the outer rim (#3050).
-        let centre_line = 0.010 - 0.050 * side.powf(2.0)
+        // Sit below centre like a refracted horizon, with only a gentle
+        // spherical arch. The surrounding liquid still moves the line subtly.
+        let centre_line = 0.20 - 0.050 * side.powf(2.0)
             + sway * 0.006
             + sine(flow_x * 1.2 - t * 0.28) * (0.002 + level * 0.004);
         let centre = flow_y - centre_line;
@@ -251,17 +253,18 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let horizon_span = horizon_taper;
         let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.38 + horizon_taper * 0.62);
         let horizon = diffuse(centre, bloom_width * 1.65) * horizon_span;
-        // Keep the white hotspot in the middle 40%. At the curved outer wall
-        // only the softer transmitted amber and blue should remain.
-        let white_hotspot = 1.0 - smooth(0.20, 0.48, side);
-        let white = diffuse(centre, bloom_width) * horizon_span * white_hotspot;
+        // A narrow radial white core feathers into the transmitted colour,
+        // rather than resolving into a thick capsule across the glass.
+        let white_hotspot = 1.0 - smooth(0.12, 0.40, side);
+        let white = diffuse(centre, bloom_width * 0.42) * horizon_span * white_hotspot;
 
-        // Invert the transmitted horizon: warm light sits above its white
-        // core, while the cool reflection extends softly into the lower half.
-        let amber_above = smooth(-0.22, -0.12, centre) * (1.0 - smooth(-0.025, 0.005, centre));
-        let blue_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.28, 0.52, centre));
-        let amber = diffuse(centre + 0.055, 0.070) * horizon_span * amber_above;
-        let blue_reflection = diffuse(centre - 0.075, 0.105) * horizon_span * blue_below;
+        // Cool light sits above the white core and warm light below it.
+        // Both masks reach zero at the core so their colours blend through
+        // the narrow hotspot without a hard horizontal boundary.
+        let blue_above = smooth(-0.22, -0.12, centre) * (1.0 - smooth(-0.025, 0.005, centre));
+        let amber_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.24, 0.46, centre));
+        let blue_reflection = diffuse(centre + 0.055, 0.075) * horizon_span * blue_above;
+        let amber = diffuse(centre - 0.060, 0.075) * horizon_span * amber_below;
 
         // Razor-thin inset arcs retain the wet specular edge without becoming
         // vector strokes. Their widths are 70% below the previous arcs, and
@@ -331,7 +334,10 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + top_arc * 2.00
             + bottom_arc * 1.30
             + chromatic * (0.018 + (1.0 - warm_edge) * 0.058);
-        let alpha = (0.035
+        // A faint slate body gives the lens a physical volume while keeping
+        // the page behind it clearly visible through the centre.
+        let alpha = (0.055
+            + absorption * 0.025
             + edge * 0.13
             + top_arc * 0.70
             + bottom_arc * 0.48
