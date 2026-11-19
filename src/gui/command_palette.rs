@@ -184,11 +184,17 @@ const ASK_SUFFIX: &str = " - Ask the crab";
 const FIELD_PAD_Y: f32 = 22.0;
 
 /// The field's left inset: where the query starts, measured from the curve.
-const FIELD_PAD_X: f32 = 22.0;
+///
+/// The microphone's glyph does not sit at the right inset itself: its tile is
+/// wider than the glyph it centres, so the visible gap on that side is 30 plus
+/// the tile's own bearing, about 35.6. The query starts level with it instead
+/// of 14 short, which is what put the caret left of the card's own rows and
+/// made the field look shoved into the curve (#3066).
+const FIELD_PAD_X: f32 = 34.0;
 
-/// The field's right inset, larger than the left on purpose. The microphone
-/// carries optical weight the thin left edge of a glyph does not, and at the
-/// left inset the glyph read as pressed against the end of the pill.
+/// The field's right inset, measured to the microphone's tile and not to its
+/// glyph. A tile wider than its glyph is what makes the visible right gap
+/// larger than this number; the left inset is set to match the visible gap.
 const FIELD_PAD_RIGHT: f32 = 30.0;
 
 /// The space the microphone puts between itself and the line it follows
