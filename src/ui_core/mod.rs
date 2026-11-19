@@ -7,6 +7,9 @@
 
 pub mod actions;
 pub mod bang;
+// The arithmetic a query becomes when it is a calculation rather than a
+// search: pure, no toolkit, so both frontends answer the same keystrokes.
+pub mod calc;
 // `card` is the shared card shape and reads `gpui` types, so it only
 // compiles with the feature that provides them (#2510). Every consumer is
 // in `src/gui/`.

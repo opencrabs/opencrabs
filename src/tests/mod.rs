@@ -555,6 +555,7 @@ pub mod rsi_sync_cap_bail_test;
 pub mod rsi_sync_fetch_test;
 pub mod rsi_sync_tracked_test;
 pub mod secret_hygiene_oc05_test;
+pub mod seeker_calc_test;
 pub mod seeker_chip_test;
 pub mod seeker_editing_test;
 pub mod seeker_nbsp_test;
