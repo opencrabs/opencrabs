@@ -2501,8 +2501,11 @@ fn the_help_screen_opens_on_ctrl_h_and_cmd_question() {
         src.contains("self.help_open = false;"),
         "Esc must close the panel"
     );
-    assert!(src.contains("help_keys::section_rows"));
-    assert!(src.contains("filter(|row| row.gui.is_some())"));
+    // The table read is in `status.rs`, which sits outside the dashboard
+    // concat, so the scan reads it where it is written.
+    let rows = include_str!("../status.rs");
+    assert!(rows.contains("help_keys::section_rows"));
+    assert!(rows.contains("filter(|row| row.gui.is_some())"));
     // The panel's body moved to its own module (#2817 follow-up) and then
     // to the card view (#2893), so the row loop is read where it is
     // written.
