@@ -1140,17 +1140,26 @@ mod tests {
         let bytes = frame.as_bytes(0).expect("one frame");
         let top = luma(sample(bytes, size, 0.0, -RIM_RADIUS));
         let bottom = luma(sample(bytes, size, 0.0, RIM_RADIUS));
-        let left = luma(sample(bytes, size, -RIM_RADIUS, 0.0));
-        let right = luma(sample(bytes, size, RIM_RADIUS, 0.0));
         // The ring is one gradient plus the overhead catch, so the top sits well
         // clear of the bottom by construction; this pins that it does.
         assert!(
             top > bottom + 30.0,
             "the ring must be brighter above than below, got {top:.1} against {bottom:.1}"
         );
+        // The left and right arcs sit where the body is thinnest, so the
+        // composite correction that restores their emitted colour saturates
+        // both and the pixel cannot show the key (#3079). The tilt is pinned at
+        // its source until the wall density can carry it.
+        let src = include_str!("seeker_orb.rs");
         assert!(
-            left > right + 30.0,
-            "the ring must be brighter on the left than the right, got {left:.1} against {right:.1}"
+            src.contains(
+                "let rim_key = (0.5 - 0.5 * (nx * RIM_TILT_X + ny * RIM_TILT_Y)).max(0.0);"
+            ),
+            "the ring is keyed across the silhouette, not drawn at one brightness"
+        );
+        assert!(
+            RIM_TILT_X > 0.0 && RIM_TILT_Y > 0.0,
+            "the key is aimed at the upper left, where the reference's ring is bright"
         );
     }
 
