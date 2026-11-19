@@ -282,24 +282,26 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         );
         let caustics = (lower_a * 0.72 + lower_b * 0.48) * envelope;
 
-        // Fresnel gives the rim depth; broad bilateral glints keep opposite
-        // sides bright instead of leaving one white dot on a dark circle.
+        // A hairline Fresnel reflection defines the glass without becoming a
+        // thick neon ring. Almost the whole circumference stays white-hot;
+        // only a narrow lower-left arc falls away, like Siri's rim light.
         let fresnel = edge.powf(2.4);
         let top_left = (-nx * 0.55 - ny * 0.85).clamp(0.0, 1.0);
         let bottom_right = (nx * 0.45 + ny * 0.85).clamp(0.0, 1.0);
         let opposite_sides = smooth(0.18, 0.92, nx.abs());
-        let opposite_caps = smooth(0.30, 0.95, ny.abs());
-        let shimmer = 0.76 + 0.24 * sine((nx + ny) * 3.0 + t * 1.10);
-        let outer_rim = bell(radius - 0.955, 0.050);
-        let inner_rim = bell(radius - 0.840, 0.100);
-        let rim_base = outer_rim * (0.24 + opposite_sides * 0.76 + opposite_caps * 0.42) * shimmer;
-        let rim_cool = outer_rim * (0.32 + opposite_sides * 0.82 + opposite_caps * 0.46)
-            + inner_rim * (0.12 + top_left * 0.32 + opposite_sides * 0.28);
-        let rim_warm = inner_rim * (0.16 + bottom_right * 0.42 + opposite_sides * 0.50)
-            + outer_rim * opposite_caps * 0.20;
+        let lower_left = smooth(0.58, 0.96, (-nx + ny) * 0.7071);
+        let rim_arc = 1.0 - lower_left * 0.84;
+        let shimmer = (0.92 + 0.08 * sine((nx + ny) * 3.0 + t * 0.55)) * rim_arc;
+        let outer_rim = bell(radius - 0.978, 0.020);
+        let inner_rim = bell(radius - 0.934, 0.032);
+        let rim_base = outer_rim * (1.04 + top_left * 0.10 + bottom_right * 0.08) * shimmer;
+        let rim_cool = outer_rim * (0.10 + top_left * 0.14) * shimmer
+            + inner_rim * (0.08 + opposite_sides * 0.12) * rim_arc;
+        let rim_warm = outer_rim * (0.08 + bottom_right * 0.12) * shimmer
+            + inner_rim * (0.06 + bottom_right * 0.10) * rim_arc;
         let side_specular = bell(nx.abs() - 0.70, 0.24) * bell(ny + 0.05, 0.62);
         let cap_specular = bell(ny.abs() - 0.74, 0.18) * bell(nx, 0.55);
-        let specular = side_specular * 0.78 + cap_specular * 0.48;
+        let specular = side_specular * 0.62 + cap_specular * 0.38;
         let inner_shadow = smooth(0.38, 0.99, radius) * (0.72 - top_left * 0.25);
         let body_shade = 1.0 - inner_shadow * 0.58;
         let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.85))
@@ -313,9 +315,9 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
             + centre_light * 0.52
             + upper * (0.24 + warm * 0.34)
             + caustics * (0.28 + warm * 0.58)
-            + rim_base * 0.72
-            + rim_cool * 0.44
-            + rim_warm * 0.88
+            + rim_base * 0.96
+            + rim_cool * 0.20
+            + rim_warm * 0.32
             + specular
             + fresnel * tint.0 * 0.040;
         let green = body
@@ -325,9 +327,9 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
             + centre_light * 0.48
             + upper * (0.40 + warm * 0.18)
             + caustics * (0.42 + warm * 0.26)
-            + rim_base * 0.80
-            + rim_cool * 0.74
-            + rim_warm * 0.48
+            + rim_base * 0.98
+            + rim_cool * 0.34
+            + rim_warm * 0.16
             + specular
             + fresnel * tint.1 * 0.045;
         let blue = body * 1.35
@@ -337,9 +339,9 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
             + centre_light * 0.42
             + upper * 0.66
             + caustics * (0.72 - warm * 0.24)
-            + rim_base * 0.90
-            + rim_cool
-            + rim_warm * 0.24
+            + rim_base
+            + rim_cool * 0.52
+            + rim_warm * 0.08
             + specular
             + fresnel * tint.2 * 0.060;
         let alpha = (0.16
@@ -348,7 +350,7 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
             + band * 0.20
             + hot * 0.14
             + core * 0.16
-            + outer_rim * 0.20
+            + outer_rim * (0.16 + rim_arc * 0.20)
             + specular * 0.10)
             .clamp(0.0, 0.97)
             * coverage;
@@ -484,6 +486,35 @@ mod tests {
         assert!((history[history.len() - 2] - 0.5).abs() < 0.001);
         assert!((history[history.len() - 1] - 1.0).abs() < 0.001);
         assert_eq!(voice_at(&history, 1.0), 1.0);
+    }
+
+    #[test]
+    fn the_crisp_rim_only_falls_away_at_the_lower_left() {
+        let surface = Surface::new(96);
+        let frame = render(
+            &surface,
+            0.2,
+            OrbInput {
+                recording: true,
+                levels: [0.2; VOICE_SAMPLES],
+                colour: 0xffbf47,
+            },
+            0.2,
+        );
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let rim_light = |nx: f32, ny: f32| {
+            let ring = ORB_RADIUS * 0.978;
+            let column = (((nx * ring + 1.0) * 0.5 * 96.0) as usize).min(95);
+            let row = (((ny * ring + 1.0) * 0.5 * 96.0) as usize).min(95);
+            let index = (row * 96 + column) * 4;
+            bytes[index] as u16 + bytes[index + 1] as u16 + bytes[index + 2] as u16
+        };
+        let bright_arc = rim_light(0.7071, -0.7071);
+        let quiet_arc = rim_light(-0.7071, 0.7071);
+        assert!(
+            bright_arc > quiet_arc + 120,
+            "the lower-left sixth should fall away while the rest stays bright"
+        );
     }
 
     #[test]
