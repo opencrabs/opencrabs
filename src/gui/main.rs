@@ -5511,7 +5511,7 @@ impl Render for Dashboard {
                     caret_on: self.finder_caret,
                     view: cx.entity().downgrade(),
                     paint: self.finder_paint.clone(),
-                    voice: self.seeker_voice_view(),
+                    voice: self.seeker_voice_view(cx),
                 },
                 handlers,
                 chip,

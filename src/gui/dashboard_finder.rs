@@ -544,6 +544,7 @@ impl Dashboard {
         let keep = self.seeker_capture.is_some() || self.seeker_transcription.is_some();
         if !keep {
             self.seeker_voice_looping = false;
+            self.clear_seeker_orb(cx);
         }
         keep
     }

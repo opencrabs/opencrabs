@@ -11,12 +11,13 @@
 
 use gpui::{
     App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
-    InspectorElementId, LayoutId, MouseButton, Pixels, Point, ScrollWheelEvent, SharedString,
-    Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, linear_color_stop,
-    linear_gradient, point, prelude::*, px, relative, rems, rgb, rgba, size,
+    InspectorElementId, LayoutId, MouseButton, Pixels, Point, RenderImage, ScrollWheelEvent,
+    SharedString, Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, img,
+    point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{Dashboard, palette};
 use opencrabs::ui_core::card::{SEEKER_RADIUS, seeker_concentric_radius};
@@ -425,8 +426,8 @@ pub(crate) struct SeekerVoice {
     pub recording: bool,
     /// Seconds the take has run, for the counter.
     pub secs: u64,
-    /// The meter, newest last, for the wave.
-    pub levels: Vec<f32>,
+    /// The newest high-resolution glass frame from the orb worker.
+    pub frame: Arc<RenderImage>,
 }
 
 /// The dictation control on the Seeker field (#3044).
@@ -471,25 +472,12 @@ fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
         })
 }
 
-/// The take, as one glass bubble in the middle of the window (#3044).
+/// The take, as one animated glass bubble in the middle of the window (#3044).
 ///
-/// Spotlight's Siri bubble is the shape: while the microphone is open the card
-/// leaves the window and this is the only thing drawn, so the bubble carries
-/// the whole state by itself. Yellow while the device is open, green from the
-/// moment the take is handed to the transcriber: the colour answers "did my
-/// second press land" before any words do, and the words come back into the
-/// field for editing and sending.
-///
-/// The bubble is a control, not a badge: it carries the same click the chord
-/// does, so stopping the take never depends on remembering a key (#3044). The
-/// button in its middle is the visible half of that, and the caption under it
-/// says the chord for anyone who would rather press that.
-///
-/// Four layers make it read as glass rather than a flat disc: a dark gradient
-/// sphere, an inner wall just inside the rim, a specular band across the top,
-/// and a halo in the state colour that swells on what the microphone just
-/// heard. GPUI has no backdrop blur, so this is glass drawn, not glass
-/// sampled.
+/// The worker supplies the transparent 1024 px material. GPUI paints it as an
+/// image rather than stacking static circles, so the liquid ribbons, rim and
+/// microphone response move together. The timer and stop control stay crisp
+/// above the texture instead of being baked into every worker frame.
 fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoElement {
     let theme = palette::current();
     let colour = if voice.recording {
@@ -497,124 +485,48 @@ fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoE
     } else {
         theme.green
     };
-    // The newest reading, for the rim: the sphere brightens on what the
-    // microphone just heard rather than on a clock of its own.
-    let heard = voice.levels.last().copied().unwrap_or(0.0).clamp(0.0, 1.0);
     div()
         .id("seeker-take-bubble")
         .relative()
         .flex()
         .flex_none()
-        .flex_col()
         .items_center()
         .justify_center()
-        .gap_2()
         .size(rems(TAKE_BUBBLE))
-        .rounded_full()
-        .bg(linear_gradient(
-            150.0,
-            linear_color_stop(rgba(0x2a2a38f2), 0.0),
-            linear_color_stop(rgba(0x08080dfa), 1.0),
-        ))
-        .border_1()
-        .border_color(rgba((colour << 8) | (0x80 + (heard * 0x55 as f32) as u32)))
-        .shadow_lg()
-        .overflow_hidden()
         .when(voice.recording, |d| d.cursor(CursorStyle::PointingHand))
         .on_click(move |_ev, _window, cx| {
             cx.stop_propagation();
             let _ = view.update(cx, |this, cx| this.seeker_stop_for_edit(cx));
         })
+        .child(img(voice.frame.clone()).absolute().inset_0().size_full())
         .child(
-            // The inner wall: a second circle just inside the rim, which is
-            // what a thick glass shell looks like from the front.
             div()
                 .absolute()
-                .top(px(7.0))
-                .left(px(7.0))
-                .right(px(7.0))
-                .bottom(px(7.0))
-                .rounded_full()
-                .border_1()
-                .border_color(rgba(0xffffff14)),
-        )
-        .child(
-            // The specular band across the top third: the highlight that
-            // separates glass from a flat disc.
-            div()
-                .absolute()
-                .top(px(14.0))
-                .left(px(30.0))
-                .right(px(30.0))
-                .h(px(22.0))
-                .rounded_full()
-                .bg(rgba(0xffffff26)),
-        )
-        .child(
-            // The halo: the state colour under the content, swelling on the
-            // newest reading, so the sphere visibly breathes while the person
-            // talks. Six rem centred in a nine rem bubble is a rem and a half
-            // in from each edge, in rem so a scaled window keeps it centred.
-            div()
-                .absolute()
-                .top(rems(1.5))
-                .left(rems(1.5))
-                .size(rems(6.0))
-                .rounded_full()
-                .bg(rgba((colour << 8) | (0x0c + (heard * 0x30 as f32) as u32))),
-        )
-        .child(seeker_wave(&voice.levels, colour))
-        .child(div().text_sm().text_color(rgb(colour)).child(format!(
-            "{}:{:02}",
-            voice.secs / 60,
-            voice.secs % 60
-        )))
-        .child(
-            // The button: a stop square while the device is open, the same
-            // square in green once the words are on their way. Sized for a
-            // thumb and drawn, not a glyph from the icon set, so the state
-            // colour is the only thing that has to change.
-            div()
+                .inset_0()
                 .flex()
-                .flex_none()
+                .flex_col()
                 .items_center()
                 .justify_center()
-                .size(px(26.0))
-                .rounded_full()
-                .bg(rgba(0xffffff1c))
-                .border_1()
-                .border_color(rgba(0xffffff30))
-                .child(div().size(px(9.0)).rounded(px(2.0)).bg(rgb(colour))),
+                .gap_2()
+                .child(div().text_sm().text_color(rgb(colour)).child(format!(
+                    "{}:{:02}",
+                    voice.secs / 60,
+                    voice.secs % 60
+                )))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .size(px(26.0))
+                        .rounded_full()
+                        .bg(rgba(0x08080d80))
+                        .border_1()
+                        .border_color(rgba(0xffffff30))
+                        .child(div().size(px(9.0)).rounded(px(2.0)).bg(rgb(colour))),
+                ),
         )
-}
-
-/// How many meter readings the bubble draws. Fewer than the composer's strip,
-/// because the bubble is round and the same count would run into its curve.
-const SEEKER_WAVE_BARS: usize = 26;
-
-/// The live meter in the bubble (#3044): one bar per reading, newest on the
-/// right, so the strip scrolls the way a waveform should and its right edge is
-/// what the microphone heard a moment ago.
-fn seeker_wave(levels: &[f32], colour: u32) -> impl IntoElement {
-    let shown = &levels[levels.len().saturating_sub(SEEKER_WAVE_BARS)..];
-    let mut row = div()
-        .flex()
-        .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(px(2.0))
-        .h(px(32.0));
-    for level in shown {
-        row = row.child(
-            div()
-                .flex_none()
-                .w(px(2.5))
-                .h(px(2.0 + level.clamp(0.0, 1.0) * 30.0))
-                .rounded(px(1.25))
-                .bg(rgb(colour)),
-        );
-    }
-    row
 }
 
 /// Presentation state for one Seeker frame. Grouping the borrowed engine,
