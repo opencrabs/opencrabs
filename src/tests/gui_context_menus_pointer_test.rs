@@ -46,9 +46,14 @@ fn fn_body(src: &'static str, name: &str) -> &'static str {
 }
 
 /// A file without its own test module. The scans below count occurrences, and
-/// a test that quotes the string it looks for would count itself.
+/// a test that quotes the string it looks for would count itself. The trailing
+/// brace is load-bearing: `#[cfg(test)] mod tests;` only declares the
+/// directory that holds the window's tests and is production, while
+/// `mod tests {` is the inline block whose text has to be dropped.
 fn code(src: &'static str) -> &'static str {
-    src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src)
+    src.split("\n#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap_or(src)
 }
 
 /// A menu is only at the pointer if the press recorded one. Every surface that

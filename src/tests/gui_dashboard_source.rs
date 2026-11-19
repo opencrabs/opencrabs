@@ -12,9 +12,10 @@
 //! in; this constant is for "the dashboard contains this", which is what the
 //! single-file scan meant before the split.
 
-/// The modules come first so a scan that cuts the window's own test module
-/// off the end still sees every one of them: the split marker sits in
-/// `main.rs`, and it is the last part of this text.
+/// The modules come first so a scan that cuts at the first module's inline
+/// test block still sees every module before it. The window file itself is
+/// last and carries no inline tests: its tests live in `gui/tests/` now, so
+/// the whole of this text is production.
 pub const DASHBOARD: &str = concat!(
     include_str!("../gui/dashboard_commands.rs"),
     include_str!("../gui/dashboard_config.rs"),
