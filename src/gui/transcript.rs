@@ -16,7 +16,7 @@
 //! Phase-0 lessons still bind: 4 MB fetch thread, no migrations, char-safe
 //! truncation everywhere (#2271).
 
-use super::icon::{collapse_icon, disclosure_icon, play_icon, stop_icon};
+use super::icon::{collapse_icon, disclosure_icon};
 use crate::palette;
 use crate::topic_icons;
 use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE, TURN_STOPPED_ROLE};
@@ -54,7 +54,6 @@ use opencrabs::tui::render::{
 use crate::attachment_view;
 use crate::editor::{Attachment, marker_paths, strip_markers};
 use crate::markdown;
-use crate::voice_play;
 
 impl markdown::MdPalette for palette::Palette {
     fn tint(&self, tint: markdown::MdTint) -> u32 {
@@ -2840,9 +2839,9 @@ fn forward_block(
     col
 }
 
-/// The files a stored message carries, drawn as the files themselves: images
-/// show their real pixels through `img`, videos and documents show their kind
-/// plus the name. Filled from the `<<IMG:...>>` / `<<VID:...>>` markers the
+/// The files a stored message carries. Audio draws the shared horizontal
+/// player; images show their real pixels, and videos and documents show their
+/// kind plus the name. Filled from the attachment markers the
 /// send path writes into the message, which is why a reloaded session shows
 /// exactly what was sent instead of a text stand-in for it.
 ///
@@ -2857,12 +2856,15 @@ fn history_attachments(
     content_width: f32,
     handlers: &HashMap<String, ClickHandler>,
 ) -> Div {
-    let plan = attachment_view::plan(paths.len(), content_width);
-    if plan.is_empty() {
+    if paths.is_empty() {
         return div();
     }
-    let side = plan.tile.w;
-    let drawn = plan.cells() - usize::from(plan.folded > 0);
+    // Audio gets its own horizontal rows. Square planning applies only to the
+    // remaining images, videos and documents, so mixed messages keep both
+    // kinds of preview without squeezing a player into a thumbnail (#3054).
+    let (audio, files): (Vec<_>, Vec<_>) = paths.iter().partition(|path| {
+        Attachment::for_display((*path).to_path_buf()).is_audio()
+    });
     let mut strip = div()
         .flex()
         .flex_col()
@@ -2870,6 +2872,28 @@ fn history_attachments(
         .overflow_hidden()
         .gap_2()
         .pt_1();
+    for (index, path) in audio.into_iter().enumerate() {
+        let key = path.to_string_lossy();
+        strip = strip.child(
+            div()
+                .w_full()
+                .max_w(px(420.0))
+                .min_w_0()
+                .child(crate::voice_preview::player(
+                    &format!("history-{key}-{index}"),
+                    path,
+                    None,
+                    &[],
+                )),
+        );
+    }
+    if files.is_empty() {
+        return strip;
+    }
+
+    let plan = attachment_view::plan(files.len(), content_width);
+    let side = plan.tile.w;
+    let drawn = plan.cells() - usize::from(plan.folded > 0);
     let mut index = 0usize;
     for cells in &plan.rows {
         let mut row = div()
@@ -2880,48 +2904,17 @@ fn history_attachments(
             .gap_2();
         for _ in 0..*cells {
             row = row.child(if index < drawn {
-                let path = &paths[index];
+                let path = files[index];
                 let key = path.to_string_lossy().to_string();
-                let attachment = Attachment::for_display(path.to_path_buf());
-                if attachment.is_audio() {
-                    // A clip sounds where it sits (#3044). The press belongs to
-                    // the player, not to the preview overlay: a recording is
-                    // something to hear, not something to open, and the tile
-                    // says so by swapping its glyph while it plays.
-                    let clip = attachment.path.clone();
-                    let playing = voice_play::is_playing(&clip);
-                    let mut card = audio_card(&attachment, side, playing)
+                // Cloned, not taken: the same file can appear in more than one
+                // message, and every tile of it must open it.
+                match handlers.get(&key).cloned() {
+                    Some(handler) => attachment_cell(path, side)
                         .id(SharedString::from(format!("attachment-{key}")))
-                        .cursor_pointer();
-                    // A file that has been moved or cleaned up can only be
-                    // reported: the card still shows what the message said, and
-                    // pressing it explains the silence instead of doing nothing.
-                    if path.is_file() {
-                        card = card.on_click(move |_event, _window, cx| {
-                            match voice_play::toggle(&clip) {
-                                Ok(()) => cx.refresh_windows(),
-                                Err(reason) => {
-                                    crate::logging::error(&format!("voice card: {reason}"))
-                                }
-                            }
-                        });
-                    }
-                    card.into_any_element()
-                } else {
-                    // Cloned, not taken: the same file can appear in more than
-                    // one message, and every tile of it must open it.
-                    match handlers.get(&key).cloned() {
-                        // A tile you can see is a tile you can open: the click
-                        // goes to the overlay, which decides what the file is.
-                        Some(handler) => attachment_cell(path, side)
-                            .id(SharedString::from(format!("attachment-{key}")))
-                            .cursor_pointer()
-                            // gpui wants a real `Fn`, and `Rc<dyn Fn>` is not one,
-                            // so each tile forwards into the shared handler.
-                            .on_click(move |event, window, cx| handler(event, window, cx))
-                            .into_any_element(),
-                        None => attachment_cell(path, side).into_any_element(),
-                    }
+                        .cursor_pointer()
+                        .on_click(move |event, window, cx| handler(event, window, cx))
+                        .into_any_element(),
+                    None => attachment_cell(path, side).into_any_element(),
                 }
             } else {
                 fold_cell(plan.folded, side)
@@ -2933,9 +2926,8 @@ fn history_attachments(
     strip
 }
 
-/// One attachment: the picture (or its kind glyph) in a square box, the file
-/// name under it. The box owns the size, so the caption can never be the thing
-/// that decides how tall the row is.
+/// One non-audio attachment: the picture or kind glyph in a square box, with
+/// the file name under it. The box owns the size, not the caption.
 fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
     let tile: AnyElement = if attachment.is_image() {
@@ -3025,95 +3017,6 @@ fn fold_cell(folded: usize, side: f32) -> AnyElement {
         .text_color(rgb(palette::current().text_muted))
         .child(SharedString::from(format!("+{folded}")))
         .into_any_element()
-}
-
-/// The bars a voice card draws instead of a thumbnail (#3044).
-///
-/// A fixed pattern, on purpose: the card has to say "this is a sound" at a
-/// glance, and decoding every recording on every paint to draw its true
-/// envelope would cost far more than the shape is worth. A waveform that
-/// pretends to be the clip's own would be the worse lie of the two.
-const AUDIO_BARS: [f32; 9] = [4.0, 9.0, 14.0, 7.0, 16.0, 11.0, 5.0, 12.0, 6.0];
-
-/// One voice message, drawn as a card that plays where it sits (#3044).
-///
-/// Same square footprint as every other attachment tile, so the strip's own
-/// layout keeps deciding the row: the play glyph, bars and length sit inside
-/// it, and the file name stays under it where the other tiles put theirs. The
-/// card has no click of its own; `history_attachments` hands it to the player.
-fn audio_card(attachment: &Attachment, side: f32, playing: bool) -> Div {
-    let palette = palette::current();
-    let tint = if playing { palette.red } else { palette.accent };
-    let mut bars = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap_1();
-    for height in AUDIO_BARS {
-        bars = bars.child(
-            div()
-                .w(px(2.0))
-                .h(px(height))
-                .rounded(px(1.0))
-                .bg(rgb(if playing { tint } else { palette.track })),
-        );
-    }
-    // Absent or half-written clips still draw: the length is the one thing the
-    // card cannot invent, so it says so instead of showing a made-up number.
-    let length = voice_play::duration(&attachment.path)
-        .map(clip_length)
-        .unwrap_or_else(|| "--:--".to_string());
-    div()
-        .flex()
-        .flex_col()
-        .flex_shrink_0()
-        .w(px(side))
-        .gap_1()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .w(px(side))
-                .h(px(side))
-                .flex_shrink_0()
-                .overflow_hidden()
-                .rounded(px(CARD_RADIUS))
-                .border_1()
-                .border_color(rgb(if playing { tint } else { palette.track }))
-                .bg(glass_fill(if playing {
-                    palette.panel_hi
-                } else {
-                    palette.panel
-                }))
-                .child(if playing {
-                    stop_icon(tint, 1.15).into_any_element()
-                } else {
-                    play_icon(tint, 1.15).into_any_element()
-                })
-                .child(bars)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette.text_muted))
-                        .child(SharedString::from(length)),
-                ),
-        )
-        .child(
-            div()
-                .truncate()
-                .text_xs()
-                .text_color(rgb(palette.text_muted))
-                .child(SharedString::from(attachment.name.clone())),
-        )
-}
-
-/// A clip's length the way a player prints it: `0:07`, `1:23`.
-fn clip_length(seconds: u64) -> String {
-    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// A thinking block: dim, italic, collapsed to a bounded preview so a long

@@ -116,19 +116,12 @@ fn the_take_previews_above_the_row_with_its_own_shape() {
     );
 
     let strip = editor("fn voice_strip(", "/// The keybindings the editor needs");
-    // The call is wrapped across lines by rustfmt, so the pin reads its two
-    // halves instead of the single line they happened to share (#3044).
     assert!(
-        strip.contains("waveform(") && strip.contains("&draft.levels"),
-        "the preview draws the shape that was recorded, not a pattern invented for it"
-    );
-    assert!(
-        strip.contains("crate::voice_play::duration(&draft.clip)"),
-        "the length comes from the file the message will carry"
-    );
-    assert!(
-        strip.contains("crate::voice_play::toggle(&clip)"),
-        "the clip can be heard before it is spent"
+        strip.contains("crate::voice_preview::player(")
+            && strip.contains("&draft.clip")
+            && strip.contains("Some(draft.seconds)")
+            && strip.contains("&draft.levels"),
+        "the take uses the shared player and keeps its capture as the decode fallback"
     );
     assert!(
         strip.contains("\"voice-preview-discard\""),
@@ -170,9 +163,8 @@ fn the_take_can_be_thrown_away() {
         "the draft is consumed rather than left behind"
     );
     assert!(
-        discard.contains("crate::voice_play::is_playing(&draft.clip)")
-            && discard.contains("crate::voice_play::toggle(&draft.clip)"),
-        "a discarded take goes silent instead of playing to an empty composer"
+        discard.contains("crate::voice_play::stop(&draft.clip)"),
+        "a discarded take stops outright, including a paused one"
     );
     assert!(
         discard.contains("self.voice_levels.clear()"),
@@ -297,14 +289,14 @@ fn only_an_audio_extension_draws_a_player() {
         "audio emits AUD rather than borrowing IMG, which draws a picture"
     );
 
-    let cards = region_in(TRANSCRIPT, "if attachment.is_audio() {", "} else {");
+    let cards = region_in(TRANSCRIPT, "fn history_attachments(", "fn attachment_cell(");
     assert!(
-        cards.contains("voice_play::toggle(&clip)"),
-        "the card plays the clip where it sits instead of opening it"
+        cards.contains(".partition(") && cards.contains(".is_audio()"),
+        "audio is separated from the square attachment plan"
     );
     assert!(
-        cards.contains("voice_play::is_playing(&clip)"),
-        "the card shows which clip is playing"
+        cards.contains("crate::voice_preview::player("),
+        "the stored clip uses the same seekable player as the composer"
     );
 }
 

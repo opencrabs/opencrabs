@@ -938,13 +938,13 @@ impl Dashboard {
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.
         self.poll_tick = self.poll_tick.wrapping_add(1);
-        // A clip that ends on its own leaves no event behind (#3044), so the
-        // cards would keep offering a stop square for a silence. The player
-        // owns the answer; this compares it against what was last painted and
-        // repaints on the one tick where the two disagree.
-        let playing = crate::voice_play::playing_path();
-        if playing != self.voice_playing {
-            self.voice_playing = playing;
+        // Playback and background waveform decoding leave no event behind
+        // (#3054). One snapshot covers position, pause, completion and the
+        // pending visual count, so the dashboard paints exactly when either
+        // kind of visible voice state changes.
+        let voice_paint = crate::voice_play::paint_state();
+        if voice_paint != self.voice_paint {
+            self.voice_paint = voice_paint;
             cx.notify();
         }
         // A click on a desktop banner posts the conversation it named (#2751).

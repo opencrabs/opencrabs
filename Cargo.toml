@@ -357,17 +357,18 @@ code-graph = ["tree-sitter", "tree-sitter-rust"]
 # Native desktop app. Off by default so a plain `cargo build` stays free of the
 # gpui dependency tree; the release build and CI enable it.
 #
-# The audio entries are for voice messages (#3044): `opusic-sys` encodes the
-# recording into the OGG/Opus a channel would have sent, and symphonia plus its
-# libopus adapter decode it again for the transcript's play button. They are the
-# same crates `local-tts` and `local-stt` already pull in, so a build with those
-# features pays nothing extra.
+# The audio entries are for voice messages (#3044, #3054): `opusic-sys` encodes
+# the recording into OGG/Opus, symphonia plus its libopus adapter decode the
+# samples and waveform, and rodio owns pause and seeking on the playback thread.
+# They are the same crates `local-tts` and `local-stt` already pull in, so a
+# build with those features pays nothing extra.
 gui = [
     "dep:gpui",
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-app-kit",
     "dep:cpal",
+    "rodio",
     "dep:symphonia",
     "dep:symphonia-adapter-libopus",
     "dep:opusic-sys",

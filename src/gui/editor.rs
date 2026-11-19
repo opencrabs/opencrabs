@@ -178,9 +178,8 @@ impl Attachment {
         IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
     }
 
-    /// A clip, which the transcript draws as a card it can play rather than a
-    /// tile it can only open (#3044). Video is deliberately not audio: a
-    /// recording is a sound, and a sound is what the card offers.
+    /// A clip, which every surface draws as a player rather than a file tile
+    /// (#3044, #3054). Video is deliberately not audio: a recording is sound.
     pub fn is_audio(&self) -> bool {
         if self.is_video {
             return false;
@@ -910,13 +909,9 @@ impl Editor {
         let Some(draft) = self.voice_draft.take() else {
             return;
         };
-        // A take silenced before it is thrown away: leaving the player running
-        // would keep a clip the composer no longer shows.
-        if crate::voice_play::is_playing(&draft.clip)
-            && let Err(reason) = crate::voice_play::toggle(&draft.clip)
-        {
-            crate::logging::error(&format!("voice preview stop: {reason}"));
-        }
+        // Stop playing and paused takes alike. Removing the draft must never
+        // leave an invisible clip sounding in the composer (#3054).
+        crate::voice_play::stop(&draft.clip);
         self.voice_levels.clear();
         crate::logging::info(&format!(
             "voice capture: discarded {:.1}s take, {}",
@@ -1033,7 +1028,10 @@ impl Editor {
 
     fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.attachments.len() {
-            self.attachments.remove(index);
+            let removed = self.attachments.remove(index);
+            if removed.is_audio() {
+                crate::voice_play::stop(&removed.path);
+            }
             cx.notify();
         }
     }
@@ -3039,9 +3037,9 @@ fn notice_row(text: &str) -> impl IntoElement {
         .child(text.to_string())
 }
 
-/// The pending attachments as chips. Images show the real file through
-/// `img` (gpui loads it from disk, so a broken path shows nothing rather
-/// than a fake tile); videos and every other file get a glyph plus the name.
+/// The pending attachments. Audio gets the shared horizontal player; images
+/// show their real file through `img`, and videos and other files keep their
+/// glyph chip plus name.
 fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div {
     // `w_full().min_w_0()` is what keeps the row inside the composer: without
     // it the strip sized itself from the chips and ran past the input until
@@ -3060,6 +3058,43 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
             cx.stop_propagation();
             this.remove_attachment(index, cx);
         });
+        if attachment.is_audio() {
+            // A picked recording is the same seekable player as a voice note,
+            // not a document chip and never an image-overlay target (#3054).
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .p_1()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .rounded(px(6.0))
+                    .bg(rgb(palette::current().panel_hi))
+                    .child(
+                        div().flex_1().min_w_0().child(crate::voice_preview::player(
+                            &format!("attachment-voice-{index}"),
+                            &attachment.path,
+                            None,
+                            &[],
+                        )),
+                    )
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("attachment-remove-{index}").into()))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_faint))
+                            .hover(|d| d.text_color(rgb(palette::current().accent)))
+                            .child("✕")
+                            .on_mouse_down(MouseButton::Left, remove),
+                    ),
+            );
+            continue;
+        }
         // The thumbnail opens the same overlay a transcript tile opens. It is
         // its own element with its own id and the remove button is a sibling,
         // so the two clicks cannot collide: the ✕ handler never sees this one
@@ -3104,15 +3139,7 @@ fn attachment_strip(attachments: &[Attachment], cx: &mut Context<Editor>) -> Div
                 .flex_shrink_0()
                 .rounded(px(4.0))
                 .bg(rgb(palette::current().bg))
-                .child(if attachment.is_video {
-                    "🎬"
-                } else if attachment.is_audio() {
-                    // A take waiting in the composer has to read as a voice
-                    // the moment it lands, not as one more document (#3044).
-                    "🎙"
-                } else {
-                    "📄"
-                })
+                .child(if attachment.is_video { "🎬" } else { "📄" })
                 .into_any_element()
         };
         let tile = div()
@@ -3345,102 +3372,58 @@ fn waveform(levels: &[f32], colour: u32) -> impl IntoElement {
 /// senders for one draft is how a message goes out twice.
 fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
     let palette = palette::current();
-    let playing = crate::voice_play::is_playing(&draft.clip);
-    let tint = if playing { palette.red } else { palette.accent };
-    let clip = draft.clip.clone();
-    let play = cx.listener(move |_this, _ev: &MouseDownEvent, _window, cx| {
-        // The click belongs to the control, not to the composer: without this
-        // the caret would also move into the field and the take would look
-        // like it had been dropped.
-        cx.stop_propagation();
-        match crate::voice_play::toggle(&clip) {
-            Ok(()) => cx.refresh_windows(),
-            Err(reason) => crate::logging::error(&format!("voice preview: {reason}")),
-        }
-    });
     let discard = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
         cx.stop_propagation();
         this.discard_voice(cx);
     });
-    // The length comes from the file, not from the timer that ran the capture:
-    // the two disagree by whatever the encoder trimmed, and the file is the
-    // artifact the message will carry.
-    let length = crate::voice_play::duration(&draft.clip)
-        .map(|secs| format!("{}:{:02}", secs / 60, secs % 60))
-        .unwrap_or_else(|| format!("{:.0}s", draft.seconds.ceil()));
     div()
         .flex()
-        .flex_row()
-        .items_start()
+        .flex_col()
         .w_full()
         .min_w_0()
-        .gap_2()
+        .gap_1()
         .p_1()
         .rounded(px(6.0))
         .bg(rgb(palette.panel_hi))
         .child(
             div()
-                .id("voice-preview-play")
                 .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(gpui::rems(1.5))
-                .cursor_pointer()
-                .child(if playing {
-                    crate::icon::stop_icon(tint, 0.9).into_any_element()
-                } else {
-                    crate::icon::play_icon(tint, 0.9).into_any_element()
-                })
-                .on_mouse_down(MouseButton::Left, play),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
+                .flex_row()
+                .items_start()
+                .w_full()
                 .min_w_0()
-                .gap_1()
+                .gap_2()
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(waveform(
-                            &draft.levels,
-                            if playing { tint } else { palette.track },
-                        ))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(palette.text_muted))
-                                .child(length),
-                        ),
+                    div().flex_1().min_w_0().child(crate::voice_preview::player(
+                        "recorded-draft",
+                        &draft.clip,
+                        Some(draft.seconds),
+                        &draft.levels,
+                    )),
                 )
-                // The words the recogniser carried, dimmed so they read as a
-                // caption of the take rather than as text in the field: the
-                // field is what Enter sends for real (#3044).
                 .child(
                     div()
-                        .w_full()
-                        .min_w_0()
+                        .id("voice-preview-discard")
+                        .flex_none()
+                        .cursor_pointer()
                         .text_xs()
-                        .text_color(rgb(palette.text_muted))
-                        .child(SharedString::from(draft.text.clone())),
+                        .text_color(rgb(palette.text_faint))
+                        .hover(|d| d.text_color(rgb(palette.accent)))
+                        .child("✕")
+                        .on_mouse_down(MouseButton::Left, discard),
                 ),
         )
+        // The recogniser's words stay a draft caption. Enter still sends the
+        // composer's actual field, exactly as before this visual change.
         .child(
             div()
-                .id("voice-preview-discard")
-                .flex_none()
-                .cursor_pointer()
+                .w_full()
+                .min_w_0()
+                .pl(px(40.0))
+                .pr(px(20.0))
                 .text_xs()
-                .text_color(rgb(palette.text_faint))
-                .hover(|d| d.text_color(rgb(palette.accent)))
-                .child("✕")
-                .on_mouse_down(MouseButton::Left, discard),
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from(draft.text.clone())),
         )
 }
 

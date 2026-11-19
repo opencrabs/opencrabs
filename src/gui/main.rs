@@ -109,7 +109,9 @@ mod topic_tabs;
 mod transcript;
 mod usage_view;
 mod voice_input;
+mod voice_media;
 mod voice_play;
+mod voice_preview;
 mod window_controls;
 
 use crate::composer_view::{
@@ -786,11 +788,10 @@ struct Dashboard {
     /// which turns those are: the transcript is ordinary text by the time it
     /// reaches the bridge, and nothing downstream can tell it apart from typing.
     voice_turns: std::collections::HashSet<Uuid>,
-    /// The clip the window is playing right now (#3044). A card draws a stop
-    /// square while its own file sounds, and the player clears the slot the
-    /// moment the clip ends, so this field is what the poll tick compares
-    /// against: one repaint where the two disagree, none while they match.
-    voice_playing: Option<std::path::PathBuf>,
+    /// The last voice state the window painted (#3054): active playback and
+    /// waveform loads. The poll compares one snapshot, so position changes
+    /// and completed background decodes both reach the visible previews.
+    voice_paint: voice_play::PaintState,
     /// Rail width in rem, moved by the splitter's drag. Never below
     /// `RAIL_MIN_REM`: dragging past it closes the rail instead, and ctrl+s
     /// brings it back at the last width.
@@ -6197,7 +6198,7 @@ fn main() {
                         seeker_scheduled_query: String::new(),
                         rail_chips_expanded: std::collections::HashMap::new(),
                         voice_turns: std::collections::HashSet::new(),
-                        voice_playing: None,
+                        voice_paint: voice_play::PaintState::default(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,
                         rail_focused: false,
