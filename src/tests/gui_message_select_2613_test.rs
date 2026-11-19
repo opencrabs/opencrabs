@@ -248,7 +248,7 @@ fn only_stored_messages_can_be_picked() {
     );
 
     let arm = TRANSCRIPT
-        .split("Block::Msg {\n                    message_id: Some(id),")
+        .split("let child: AnyElement = match block {")
         .nth(1)
         .expect("the pickable arm matches a stored message by its id");
     let arm = arm.split("_ => match").next().unwrap_or_default();
