@@ -220,134 +220,105 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let nz = surface.normal_z[index];
         let edge = 1.0 - nz;
 
-        // Bend one continuous optical surface. Wide, low-frequency currents
-        // keep the highlights clean; speech changes their curvature without
-        // introducing the small ripples that made this read as an audio trace.
-        let lens = 0.20 + edge * 0.34;
-        let turbulence = 0.012 + level * 0.024;
+        // A spherical lens compresses its environment towards the rim. The
+        // increasing radial term makes the internal light stretch strongly at
+        // the edge while the centre stays calm. GPUI does not expose the real
+        // backdrop to this image, so these coordinates refract the material,
+        // not the text painted behind the window (#3050).
+        let lens = 0.16 + edge.powf(2.0) * 0.58;
+        let turbulence = 0.010 + level * 0.018;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
         let voice = voice_at(&liquid_levels, (liquid_x * 0.5 + 0.5).clamp(0.0, 1.0));
         let voice_envelope = (1.0 - nx * nx).max(0.0).sqrt();
         let voice_ripple = voice * voice_envelope;
-        let current_x = sine(liquid_y * 1.55 + t * 0.38);
-        let current_y = sine(liquid_x * 1.75 - t * 0.30);
-        let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.065;
+        let current_x = sine(liquid_y * 1.35 + t * 0.32);
+        let current_y = sine(liquid_x * 1.45 - t * 0.27);
+        let voice_bend = (voice_ripple - level * voice_envelope * 0.45) * 0.050;
         let flow_x = x - nx * lens + current_x * turbulence;
         let flow_y = y - ny * lens + current_y * turbulence + voice_bend;
         let side = flow_x.abs().clamp(0.0, 1.0);
+        let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.92;
 
-        // One soft coloured volume and one narrow lens flare replace the
-        // stacked noisy ribbons. Their broad gradients fade smoothly into
-        // the darker glass instead of drawing several parallel wave lines.
-        let centre_line = 0.025
-            + 0.17 * side.powf(1.55)
-            + sway * 0.055
-            + sine(flow_x * 1.8 - t * 0.42) * (0.012 + level * 0.022);
+        // One continuous sunset environment crosses the lens. The white
+        // horizon has a broad amber foot and a cool blue crown; none of them
+        // is a grey line or an independent oval reflection (#3050).
+        let centre_line = 0.015
+            + 0.10 * side.powf(1.8)
+            + sway * 0.026
+            + sine(flow_x * 1.2 - t * 0.28) * (0.008 + level * 0.012);
         let centre = flow_y - centre_line;
-        let belt = bell(
-            centre,
-            0.060 + (1.0 - side) * 0.050 + level * 0.022 + breathe * 0.010,
-        );
-        let sharp = bell(centre, 0.017 + level * 0.008);
-        let warm = bell(flow_x, 0.55);
-        let band_r = 0.30 * (1.0 - warm) + warm;
-        let band_g = 0.64 * (1.0 - warm) + 0.64 * warm;
-        let band_b = (1.0 - warm) + 0.36 * warm;
-        let envelope = 1.0 - smooth(0.80, 1.0, radius) * 0.88;
-        let band = belt * (0.76 + level * 0.40) * envelope;
-        let hot = sharp * (0.42 + warm * 0.58) * envelope;
-        let centre_light = bell(flow_x, 0.43) * bell(centre, 0.29) * envelope;
-        let core = bell(flow_x, 0.22) * bell(centre, 0.12) * envelope;
-
-        // A single opposing caustic gives the sphere a second depth plane.
-        // It uses the same broad current as the main flare, not another wave.
-        let lower_line = 0.43
-            + 0.17 * side.powf(1.5)
-            + sway * 0.035
-            + sine(flow_x * 1.9 - t * 0.34) * (0.010 + level * 0.016);
-        let lower_glow = bell(flow_y - lower_line, 0.115 + level * 0.020) * envelope;
-        let lower_flare = bell(flow_y - lower_line, 0.022 + level * 0.007) * envelope;
-        let upper = bell(flow_y + 0.40 + side * 0.10 + sway * 0.025, 0.095)
-            * (0.28 + side * 0.48)
+        let horizon = bell(centre, 0.18 + level * 0.025 + breathe * 0.012)
+            * bell(flow_x, 0.88)
             * envelope;
-        let caustics = lower_glow * 0.32 + lower_flare * 0.54;
+        let white = bell(centre, 0.060 + level * 0.008)
+            * bell(flow_x, 0.48)
+            * envelope;
+        let amber = bell(centre - 0.22, 0.36) * bell(flow_x, 0.80) * envelope;
+        let blue_crown = bell(centre + 0.20, 0.34) * bell(flow_x, 0.78) * envelope;
 
-        // A hairline Fresnel reflection defines the glass without becoming a
-        // thick neon ring. Almost the whole circumference stays white-hot;
-        // only a narrow lower-left arc falls away, like Siri's rim light.
-        let fresnel = edge.powf(2.4);
-        let top_left = (-nx * 0.55 - ny * 0.85).clamp(0.0, 1.0);
-        let bottom_right = (nx * 0.45 + ny * 0.85).clamp(0.0, 1.0);
-        let opposite_sides = smooth(0.18, 0.92, nx.abs());
-        let lower_left = smooth(0.58, 0.96, (-nx + ny) * 0.7071);
-        let rim_arc = 1.0 - lower_left * 0.84;
-        let shimmer = (0.92 + 0.08 * sine((nx + ny) * 3.0 + t * 0.55)) * rim_arc;
-        let outer_rim = bell(radius - 0.978, 0.020);
-        let inner_rim = bell(radius - 0.934, 0.032);
-        let rim_base = outer_rim * (1.04 + top_left * 0.10 + bottom_right * 0.08) * shimmer;
-        let rim_cool = outer_rim * (0.10 + top_left * 0.14) * shimmer
-            + inner_rim * (0.08 + opposite_sides * 0.12) * rim_arc;
-        let rim_warm = outer_rim * (0.08 + bottom_right * 0.12) * shimmer
-            + inner_rim * (0.06 + bottom_right * 0.10) * rim_arc;
-        let side_specular = bell(nx.abs() - 0.70, 0.24) * bell(ny + 0.05, 0.62);
-        let cap_specular = bell(ny.abs() - 0.74, 0.18) * bell(nx, 0.55);
-        let specular = side_specular * 0.62 + cap_specular * 0.38;
-        let inner_shadow = smooth(0.38, 0.99, radius) * (0.72 - top_left * 0.25);
-        let body_shade = 1.0 - inner_shadow * 0.58;
-        // Smooth absorption and a single broad light field provide the dark
-        // volume. No high-frequency wisps: the clean gradient is what lets
-        // the narrow highlights read as light inside a drop of water.
-        let absorption = nz.powf(1.35);
-        let light_field = (0.5 + 0.5 * sine(nx * 0.85 - ny * 1.10 + t * 0.16))
-            * (0.45 + absorption * 0.55);
-        let body = (0.004 + absorption * 0.010 + light_field * 0.014) * body_shade;
+        // Soft directional Fresnel light, not a stroke around a flat disc.
+        // Both poles shine while the equator at the left and right falls away.
+        let fresnel = edge.powf(3.2);
+        let poles = smooth(0.10, 0.94, ny.abs());
+        let direction = 0.09 + poles * 0.91;
+        let pole_balance = 0.94 - ny * 0.06;
+        let shimmer = 0.97 + 0.03 * sine(ny * 2.0 + t * 0.30);
+        let rim = fresnel * direction * pole_balance * shimmer;
+        let inner_rim = smooth(0.56, 0.98, radius)
+            * (1.0 - smooth(0.985, 1.0, radius))
+            * direction
+            * 0.12;
 
-        let red = body * 0.80
-            + band * band_r * body_shade
-            + hot * 0.86
-            + core * 1.15
-            + centre_light * 0.52
-            + upper * (0.24 + warm * 0.34)
-            + caustics * (0.28 + warm * 0.58)
-            + rim_base * 0.96
-            + rim_cool * 0.20
-            + rim_warm * 0.32
-            + specular
-            + fresnel * tint.0 * 0.040;
-        let green = body
-            + band * band_g * body_shade
-            + hot * 0.78
-            + core * 1.08
-            + centre_light * 0.48
-            + upper * (0.40 + warm * 0.18)
-            + caustics * (0.42 + warm * 0.26)
-            + rim_base * 0.98
-            + rim_cool * 0.34
-            + rim_warm * 0.16
-            + specular
-            + fresnel * tint.1 * 0.045;
-        let blue = body * 1.35
-            + band * band_b * body_shade
-            + hot * 0.64
-            + core * 0.95
-            + centre_light * 0.42
-            + upper * 0.66
-            + caustics * (0.72 - warm * 0.24)
-            + rim_base
-            + rim_cool * 0.52
-            + rim_warm * 0.08
-            + specular
-            + fresnel * tint.2 * 0.060;
-        let alpha = (0.16
-            + edge * 0.42
-            + fresnel * 0.10
-            + band * 0.20
-            + hot * 0.14
-            + core * 0.16
-            + outer_rim * (0.16 + rim_arc * 0.20)
-            + specular * 0.10)
-            .clamp(0.0, 0.97)
+        // Broad absorption and a vertical light gradient provide the volume.
+        // Only the upper glossy sheen remains; the old lower oval is gone.
+        let absorption = nz.powf(1.30);
+        let inner_shadow = smooth(0.30, 0.99, radius) * (0.68 - poles * 0.18);
+        let body_shade = 1.0 - inner_shadow * 0.64;
+        let vertical = 0.5 - ny * 0.5;
+        let light_field = (0.35 + absorption * 0.45 + vertical * 0.20) * body_shade;
+        let body = 0.004 + light_field * 0.022;
+        let sheen = bell(flow_x + 0.18, 0.72)
+            * bell(flow_y + 0.47, 0.34)
+            * (0.20 + absorption * 0.16)
+            * envelope;
+
+        let red = body * 0.66
+            + horizon * 0.12 * body_shade
+            + white * 1.12
+            + amber * 0.74 * body_shade
+            + blue_crown * 0.055
+            + sheen * 0.34
+            + rim * 0.94
+            + inner_rim * 0.20
+            + fresnel * tint.0 * 0.018;
+        let green = body * 0.86
+            + horizon * 0.16 * body_shade
+            + white * 1.06
+            + amber * 0.29 * body_shade
+            + blue_crown * 0.31
+            + sheen * 0.40
+            + rim * 0.97
+            + inner_rim * 0.28
+            + fresnel * tint.1 * 0.022;
+        let blue = body * 1.20
+            + horizon * 0.20 * body_shade
+            + white * 0.94
+            + amber * 0.065 * body_shade
+            + blue_crown * 0.76
+            + sheen * 0.50
+            + rim
+            + inner_rim * 0.42
+            + fresnel * tint.2 * 0.028;
+        let alpha = (0.10
+            + edge * 0.24
+            + fresnel * direction * 0.22
+            + horizon * 0.10
+            + white * 0.22
+            + amber * 0.12
+            + blue_crown * 0.08
+            + sheen * 0.08)
+            .clamp(0.0, 0.96)
             * coverage;
         *pixel = bgra(red, green, blue, alpha);
     }
@@ -500,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn the_crisp_rim_only_falls_away_at_the_lower_left() {
+    fn the_soft_rim_is_brightest_at_the_top_and_bottom() {
         let surface = Surface::new(96);
         let frame = render(
             &surface,
@@ -520,11 +491,13 @@ mod tests {
             let index = (row * 96 + column) * 4;
             bytes[index] as u16 + bytes[index + 1] as u16 + bytes[index + 2] as u16
         };
-        let bright_arc = rim_light(0.7071, -0.7071);
-        let quiet_arc = rim_light(-0.7071, 0.7071);
+        let top = rim_light(0.0, -1.0);
+        let bottom = rim_light(0.0, 1.0);
+        let left = rim_light(-1.0, 0.0);
+        let right = rim_light(1.0, 0.0);
         assert!(
-            bright_arc > quiet_arc + 120,
-            "the lower-left sixth should fall away while the rest stays bright"
+            top > left + 80 && bottom > right + 80,
+            "the poles must glow while the side rim fades instead of forming a white stroke"
         );
     }
 
