@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 /// someone zooms past 2x. Everything above that was wasted work, because the
 /// material is a smooth gradient with no fine detail for extra pixels to
 /// carry, and the image is resampled into the box anyway. A 1024 px frame
-/// cost 22.79 ms to build and this one costs about a tenth of that.
+/// cost 22.79 ms to build, and this one carries a tenth of the pixels.
 pub(crate) const ORB_PIXELS: u32 = 320;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const ORB_RADIUS: f32 = 0.92;
