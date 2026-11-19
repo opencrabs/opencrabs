@@ -241,24 +241,24 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.92;
 
         // A nearly level horizon carries a diffuse optical bloom, not a solid
-        // arc. Its centre is brightest and widest; both colour and opacity
-        // fade before the glass reaches its left and right edges (#3050).
+        // arc. It reaches both sides of the lens, becoming thinner and dimmer
+        // as the curved wall bends away at the outer rim (#3050).
         let centre_line = 0.010 - 0.022 * side.powf(2.0)
             + sway * 0.006
             + sine(flow_x * 1.2 - t * 0.28) * (0.002 + level * 0.004);
         let centre = flow_y - centre_line;
-        let centre_weight = 1.0 - smooth(0.30, 0.90, side);
-        let horizon_span = centre_weight * (1.0 - smooth(0.94, 1.0, radius));
-        let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.65 + centre_weight * 0.35);
+        let horizon_taper = 1.0 - smooth(0.82, 0.995, radius);
+        let horizon_span = horizon_taper;
+        let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.38 + horizon_taper * 0.62);
         let horizon = diffuse(centre, bloom_width * 1.65) * horizon_span;
         let white = diffuse(centre, bloom_width) * horizon_span;
 
-        // Keep the colour next to the horizon. Beyond these narrow bands the
-        // upper 40% and lower 30% return to clear, dark glass.
-        let blue_above = smooth(-0.22, -0.12, centre) * (1.0 - smooth(-0.025, 0.005, centre));
-        let amber_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.12, 0.22, centre));
-        let amber = diffuse(centre - 0.055, 0.070) * horizon_span * amber_below;
-        let blue_crown = diffuse(centre + 0.055, 0.070) * horizon_span * blue_above;
+        // Invert the transmitted horizon: warm light sits above its white
+        // core, while the cool reflection extends softly into the lower half.
+        let amber_above = smooth(-0.22, -0.12, centre) * (1.0 - smooth(-0.025, 0.005, centre));
+        let blue_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.28, 0.52, centre));
+        let amber = diffuse(centre + 0.055, 0.070) * horizon_span * amber_above;
+        let blue_reflection = diffuse(centre - 0.075, 0.105) * horizon_span * blue_below;
 
         // Razor-thin inset arcs retain the wet specular edge without becoming
         // vector strokes. Their widths are 70% below the previous arcs, and
@@ -273,6 +273,13 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let bottom_arc = bell(radius - 0.988, 0.012) * bottom_pole * shimmer;
         let chromatic = fresnel * pole_light;
         let warm_edge = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
+
+        // A broader Fresnel halo sits inside the razor-thin specular edge.
+        // Warm upper and cool lower walls overlap smoothly around the sides,
+        // giving the clear centre a continuous, volumetric glass boundary.
+        let inner_wall = diffuse(radius - 0.89, 0.10) * (1.0 - smooth(0.94, 1.0, radius));
+        let warm_wall = inner_wall * (1.0 - smooth(-0.18, 0.22, ny));
+        let cool_wall = inner_wall * smooth(-0.22, 0.18, ny);
 
         // A soft inner vignette and brighter centre suggest lens depth without
         // blurring the material or introducing a backdrop GPUI cannot sample.
@@ -292,7 +299,9 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + horizon * 0.20 * body_shade
             + white * 2.25
             + amber * 1.42 * body_shade
-            + blue_crown * 0.025
+            + blue_reflection * 0.025
+            + warm_wall * 0.38
+            + cool_wall * 0.025
             + sheen * 0.20
             + top_arc * 1.70
             + bottom_arc * 1.18
@@ -301,7 +310,9 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + horizon * 0.25 * body_shade
             + white * 2.18
             + amber * 0.52 * body_shade
-            + blue_crown * 0.52
+            + blue_reflection * 0.52
+            + warm_wall * 0.16
+            + cool_wall * 0.18
             + sheen * 0.26
             + top_arc * 1.82
             + bottom_arc * 0.48
@@ -310,7 +321,9 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + horizon * 0.34 * body_shade
             + white * 2.08
             + amber * 0.035 * body_shade
-            + blue_crown * 1.42
+            + blue_reflection * 1.42
+            + warm_wall * 0.055
+            + cool_wall * 0.42
             + sheen * 0.34
             + top_arc * 2.00
             + bottom_arc * 0.10
@@ -322,7 +335,8 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + horizon * 0.17
             + white * 0.64
             + amber * 0.25
-            + blue_crown * 0.22
+            + blue_reflection * 0.22
+            + inner_wall * 0.055
             + sheen * 0.025)
             .clamp(0.0, 0.96)
             * coverage;
