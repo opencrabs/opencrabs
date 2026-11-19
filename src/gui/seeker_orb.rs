@@ -287,12 +287,22 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let warm_wall = inner_wall * (1.0 - smooth(-0.18, 0.22, ny));
         let cool_wall = inner_wall * smooth(-0.22, 0.18, ny);
 
+        // Dodge-and-burn the glass wall without moving the horizon. A deep
+        // channel immediately inside the extreme specular edge separates it
+        // from the softer inset crescents, creating spherical wall thickness.
+        let burn_channel = diffuse(radius - 0.92, 0.040);
+        let upper_crescent =
+            diffuse(radius - 0.81, 0.075) * smooth(-0.02, 0.72, -ny) * smooth(0.12, 0.80, -ny);
+        let lower_crescent =
+            diffuse(radius - 0.81, 0.075) * smooth(-0.02, 0.72, ny) * smooth(0.12, 0.80, ny);
+
         // A soft inner vignette and brighter centre suggest lens depth without
         // blurring the material or introducing a backdrop GPUI cannot sample.
         let absorption = nz.powf(1.30);
         let inner_shadow = smooth(0.30, 0.99, radius) * (0.68 - pole_light * 0.18);
         let inner_vignette = smooth(0.48, 0.99, radius) * (1.0 - pole_light) * 0.22;
-        let body_shade = (1.0 - inner_shadow * 0.60 - inner_vignette).max(0.18);
+        let body_shade =
+            (1.0 - inner_shadow * 0.60 - inner_vignette - burn_channel * 0.48).max(0.12);
         let vertical = 0.5 - ny * 0.5;
         let light_field = (0.31 + absorption * 0.52 + vertical * 0.20) * body_shade;
         let body = 0.004 + light_field * 0.022;
@@ -308,6 +318,8 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + blue_reflection * 0.025
             + warm_wall * 0.38
             + cool_wall * 0.025
+            + upper_crescent * 0.20
+            + lower_crescent * 0.17
             + sheen * 0.20
             + top_arc * 1.70
             + bottom_arc * 0.72
@@ -319,6 +331,8 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + blue_reflection * 0.52
             + warm_wall * 0.16
             + cool_wall * 0.18
+            + upper_crescent * 0.25
+            + lower_crescent * 0.09
             + sheen * 0.26
             + top_arc * 1.82
             + bottom_arc * 1.08
@@ -330,6 +344,8 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + blue_reflection * 1.42
             + warm_wall * 0.055
             + cool_wall * 0.42
+            + upper_crescent * 0.34
+            + lower_crescent * 0.018
             + sheen * 0.34
             + top_arc * 2.00
             + bottom_arc * 1.30
@@ -346,6 +362,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + amber * 0.25
             + blue_reflection * 0.22
             + inner_wall * 0.055
+            + (upper_crescent + lower_crescent) * 0.075
             + sheen * 0.025)
             .clamp(0.0, 0.96)
             * coverage;
