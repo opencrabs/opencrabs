@@ -912,12 +912,13 @@ fn the_running_task_strip_sits_right_in_teal() {
     // #2617: the strip reads the same on both surfaces, and the GUI parks
     // it above the composer on the chat's right edge in the palette's
     // cyan. Left-aligned amber was neither.
+    //
+    // The strip is a module of its own now (#3060) and its functions are
+    // `pub(crate) fn`, so a `\nfn ` cut runs past the end of it and the
+    // negative below reads amber out of a module that is not the strip.
+    // The scan takes the item's own body instead.
     let src = DASHBOARD;
-    let strip = src
-        .split("fn task_strip(")
-        .nth(1)
-        .and_then(|rest| rest.split("\nfn ").next())
-        .expect("task strip");
+    let strip = fn_body(src, "task_strip");
     assert!(strip.contains(".justify_end()"), "the strip sits right");
     assert!(strip.contains(".w_full()"), "the row owns the column width");
     assert!(
@@ -937,11 +938,7 @@ fn the_running_task_strip_keeps_a_gutter_in_a_narrow_pane() {
     // the border, and a long command truncates instead of painting over
     // the neighbouring leaf.
     let src = DASHBOARD;
-    let strip = src
-        .split("fn task_strip(")
-        .nth(1)
-        .and_then(|rest| rest.split("\nfn ").next())
-        .expect("task strip");
+    let strip = fn_body(src, "task_strip");
     assert!(strip.contains(".px_2()"), "the strip keeps a gutter");
     assert!(strip.contains(".truncate()"), "a long label ellipsizes");
     assert!(strip.contains(".min_w_0()"), "the label may shrink");
@@ -954,11 +951,7 @@ fn the_running_task_strip_copies_its_label_on_a_drag() {
     // so the gesture is the copy: a press, then a release far enough away
     // to be a drag, writes the whole label. A plain click stays a click.
     let src = DASHBOARD;
-    let strip = src
-        .split("fn task_strip(")
-        .nth(1)
-        .and_then(|rest| rest.split("\nfn ").next())
-        .expect("task strip");
+    let strip = fn_body(src, "task_strip");
     assert!(
         strip.contains(".on_mouse_down(MouseButton::Left"),
         "the press is recorded"
