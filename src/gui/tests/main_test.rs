@@ -2544,8 +2544,11 @@ fn seeker_topic_pick_never_drops_silently() {
         src.contains(&["self.topic_warning = Some(", "title);"].concat()),
         "a topic pick must arm the warning with the row it named"
     );
+    // The warning is a card of its own in `overlays.rs`, outside the
+    // dashboard concat, so its header is read where it is painted.
+    let warning = include_str!("../overlays.rs");
     assert!(
-        src.contains("OpenCrabs - Warning"),
+        warning.contains("OpenCrabs - Warning"),
         "the warning carries the header bar the report asked for"
     );
 }
