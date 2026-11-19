@@ -158,6 +158,21 @@ const INK_WARM: u32 = 0xe8b96a;
 /// one Spotlight control; the old transparent, bordered chips read as labels.
 const CHIP_FILL: u32 = 0xffffff14;
 
+/// The active kind chip's fill: the same neutral lift as an armed row, one
+/// step stronger so a switched-on capsule still reads as switched on. The old
+/// fill was the theme accent, which tinted the capsule warm over a smoked
+/// card (#3066).
+const CHIP_ACTIVE_FILL: u32 = 0xffffff26;
+
+/// The armed row's fill.
+///
+/// A theme accent works as a mark and fails as a wash: at 18 percent across a
+/// whole row it stops reading as a colour and starts reading as a tint, and
+/// over near-black glass that tint came out brown. Spotlight lifts the same
+/// row with plain white at low alpha instead, so the highlight is a shade of
+/// the glass and never a hue laid over it (#3066).
+const ARMED_FILL: u32 = 0xffffff14;
+
 /// The frosted fill the calculator's own result card wears: a whisper of white
 /// over the smoked glass, the way macOS floats a result above a surface
 /// instead of painting a coloured bar across it.
@@ -660,9 +675,10 @@ pub(super) fn overlay(
     // and the invitation alone (#2491).
     let reveal = pick_armed || !idle || idle_revealed;
 
-    // The glass is always dark, Spotlight-style, light theme included: the
-    // theme keeps its say through the accent on the armed row and the
-    // active chip (#2491).
+    // The glass is always dark, Spotlight-style, light theme included. The
+    // arming marks are neutral lifts rather than the theme accent, because a
+    // wash of accent across a whole row reads as a brown tint on near-black
+    // glass (#2491, #3066).
     //
     // Smoked, not slate (#3066). The old fill was a blue-grey close enough to
     // the dimmed code behind it that the two read as one surface; a near-black
@@ -682,7 +698,7 @@ pub(super) fn overlay(
             linear_color_stop(rgba(GLASS_BOTTOM), 1.0),
         )
     };
-    let armed_bg = rgba((theme.accent << 8) | 0x2e);
+    let armed_bg = rgba(ARMED_FILL);
     let chip = Rc::new(chip);
 
     // Inert: a click on the shell stops here instead of reaching the
@@ -772,15 +788,14 @@ pub(super) fn overlay(
                         .text_xs()
                         .cursor_pointer()
                         .when(active, |d| {
-                            d.bg(rgba((theme.accent << 8) | 0x2e))
-                                .text_color(rgb(theme.accent))
+                            d.bg(rgba(CHIP_ACTIVE_FILL)).text_color(rgb(INK))
                         })
                         .when(!active, |d| {
                             d.bg(rgba(CHIP_FILL)).text_color(rgb(INK_MUTED))
                         })
                         .hover(|d| {
                             if active {
-                                d.bg(rgba((theme.accent << 8) | 0x42))
+                                d.bg(rgba(0xffffff33))
                             } else {
                                 d.bg(rgba(0xffffff28)).text_color(rgb(INK))
                             }
@@ -823,7 +838,7 @@ pub(super) fn overlay(
                 // floats on its own frosted card the way macOS floats a
                 // conversion: a whisper of white over the glass, a lit top
                 // edge, and the copy disc on its right (#3066). Every other
-                // armed row keeps the accent wash, because those rows are
+                // armed row takes the plain grey lift, because those rows are
                 // choices and this one is an answer.
                 .when(armed && rowv.calc, |d| {
                     d.bg(rgba(FROST_FILL))
@@ -841,7 +856,7 @@ pub(super) fn overlay(
                     div()
                         .w(px(10.0))
                         .text_xs()
-                        .text_color(rgb(theme.accent))
+                        .text_color(rgb(INK))
                         .child(SharedString::from(MARKER)),
                 );
             } else {
@@ -1471,8 +1486,8 @@ mod tests {
     }
 
     /// The calculator's answer is a result, so it floats on its own frosted
-    /// card with a copy disc, while every other armed row keeps the accent
-    /// wash that marks a choice (#3066).
+    /// card with a copy disc, while every other armed row takes the plain
+    /// grey lift that marks a choice (#3066).
     #[test]
     fn the_calc_answer_floats_on_its_own_frosted_card() {
         let src = include_str!("command_palette.rs");
@@ -1482,7 +1497,7 @@ mod tests {
         );
         assert!(
             src.contains(".when(armed && !rowv.calc, |d| d.bg(armed_bg))"),
-            "the accent wash is the complement, so exactly one of the two paints"
+            "the grey lift is the complement, so exactly one of the two paints"
         );
         assert!(
             src.contains(".bg(rgba(FROST_FILL))")
