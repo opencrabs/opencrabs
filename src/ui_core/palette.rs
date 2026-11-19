@@ -68,6 +68,11 @@ pub enum PaletteKind {
     /// The favorite row: same picker, but the pick pins the conversation to
     /// the top of the rail instead of naming a topic (#2487).
     Favorite,
+    /// The calculator answer: the query is arithmetic, so the card prints the
+    /// result above every search row and picking the row (which yields
+    /// `PaletteAction::Calc`) copies it. Not part of the catalogue, so it never
+    /// pays for ranked search.
+    Calc,
 }
 
 impl PaletteKind {
@@ -87,6 +92,7 @@ impl PaletteKind {
             PaletteKind::Ask => "ask",
             PaletteKind::NewTopic => "new topic",
             PaletteKind::Favorite => "favorite",
+            PaletteKind::Calc => "calc",
         }
     }
 
@@ -110,6 +116,10 @@ impl PaletteKind {
             PaletteKind::Ask => 7,
             // An action, so it sits with the destinations, above chats.
             PaletteKind::Action | PaletteKind::NewTopic | PaletteKind::Favorite => 1,
+            // The answer is pinned above every row by the ranker, never sorted
+            // into place, so this rank only has to exist. Best-first keeps it
+            // right should that pin ever move.
+            PaletteKind::Calc => 0,
         }
     }
 
@@ -128,6 +138,9 @@ impl PaletteKind {
             PaletteKind::Session => 4,
             PaletteKind::Skill | PaletteKind::Model => 5,
             PaletteKind::Ask => 7,
+            // Unreachable: an idle field is empty and empty text is not a sum.
+            // The arm exists because every kind has to answer.
+            PaletteKind::Calc => 7,
         }
     }
 }
@@ -391,6 +404,28 @@ pub fn channel_hint(query: &str, configured: &[Channel]) -> Option<&'static str>
     Some(channel.setup_hint())
 }
 
+/// The calculator answer as a row.
+///
+/// It is built outside the ranked list because it is not a catalogue entry:
+/// the query *is* the calculation, so there is nothing to score and nothing
+/// to filter. The expression rides in the subtitle as the receipt, so the user
+/// sees what was answered rather than a bare number.
+fn calc_row(expression: &str, answer: &str) -> PaletteRow {
+    PaletteRow {
+        item: PaletteItem {
+            title: format!("= {answer}"),
+            subtitle: format!("{expression} · enter copies"),
+            kind: PaletteKind::Calc,
+            keywords: String::new(),
+            description: String::new(),
+            action: PaletteAction::Calc {
+                answer: answer.to_string(),
+            },
+        },
+        score: 0,
+    }
+}
+
 /// What picking a row does. The frontend applies it; this module only names it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PaletteAction {
@@ -453,6 +488,9 @@ pub enum PaletteAction {
     /// Window-only, because the microphone is part of the composer and the
     /// terminal dictates through `/whisper` instead.
     ToggleDictation,
+    /// Copy the calculator's answer. The expression stays in the row's own
+    /// subtitle, so the payload is only what the clipboard receives.
+    Calc { answer: String },
 }
 
 /// Why the card is armed as a session picker. The purpose decides what a
@@ -1189,6 +1227,18 @@ impl PaletteState {
                 !(row.item.kind == PaletteKind::Command
                     && matches!(row.item.title.as_str(), "/brain" | "/compact"))
             });
+        }
+        // A field that is pure arithmetic is a calculator, not a search: the
+        // answer prints above every row and Enter copies it. Inserting it
+        // here, before the miss is measured, is what keeps a sum from
+        // offering a fresh session: the card has an answer, so there is
+        // nothing to apologise for. A picker and a pressed chip keep their own
+        // meaning and never grow a calc row.
+        if self.pick.is_none() && self.kind_filter.is_none() && !idle {
+            let typed = self.field.text();
+            if let Some(answer) = super::calc::evaluate(typed) {
+                rows.insert(0, calc_row(typed.trim(), &answer));
+            }
         }
         // Only a genuine miss offers Ask Crab. Useful local answers stand on
         // their own; a fresh session still receives the exact original text,
@@ -2960,6 +3010,89 @@ mod tests {
         assert_eq!(state.query(), "");
         assert_eq!(state.caret(), 0);
         assert_eq!(state.selection(), None);
+    }
+
+    /// A field that is only a sum prints the answer above every row, and the
+    /// row Enter would run is that answer rather than the best search hit.
+    #[test]
+    fn arithmetic_query_prints_the_answer_row_first() {
+        let mut state = PaletteState::new(vec![
+            command("/help"),
+            item("200 ways to win", PaletteKind::Docs),
+        ]);
+        state.insert_text("200/7.1");
+        let rows = state.visible();
+        assert_eq!(rows[0].item.kind, PaletteKind::Calc, "{rows:?}");
+        assert_eq!(rows[0].item.title, "= 28.1690140845");
+        assert_eq!(rows[0].item.subtitle, "200/7.1 · enter copies");
+        assert_eq!(
+            rows[0].item.action,
+            PaletteAction::Calc {
+                answer: "28.1690140845".to_string()
+            }
+        );
+        assert_eq!(
+            state.selected().map(|row| row.item.kind),
+            Some(PaletteKind::Calc)
+        );
+    }
+
+    /// A sum is not a miss: the card has an answer, so the row that offers a
+    /// fresh session never appears under it.
+    #[test]
+    fn calc_row_suppresses_the_ask_row() {
+        let mut state = PaletteState::new(vec![command("/help")]);
+        state.insert_text("2+3");
+        let rows = state.visible();
+        assert_eq!(rows[0].item.title, "= 5", "{rows:?}");
+        assert!(
+            rows.iter().all(|row| row.item.kind != PaletteKind::Ask),
+            "an answer is not a miss: {rows:?}"
+        );
+    }
+
+    /// A pressed kind chip means "only this kind", so a sum found under a chip
+    /// stays a search: the card never answers what the user filtered away.
+    #[test]
+    fn calc_row_absent_while_a_chip_filters() {
+        let mut state = PaletteState::new(vec![command("/help")]);
+        state.set_kind_filter(Some(PaletteKind::Command));
+        state.insert_text("2+3");
+        assert!(
+            state
+                .visible()
+                .iter()
+                .all(|row| row.item.kind != PaletteKind::Calc)
+        );
+    }
+
+    /// A picker is choosing a conversation, and a number is not a
+    /// conversation.
+    #[test]
+    fn calc_row_absent_in_a_picker() {
+        let mut state = PaletteState::picking(
+            PickFor::NewTopic,
+            vec![item("invoices", PaletteKind::Session)],
+        );
+        state.insert_text("2+3");
+        assert!(
+            state
+                .visible()
+                .iter()
+                .all(|row| row.item.kind != PaletteKind::Calc)
+        );
+    }
+
+    /// A bare number is a search term, not a calculation, so it keeps the
+    /// ordinary miss behaviour.
+    #[test]
+    fn bare_number_keeps_the_ordinary_miss_behaviour() {
+        let mut state = PaletteState::new(vec![command("/help")]);
+        state.insert_text("200");
+        let rows = state.visible();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].item.kind, PaletteKind::Ask);
+        assert_eq!(rows[0].item.action, PaletteAction::Ask("200".to_string()));
     }
 
     proptest::proptest! {
