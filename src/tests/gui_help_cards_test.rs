@@ -108,17 +108,20 @@ fn the_screen_keeps_its_layer_contract() {
 #[test]
 fn the_counts_are_derived_from_the_rows() {
     // A literal total goes stale the day a chord is added, and a literal per
-    // card count goes stale even sooner.
+    // card count goes stale even sooner. Only the render path counts: this
+    // file's own unit test feeds `header_counts` a sample number to pin its
+    // wording, and that is not a painted total (#3048).
+    let painted = HELP_VIEW.split("#[cfg(test)]").next().unwrap_or(HELP_VIEW);
     assert!(
-        HELP_VIEW.contains("groups.iter().map(HelpGroup::count).sum()"),
+        painted.contains("groups.iter().map(HelpGroup::count).sum()"),
         "the total must be summed from the groups"
     );
     assert!(
-        HELP_VIEW.contains("group.count().to_string()"),
+        painted.contains("group.count().to_string()"),
         "each card must print its own row count"
     );
     assert!(
-        !HELP_VIEW.contains("36"),
+        !painted.contains("36"),
         "the painted row total is hardcoded"
     );
 }
