@@ -240,30 +240,37 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let side = nx.abs().clamp(0.0, 1.0);
         let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.92;
 
-        // The horizon follows the lens curvature across its full width.
-        // Separate additive colour fields keep the white core luminous, the
-        // crown vividly blue and the foot warmly amber (#3050).
-        let centre_line = 0.015
-            + 0.14 * side.powf(1.7)
-            + sway * 0.026
-            + sine(flow_x * 1.2 - t * 0.28) * (0.008 + level * 0.012);
+        // A nearly level horizon carries a diffuse optical bloom, not a solid
+        // arc. Its centre is brightest and widest; both colour and opacity
+        // fade before the glass reaches its left and right edges (#3050).
+        let centre_line = 0.010 - 0.022 * side.powf(2.0)
+            + sway * 0.006
+            + sine(flow_x * 1.2 - t * 0.28) * (0.002 + level * 0.004);
         let centre = flow_y - centre_line;
-        let horizon_span = 1.0 - smooth(0.94, 1.0, radius) * 0.26;
-        let horizon = bell(centre, 0.18 + level * 0.020 + breathe * 0.010) * horizon_span;
-        let white = bell(centre, 0.052 + level * 0.006) * horizon_span;
-        let amber = bell(centre - 0.20, 0.36) * horizon_span;
-        let blue_crown = bell(centre + 0.18, 0.33) * horizon_span;
+        let centre_weight = 1.0 - smooth(0.30, 0.90, side);
+        let horizon_span = centre_weight * (1.0 - smooth(0.94, 1.0, radius));
+        let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.65 + centre_weight * 0.35);
+        let horizon = diffuse(centre, bloom_width * 1.65) * horizon_span;
+        let white = diffuse(centre, bloom_width) * horizon_span;
 
-        // Inset cool and warm arcs replace a uniform outline. Both vanish at
-        // the middle sides; the upper light favours the top-left shoulder.
+        // Keep the colour next to the horizon. Beyond these narrow bands the
+        // upper 40% and lower 30% return to clear, dark glass.
+        let blue_above = smooth(-0.22, -0.12, centre) * (1.0 - smooth(-0.025, 0.005, centre));
+        let amber_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.12, 0.22, centre));
+        let amber = diffuse(centre - 0.055, 0.070) * horizon_span * amber_below;
+        let blue_crown = diffuse(centre + 0.055, 0.070) * horizon_span * blue_above;
+
+        // Razor-thin inset arcs retain the wet specular edge without becoming
+        // vector strokes. Their widths are 70% below the previous arcs, and
+        // both still vanish completely at the middle sides (#3050).
         let fresnel = edge.powf(3.8);
         let top_pole = smooth(0.03, 0.88, -ny);
         let bottom_pole = smooth(0.03, 0.88, ny);
         let pole_light = (top_pole + bottom_pole).clamp(0.0, 1.0);
         let top_left = 0.90 + 0.10 * smooth(0.0, 0.80, -nx);
         let shimmer = 0.985 + 0.015 * sine(ny * 2.0 + t * 0.30);
-        let top_arc = bell(radius - 0.970, 0.046) * top_pole * top_left * shimmer;
-        let bottom_arc = bell(radius - 0.972, 0.040) * bottom_pole * shimmer;
+        let top_arc = bell(radius - 0.988, 0.014) * top_pole * top_left * shimmer;
+        let bottom_arc = bell(radius - 0.988, 0.012) * bottom_pole * shimmer;
         let chromatic = fresnel * pole_light;
         let warm_edge = (ny * 0.5 + 0.5).clamp(0.0, 1.0);
 
@@ -353,6 +360,14 @@ fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
 fn bell(value: f32, width: f32) -> f32 {
     let t = (1.0 - value.abs() / width).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Long, soft optical falloff without a per-pixel exponential call. Unlike a
+/// compact bell, the tail has no hard boundary that could read as a stroke.
+fn diffuse(value: f32, width: f32) -> f32 {
+    let distance = value / width;
+    let falloff = 1.0 / (1.0 + distance * distance);
+    falloff * falloff
 }
 
 fn smooth(from: f32, to: f32, value: f32) -> f32 {
@@ -484,7 +499,7 @@ mod tests {
         );
         let bytes = frame.as_bytes(0).expect("one frame");
         let rim_light = |nx: f32, ny: f32| {
-            let ring = ORB_RADIUS * 0.978;
+            let ring = ORB_RADIUS * 0.988;
             let column = (((nx * ring + 1.0) * 0.5 * 96.0) as usize).min(95);
             let row = (((ny * ring + 1.0) * 0.5 * 96.0) as usize).min(95);
             let index = (row * 96 + column) * 4;
