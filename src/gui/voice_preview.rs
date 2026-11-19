@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -102,8 +103,8 @@ pub(crate) fn player(
         .unwrap_or(0.0);
     let playing = state.is_some_and(|state| state.playing);
     let peaks = visual
-        .map(|visual| visual.peaks)
-        .unwrap_or_else(|| std::sync::Arc::new(fallback_peaks(fallback_levels)));
+        .map(|visual| Arc::clone(&visual.peaks))
+        .unwrap_or_else(|| Arc::new(fallback_peaks(fallback_levels)));
     let time = format!(
         "{} / {}",
         clip_length(position.as_secs()),
@@ -132,7 +133,7 @@ pub(crate) fn player(
         .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
             cx.stop_propagation();
         })
-        .on_click(move |_event, window, cx| {
+        .on_click(move |_event, window, _cx| {
             if let Err(reason) = voice_play::toggle(&toggle_path) {
                 logging::error(&format!("voice preview: {reason}"));
             }

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use symphonia::core::audio::SampleBuffer;
@@ -37,7 +37,8 @@ enum CachedVisual {
 }
 
 fn visuals() -> &'static Mutex<HashMap<PathBuf, CachedVisual>> {
-    static VISUALS: Mutex<HashMap<PathBuf, CachedVisual>> = Mutex::new(HashMap::new());
+    static VISUALS: LazyLock<Mutex<HashMap<PathBuf, CachedVisual>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
     &VISUALS
 }
 
