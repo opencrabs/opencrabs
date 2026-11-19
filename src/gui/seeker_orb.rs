@@ -197,19 +197,23 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
     let breathe = 0.5 + 0.5 * (t * 0.90).sin();
     for (index, pixel) in pixels.pixels_mut().enumerate() {
         let radius = surface.radius[index];
-        if radius > 1.10 {
+        if radius > 1.18 {
             continue;
         }
         let x = surface.x[index];
         let y = surface.y[index];
         if radius > 1.0 {
-            // The transparent margin carries a soft contact shadow and a
-            // faint light bloom. The sphere now sits in the window instead of
-            // reading as a circular filter laid over the text.
-            let shadow =
-                bell(radius - 1.02, 0.08) * (0.10 + 0.06 * ((y + 1.0) * 0.5).clamp(0.0, 1.0));
-            let glow = bell(radius - 1.0, 0.10) * (0.025 + level * 0.04);
-            *pixel = bgra(tint.0 * 0.025, tint.1 * 0.03, tint.2 * 0.045, shadow + glow);
+            // Offset the penumbra below the lens so the transparent margin
+            // reads as a cast shadow, not a uniformly dark circular outline.
+            let drop_radius = (x * x + (y - 0.10) * (y - 0.10)).sqrt() / ORB_RADIUS;
+            let shadow = diffuse(drop_radius - 1.04, 0.13) * 0.30;
+            let glow = diffuse(radius - 1.0, 0.10) * (0.018 + level * 0.025);
+            *pixel = bgra(
+                tint.0 * 0.012,
+                tint.1 * 0.016,
+                tint.2 * 0.024,
+                shadow + glow,
+            );
             continue;
         }
 
@@ -245,13 +249,16 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // as the curved wall bends away at the outer rim (#3050).
         // Sit below centre like a refracted horizon, with only a gentle
         // spherical arch. The surrounding liquid still moves the line subtly.
-        let centre_line = 0.20 - 0.050 * side.powf(2.0)
+        let centre_line = 0.20
+            + 0.065 * side.powf(2.0)
             + sway * 0.006
             + sine(flow_x * 1.2 - t * 0.28) * (0.002 + level * 0.004);
         let centre = flow_y - centre_line;
-        let horizon_taper = 1.0 - smooth(0.82, 0.995, radius);
+        // Keep transmitted light continuous into both side walls. Only its
+        // thickness and intensity taper; there are no detached capsule ends.
+        let horizon_taper = 1.0 - smooth(0.62, 1.0, side) * 0.58;
         let horizon_span = horizon_taper;
-        let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.38 + horizon_taper * 0.62);
+        let bloom_width = (0.075 + level * 0.008 + breathe * 0.004) * (0.56 + horizon_taper * 0.44);
         let horizon = diffuse(centre, bloom_width * 1.65) * horizon_span;
         // A narrow radial white core feathers into the transmitted colour,
         // rather than resolving into a thick capsule across the glass.
@@ -265,6 +272,13 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let amber_below = smooth(-0.005, 0.025, centre) * (1.0 - smooth(0.24, 0.46, centre));
         let blue_reflection = diffuse(centre + 0.055, 0.075) * horizon_span * blue_above;
         let amber = diffuse(centre - 0.060, 0.075) * horizon_span * amber_below;
+        // Refracted light disperses through the whole lower bowl. Its density
+        // falls towards the bottom pole and outer wall instead of ending as a
+        // bright stripe suspended over black.
+        let lower_bowl = smooth(-0.06, 0.38, centre)
+            * (1.0 - smooth(0.42, 0.96, ny))
+            * (1.0 - smooth(0.82, 1.0, radius));
+        let lower_warmth = 1.0 - smooth(0.10, 0.58, centre);
 
         // Razor-thin inset arcs retain the wet specular edge without becoming
         // vector strokes. Their widths are 70% below the previous arcs, and
@@ -286,6 +300,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let inner_wall = diffuse(radius - 0.89, 0.10) * (1.0 - smooth(0.94, 1.0, radius));
         let warm_wall = inner_wall * (1.0 - smooth(-0.18, 0.22, ny));
         let cool_wall = inner_wall * smooth(-0.22, 0.18, ny);
+        // Separate side bevels bridge the pole highlights into one continuous
+        // wall. Amber stays above the equator and silver-blue wraps below it.
+        let side_wall = diffuse(radius - 0.915, 0.065) * smooth(0.15, 0.78, side);
+        let warm_side = side_wall * (1.0 - smooth(-0.35, 0.15, ny));
+        let cool_side = side_wall * smooth(-0.15, 0.35, ny);
 
         // Dodge-and-burn the glass wall without moving the horizon. A deep
         // channel immediately inside the extreme specular edge separates it
@@ -316,8 +335,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + white * 2.25
             + amber * 1.42 * body_shade
             + blue_reflection * 0.025
+            + lower_bowl * (0.08 + lower_warmth * 0.18)
             + warm_wall * 0.38
             + cool_wall * 0.025
+            + warm_side * 0.46
+            + cool_side * 0.08
             + upper_crescent * 0.20
             + lower_crescent * 0.17
             + sheen * 0.20
@@ -329,8 +351,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + white * 2.18
             + amber * 0.52 * body_shade
             + blue_reflection * 0.52
+            + lower_bowl * (0.12 + lower_warmth * 0.04)
             + warm_wall * 0.16
             + cool_wall * 0.18
+            + warm_side * 0.22
+            + cool_side * 0.28
             + upper_crescent * 0.25
             + lower_crescent * 0.09
             + sheen * 0.26
@@ -342,8 +367,11 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + white * 2.08
             + amber * 0.035 * body_shade
             + blue_reflection * 1.42
+            + lower_bowl * (0.22 - lower_warmth * 0.17)
             + warm_wall * 0.055
             + cool_wall * 0.42
+            + warm_side * 0.06
+            + cool_side * 0.55
             + upper_crescent * 0.34
             + lower_crescent * 0.018
             + sheen * 0.34
@@ -361,7 +389,9 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + white * 0.64
             + amber * 0.25
             + blue_reflection * 0.22
+            + lower_bowl * 0.045
             + inner_wall * 0.055
+            + side_wall * 0.070
             + (upper_crescent + lower_crescent) * 0.075
             + sheen * 0.025)
             .clamp(0.0, 0.96)
