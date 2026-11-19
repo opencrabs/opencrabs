@@ -128,6 +128,7 @@ struct Surface {
     x: Vec<f32>,
     y: Vec<f32>,
     radius: Vec<f32>,
+    normal_z: Vec<f32>,
 }
 
 impl Surface {
@@ -138,6 +139,7 @@ impl Surface {
             x: vec![0.0; count],
             y: vec![0.0; count],
             radius: vec![0.0; count],
+            normal_z: vec![0.0; count],
         };
         for row in 0..size {
             let y = ((row as f32 + 0.5) / size as f32) * 2.0 - 1.0;
@@ -146,7 +148,9 @@ impl Surface {
                 let index = row as usize * size as usize + column as usize;
                 surface.x[index] = x;
                 surface.y[index] = y;
-                surface.radius[index] = (x * x + y * y).sqrt() / ORB_RADIUS;
+                let radius = (x * x + y * y).sqrt() / ORB_RADIUS;
+                surface.radius[index] = radius;
+                surface.normal_z[index] = (1.0 - radius * radius).max(0.0).sqrt();
             }
         }
         surface
@@ -158,8 +162,14 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
     let mut pixels = RgbaImage::new(surface.size, surface.size);
     let tint = rgb(input.colour);
     let level = energy.clamp(0.0, 1.0);
-    let speed = if input.recording { 1.0 } else { 0.38 };
+    let speed = if input.recording { 1.65 } else { 0.45 };
     let t = time * speed;
+    // These are frame-wide uniforms, not per-pixel waves: the whole body of
+    // liquid visibly rolls and breathes even when the room is quiet.
+    let roll = (t * 0.32).sin() * 0.18;
+    let (roll_sin, roll_cos) = roll.sin_cos();
+    let sway = (t * 0.72).sin();
+    let breathe = 0.5 + 0.5 * (t * 0.90).sin();
     for (index, pixel) in pixels.pixels_mut().enumerate() {
         let radius = surface.radius[index];
         if radius > 1.10 {
@@ -171,129 +181,144 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
             // The transparent margin carries a soft contact shadow and a
             // faint light bloom. The sphere now sits in the window instead of
             // reading as a circular filter laid over the text.
-            let shadow = bell(radius - 1.02, 0.08)
-                * (0.10 + 0.06 * ((y + 1.0) * 0.5).clamp(0.0, 1.0));
+            let shadow =
+                bell(radius - 1.02, 0.08) * (0.10 + 0.06 * ((y + 1.0) * 0.5).clamp(0.0, 1.0));
             let glow = bell(radius - 1.0, 0.10) * (0.025 + level * 0.04);
-            *pixel = bgra(
-                tint.0 * 0.025,
-                tint.1 * 0.03,
-                tint.2 * 0.045,
-                shadow + glow,
-            );
+            *pixel = bgra(tint.0 * 0.025, tint.1 * 0.03, tint.2 * 0.045, shadow + glow);
             continue;
         }
 
-        let coverage = ((1.0 - radius) * surface.size as f32 * ORB_RADIUS * 0.5 + 0.5)
-            .clamp(0.0, 1.0);
+        let coverage =
+            ((1.0 - radius) * surface.size as f32 * ORB_RADIUS * 0.5 + 0.5).clamp(0.0, 1.0);
         let nx = x / ORB_RADIUS;
         let ny = y / ORB_RADIUS;
-        let nz = (1.0 - radius * radius).max(0.0).sqrt();
+        let nz = surface.normal_z[index];
         let edge = 1.0 - nz;
 
-        // Bend the internal light field along the sphere normal. This gives
-        // the transparent material a distorted, refracted appearance without
-        // pretending that GPUI has sampled the pixels behind the window.
-        let lens = 0.14 + edge * 0.24;
-        let turbulence = 0.010 + level * 0.032;
-        let flow_x = x - nx * lens + sine(y * 4.4 + t * 0.50) * turbulence;
-        let flow_y = y - ny * lens
-            + sine(x * 3.6 - t * 0.65) * turbulence
-            + sine(x * 8.2 + y * 2.1 + t) * turbulence * 0.35;
+        // Refract the internal volume along the sphere normal, then push two
+        // crossing liquid waves through it. The old offsets were too small to
+        // read as motion; these deform the bands themselves, not just tint.
+        let lens = 0.16 + edge * 0.30;
+        let turbulence = 0.045 + level * 0.070;
+        let liquid_x = nx * roll_cos - ny * roll_sin;
+        let liquid_y = nx * roll_sin + ny * roll_cos;
+        let wave_x =
+            sine(liquid_y * 5.0 + t * 1.35) + sine((liquid_x + liquid_y) * 7.0 - t * 0.80) * 0.45;
+        let wave_y = sine(liquid_x * 6.2 - t * 1.05) + sine((liquid_x - liquid_y) * 8.0 + t) * 0.40;
+        let flow_x = x - nx * lens + wave_x * turbulence;
+        let flow_y = y - ny * lens + wave_y * turbulence;
         let side = flow_x.abs().clamp(0.0, 1.0);
 
-        // Siri's main reflection is a curved V, not a horizontal white bar.
-        // Copper collects at its centre and silver-blue wraps around both
-        // sides. A narrow inner band gives the centre its bright point light.
-        let centre_line = 0.10 - 0.26 * side.powf(1.35)
-            + sine(flow_x * 3.3 - t * 0.72) * (0.018 + level * 0.035)
-            + sine(flow_x * 7.7 + t * 1.10) * (0.006 + level * 0.012);
+        // A broad, white-hot core sits inside a blue and rose-gold ribbon.
+        // Its curvature and position evolve with the liquid, so the highlight
+        // belongs to the volume instead of looking painted on the window.
+        let centre_line = 0.02
+            + 0.20 * side.powf(1.45)
+            + sway * 0.080
+            + sine(flow_x * 3.3 - t * 1.20) * (0.035 + level * 0.045)
+            + sine(flow_x * 7.7 + t * 1.60) * (0.012 + level * 0.018);
         let centre = flow_y - centre_line;
-        let belt = bell(centre, 0.050 + (1.0 - side) * 0.050 + level * 0.025);
-        let sharp = bell(centre, 0.018 + level * 0.012);
-        let warm = bell(flow_x, 0.44);
-        let band_r = 0.30 * (1.0 - warm) + warm;
-        let band_g = 0.62 * (1.0 - warm) + 0.55 * warm;
-        let band_b = 0.95 * (1.0 - warm) + 0.25 * warm;
-        let envelope = 1.0 - smooth(0.78, 0.99, radius) * 0.88;
-        let band = belt * (0.66 + level * 0.34) * envelope;
+        let belt = bell(
+            centre,
+            0.075 + (1.0 - side) * 0.075 + level * 0.035 + breathe * 0.018,
+        );
+        let sharp = bell(centre, 0.030 + level * 0.016);
+        let warm = bell(flow_x, 0.55);
+        let band_r = 0.34 * (1.0 - warm) + warm;
+        let band_g = 0.68 * (1.0 - warm) + 0.62 * warm;
+        let band_b = (1.0 - warm) + 0.34 * warm;
+        let envelope = 1.0 - smooth(0.82, 1.0, radius) * 0.82;
+        let band = belt * (0.88 + level * 0.48) * envelope;
         let hot = sharp * warm * envelope;
-        let centre_light = bell(flow_x, 0.26) * bell(flow_y - 0.08, 0.20);
+        let centre_light = bell(flow_x, 0.38) * bell(centre, 0.24) * envelope;
+        let core = bell(flow_x, 0.18) * bell(centre, 0.105) * envelope;
 
-        // Fainter internal reflections cross at another depth. Their paths
-        // tighten near the lower rim, like light trapped inside a water drop.
-        let upper_line = -0.34 - 0.15 * side.powf(1.6)
-            + sine(flow_x * 4.1 + t * 0.43) * (0.012 + level * 0.018);
-        let upper = bell(flow_y - upper_line, 0.018 + level * 0.010)
-            * (0.30 + side * 0.70)
-            * envelope;
+        // Secondary caustics cross at different depths and drift against the
+        // main band. This parallax is what makes the material read as water.
+        let upper_line = -0.34 - 0.15 * side.powf(1.6) - sway * 0.045
+            + sine(flow_x * 4.1 + t * 0.95) * (0.030 + level * 0.028);
+        let upper =
+            bell(flow_y - upper_line, 0.032 + level * 0.014) * (0.38 + side * 0.62) * envelope;
         let lower_line = 0.43
             + 0.20 * side.powf(1.4)
-            + sine(flow_x * 5.4 - t * 0.55) * (0.018 + level * 0.024);
-        let lower_a = bell(flow_y - lower_line, 0.024 + level * 0.010);
+            + sway * 0.055
+            + sine(flow_x * 5.4 - t * 1.15) * (0.036 + level * 0.032);
+        let lower_a = bell(flow_y - lower_line, 0.034 + level * 0.014);
         let lower_b = bell(
-            flow_y - 0.57 - 0.12 * side
-                + sine(flow_x * 4.6 + t * 0.47) * (0.015 + level * 0.018),
-            0.014 + level * 0.007,
+            flow_y - 0.57 - 0.12 * side + sine(flow_x * 4.6 + t * 1.05) * (0.030 + level * 0.026),
+            0.024 + level * 0.010,
         );
-        let caustics = (lower_a * 0.58 + lower_b * 0.36) * envelope;
+        let caustics = (lower_a * 0.72 + lower_b * 0.48) * envelope;
 
-        // Bright, selective edge lights and dark intervals make a hard surface.
-        // A uniform white ring would flatten it back into an outlined circle.
+        // Fresnel gives the rim depth; broad bilateral glints keep opposite
+        // sides bright instead of leaving one white dot on a dark circle.
+        let fresnel = edge.powf(2.4);
         let top_left = (-nx * 0.55 - ny * 0.85).clamp(0.0, 1.0);
         let bottom_right = (nx * 0.45 + ny * 0.85).clamp(0.0, 1.0);
-        let outer_rim = bell(radius - 0.976, 0.024);
-        let inner_rim = bell(radius - 0.885, 0.055);
-        let rim_base = outer_rim * (0.16 + top_left * 0.40);
-        let rim_cool = outer_rim * top_left * 0.72 + inner_rim * top_left * 0.22;
-        let rim_warm = inner_rim * (0.08 + bottom_right * 0.62);
-        let specular = bell(nx + 0.40, 0.22) * bell(ny + 0.48, 0.12)
-            + bell(nx + 0.58, 0.10) * bell(ny + 0.20, 0.28) * 0.38;
-        let inner_shadow = smooth(0.45, 0.98, radius) * (1.0 - top_left * 0.35);
-        let body_shade = 1.0 - inner_shadow * 0.52;
-        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.35))
-            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.28));
-        let body = (0.004 + nz * 0.009 + wisps * 0.005) * body_shade;
+        let opposite_sides = smooth(0.18, 0.92, nx.abs());
+        let opposite_caps = smooth(0.30, 0.95, ny.abs());
+        let shimmer = 0.76 + 0.24 * sine((nx + ny) * 3.0 + t * 1.10);
+        let outer_rim = bell(radius - 0.955, 0.050);
+        let inner_rim = bell(radius - 0.840, 0.100);
+        let rim_base = outer_rim * (0.24 + opposite_sides * 0.76 + opposite_caps * 0.42) * shimmer;
+        let rim_cool = outer_rim * (0.32 + opposite_sides * 0.82 + opposite_caps * 0.46)
+            + inner_rim * (0.12 + top_left * 0.32 + opposite_sides * 0.28);
+        let rim_warm = inner_rim * (0.16 + bottom_right * 0.42 + opposite_sides * 0.50)
+            + outer_rim * opposite_caps * 0.20;
+        let side_specular = bell(nx.abs() - 0.70, 0.24) * bell(ny + 0.05, 0.62);
+        let cap_specular = bell(ny.abs() - 0.74, 0.18) * bell(nx, 0.55);
+        let specular = side_specular * 0.78 + cap_specular * 0.48;
+        let inner_shadow = smooth(0.38, 0.99, radius) * (0.72 - top_left * 0.25);
+        let body_shade = 1.0 - inner_shadow * 0.58;
+        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.85))
+            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.72));
+        let body = (0.006 + nz * 0.014 + wisps * 0.010) * body_shade;
 
         let red = body * 0.80
             + band * band_r * body_shade
-            + hot * 0.72
-            + centre_light * 0.30
-            + upper * (0.20 + warm * 0.30)
-            + caustics * (0.22 + warm * 0.52)
-            + rim_base * 0.65
-            + rim_cool * 0.38
-            + rim_warm * 0.82
-            + specular * 0.95
-            + edge * edge * tint.0 * 0.025;
+            + hot * 0.86
+            + core * 1.15
+            + centre_light * 0.52
+            + upper * (0.24 + warm * 0.34)
+            + caustics * (0.28 + warm * 0.58)
+            + rim_base * 0.72
+            + rim_cool * 0.44
+            + rim_warm * 0.88
+            + specular
+            + fresnel * tint.0 * 0.040;
         let green = body
             + band * band_g * body_shade
-            + hot * 0.62
-            + centre_light * 0.25
-            + upper * (0.34 + warm * 0.14)
-            + caustics * (0.36 + warm * 0.23)
-            + rim_base * 0.72
-            + rim_cool * 0.66
-            + rim_warm * 0.43
-            + specular * 0.97
-            + edge * edge * tint.1 * 0.025;
+            + hot * 0.78
+            + core * 1.08
+            + centre_light * 0.48
+            + upper * (0.40 + warm * 0.18)
+            + caustics * (0.42 + warm * 0.26)
+            + rim_base * 0.80
+            + rim_cool * 0.74
+            + rim_warm * 0.48
+            + specular
+            + fresnel * tint.1 * 0.045;
         let blue = body * 1.35
             + band * band_b * body_shade
-            + hot * 0.40
-            + centre_light * 0.17
-            + upper * 0.56
-            + caustics * (0.62 - warm * 0.25)
-            + rim_base * 0.82
+            + hot * 0.64
+            + core * 0.95
+            + centre_light * 0.42
+            + upper * 0.66
+            + caustics * (0.72 - warm * 0.24)
+            + rim_base * 0.90
             + rim_cool
-            + rim_warm * 0.20
+            + rim_warm * 0.24
             + specular
-            + edge * edge * tint.2 * 0.035;
-        let alpha = (0.28
-            + edge * 0.50
+            + fresnel * tint.2 * 0.060;
+        let alpha = (0.16
+            + edge * 0.42
+            + fresnel * 0.10
             + band * 0.20
-            + hot * 0.10
-            + outer_rim * 0.18
-            + specular * 0.08)
-            .clamp(0.0, 0.96)
+            + hot * 0.14
+            + core * 0.16
+            + outer_rim * 0.20
+            + specular * 0.10)
+            .clamp(0.0, 0.97)
             * coverage;
         *pixel = bgra(red, green, blue, alpha);
     }
@@ -384,7 +409,17 @@ mod tests {
         };
         let first = render(&surface, 0.2, input, 0.2);
         let later = render(&surface, 0.8, input, 0.2);
-        assert_ne!(first.as_bytes(0), later.as_bytes(0));
+        let before = first.as_bytes(0).expect("first frame");
+        let after = later.as_bytes(0).expect("later frame");
+        let visibly_changed = before
+            .iter()
+            .zip(after)
+            .filter(|(a, b)| (**a).abs_diff(**b) > 8)
+            .count();
+        assert!(
+            visibly_changed > before.len() / 200,
+            "motion must reshape visible pixels, not merely change one sample"
+        );
         let louder = render(&surface, 0.2, input, 0.9);
         assert_ne!(first.as_bytes(0), louder.as_bytes(0));
     }
@@ -392,10 +427,7 @@ mod tests {
     #[test]
     fn sine_wraps_when_rounding_reaches_the_table_end() {
         let almost_one_turn = f32::from_bits(0x3f7f_ffff);
-        assert_eq!(
-            (almost_one_turn * SINE_STEPS as f32) as usize,
-            SINE_STEPS
-        );
+        assert_eq!((almost_one_turn * SINE_STEPS as f32) as usize, SINE_STEPS);
         assert!(sine(TAU * almost_one_turn).abs() < 0.001);
     }
 }
