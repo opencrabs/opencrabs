@@ -31,6 +31,7 @@ mod attachment_view;
 mod bang;
 mod boot;
 mod breakdown;
+mod channel_chip;
 mod chat_leaf;
 mod command_palette;
 mod commands;
@@ -60,6 +61,7 @@ mod hint;
 mod icon;
 mod launch;
 mod layout_store;
+mod live_fold;
 mod logging;
 mod markdown;
 mod menu;
@@ -75,6 +77,7 @@ mod onboard;
 mod overlays;
 mod palette;
 mod pane_chrome;
+mod pane_focus;
 mod pane_layout;
 mod pane_view;
 mod plan_strip;
@@ -100,6 +103,7 @@ mod skills_view;
 mod status;
 mod task_detail;
 mod task_list;
+mod task_strip;
 mod telegram_topics;
 #[cfg(test)]
 mod tests;
@@ -111,6 +115,7 @@ mod topic_bar_view;
 mod topic_icons;
 mod topic_tabs;
 mod transcript;
+mod turn_swap;
 mod usage_load;
 mod usage_view;
 mod voice_input;
@@ -118,6 +123,7 @@ mod voice_media;
 mod voice_play;
 mod voice_preview;
 mod window_controls;
+mod window_input;
 
 use crate::composer_view::{
     command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
@@ -145,11 +151,27 @@ use crate::status::status_identity;
 use crate::theme::{BASE_REM, Size, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, text};
 use crate::topic_bar_view::{overflow_chip, topic_label, topic_strip, topic_tab};
 
+// The window's boot, input, launch and fold helpers live beside this file
+// (#3060), imported here so the sibling modules keep reaching them through
+// the crate root.
+
 use crate::boot::{LoadState, boot_config, ledger_path};
+use crate::channel_chip::{
+    channel_chip_line, channel_chip_line_from, configured_channels, configured_channels_from,
+};
 use crate::launch::{
     Launch, launch_intent, pick_initial_session, print_launch_help, remember_open_session,
 };
+use crate::live_fold::{fold_live, rail_activity_line};
+use crate::pane_focus::resolve_split_focus;
+use crate::task_strip::{StripTap, TaskTail, task_strip};
+use crate::turn_swap::{
+    SETTLE_BUDGET, SETTLE_RECHECK, SETTLE_RECHECKS, settle_landed, swap_visible_turn,
+};
 use crate::usage_load::{load_view, period_word};
+use crate::window_input::{
+    CARET_IDLE_AFTER, CtrlCAction, ctrl_c_action, translate_key, wheel_dy, zoom_step_for,
+};
 
 use opencrabs::db::models::Message;
 use opencrabs::ui_core::actions;
@@ -284,89 +306,12 @@ impl Render for PaneGhost {
     }
 }
 
-/// Translate a gpui keystroke into the neutral vocabulary the decision logic
-/// speaks. Key names here are the macOS platform layer's spellings
-/// (`platform/mac/events.rs`): `escape`, `tab` (shift+tab arrives as `tab`
-/// with the shift modifier), `enter`. A printable `key_char` becomes
-/// `UiKey::Char` unless a command-ish modifier is held, and everything
-/// unmodelled falls to `UiKey::Other`, which `decide` always ignores.
-fn translate_key(ev: &KeyDownEvent) -> UiKey {
-    let ks = &ev.keystroke;
-    match ks.key.as_str() {
-        "escape" => UiKey::Esc,
-        "tab" if ks.modifiers.shift => UiKey::BackTab,
-        "tab" => UiKey::Tab,
-        "enter" => UiKey::Enter,
-        _ => {
-            if ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform {
-                UiKey::Other
-            } else {
-                ks.key_char
-                    .as_deref()
-                    .and_then(|s| s.chars().next())
-                    .map(UiKey::Char)
-                    .unwrap_or(UiKey::Other)
-            }
-        }
-    }
-}
-
-/// One zoom step from the raw key name: `=` or `+` in, `-` or `_` out, `0`
-/// back to the base rem, always clamped to the theme's range. The modifier
-/// state is irrelevant, so both bare and cmd-chorded keys zoom. `None` for
-/// any key that is not a zoom key.
-fn zoom_step(key: &str, rem: f32) -> Option<f32> {
-    let min = BASE_REM * ZOOM_MIN;
-    let max = BASE_REM * ZOOM_MAX;
-    match key {
-        "=" | "+" => Some((rem * ZOOM_STEP).min(max)),
-        "-" | "_" => Some((rem / ZOOM_STEP).max(min)),
-        "0" => Some(BASE_REM),
-        _ => None,
-    }
-}
-
-/// The handler's rule: a zoom key acts only with cmd or ctrl held, so a bare
-/// minus typed into the composer stays text. The reset rides the same chord.
-fn zoom_step_for(key: &str, rem: f32, chord: bool) -> Option<f32> {
-    if !chord {
-        return None;
-    }
-    zoom_step(key, rem)
-}
-
-/// How long a finished turn's reload keeps retrying while its rows are still
-/// being written.
-///
-/// The first version bounded this with `SETTLE_ATTEMPTS` (eight), which the
-/// poll cadence turned into roughly half a second. A 100 KB assistant row
-/// under WAL can take longer: the 2026-11-08 23:38:29 log shows retries 1 to
-/// 8 ending in "transcript never caught up", after which the live card stayed
-/// pinned beside the persisted turn until the session was reopened. A
-/// deadline bounds the wait without assuming how long one write takes.
-const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// One more read this long after the budget expired, so a write that landed
-/// late still releases the live card instead of leaving it pinned.
-const SETTLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// How many late re-reads one turn may spend after the budget expired. The
-/// second covers a write that landed between the first recheck and its own
-/// read; past that, the log line is the honest answer.
-const SETTLE_RECHECKS: u8 = 2;
-
 /// The rail's default width, and the floor it may be dragged to. At the
 /// floor the splitter closes the rail instead of leaving a sliver: a 3-rem
 /// column shows titles cut to nothing, which is worse than no column.
 const RAIL_DEFAULT_REM: f32 = 17.0;
 const RAIL_MIN_REM: f32 = 11.0;
 const RAIL_MAX_REM: f32 = 32.0;
-
-/// How long the Seeker caret keeps blinking after the last keystroke. Past
-/// this the field goes quiet and the caret hides, the way Spotlight's does
-/// once typing stops; the next key brings it back (#2531). The window and the
-/// terminal share one rule, so this aliases the engine's constant.
-const CARET_IDLE_AFTER: std::time::Duration = opencrabs::ui_core::palette::CARET_IDLE_AFTER;
 
 /// How many destinations the forward picker lists at once (#2608). The rail
 /// can hold hundreds of sessions; the picker is a bar, not a list, so it shows
@@ -383,94 +328,6 @@ const COPIED_ICON_TTL: std::time::Duration = std::time::Duration::from_millis(12
 /// Only the timer belonging to the menu still on screen may close it.
 fn msg_menu_expiry_due(open: bool, current_generation: u64, timer_generation: u64) -> bool {
     open && current_generation == timer_generation
-}
-
-/// Which messaging channels the config says are live: enabled and carrying the
-/// credential that channel needs. Read once when Seeker opens, so the hint says
-/// "not set up" only when that is true (#2462).
-fn configured_channels() -> Vec<Channel> {
-    match Config::load() {
-        Ok(config) => configured_channels_from(&config),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// The same answer for a config that is already loaded, so a hot reload can
-/// refresh the cached list without taking a second disk read.
-fn configured_channels_from(config: &Config) -> Vec<Channel> {
-    let channels = &config.channels;
-    let filled = |value: &Option<String>| value.as_deref().is_some_and(|text| !text.is_empty());
-    let mut live = Vec::new();
-    if channels.telegram.enabled && filled(&channels.telegram.token) {
-        live.push(Channel::Telegram);
-    }
-    if channels.discord.enabled && filled(&channels.discord.token) {
-        live.push(Channel::Discord);
-    }
-    if channels.slack.enabled && filled(&channels.slack.token) && filled(&channels.slack.app_token)
-    {
-        live.push(Channel::Slack);
-    }
-    // WhatsApp pairs by QR: being enabled is the whole credential.
-    if channels.whatsapp.enabled {
-        live.push(Channel::WhatsApp);
-    }
-    if channels.trello.enabled
-        && filled(&channels.trello.app_token)
-        && filled(&channels.trello.token)
-    {
-        live.push(Channel::Trello);
-    }
-    live
-}
-
-/// Who owns the channels right now (#2452): a token lock on disk says
-/// something claimed them, a live instance lock says that something is
-/// still running. Read-only: the GUI never constructs a ChannelManager
-/// and never starts one on its own.
-fn channel_ownership() -> channel_status::Ownership {
-    let locks = opencrabs::config::profile::base_opencrabs_dir().join("locks");
-    // Token locks are files named `{channel}_{hash}.lock`; the instance,
-    // paths and scheduler locks live in their own subdirectories, so the
-    // suffix test on files only sees the channel claims.
-    let lock_present = std::fs::read_dir(&locks)
-        .map(|entries| {
-            entries.filter_map(Result::ok).any(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                e.path().is_file() && name.ends_with(".lock") && name.contains('_')
-            })
-        })
-        .unwrap_or(false);
-    let profile = opencrabs::config::profile::active_profile().unwrap_or("default");
-    let live = opencrabs::config::profile::instance_running_in(&locks.join("instance"), profile);
-    channel_status::ownership(lock_present, live)
-}
-
-/// The chip line for the current config and lock state: `None` when every
-/// configured channel is served or nothing is configured (#2452).
-///
-/// UI THREAD ONLY: `Config::load` builds the whole config by value and on
-/// a GPUI background worker that build overflows the small stack (SIGILL,
-/// 2026-11-03). Background callers use `channel_chip_line_from` with the
-/// names read here once and passed in.
-fn channel_chip_line() -> Option<SharedString> {
-    let names: Vec<String> = configured_channels()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-    channel_chip_line_from(&names)
-}
-
-/// The chip line from a fixed set of channel names: the probe path. Never
-/// touches Config, so it is safe on a background worker; the lock and
-/// instance checks are small directory reads (#2452).
-fn channel_chip_line_from(names: &[String]) -> Option<SharedString> {
-    if names.is_empty() {
-        return None;
-    }
-    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-    channel_status::status_line(&borrowed, &channel_ownership()).map(SharedString::from)
 }
 
 /// Whether a rail preview refresh can actually change a line.
@@ -1208,75 +1065,6 @@ fn set_rail_open_state(
         // The deep hits clear with the rail too (#2720): a reopened rail
         // starts unsearched, never showing snippets from the last query.
         sessions.content_matches.clear();
-    }
-}
-
-/// How tall one wheel "line" is when the platform reports the tick in lines
-/// instead of pixels, the same 20px GPUI's own list uses (#2698).
-const WHEEL_LINE_PX: f32 = 20.0;
-
-/// How long a first Ctrl+C stays armed before the second press stops meaning
-/// "quit": the terminal's own three seconds (`tui/app/state.rs:3730`).
-const QUIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// What one Ctrl+C press spends itself on (#2308).
-///
-/// The terminal has answered this key the same way for years, so the window
-/// asks the same question in the same order instead of inventing a second
-/// meaning for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CtrlCAction {
-    /// The reader is scrolled up: put them back at the bottom, keep the window
-    /// open.
-    SnapBottom,
-    /// Throw the draft away and arm the quit window, with the hint.
-    ClearAndArm,
-    /// A second press inside the window: leave.
-    Quit,
-}
-
-/// The terminal's Ctrl+C ladder, as a decision (#2308).
-///
-/// `following` is the transcript's own follow, `input_empty` whether the
-/// composer has anything to throw away, `pending` the first press while it is
-/// still armed, and `now` the clock that judges it. A composer holding text is
-/// a fresh start, never a confirmation: the press throws that text away and
-/// arms again, so a keystroke typed between the two presses can never be the
-/// thing that closes the window.
-fn ctrl_c_action(
-    following: bool,
-    input_empty: bool,
-    pending: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> CtrlCAction {
-    // A reader scrolled up gets the bottom back and nothing else: the press
-    // never costs them the window.
-    if !following {
-        return CtrlCAction::SnapBottom;
-    }
-    // The second press quits, and only over an empty composer. A pending
-    // stamp in the future means the clock moved backwards: that is no proof
-    // of a second press, so it re-arms instead of quitting.
-    if input_empty
-        && let Some(at) = pending
-        && now
-            .checked_duration_since(at)
-            .is_some_and(|elapsed| elapsed < QUIT_WINDOW)
-    {
-        return CtrlCAction::Quit;
-    }
-    CtrlCAction::ClearAndArm
-}
-
-/// How far one wheel tick asks a transcript to move, in px (#2698).
-///
-/// Platforms disagree on the unit and on the axis: a trackpad reports pixels
-/// and a mouse may report lines, and either may be horizontal only. Only the
-/// vertical part decides whether the reader walked back through history.
-fn wheel_dy(delta: &ScrollDelta) -> f32 {
-    match delta {
-        ScrollDelta::Pixels(d) => f32::from(d.y),
-        ScrollDelta::Lines(d) => d.y * WHEEL_LINE_PX,
     }
 }
 
@@ -5503,309 +5291,6 @@ fn main() {
         agent_bridge::window_is_up();
         cx.activate(true);
     });
-}
-
-/// The card's single line for a turn running with no pane of its own (#2718).
-///
-/// The pane paints the lead in the accent colour and the tail muted, and a
-/// card line has one colour to spend, so the halves are joined with the same
-/// separator the terminal uses. Empty means the turn has said nothing yet: the
-/// card then keeps its preview instead of blanking a line to show a blank.
-///
-/// The prose leads and the call follows (#2816). Narration is occasional, not
-/// constant: most turns run from call to call and never speak, and on those
-/// the call is still the whole line. When a turn does speak, the paragraph is
-/// what it concluded and the call is only what it ran, so a card that printed
-/// the call alone hid the sentence the chat above it was showing.
-fn rail_activity_line(live: &transcript::LiveTurn) -> String {
-    // The paragraph the turn last spoke, clipped by the pane's own rule so the
-    // two surfaces never show a different slice of the same sentence.
-    let narration = live
-        .narration()
-        .last()
-        .map(transcript::collapsed_paragraph)
-        .filter(|text| !text.is_empty());
-    // `live_status_line` invents "OpenCrabs is thinking..." for a turn that has
-    // produced nothing at all, which on a card would out-shout the preview it
-    // is replacing. The rail waits for the first real event (#2718), and a
-    // paragraph counts as one: a turn whose only output so far is prose still
-    // has something to say.
-    let idle = !live.thinking
-        && live.tools.is_empty()
-        && live.chunks == 0
-        && live.stream.is_empty()
-        && live.reasoning.is_empty()
-        && narration.is_none();
-    if idle {
-        return String::new();
-    }
-    let (lead, tail) = transcript::live_status_line(live);
-    let mut parts: Vec<String> = Vec::new();
-    parts.extend(narration);
-    // Then what it ran. The call-count and clock tail is appended after both,
-    // so the line reads the way the chat does: prose, the call, then the tally.
-    match transcript::live_activity(live) {
-        Some(call) => parts.push(call),
-        // A turn that spoke but has not called anything yet gets no second
-        // "thinking" label: the prose is the line.
-        None if parts.is_empty() && !lead.is_empty() => parts.push(lead),
-        None => {}
-    }
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts.join(" \u{b7} ")
-}
-
-/// Fold one progress event into a live card.
-///
-/// Free because two owners draw the same card: a split leaf's pane (#2614) and
-/// a turn parked under a conversation the user switched away from (#2616). The
-/// fold has to be identical for both or the card would tell a different story
-/// depending on where the session happens to be sitting.
-fn fold_live(
-    live: &mut transcript::LiveTurn,
-    progress: opencrabs::brain::agent::ProgressEvent,
-    at: std::time::Instant,
-) {
-    use opencrabs::brain::agent::ProgressEvent;
-    match progress {
-        ProgressEvent::Thinking => live.thinking = true,
-        ProgressEvent::StreamingChunk { text } => {
-            live.thinking = false;
-            // The arrival stamp, so a batch folded in one loop still measures
-            // the time the provider actually spent streaming (#2703).
-            live.note_chunk_at(&text, at);
-        }
-        ProgressEvent::IntermediateText { text, reasoning } => {
-            live.thinking = false;
-            if let Some(reasoning) = reasoning {
-                live.push_reasoning_at(&reasoning, at);
-            }
-            live.push_narration(&text);
-        }
-        ProgressEvent::ToolStarted {
-            tool_name,
-            tool_input,
-            ..
-        } => {
-            live.thinking = false;
-            let description =
-                opencrabs::tui::app::App::format_tool_description(&tool_name, &tool_input);
-            live.push_tool(transcript::ToolCall::running(tool_name, description));
-        }
-        ProgressEvent::ToolCompleted {
-            tool_name, success, ..
-        } => {
-            let open = live
-                .tools
-                .iter_mut()
-                .rev()
-                .find(|c| !c.done && c.name == tool_name && c.task_id.is_none());
-            match open {
-                Some(call) => {
-                    call.done = true;
-                    call.success = success;
-                }
-                None => live.push_tool(transcript::ToolCall {
-                    name: tool_name.clone(),
-                    description: tool_name,
-                    success,
-                    done: true,
-                    task_id: None,
-                }),
-            }
-        }
-        ProgressEvent::DetachedTaskStarted { task_id, label } => {
-            live.thinking = false;
-            live.push_tool(transcript::ToolCall::detached(task_id, label));
-        }
-        ProgressEvent::DetachedTaskFinished {
-            task_id,
-            success,
-            elapsed_secs,
-            ..
-        } => {
-            // The same settle the window's card runs, so a pane, a parked turn
-            // and a rail card keep the runtime too (#2952). This used to drop
-            // elapsed_secs and mark the row done with no duration, which left
-            // two paths settling one event and only one keeping the number.
-            // A finish with no row is not an error: the turn may have settled.
-            transcript::settle_detached(&mut live.tools, &task_id, success, elapsed_secs);
-        }
-        ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
-        // The service discarded what it had already streamed: a phantom
-        // iteration, a gaslighting preamble, a thinking-loop timeout. The card
-        // has to drop it too, or the working-out that just got retried stays on
-        // screen as the answer until the turn settles (#3021).
-        ProgressEvent::StripStreamedContent { bytes, .. } => live.strip_streamed(bytes),
-        _ => {}
-    }
-}
-
-/// Park the turn on screen under `from` and bring back the one `to` owns.
-///
-/// The window paints one conversation at a time, but every session may be
-/// running a turn of its own. State moves with the session instead of the
-/// window: the outgoing turn is stored whole and the incoming one restored, so
-/// neither the spinner nor the counters jump to a conversation that never sent
-/// anything (#2616). A session with nothing in flight gets an empty slot,
-/// which is what makes a switch to an idle conversation paint as idle.
-///
-/// A card that has ended is parked too (#2811). Gating the park on `busy` alone
-/// dropped every turn the moment it stopped running, so a turn the user had
-/// just stopped came back as an empty slot and the stop, the stream and the
-/// verdict went with it. What decides the park is whether the card holds
-/// anything the ledger cannot draw yet, which is `!live.is_empty()`; `busy`
-/// rides along so the restored card knows whether anything is still moving.
-///
-/// The whole [`chat_leaf::Turn`] moves now, not six fields of it, so the
-/// reload handshake's deadline and late re-checks travel with the turn they
-/// belong to instead of waiting on screen for the next conversation (#2805).
-fn swap_visible_turn(
-    stashed: &mut std::collections::HashMap<Uuid, chat_leaf::Turn>,
-    from: Option<Uuid>,
-    to: Uuid,
-    turn: &mut chat_leaf::Turn,
-) {
-    if from == Some(to) {
-        return;
-    }
-    if let Some(from) = from
-        && (turn.busy || !turn.live.is_empty())
-    {
-        stashed.insert(from, std::mem::take(turn));
-    }
-    match stashed.remove(&to) {
-        // The flag travels with the card (#2811): a stopped turn comes back
-        // stopped, not "running again".
-        Some(restored) => *turn = restored,
-        None => *turn = chat_leaf::Turn::default(),
-    }
-}
-
-/// Whether a reload holds the turn it was waiting for (#2705).
-///
-/// The comparison is against the session's row total as the ledger reports it,
-/// never against the windowed turn count: past `transcript::WINDOW` rows the
-/// window stops growing, so a turn count could never reach an expectation
-/// taken from it and the metrics of every later turn were thrown away.
-fn settle_landed(expect: Option<usize>, total: i64) -> bool {
-    expect.is_none_or(|want| total.max(0) as usize >= want)
-}
-
-/// What a click on the task strip runs: the window mints it, the strip only
-/// calls it.
-type StripTap = Rc<dyn Fn(&mut Window, &mut App)>;
-
-/// The running detached command, above the input.
-///
-/// Same formatter as the TUI (`tui::render::background`), so the two surfaces
-/// cannot disagree about what a running task looks like. No border and no
-/// percentage width: it sits in the column flow and disappears when idle. It
-/// aligns to the chat's right edge and prints in the palette's cyan, which is
-/// where the owner reads a background job (#2617).
-///
-/// The right alignment is not the whole row: the label keeps a gutter and a
-/// clip, so in a narrow pane it stops at the pane's padding instead of
-/// touching the border, and a long command ellipsizes instead of painting
-/// over the neighbouring leaf (#2622).
-///
-/// A plain click, the press and release the drag test below lets through,
-/// opens the session's task list. `on_tap` is that click, minted by the
-/// window, and `None` leaves the strip a label.
-fn task_strip(text: String, on_tap: Option<StripTap>) -> Div {
-    // #2678: the roster above the composer is the line the user quotes back at
-    // the agent ("that job is stuck"), so a drag over it copies it. The strip
-    // is one truncated line with no character grid of its own, so there is
-    // nothing to select inside it: the gesture is the copy, and it copies the
-    // whole label rather than the part that survived truncation.
-    //
-    // The press outlives the frame it landed in. The strip is rebuilt on every
-    // render, and while a turn streams or the elapsed time ticks a render
-    // lands between most presses and their release: a press kept in a cell
-    // minted here was gone by the time the release looked for it, so the
-    // click opened the list only when no frame happened to fall in between.
-    thread_local! {
-        static STRIP_PRESS: std::cell::Cell<Option<Point<Pixels>>> =
-            const { std::cell::Cell::new(None) };
-    }
-    let copied = format!("⏳ {text}");
-    let clickable = on_tap.is_some();
-    div()
-        .when(clickable, |d| d.cursor_pointer())
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_end()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .px_2()
-        .text_xs()
-        .text_color(rgb(palette::current().teal))
-        .on_mouse_down(MouseButton::Left, move |ev, _window, _app| {
-            STRIP_PRESS.with(|press| press.set(Some(ev.position)));
-        })
-        .on_mouse_up(MouseButton::Left, move |ev, window, app| {
-            let Some(from) = STRIP_PRESS.with(|press| press.take()) else {
-                return;
-            };
-            if (ev.position - from).magnitude() <= 2.0 {
-                if let Some(tap) = on_tap.as_ref() {
-                    tap(window, app);
-                }
-                return;
-            }
-            app.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-        })
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .truncate()
-                .child(SharedString::from(format!("⏳ {text}"))),
-        )
-}
-
-/// One open task's output as the window last read it.
-struct TaskTail {
-    read_at: std::time::Instant,
-    path: Option<std::path::PathBuf>,
-    text: Option<SharedString>,
-}
-
-/// The leaf that owns the keyboard in a split, `None` meaning the chat leaf.
-///
-/// `pane_focus` can name a pane the tree no longer holds: a closed leaf, a
-/// session moved into the chat, a split that came back with one leaf. Read
-/// literally, that id made EVERY leaf take the unfocused branch, so the split
-/// drew a dim placeholder in every pane and no frame painted a real field at
-/// all. A file dropped then landed in the window's editor, which nothing was
-/// drawing, so the drop looked ignored (#2620).
-///
-/// A single leaf is never a split and the chat owns the keyboard, so the id is
-/// not consulted at all. A live id names its own leaf, with the chat leaf
-/// reading as `None` the way it does everywhere else. A stale id hands the
-/// keyboard back to the chat when the chat is in the tree, and to the first
-/// surviving leaf when it is not, so the window always draws one real composer
-/// and one real drop target.
-fn resolve_split_focus(
-    leaves: &[Uuid],
-    pane_focus: Option<Uuid>,
-    chat: Option<Uuid>,
-) -> Option<Uuid> {
-    if leaves.len() < 2 {
-        return None;
-    }
-    if let Some(id) = pane_focus.filter(|id| leaves.contains(id)) {
-        return (Some(id) != chat).then_some(id);
-    }
-    if chat.is_some_and(|id| leaves.contains(&id)) {
-        None
-    } else {
-        leaves.first().copied()
-    }
 }
 
 /// Who asked for a send.

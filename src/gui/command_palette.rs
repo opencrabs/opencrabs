@@ -1195,9 +1195,9 @@ mod tests {
     #[test]
     fn seeker_caret_stops_blinking_once_typing_stops() {
         // Two of the three pins moved to the finder in the split (#2822): the
-        // blink check and the reset that restarts it. The idle constant stayed
-        // in the window. Read the whole dashboard so a pin cannot pass while
-        // the code it names lives one module over.
+        // blink check and the reset that restarts it. The idle constant left
+        // the window for `window_input.rs` (#3060). Read the whole dashboard
+        // so a pin cannot pass while the code it names lives one module over.
         let src = crate::dashboard_source::DASHBOARD;
         assert!(
             src.contains("const CARET_IDLE_AFTER"),
