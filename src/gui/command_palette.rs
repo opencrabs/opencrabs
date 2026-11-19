@@ -13,7 +13,7 @@ use gpui::{
     App, Bounds, ClickEvent, CursorStyle, Element, ElementId, Entity, GlobalElementId,
     InspectorElementId, LayoutId, MouseButton, Pixels, Point, RenderImage, ScrollWheelEvent,
     SharedString, Style, TextAlign, TextRun, WeakEntity, Window, WrappedLine, div, fill, img,
-    point, prelude::*, px, relative, rems, rgb, rgba, size,
+    linear_color_stop, linear_gradient, point, prelude::*, px, relative, rems, rgb, rgba, size,
 };
 use std::ops::Range;
 use std::rc::Rc;
