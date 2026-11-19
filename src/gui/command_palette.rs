@@ -1197,8 +1197,14 @@ mod tests {
             src.contains("const ASK_SUFFIX: &str"),
             "the tail is one named string, not a literal repeated in two places"
         );
+        // The arm is read from its own head rather than as one line, so a
+        // rewrap by the formatter cannot fail a test about behaviour.
+        let suffix_arm = src
+            .split("suffix: if state.pick().is_none() {")
+            .nth(1)
+            .expect("the tail is keyed to the query, not to a pick");
         assert!(
-            src.contains("suffix: if state.pick().is_none() { ASK_SUFFIX } else { \"\" }"),
+            suffix_arm.trim_start().starts_with("ASK_SUFFIX"),
             "a picker lists conversations, so only a query carries the invitation"
         );
         assert!(
