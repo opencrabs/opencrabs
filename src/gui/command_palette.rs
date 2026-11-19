@@ -1553,8 +1553,18 @@ mod tests {
             item("72", PaletteKind::Calc),
             item("Quit", PaletteKind::Command),
         ]));
-        assert!(printed[0].calc, "a calculator row says it is one");
-        assert!(!printed[1].calc, "a command row does not");
+        // An idle field ranks by the menu's own order, so the calculator is not
+        // first: read the rows by their title instead of by position.
+        let calc = printed
+            .iter()
+            .find(|row| row.title == "72")
+            .expect("the calculator row survives the ordering");
+        let command = printed
+            .iter()
+            .find(|row| row.title == "Quit")
+            .expect("the command row survives the ordering");
+        assert!(calc.calc, "a calculator row says it is one");
+        assert!(!command.calc, "a command row does not");
     }
 
     /// The blink has an idle cutoff. A caret that never stops reads as a
