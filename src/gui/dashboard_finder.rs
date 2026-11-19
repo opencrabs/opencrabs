@@ -94,7 +94,7 @@ impl Dashboard {
         self.finder_selecting = false;
         // A take belongs to the card that started it (#3044): closing the card
         // stops the device instead of leaving the microphone open behind a
-        // surface that no longer draws a counter or a stop.
+        // surface that no longer draws the take.
         self.seeker_voice_reset(cx);
         self.refocus_screen();
         cx.notify();
@@ -361,7 +361,6 @@ impl Dashboard {
                 self.seeker_capture = Some(voice_input::Capture::start());
                 self.seeker_voice_finishing = false;
                 self.seeker_voice_send = true;
-                self.seeker_voice_secs = 0;
                 self.seeker_voice_levels.clear();
                 self.seeker_orb = Some(seeker_orb::OrbAnimation::start(palette::current().amber));
                 self.pump_seeker_voice(cx);
@@ -380,7 +379,7 @@ impl Dashboard {
 
     /// End the take without sending it (#3044).
     ///
-    /// The bubble's stop button. Same two threads as the chord, one flag apart:
+    /// A click on the glass. Same two threads as the chord, one flag apart:
     /// the words land in the field and the search is left for the person to
     /// start, so a query the transcriber half heard can be read and corrected
     /// before it runs. A take that is already closing is left alone.
@@ -426,7 +425,6 @@ impl Dashboard {
         orb.update(recording, level, colour);
         Some(command_palette::SeekerVoice {
             recording,
-            secs: self.seeker_voice_secs,
             frame: orb.frame(cx),
         })
     }
@@ -446,7 +444,6 @@ impl Dashboard {
         self.seeker_transcription = None;
         self.clear_seeker_orb(cx);
         self.seeker_voice_levels.clear();
-        self.seeker_voice_secs = 0;
         self.seeker_voice_finishing = false;
         self.seeker_voice_send = false;
     }
@@ -479,12 +476,8 @@ impl Dashboard {
         let mut changed = false;
         // Read the device into locals first: the borrow of the capture must end
         // before the fields it feeds are written.
-        let meter = self
-            .seeker_capture
-            .as_ref()
-            .map(|capture| (capture.elapsed().as_secs(), capture.levels()));
-        if let Some((secs, levels)) = meter {
-            self.seeker_voice_secs = secs;
+        let levels = self.seeker_capture.as_ref().map(|capture| capture.levels());
+        if let Some(levels) = levels {
             self.seeker_voice_levels = levels;
             changed = true;
         }
@@ -554,7 +547,7 @@ impl Dashboard {
     /// The insertion goes through the shared text field, so a take replaces a
     /// selection and lands where the person would have typed. `send` decides
     /// what happens next: a take ended by the chord runs the search the same
-    /// way a keystroke starts it, and a take ended by the bubble's stop button
+    /// way a keystroke starts it, and a take ended by clicking the glass
     /// leaves the words there to be read and corrected first.
     ///
     /// The card is reopened if it is gone: a take that outlived its surface

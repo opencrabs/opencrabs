@@ -668,22 +668,20 @@ struct Dashboard {
     finder_paint: Entity<command_palette::FinderPaint>,
     /// A left-button drag is extending the field's selection.
     finder_selecting: bool,
-    /// The Seeker's own take (#3044). The card records in place: the field it
-    /// fills is the field on screen, so the counter, the wave and the stop are
-    /// drawn inside the card instead of the composer's strip, and the words
-    /// land where the person was already typing.
+    /// The Seeker's own take (#3044). The card records in place: its glass
+    /// bubble replaces the card while the device is open, and the words land
+    /// in the field where the person was already typing.
     seeker_capture: Option<voice_input::Capture>,
     seeker_transcription: Option<voice_input::Transcription>,
     /// The high-resolution procedural glass drawn while this take is live.
     seeker_orb: Option<seeker_orb::OrbAnimation>,
-    /// How long the take has run, and the meter the card draws beside it.
-    seeker_voice_secs: u64,
+    /// The live microphone meter that drives the glass motion.
     seeker_voice_levels: Vec<f32>,
     /// The recording was asked to stop and its WAV is being built.
     seeker_voice_finishing: bool,
     /// Whether the words this take produces should be run as a search the
     /// moment they land, or only put in the field for editing (#3044). The
-    /// chord sends, the bubble's own stop button hands the words back.
+    /// chord sends; clicking the glass hands the words back.
     seeker_voice_send: bool,
     /// Whether the Seeker's voice loop is already ticking. Same one-shot shape
     /// as the composer's: one loop per take, never one per frame.
@@ -6142,7 +6140,6 @@ fn main() {
                         seeker_capture: None,
                         seeker_transcription: None,
                         seeker_orb: None,
-                        seeker_voice_secs: 0,
                         seeker_voice_levels: Vec::new(),
                         seeker_voice_finishing: false,
                         seeker_voice_send: false,
@@ -7890,13 +7887,13 @@ mod tests {
             "the chord asks for the words to be searched the moment they land"
         );
 
-        // The other way out of a take (#3044): the bubble's own stop button
-        // lands the words without searching them, so a half-heard query can be
-        // read and corrected first.
+        // The other way out of a take (#3044): clicking the glass lands the
+        // words without searching them, so a half-heard query can be read and
+        // corrected first.
         let edit = "pub(crate) fn seeker_stop_for_edit(";
         let stop = code
             .find(edit)
-            .expect("the bubble's stop button has a handler");
+            .expect("the glass click has a handler");
         let tail = code.get(stop..).expect("the handler starts on a glyph");
         let stop_body = tail.split("\n    }\n").next().expect("the stop body");
         assert!(

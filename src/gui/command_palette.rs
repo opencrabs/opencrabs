@@ -421,12 +421,10 @@ pub(super) fn query_line(
 /// The Seeker's take, as the window paints it (#3044).
 ///
 /// Derived from the window's handles on every frame rather than stored: the
-/// bubble must never show a counter for a microphone that already closed.
+/// bubble must never paint a microphone that already closed.
 pub(crate) struct SeekerVoice {
     /// The device is open and samples are arriving.
     pub recording: bool,
-    /// Seconds the take has run, for the counter.
-    pub secs: u64,
     /// The newest high-resolution glass frame from the orb worker.
     pub frame: Arc<RenderImage>,
 }
@@ -477,15 +475,9 @@ fn field_mic(view: WeakEntity<Dashboard>) -> impl IntoElement {
 ///
 /// The worker supplies the transparent 1024 px material. GPUI paints it as an
 /// image rather than stacking static circles, so the liquid ribbons, rim and
-/// microphone response move together. The timer and stop control stay crisp
-/// above the texture instead of being baked into every worker frame.
+/// microphone response move together. Nothing sits over the glass: the whole
+/// bubble remains the click target that ends the take for editing.
 fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoElement {
-    let theme = palette::current();
-    let colour = if voice.recording {
-        theme.amber
-    } else {
-        theme.green
-    };
     div()
         .id("seeker-take-bubble")
         .relative()
@@ -500,34 +492,6 @@ fn seeker_bubble(voice: &SeekerVoice, view: WeakEntity<Dashboard>) -> impl IntoE
             let _ = view.update(cx, |this, cx| this.seeker_stop_for_edit(cx));
         })
         .child(img(voice.frame.clone()).absolute().inset_0().size_full())
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(div().text_sm().text_color(rgb(colour)).child(format!(
-                    "{}:{:02}",
-                    voice.secs / 60,
-                    voice.secs % 60
-                )))
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .size(px(26.0))
-                        .rounded_full()
-                        .bg(rgba(0x08080d80))
-                        .border_1()
-                        .border_color(rgba(0xffffff30))
-                        .child(div().size(px(9.0)).rounded(px(2.0)).bg(rgb(colour))),
-                ),
-        )
 }
 
 /// Presentation state for one Seeker frame. Grouping the borrowed engine,
@@ -605,9 +569,9 @@ pub(super) fn overlay(
     // carries no flex gap, because the caret rides the shaped line and a gap
     // beside it would move the one thing that has to sit exactly where the text
     // does (#2531); the microphone brings its own inset instead.
-    // Two handles on the window: the microphone's click and the bubble's own
-    // stop button. The field's shaped line takes the original, so the copies
-    // have to be made before it does (#3044).
+    // Two handles on the window: the microphone's click and the glass bubble's
+    // click. The field's shaped line takes the original, so the copies have to
+    // be made before it does (#3044).
     let dictate = view.clone();
     let bubble_view = view.clone();
     let mut pill = div()
@@ -1119,20 +1083,21 @@ mod tests {
             "yellow while the device is open, green from the hand-off to the transcriber"
         );
         assert!(
-            drawn.contains(".size(rems(TAKE_BUBBLE))") && drawn.contains(".rounded_full()"),
-            "the take is a sphere, not a bar"
+            drawn.contains(".size(rems(TAKE_BUBBLE))")
+                && drawn.contains("img(voice.frame.clone())"),
+            "the take is the high-resolution glass frame, not a bar"
         );
         assert!(
             drawn.contains("this.seeker_stop_for_edit(cx)"),
-            "the bubble is a stop control, so ending a take never depends on remembering the chord"
+            "clicking the glass still ends a take without requiring the chord"
         );
         assert!(
             !drawn.contains("this.seeker_dictate(cx)"),
             "the bubble hands the words back for editing; sending is the chord's job"
         );
         assert!(
-            drawn.contains(".size(px(26.0))"),
-            "the stop is a drawn button, not a caption nobody knows to click"
+            !drawn.contains("voice.secs") && !drawn.contains(".size(px(26.0))"),
+            "no timer or separate stop button covers the glass"
         );
     }
 
