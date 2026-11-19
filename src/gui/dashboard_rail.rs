@@ -991,47 +991,6 @@ impl Dashboard {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn a_strip_that_just_opened_stays_open() {
-        // #3020: expanding is a deliberate act, and the reader needs the time
-        // to scan the list before anything folds under the pointer.
-        let now = Instant::now();
-        assert!(!chips_idle_fold_due(now, now));
-        assert!(!chips_idle_fold_due(
-            now,
-            now + RAIL_CHIPS_IDLE_FOLD - Duration::from_millis(1)
-        ));
-    }
-
-    #[test]
-    fn a_strip_open_past_the_idle_period_folds() {
-        // #3020: the disclosure is a picker, not a setting, so it does not
-        // survive being ignored.
-        let now = Instant::now();
-        assert!(chips_idle_fold_due(now, now + RAIL_CHIPS_IDLE_FOLD));
-        assert!(chips_idle_fold_due(
-            now,
-            now + RAIL_CHIPS_IDLE_FOLD + Duration::from_secs(600)
-        ));
-    }
-
-    #[test]
-    fn a_clock_that_moved_backwards_does_not_fold() {
-        // #3020: `Instant` is monotonic on every platform the window ships on,
-        // but a strip is cheap to keep and expensive to lose under the reader's
-        // pointer, so the comparison saturates instead of panicking. The stamp
-        // sits in the future here, which is the same shape as a clock that
-        // stepped back.
-        let now = Instant::now();
-        assert!(!chips_idle_fold_due(now + Duration::from_secs(5), now));
-    }
-}
-
 /// Whether a rail preview refresh can actually change a line.
 ///
 /// The first version asked `rail.streaming_count()`, which counts only
@@ -1093,5 +1052,46 @@ pub(crate) fn set_rail_open_state(
         // The deep hits clear with the rail too (#2720): a reopened rail
         // starts unsearched, never showing snippets from the last query.
         sessions.content_matches.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_strip_that_just_opened_stays_open() {
+        // #3020: expanding is a deliberate act, and the reader needs the time
+        // to scan the list before anything folds under the pointer.
+        let now = Instant::now();
+        assert!(!chips_idle_fold_due(now, now));
+        assert!(!chips_idle_fold_due(
+            now,
+            now + RAIL_CHIPS_IDLE_FOLD - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn a_strip_open_past_the_idle_period_folds() {
+        // #3020: the disclosure is a picker, not a setting, so it does not
+        // survive being ignored.
+        let now = Instant::now();
+        assert!(chips_idle_fold_due(now, now + RAIL_CHIPS_IDLE_FOLD));
+        assert!(chips_idle_fold_due(
+            now,
+            now + RAIL_CHIPS_IDLE_FOLD + Duration::from_secs(600)
+        ));
+    }
+
+    #[test]
+    fn a_clock_that_moved_backwards_does_not_fold() {
+        // #3020: `Instant` is monotonic on every platform the window ships on,
+        // but a strip is cheap to keep and expensive to lose under the reader's
+        // pointer, so the comparison saturates instead of panicking. The stamp
+        // sits in the future here, which is the same shape as a clock that
+        // stepped back.
+        let now = Instant::now();
+        assert!(!chips_idle_fold_due(now + Duration::from_secs(5), now));
     }
 }
