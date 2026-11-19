@@ -6684,10 +6684,13 @@ mod tests {
     #[test]
     fn message_bubbles_pad_and_shrink_attachment_budget() {
         let src = include_str!("transcript.rs");
+        // The bubble's own body, not the stretch of file after it: the fold
+        // tile that follows carries the card radius on purpose (#3064), and it
+        // belongs to its own function.
         let bubble = src
             .split("fn bubble(")
             .nth(1)
-            .and_then(|rest| rest.split("/// The files").next())
+            .and_then(|rest| rest.split("\nfn ").next())
             .expect("message bubble renderer");
         assert!(bubble.contains(".rounded(px(MESSAGE_RADIUS))"));
         assert!(!bubble.contains(".rounded(px(CARD_RADIUS))"));
