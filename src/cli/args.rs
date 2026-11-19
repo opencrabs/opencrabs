@@ -749,9 +749,7 @@ pub async fn run() -> Result<()> {
         cli.command,
         Some(Commands::Service { .. }) | Some(Commands::Init { .. })
     );
-    if !manages_service
-        && let Err(e) = commands::migrate_legacy_service_label()
-    {
+    if !manages_service && let Err(e) = commands::migrate_legacy_service_label() {
         tracing::warn!("service label migration skipped: {e}");
     }
 

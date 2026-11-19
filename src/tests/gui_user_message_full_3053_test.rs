@@ -43,7 +43,10 @@ fn a_message_the_reader_typed_is_never_cut() {
         "working-out bodies still take the bound"
     );
 
-    let blocks = region("fn block_view(", "Block::Thinking { content } => thinking_block");
+    let blocks = region(
+        "fn block_view(",
+        "Block::Thinking { content } => thinking_block",
+    );
     assert!(
         blocks.contains("full || role == \"user\""),
         "a forwarded message the reader sent is not cut either"

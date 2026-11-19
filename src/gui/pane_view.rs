@@ -574,8 +574,8 @@ impl Render for PaneView {
                 let title = opencrabs::ui_core::message_reader::title(&row.content);
                 let content = row.content.clone();
                 let window = edit_window.clone();
-                let handler: transcript::ClickHandler = std::rc::Rc::new(
-                    move |ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let handler: transcript::ClickHandler =
+                    std::rc::Rc::new(move |ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
                         // A drag is a copy gesture, not a request to open.
                         if let ClickEvent::Mouse(click) = ev
                             && (click.up.position - click.down.position).magnitude() > 2.0
@@ -585,8 +585,7 @@ impl Render for PaneView {
                         let _ = window.update(cx, |this, cx| {
                             this.open_message_preview(title.clone(), content.clone(), cx);
                         });
-                    },
-                );
+                    });
                 (id, handler)
             })
             .collect();

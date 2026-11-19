@@ -280,11 +280,7 @@ pub(crate) fn drop_held(content: &str, held: &[String]) -> String {
 /// first flush so its clock covers the thinking, and a block that already
 /// posted always paints, because settling it is what closes it.
 pub(crate) fn paints(steps: &[Step], posted: bool, wait_for_first_tool: bool) -> bool {
-    !wait_for_first_tool
-        || posted
-        || steps
-            .iter()
-            .any(|step| matches!(step, Step::Tool { .. }))
+    !wait_for_first_tool || posted || steps.iter().any(|step| matches!(step, Step::Tool { .. }))
 }
 
 /// Render the block as one WhatsApp text body.

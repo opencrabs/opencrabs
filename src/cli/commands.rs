@@ -541,9 +541,7 @@ pub(crate) async fn cmd_doctor(config: &crate::config::Config, fix: bool) -> Res
     if svc_conflicts > 0 {
         // Non-zero exit is what makes the command usable from a script. Every
         // other check here is advisory, so only a service conflict fails it.
-        anyhow::bail!(
-            "{svc_conflicts} service conflict(s) found; see the Service section above"
-        );
+        anyhow::bail!("{svc_conflicts} service conflict(s) found; see the Service section above");
     }
 
     Ok(())
@@ -731,12 +729,11 @@ fn doctor_service_report() -> (u32, u32, u32) {
     println!();
     println!("  Profile [{profile}]:");
     let locks_dir = crate::config::profile::base_opencrabs_dir().join("locks");
-    let stamp_pid = std::fs::read_to_string(
-        locks_dir.join("instance").join(format!("{profile}.lock")),
-    )
-    .ok()
-    .and_then(|contents| crate::config::profile::split_pid_ticks(contents.trim()))
-    .map(|(pid, _ticks)| pid);
+    let stamp_pid =
+        std::fs::read_to_string(locks_dir.join("instance").join(format!("{profile}.lock")))
+            .ok()
+            .and_then(|contents| crate::config::profile::split_pid_ticks(contents.trim()))
+            .map(|(pid, _ticks)| pid);
 
     let mut claimants: Vec<u32> = Vec::new();
     match stamp_pid {
@@ -762,7 +759,10 @@ fn doctor_service_report() -> (u32, u32, u32) {
     for (pid, owner) in &owners {
         let mut channels = owner.channels.clone();
         channels.sort();
-        println!("    ✅ Channel locks: pid {pid} holds {}", channels.join(", "));
+        println!(
+            "    ✅ Channel locks: pid {pid} holds {}",
+            channels.join(", ")
+        );
         ok += 1;
         if !claimants.contains(pid) {
             claimants.push(*pid);
@@ -2388,7 +2388,9 @@ fn bootout_label(label: &str) -> Result<()> {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let lowered = stderr.to_lowercase();
     // Not loaded is the outcome we wanted, so it is not an error.
-    if lowered.contains("no such") || lowered.contains("not find") || lowered.contains("could not find")
+    if lowered.contains("no such")
+        || lowered.contains("not find")
+        || lowered.contains("could not find")
     {
         return Ok(());
     }

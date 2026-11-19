@@ -39,7 +39,10 @@ fn the_title_is_the_first_line_that_carries_text() {
     assert_eq!(title("first line\nsecond line"), "first line");
     // Leading blank lines are what a pasted block starts with; the title skips
     // them instead of printing an empty header.
-    assert_eq!(title("\n\n   \n  the real opening\nthen more"), "the real opening");
+    assert_eq!(
+        title("\n\n   \n  the real opening\nthen more"),
+        "the real opening"
+    );
     assert_eq!(title(""), "message");
     assert_eq!(title("   \n\t\n"), "message");
 }

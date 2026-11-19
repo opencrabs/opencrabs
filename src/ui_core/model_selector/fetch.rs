@@ -317,7 +317,11 @@ pub async fn fetch_provider_models(
             struct GeminiModelsResponse {
                 models: Vec<GeminiModel>,
             }
-            match models_request(url).header("x-goog-api-key", key).send().await {
+            match models_request(url)
+                .header("x-goog-api-key", key)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<GeminiModelsResponse>().await {
                         Ok(body) => {

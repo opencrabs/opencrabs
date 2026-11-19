@@ -436,7 +436,6 @@ pub mod logging_log_files_test;
 pub mod logging_logger_test;
 pub mod long_command_test;
 pub mod markdown_render_test;
-pub mod message_reader_test;
 pub mod memory_archive_index_test;
 pub mod memory_backfill_sweep_test;
 pub mod memory_chunk_vector_test;
@@ -464,6 +463,7 @@ pub mod memory_vector_default_test;
 pub mod menu_auto_solo_test;
 #[cfg(feature = "telegram")]
 pub mod menu_refresh_test;
+pub mod message_reader_test;
 pub mod message_split_markup_test;
 pub mod mimo_tool_call_hint_test;
 pub mod mission_control_command_test;

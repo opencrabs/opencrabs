@@ -158,8 +158,7 @@ fn temp_agents_dir(tag: &str) -> std::path::PathBuf {
 }
 
 fn write_plist(agents_dir: &std::path::Path, label: &str) {
-    std::fs::write(launchagent_plist_path_in(agents_dir, label), "<plist/>")
-        .expect("write plist");
+    std::fs::write(launchagent_plist_path_in(agents_dir, label), "<plist/>").expect("write plist");
 }
 
 /// The case a long-lived install hits: both labels on disk. The managed plist

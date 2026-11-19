@@ -8722,8 +8722,7 @@ mod tests {
     fn the_composer_hint_offers_the_microphone_only_when_it_works() {
         let ready = composer_hint_for(false, 0, true);
         assert_eq!(
-            ready,
-            "Talk to the crab… · ctrl+alt+r to record, same key to stop",
+            ready, "Talk to the crab… · ctrl+alt+r to record, same key to stop",
             "a configured window names the chord and what it does"
         );
         assert!(
@@ -8736,8 +8735,7 @@ mod tests {
         );
         let cold = composer_hint_for(false, 0, false);
         assert_eq!(
-            cold,
-            "Talk to the crab… · /voice sets up the mic",
+            cold, "Talk to the crab… · /voice sets up the mic",
             "an unconfigured window names the only command that helps"
         );
         assert!(

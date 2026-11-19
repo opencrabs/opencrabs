@@ -576,8 +576,8 @@ pub fn body(
         PreviewKind::File => file_body(preview, document, middle_click),
         PreviewKind::Message => message_body(document, middle_click),
     };
-    let document_open = matches!(preview.kind, PreviewKind::File | PreviewKind::Message)
-        && document.is_some();
+    let document_open =
+        matches!(preview.kind, PreviewKind::File | PreviewKind::Message) && document.is_some();
     let mut shell = div().flex().flex_col().gap_3().w_full().min_w_0();
     if document_open {
         shell = shell.flex_1().min_h_0();

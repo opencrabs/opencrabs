@@ -38,8 +38,7 @@ fn tui_inline_phantom_row_folds_instead_of_painting_markers() {
             row.content
         );
         assert!(
-            !row
-                .details
+            !row.details
                 .as_deref()
                 .is_some_and(|d| d.contains("phantom_blocked")),
             "marker leaked into details"

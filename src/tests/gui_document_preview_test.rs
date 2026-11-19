@@ -1,8 +1,6 @@
 use std::fs;
 
-use crate::ui_core::local_document::{
-    DocumentKind, DocumentLoadError, load, load_with_limits,
-};
+use crate::ui_core::local_document::{DocumentKind, DocumentLoadError, load, load_with_limits};
 use crate::ui_core::scroll::{ScrollThumb, vertical_scroll_thumb};
 
 #[test]
@@ -19,7 +17,10 @@ fn document_kind_accepts_only_the_first_preview_slice() {
         DocumentKind::of_path(std::path::Path::new("notes.txt")),
         Some(DocumentKind::PlainText)
     );
-    assert_eq!(DocumentKind::of_path(std::path::Path::new("sheet.pdf")), None);
+    assert_eq!(
+        DocumentKind::of_path(std::path::Path::new("sheet.pdf")),
+        None
+    );
     assert_eq!(DocumentKind::of_path(std::path::Path::new("README")), None);
 }
 
@@ -39,10 +40,7 @@ fn loader_reads_text_without_marking_it_truncated() {
 fn loader_reports_missing_paths_and_directories() {
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("missing.md");
-    assert!(matches!(
-        load(&missing),
-        Err(DocumentLoadError::Io(_))
-    ));
+    assert!(matches!(load(&missing), Err(DocumentLoadError::Io(_))));
     assert_eq!(load(dir.path()), Err(DocumentLoadError::NotAFile));
 }
 
@@ -130,15 +128,24 @@ fn document_preview_gui_keeps_io_parsing_scrolling_and_lifetime_wired() {
 fn document_scrollbar_tracks_the_reading_position() {
     assert_eq!(
         vertical_scroll_thumb(400.0, 1600.0, 0.0),
-        Some(ScrollThumb { top: 0.0, height: 80.0 })
+        Some(ScrollThumb {
+            top: 0.0,
+            height: 80.0
+        })
     );
     assert_eq!(
         vertical_scroll_thumb(400.0, 1600.0, -800.0),
-        Some(ScrollThumb { top: 160.0, height: 80.0 })
+        Some(ScrollThumb {
+            top: 160.0,
+            height: 80.0
+        })
     );
     assert_eq!(
         vertical_scroll_thumb(400.0, 1600.0, -1600.0),
-        Some(ScrollThumb { top: 320.0, height: 80.0 })
+        Some(ScrollThumb {
+            top: 320.0,
+            height: 80.0
+        })
     );
 }
 
@@ -146,7 +153,10 @@ fn document_scrollbar_tracks_the_reading_position() {
 fn document_scrollbar_keeps_a_visible_thumb_and_hides_when_content_fits() {
     assert_eq!(
         vertical_scroll_thumb(400.0, 19_600.0, -19_600.0),
-        Some(ScrollThumb { top: 376.0, height: 24.0 })
+        Some(ScrollThumb {
+            top: 376.0,
+            height: 24.0
+        })
     );
     assert_eq!(vertical_scroll_thumb(400.0, 0.0, 0.0), None);
     assert_eq!(vertical_scroll_thumb(0.0, 100.0, 0.0), None);
