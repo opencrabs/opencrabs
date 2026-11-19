@@ -1,4 +1,4 @@
-//! Seeker kind-chip styling sentinel (#2533).
+//! Seeker kind-chip styling sentinel (#2533, #3066).
 
 const SOURCE: &str = include_str!("../gui/command_palette.rs");
 
@@ -24,9 +24,9 @@ fn seeker_chip_row_is_filled_not_outlined() {
     for expected in [
         ".rounded_full()",
         ".bg(rgba(CHIP_FILL))",
-        ".bg(rgba((theme.accent << 8) | 0x2e))",
-        ".text_color(rgb(theme.accent))",
-        ".bg(rgba((theme.accent << 8) | 0x42))",
+        ".bg(rgba(CHIP_ACTIVE_FILL))",
+        ".text_color(rgb(INK))",
+        ".bg(rgba(0xffffff33))",
         ".bg(rgba(0xffffff28))",
     ] {
         assert!(
@@ -37,5 +37,12 @@ fn seeker_chip_row_is_filled_not_outlined() {
     assert!(
         SOURCE.contains("const CHIP_FILL: u32 = 0xffffff14;"),
         "the inactive fill stays a named translucent white token"
+    );
+    // The active capsule is a neutral lift, not the theme accent (#3066): at
+    // low alpha over the smoked card the accent sampled brown, so the fill is
+    // a shade of the glass and stays a named token.
+    assert!(
+        SOURCE.contains("const CHIP_ACTIVE_FILL: u32 = 0xffffff26;"),
+        "the active fill stays a named neutral token instead of the accent"
     );
 }
