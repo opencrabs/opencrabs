@@ -225,7 +225,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // the edge while the centre stays calm. GPUI does not expose the real
         // backdrop to this image, so these coordinates refract the material,
         // not the text painted behind the window (#3050).
-        let lens = 0.16 + edge.powf(2.0) * 0.58;
+        let lens = 0.12 + edge.powf(2.4) * 0.76;
         let turbulence = 0.010 + level * 0.018;
         let liquid_x = nx * roll_cos - ny * roll_sin;
         let liquid_y = nx * roll_sin + ny * roll_cos;
@@ -248,27 +248,23 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + sway * 0.026
             + sine(flow_x * 1.2 - t * 0.28) * (0.008 + level * 0.012);
         let centre = flow_y - centre_line;
-        let horizon = bell(centre, 0.18 + level * 0.025 + breathe * 0.012)
-            * bell(flow_x, 0.88)
-            * envelope;
-        let white = bell(centre, 0.060 + level * 0.008)
-            * bell(flow_x, 0.48)
-            * envelope;
-        let amber = bell(centre - 0.22, 0.36) * bell(flow_x, 0.80) * envelope;
-        let blue_crown = bell(centre + 0.20, 0.34) * bell(flow_x, 0.78) * envelope;
+        let horizon =
+            bell(centre, 0.17 + level * 0.020 + breathe * 0.010) * bell(flow_x, 0.88) * envelope;
+        let white = bell(centre, 0.045 + level * 0.006) * bell(flow_x, 0.50) * envelope;
+        let amber = bell(centre - 0.20, 0.34) * bell(flow_x, 0.80) * envelope;
+        let blue_crown = bell(centre + 0.18, 0.31) * bell(flow_x, 0.78) * envelope;
 
-        // Soft directional Fresnel light, not a stroke around a flat disc.
-        // Both poles shine while the equator at the left and right falls away.
-        let fresnel = edge.powf(3.2);
-        let poles = smooth(0.10, 0.94, ny.abs());
-        let direction = 0.09 + poles * 0.91;
-        let pole_balance = 0.94 - ny * 0.06;
-        let shimmer = 0.97 + 0.03 * sine(ny * 2.0 + t * 0.30);
-        let rim = fresnel * direction * pole_balance * shimmer;
-        let inner_rim = smooth(0.56, 0.98, radius)
-            * (1.0 - smooth(0.985, 1.0, radius))
-            * direction
-            * 0.12;
+        // A narrow specular band gives the poles a wet, glassy edge. The
+        // wider bloom stays faint so it cannot become a uniform white stroke.
+        let fresnel = edge.powf(3.8);
+        let poles = smooth(0.08, 0.90, ny.abs());
+        let direction = 0.035 + poles * 0.965;
+        let pole_balance = 0.96 - ny * 0.04;
+        let shimmer = 0.985 + 0.015 * sine(ny * 2.0 + t * 0.30);
+        let rim = smooth(0.970, 0.997, radius) * direction * pole_balance * shimmer;
+        let rim_bloom = bell(radius - 0.965, 0.070) * direction * 0.16;
+        let chromatic = fresnel * (0.25 + direction * 0.75);
+        let warm_edge = (nx * 0.5 + 0.5).clamp(0.0, 1.0);
 
         // Broad absorption and a vertical light gradient provide the volume.
         // Only the upper glossy sheen remains; the old lower oval is gone.
@@ -278,46 +274,47 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let vertical = 0.5 - ny * 0.5;
         let light_field = (0.35 + absorption * 0.45 + vertical * 0.20) * body_shade;
         let body = 0.004 + light_field * 0.022;
-        let sheen = bell(flow_x + 0.18, 0.72)
-            * bell(flow_y + 0.47, 0.34)
-            * (0.20 + absorption * 0.16)
+        let sheen = bell(flow_x + 0.18, 0.62)
+            * bell(flow_y + 0.47, 0.28)
+            * (0.12 + absorption * 0.10)
             * envelope;
 
-        let red = body * 0.66
-            + horizon * 0.12 * body_shade
-            + white * 1.12
-            + amber * 0.74 * body_shade
-            + blue_crown * 0.055
+        let red = body * 0.50
+            + horizon * 0.18 * body_shade
+            + white * 1.65
+            + amber * 1.08 * body_shade
+            + blue_crown * 0.045
+            + sheen * 0.20
+            + rim * 1.35
+            + rim_bloom * 0.32
+            + chromatic * (0.018 + warm_edge * 0.042);
+        let green = body * 0.72
+            + horizon * 0.23 * body_shade
+            + white * 1.58
+            + amber * 0.38 * body_shade
+            + blue_crown * 0.38
+            + sheen * 0.26
+            + rim * 1.38
+            + rim_bloom * 0.36
+            + chromatic * 0.022;
+        let blue = body * 0.96
+            + horizon * 0.30 * body_shade
+            + white * 1.50
+            + amber * 0.055 * body_shade
+            + blue_crown * 1.02
             + sheen * 0.34
-            + rim * 0.94
-            + inner_rim * 0.20
-            + fresnel * tint.0 * 0.018;
-        let green = body * 0.86
-            + horizon * 0.16 * body_shade
-            + white * 1.06
-            + amber * 0.29 * body_shade
-            + blue_crown * 0.31
-            + sheen * 0.40
-            + rim * 0.97
-            + inner_rim * 0.28
-            + fresnel * tint.1 * 0.022;
-        let blue = body * 1.20
-            + horizon * 0.20 * body_shade
-            + white * 0.94
-            + amber * 0.065 * body_shade
-            + blue_crown * 0.76
-            + sheen * 0.50
-            + rim
-            + inner_rim * 0.42
-            + fresnel * tint.2 * 0.028;
-        let alpha = (0.10
-            + edge * 0.24
-            + fresnel * direction * 0.22
-            + horizon * 0.10
-            + white * 0.22
-            + amber * 0.12
-            + blue_crown * 0.08
-            + sheen * 0.08)
+            + rim * 1.42
+            + rim_bloom * 0.44
+            + chromatic * (0.018 + (1.0 - warm_edge) * 0.050);
+        let alpha = (0.035
+            + edge * 0.13
+            + rim * 0.55
+            + rim_bloom * 0.08
+            + horizon * 0.12
+            + white * 0.46
+            + amber * 0.17
+            + blue_crown * 0.13
+            + sheen * 0.025)
             .clamp(0.0, 0.96)
             * coverage;
         *pixel = bgra(red, green, blue, alpha);
