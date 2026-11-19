@@ -8702,9 +8702,10 @@ mod tests {
     #[test]
     fn the_composer_hint_offers_the_microphone_only_when_it_works() {
         let ready = composer_hint_for(false, 0, true);
-        assert!(
-            ready.contains("ctrl+alt+r") && ready.contains("record"),
-            "a configured window names the chord and what it does: {ready}"
+        assert_eq!(
+            ready,
+            "Talk to the crab… · ctrl+alt+r to record, same key to stop",
+            "a configured window names the chord and what it does"
         );
         assert!(
             ready.contains("same key to stop"),
@@ -8715,9 +8716,10 @@ mod tests {
             "a working microphone never points the reader at setup: {ready}"
         );
         let cold = composer_hint_for(false, 0, false);
-        assert!(
-            cold.contains("/voice"),
-            "an unconfigured window names the only command that helps: {cold}"
+        assert_eq!(
+            cold,
+            "Talk to the crab… · /voice sets up the mic",
+            "an unconfigured window names the only command that helps"
         );
         assert!(
             !cold.contains("ctrl+alt+r"),
