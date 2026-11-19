@@ -3804,7 +3804,13 @@ fn live_card(
     // Whether the call has anything to say, read before the row draws it: the
     // entry that renders the call takes the string, and the head still asks
     // whether it had one when it decides how many rows it has (#3046).
-    let has_lead = !lead.is_empty();
+    //
+    // The thinking placeholder is not something the turn said. `live_status_line`
+    // answers it for a turn with nothing at all, which is exactly the state the
+    // clock counts through, so the head drops it: the slot already says the turn
+    // is working, and it says it with the seconds. The rail still reads the
+    // placeholder out of `live_status_line` itself, which is why it stays there.
+    let has_lead = !lead.is_empty() && lead != THINKING_PLACEHOLDER;
     let footer = live_card_footer(live, ctx);
     // One status line, dot-divided (#3046): the sentence the turn is speaking,
     // the call it is running right now, and the numbers, with the turn's total
@@ -3839,17 +3845,21 @@ fn live_card(
     // sessions showed two different heads for the same state of a turn. Only a
     // call or a sentence is something to say.
     //
-    // The placeholder is not something to say either. `live_status_line`
-    // answers "OpenCrabs is thinking..." while the turn has nothing at all, and
-    // that sentence sits beside the clock rather than in front of it, so the
-    // clock still leads the line a message begins on.
+    // The placeholder is not something to say either. The head drops it
+    // (`has_lead` refuses it), so an empty line is the clock alone on the
+    // arrow's row, and the sentence the turn is speaking is the first thing
+    // that fills the line.
     let idle = live.tools.is_empty()
         && live.chunks == 0
         && live.stream.is_empty()
         && live.reasoning.is_empty()
         && collapsed_narration(live).is_none();
     let clock = clock_glyph(live.elapsed_secs());
-    if idle && !finished {
+    // One flag for the whole head, not two conditions that could disagree: it
+    // seats the clock in the slot and it paints the clock in the accent the
+    // line keeps once the clock moves, so the travel has no colour change in it.
+    let clock_in_slot = idle && !finished;
+    if clock_in_slot {
         slot = Some(clock);
     } else {
         segments.push(clock);
@@ -3876,7 +3886,17 @@ fn live_card(
     // moment there is a call or a sentence, so it never stands in front of what
     // the turn itself said.
     if let Some(slot) = slot {
-        head = head.child(head_run(slot, palette::current().text_muted, None).flex_shrink_0());
+        // The clock counts in the accent the numbers keep (#3046). It is the
+        // only thing on an otherwise empty head, so the orange is what says the
+        // turn is working without a word, and it does not change when the clock
+        // moves to the end of the line. A verdict keeps the muted grey the
+        // settled card gives its own glyphs.
+        let slot_colour = if clock_in_slot {
+            accent
+        } else {
+            palette::current().text_muted
+        };
+        head = head.child(head_run(slot, slot_colour, None).flex_shrink_0());
     }
     if !status_line.is_empty() {
         head = head.child(div().flex_1().min_w_0().child(live_entry_text(
@@ -4137,6 +4157,12 @@ fn head_dot(colour: u32) -> AnyElement {
         .into_any_element()
 }
 
+/// What `live_status_line` answers while a turn has nothing at all, worded for
+/// the session rail's preview. The card drops it: the head's slot already shows
+/// the turn working, counting the seconds, so the sentence would only repeat it
+/// beside a clock (#3046).
+pub(crate) const THINKING_PLACEHOLDER: &str = "OpenCrabs is thinking...";
+
 /// The live line split into its accented lead and its muted tail (#2326).
 ///
 /// The lead is what the turn is doing: the running call, else the last one
@@ -4159,7 +4185,7 @@ pub(crate) fn live_status_line(live: &LiveTurn) -> (String, String) {
         && live.stream.is_empty()
         && live.reasoning.is_empty()
     {
-        lead = Some("OpenCrabs is thinking...".to_string());
+        lead = Some(THINKING_PLACEHOLDER.to_string());
     }
     let mut tail: Vec<String> = Vec::new();
     if !live.tools.is_empty() {
@@ -7679,8 +7705,16 @@ mod tests {
             "the numbers never move the clock: the budget lands before the first call"
         );
         assert!(
-            segments.contains("if idle && !finished {"),
+            segments.contains("let clock_in_slot = idle && !finished;"),
             "the clock leads only the line a message begins on"
+        );
+        assert!(
+            segments.contains("if clock_in_slot {"),
+            "and one flag seats it, so the paint cannot read a different state"
+        );
+        assert!(
+            card.contains("let slot_colour = if clock_in_slot {"),
+            "it counts in the accent it keeps after it moves, not in grey"
         );
         assert!(
             segments.contains("slot = Some(clock);"),
