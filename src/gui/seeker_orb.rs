@@ -168,79 +168,132 @@ fn render(surface: &Surface, time: f32, input: OrbInput, energy: f32) -> RenderI
         let x = surface.x[index];
         let y = surface.y[index];
         if radius > 1.0 {
-            // A little coloured bloom lives outside the glass, in the texture's
-            // transparent margin rather than in a second GPUI element.
-            let glow = bell(radius - 1.0, 0.10) * (0.08 + level * 0.08);
-            *pixel = bgra(tint.0 * 0.5, tint.1 * 0.5, tint.2 * 0.5, glow);
+            // The transparent margin carries a soft contact shadow and a
+            // faint light bloom. The sphere now sits in the window instead of
+            // reading as a circular filter laid over the text.
+            let shadow = bell(radius - 1.02, 0.08)
+                * (0.10 + 0.06 * ((y + 1.0) * 0.5).clamp(0.0, 1.0));
+            let glow = bell(radius - 1.0, 0.10) * (0.025 + level * 0.04);
+            *pixel = bgra(
+                tint.0 * 0.025,
+                tint.1 * 0.03,
+                tint.2 * 0.045,
+                shadow + glow,
+            );
             continue;
         }
 
         let coverage = ((1.0 - radius) * surface.size as f32 * ORB_RADIUS * 0.5 + 0.5)
             .clamp(0.0, 1.0);
-        let wave_a = sine(x * 4.2 + t * 1.45);
-        let wave_b = sine(x * 8.1 - y * 2.4 - t * 0.82);
-        let wave_c = sine(y * 5.3 - x * 2.1 + t * 0.63);
-        let liquid = 0.018 + level * 0.065;
-        let flow_x = x + wave_c * 0.025;
-        let flow_y = y + wave_a * liquid + wave_b * (0.012 + level * 0.022);
+        let nx = x / ORB_RADIUS;
+        let ny = y / ORB_RADIUS;
+        let nz = (1.0 - radius * radius).max(0.0).sqrt();
+        let edge = 1.0 - nz;
 
-        // Three ribbons cross at different depths. Their width and distortion
-        // answer the microphone while their phases never stop moving.
-        let centre = flow_y - sine(x * 2.65 - t * 0.72) * (0.035 + level * 0.06);
-        let core = bell(centre, 0.085 + level * 0.065);
-        let upper = bell(
-            flow_y + 0.23 + sine(x * 3.1 + t * 0.55) * 0.055,
-            0.032 + level * 0.025,
-        );
-        let lower = bell(
-            flow_y - 0.27 + sine(x * 3.8 - t * 0.48) * 0.045,
-            0.045 + level * 0.025,
-        );
-        let wisps = (0.5 + 0.5 * sine(x * 3.4 + y * 4.6 + wave_b + t * 0.35))
-            * (0.5 + 0.5 * sine(y * 5.8 - x * 2.2 - t * 0.28));
+        // Bend the internal light field along the sphere normal. This gives
+        // the transparent material a distorted, refracted appearance without
+        // pretending that GPUI has sampled the pixels behind the window.
+        let lens = 0.14 + edge * 0.24;
+        let turbulence = 0.010 + level * 0.032;
+        let flow_x = x - nx * lens + sine(y * 4.4 + t * 0.50) * turbulence;
+        let flow_y = y - ny * lens
+            + sine(x * 3.6 - t * 0.65) * turbulence
+            + sine(x * 8.2 + y * 2.1 + t) * turbulence * 0.35;
+        let side = flow_x.abs().clamp(0.0, 1.0);
 
-        let fresnel = smooth(0.42, 1.0, radius);
-        let rim = bell(radius - 0.965, 0.075);
-        let top = (-y).clamp(0.0, 1.0);
-        let specular = bell(flow_x + 0.34 + sine(t * 0.4) * 0.07, 0.42)
-            * bell(y + 0.56, 0.24)
-            * 0.32;
-        let horizontal = (1.0 - x * x * 0.48).clamp(0.0, 1.0);
-        let band = core * horizontal * (0.82 + sine(t * 1.1) * 0.08 + level * 0.22);
-        let white = (1.0 - x.abs() * 0.72).clamp(0.0, 1.0);
-        let band_rgb = (
-            tint.0 * (1.0 - white) + white,
-            tint.1 * (1.0 - white) + white,
-            tint.2 * (1.0 - white) + white,
-        );
-        let rim_light = rim * (0.12 + top * 0.48 + specular);
+        // Siri's main reflection is a curved V, not a horizontal white bar.
+        // Copper collects at its centre and silver-blue wraps around both
+        // sides. A narrow inner band gives the centre its bright point light.
+        let centre_line = 0.10 - 0.26 * side.powf(1.35)
+            + sine(flow_x * 3.3 - t * 0.72) * (0.018 + level * 0.035)
+            + sine(flow_x * 7.7 + t * 1.10) * (0.006 + level * 0.012);
+        let centre = flow_y - centre_line;
+        let belt = bell(centre, 0.050 + (1.0 - side) * 0.050 + level * 0.025);
+        let sharp = bell(centre, 0.018 + level * 0.012);
+        let warm = bell(flow_x, 0.44);
+        let band_r = 0.30 * (1.0 - warm) + warm;
+        let band_g = 0.62 * (1.0 - warm) + 0.55 * warm;
+        let band_b = 0.95 * (1.0 - warm) + 0.25 * warm;
+        let envelope = 1.0 - smooth(0.78, 0.99, radius) * 0.88;
+        let band = belt * (0.66 + level * 0.34) * envelope;
+        let hot = sharp * warm * envelope;
+        let centre_light = bell(flow_x, 0.26) * bell(flow_y - 0.08, 0.20);
 
-        let red = 0.012
-            + wisps * 0.018
-            + fresnel * tint.0 * 0.035
-            + band * band_rgb.0 * 0.82
-            + upper * tint.0 * 0.16
-            + lower * tint.0 * 0.11
-            + rim_light * 0.72
-            + specular * 0.35;
-        let green = 0.016
-            + wisps * 0.022
-            + fresnel * tint.1 * 0.035
-            + band * band_rgb.1 * 0.86
-            + upper * tint.1 * 0.18
-            + lower * tint.1 * 0.12
-            + rim_light * 0.78
-            + specular * 0.38;
-        let blue = 0.027
-            + wisps * 0.034
-            + fresnel * tint.2 * 0.045
-            + band * band_rgb.2 * 0.92
-            + upper * tint.2 * 0.22
-            + lower * tint.2 * 0.16
-            + rim_light * 0.88
-            + specular * 0.42;
-        let alpha = (0.16 + fresnel * 0.35 + band * 0.30 + rim * 0.13 + specular * 0.10)
-            .clamp(0.0, 0.82)
+        // Fainter internal reflections cross at another depth. Their paths
+        // tighten near the lower rim, like light trapped inside a water drop.
+        let upper_line = -0.34 - 0.15 * side.powf(1.6)
+            + sine(flow_x * 4.1 + t * 0.43) * (0.012 + level * 0.018);
+        let upper = bell(flow_y - upper_line, 0.018 + level * 0.010)
+            * (0.30 + side * 0.70)
+            * envelope;
+        let lower_line = 0.43
+            + 0.20 * side.powf(1.4)
+            + sine(flow_x * 5.4 - t * 0.55) * (0.018 + level * 0.024);
+        let lower_a = bell(flow_y - lower_line, 0.024 + level * 0.010);
+        let lower_b = bell(
+            flow_y - 0.57 - 0.12 * side
+                + sine(flow_x * 4.6 + t * 0.47) * (0.015 + level * 0.018),
+            0.014 + level * 0.007,
+        );
+        let caustics = (lower_a * 0.58 + lower_b * 0.36) * envelope;
+
+        // Bright, selective edge lights and dark intervals make a hard surface.
+        // A uniform white ring would flatten it back into an outlined circle.
+        let top_left = (-nx * 0.55 - ny * 0.85).clamp(0.0, 1.0);
+        let bottom_right = (nx * 0.45 + ny * 0.85).clamp(0.0, 1.0);
+        let outer_rim = bell(radius - 0.976, 0.024);
+        let inner_rim = bell(radius - 0.885, 0.055);
+        let rim_base = outer_rim * (0.16 + top_left * 0.40);
+        let rim_cool = outer_rim * top_left * 0.72 + inner_rim * top_left * 0.22;
+        let rim_warm = inner_rim * (0.08 + bottom_right * 0.62);
+        let specular = bell(nx + 0.40, 0.22) * bell(ny + 0.48, 0.12)
+            + bell(nx + 0.58, 0.10) * bell(ny + 0.20, 0.28) * 0.38;
+        let inner_shadow = smooth(0.45, 0.98, radius) * (1.0 - top_left * 0.35);
+        let body_shade = 1.0 - inner_shadow * 0.52;
+        let wisps = (0.5 + 0.5 * sine(flow_x * 3.4 + flow_y * 4.6 + t * 0.35))
+            * (0.5 + 0.5 * sine(flow_y * 5.8 - flow_x * 2.2 - t * 0.28));
+        let body = (0.004 + nz * 0.009 + wisps * 0.005) * body_shade;
+
+        let red = body * 0.80
+            + band * band_r * body_shade
+            + hot * 0.72
+            + centre_light * 0.30
+            + upper * (0.20 + warm * 0.30)
+            + caustics * (0.22 + warm * 0.52)
+            + rim_base * 0.65
+            + rim_cool * 0.38
+            + rim_warm * 0.82
+            + specular * 0.95
+            + edge * edge * tint.0 * 0.025;
+        let green = body
+            + band * band_g * body_shade
+            + hot * 0.62
+            + centre_light * 0.25
+            + upper * (0.34 + warm * 0.14)
+            + caustics * (0.36 + warm * 0.23)
+            + rim_base * 0.72
+            + rim_cool * 0.66
+            + rim_warm * 0.43
+            + specular * 0.97
+            + edge * edge * tint.1 * 0.025;
+        let blue = body * 1.35
+            + band * band_b * body_shade
+            + hot * 0.40
+            + centre_light * 0.17
+            + upper * 0.56
+            + caustics * (0.62 - warm * 0.25)
+            + rim_base * 0.82
+            + rim_cool
+            + rim_warm * 0.20
+            + specular
+            + edge * edge * tint.2 * 0.035;
+        let alpha = (0.28
+            + edge * 0.50
+            + band * 0.20
+            + hot * 0.10
+            + outer_rim * 0.18
+            + specular * 0.08)
+            .clamp(0.0, 0.96)
             * coverage;
         *pixel = bgra(red, green, blue, alpha);
     }
