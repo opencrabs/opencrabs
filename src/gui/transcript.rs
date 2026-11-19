@@ -2775,7 +2775,7 @@ fn bubble(
 /// The tile is the click. It stops the event when it opens, because the row
 /// under it answers the same press, and one click must not open the reader
 /// twice.
-fn folded_document_cell(fold: &message_reader::Fold, open: Option<&ClickHandler>) -> Div {
+fn folded_document_cell(fold: &message_reader::Fold, open: Option<&ClickHandler>) -> AnyElement {
     let palette = palette::current();
     let details = format!("{} \u{00b7} open in the reader", fold.summary);
     let tile = div()
@@ -2822,12 +2822,21 @@ fn folded_document_cell(fold: &message_reader::Fold, open: Option<&ClickHandler>
     match open {
         Some(handler) => {
             let handler = handler.clone();
-            tile.cursor_pointer().on_click(move |event, window, cx| {
-                cx.stop_propagation();
-                handler(event, window, cx);
-            })
+            // The click hangs off a stateful element: gpui's `on_click` lives
+            // on `StatefulInteractiveElement`, not on a bare `Div`, and a
+            // `ClickHandler` is an `Rc<dyn Fn>`, which is not an `Fn`, so it
+            // forwards through a closure of its own. The id is content-derived
+            // because the card is built out of the fold, not out of a row that
+            // owns a stored id.
+            tile.id(SharedString::from(format!("fold-card-{}", fold.name)))
+                .cursor_pointer()
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    handler(event, window, cx);
+                })
+                .into_any_element()
         }
-        None => tile,
+        None => tile.into_any_element(),
     }
 }
 
