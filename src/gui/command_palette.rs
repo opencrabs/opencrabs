@@ -268,6 +268,15 @@ const SEEKER_GAP: f32 = 10.0;
 const SEEKER_GUTTER: f32 = 12.0;
 const SEEKER_ROW_PAD_X: f32 = 12.0;
 
+/// The rail the card's chrome stands on: the chips, the status line and the
+/// legend all start where a row's text starts, so the card reads as one column
+/// with a single left edge. Three surfaces had drifted onto their own insets
+/// (chips and footers at the raw 12 px gutter, rows at 24), which put the
+/// chrome left of every row beneath it and made the card look unaligned. It is
+/// the gutter plus the row's own inset by construction, never a second guess
+/// at the same measure (#3066).
+const SEEKER_CARD_PAD_X: f32 = SEEKER_GUTTER + SEEKER_ROW_PAD_X;
+
 /// The floating take's diameter (#3044). Siri-sized rather than chip-sized:
 /// while the microphone is open the bubble is the only thing on the screen, so
 /// it has to carry the whole state at a glance from across a desk.
@@ -775,7 +784,13 @@ pub(super) fn overlay(
         // conversation list has no kinds to filter (#2491).
         if !pick_armed {
             let wanted = state.kind_filter();
-            let mut row = div().flex().flex_row().gap_1().px_3().pt_4().pb_2();
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .px(px(SEEKER_CARD_PAD_X))
+                .pt_4()
+                .pb_3();
             for (ix, (label, kind)) in chip_defs().into_iter().enumerate() {
                 let active = wanted == kind;
                 let press = chip.clone();
@@ -956,7 +971,7 @@ pub(super) fn overlay(
         if miss || asks {
             card = card.child(
                 div()
-                    .px_3()
+                    .px(px(SEEKER_CARD_PAD_X))
                     .pb_3()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
@@ -968,7 +983,7 @@ pub(super) fn overlay(
             card = card
                 .child(
                     div()
-                        .px_3()
+                        .px(px(SEEKER_CARD_PAD_X))
                         .pb_1()
                         .text_xs()
                         .text_color(rgb(INK_WARM))
@@ -976,7 +991,7 @@ pub(super) fn overlay(
                 )
                 .child(
                     div()
-                        .px_3()
+                        .px(px(SEEKER_CARD_PAD_X))
                         .pb_2()
                         .text_xs()
                         .text_color(rgb(INK_MUTED))
@@ -987,7 +1002,7 @@ pub(super) fn overlay(
             // line would run, so the legend names that (#2711).
             card = card.child(
                 div()
-                    .px_3()
+                    .px(px(SEEKER_CARD_PAD_X))
                     .pb_3()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
@@ -998,7 +1013,7 @@ pub(super) fn overlay(
             // at its rows so the glass stays a hint (#2491).
             card = card.child(
                 div()
-                    .px_3()
+                    .px(px(SEEKER_CARD_PAD_X))
                     .pb_3()
                     .text_xs()
                     .text_color(rgb(INK_MUTED))
