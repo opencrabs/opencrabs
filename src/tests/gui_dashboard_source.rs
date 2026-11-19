@@ -18,6 +18,7 @@
 /// window file itself is last and carries no inline tests: its tests live in
 /// `gui/tests/` now, so the whole of this text is production.
 pub const DASHBOARD: &str = concat!(
+    include_str!("../gui/app.rs"),
     include_str!("../gui/boot.rs"),
     include_str!("../gui/channel_chip.rs"),
     include_str!("../gui/launch.rs"),
@@ -38,12 +39,14 @@ pub const DASHBOARD: &str = concat!(
     include_str!("../gui/dashboard_projects.rs"),
     include_str!("../gui/projects_screen.rs"),
     include_str!("../gui/dashboard_rail.rs"),
+    include_str!("../gui/dashboard_render.rs"),
     // The rail itself (#2933): rows, chips and the filter menu are built in
     // their own module now, so a "the dashboard contains this" scan has to read
     // it too.
     include_str!("../gui/rail_view.rs"),
     include_str!("../gui/dashboard_screens.rs"),
     include_str!("../gui/dashboard_sessions.rs"),
+    include_str!("../gui/dashboard_state.rs"),
     include_str!("../gui/dashboard_topics.rs"),
     include_str!("../gui/dashboard_turns.rs"),
     include_str!("../gui/main.rs"),

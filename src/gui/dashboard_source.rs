@@ -12,6 +12,7 @@
 //! it. The window's boot, input and launch helpers moved out of `main.rs`
 //! (#3060) and are listed with the rest.
 pub const DASHBOARD: &str = concat!(
+    include_str!("app.rs"),
     include_str!("boot.rs"),
     include_str!("channel_chip.rs"),
     include_str!("launch.rs"),
@@ -32,9 +33,11 @@ pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_projects.rs"),
     include_str!("projects_screen.rs"),
     include_str!("dashboard_rail.rs"),
+    include_str!("dashboard_render.rs"),
     include_str!("rail_view.rs"),
     include_str!("dashboard_screens.rs"),
     include_str!("dashboard_sessions.rs"),
+    include_str!("dashboard_state.rs"),
     include_str!("dashboard_topics.rs"),
     include_str!("dashboard_turns.rs"),
     include_str!("main.rs"),
