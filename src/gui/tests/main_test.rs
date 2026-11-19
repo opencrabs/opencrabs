@@ -2590,11 +2590,15 @@ fn seeker_owns_the_keyboard_before_the_composer_does() {
     // must run before the composer gate, or a focused editor types into
     // itself what the user meant for the field (#2458).
     let src = DASHBOARD;
-    let hook = src
+    // The gate's chain is wrapped by rustfmt, so the scan reads on_key
+    // flat and compares positions in one string.
+    let on_key = fn_body(src, "on_key");
+    let flat: String = on_key.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hook = flat
         .find("self.finder_key(ks, cx)")
         .expect("the card must answer keys in on_key");
-    let gate = src
-        .find("if self.composer.editor.read(cx).focus_handle.is_focused(window)")
+    let gate = flat
+        .find("if self .composer .editor .read(cx) .focus_handle .is_focused(window)")
         .expect("the composer gate is in the handler");
     assert!(
         hook < gate,
@@ -3256,11 +3260,16 @@ fn ctrl_c_clears_a_draft_typed_since_the_first_press() {
 #[test]
 fn ctrl_c_branch_runs_ahead_of_the_composer_gate() {
     let src = DASHBOARD;
-    let branch = src
+    // rustfmt wrapped the gate's method chain at 100 columns, so the scan
+    // reads the body flat: the rule is about where the gate sits, not
+    // about where the breaks landed.
+    let on_key = fn_body(src, "on_key");
+    let flat: String = on_key.split_whitespace().collect::<Vec<_>>().join(" ");
+    let branch = flat
         .find("self.ctrl_c_press(cx);")
         .expect("the Ctrl+C branch is in on_key");
-    let gate = src
-        .find("if self.composer.editor.read(cx).focus_handle.is_focused(window)")
+    let gate = flat
+        .find("if self .composer .editor .read(cx) .focus_handle .is_focused(window)")
         .expect("the composer gate is in on_key");
     assert!(
         branch < gate,
