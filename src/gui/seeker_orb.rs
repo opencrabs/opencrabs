@@ -634,11 +634,8 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // where the sound is, and the lens rotates underneath it on its own.
         let waveform = voice_at(&liquid_levels, (nx * 0.5 + 0.5).clamp(0.0, 1.0));
         let lift = LIFT * level * waveform;
-        let horizon = HORIZON
-            + BOW_BOWL * (1.0 - nz)
-            + BREATHE * sine(t * 0.70)
-            + slosh * nx
-            + swell;
+        let horizon =
+            HORIZON + BOW_BOWL * (1.0 - nz) + BREATHE * sine(t * 0.70) + slosh * nx + swell;
         // The band rides a slightly different seam from the bowl's: it is the
         // horizon reflected off the inside of the sphere, so it rises towards
         // the wall while the bowl's own boundary falls away. The voice lifts it
@@ -1433,10 +1430,10 @@ mod tests {
         let spoken = render(&surface, 0.0, half, 1.0);
         let quiet_bytes = quiet.as_bytes(0).expect("quiet frame");
         let spoken_bytes = spoken.as_bytes(0).expect("spoken frame");
-        let left = band_centroid(spoken_bytes, size, -0.55)
-            - band_centroid(quiet_bytes, size, -0.55);
-        let right = band_centroid(spoken_bytes, size, 0.55)
-            - band_centroid(quiet_bytes, size, 0.55);
+        let left =
+            band_centroid(spoken_bytes, size, -0.55) - band_centroid(quiet_bytes, size, -0.55);
+        let right =
+            band_centroid(spoken_bytes, size, 0.55) - band_centroid(quiet_bytes, size, 0.55);
         assert!(
             right < left - 0.03,
             "the loud side of the strip must rise clear of the quiet side, \
