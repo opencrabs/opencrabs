@@ -549,12 +549,15 @@ impl Dashboard {
         self.preview_document = None;
     }
 
-    /// Read a long message in the document reader (#3053). The text is already
-    /// in memory, so nothing is written to disk and there is no file to open:
-    /// the reader is the comfortable place to read what the row already shows
-    /// in full.
+    /// Read a long message in the document reader (#3053). When the window has
+    /// written the row's markdown to the conversation's project files, the
+    /// reader opens THAT file (#3064): the card on the row names it, so reading
+    /// the file is the card keeping its word. A row the window has no file for
+    /// falls back to the text it holds, because a reader that refuses what the
+    /// row already shows is worse than one with no file behind it.
     pub(crate) fn open_message_preview(
         &mut self,
+        id: uuid::Uuid,
         title: String,
         content: String,
         cx: &mut Context<Self>,
@@ -565,14 +568,24 @@ impl Dashboard {
         self.preview_document = Some(preview_document::DocumentState::text(generation));
         self.preview_video = None;
         self.preview_zoom = 1.0;
+        let path = self.prompt_docs.get(&id).cloned();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let parsed = cx
                 .background_executor()
                 .spawn(async move {
+                    // A file the window wrote is the same bytes as the row, so
+                    // the read is only about which copy is authoritative. It
+                    // stays on this half of the work: a failed read falls back
+                    // to the row's own text instead of an error the reader
+                    // cannot do anything with.
+                    let body = match path {
+                        Some(path) => std::fs::read_to_string(path).unwrap_or(content),
+                        None => content,
+                    };
                     // Verbatim is what the row itself draws, so the reader
                     // shows the same line breaks the reader typed.
-                    preview_document::parse_text(&content, crate::markdown::MdFlow::Verbatim)
+                    preview_document::parse_text(&body, crate::markdown::MdFlow::Verbatim)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {

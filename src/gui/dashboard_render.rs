@@ -329,10 +329,11 @@ impl Render for Dashboard {
             } else if row.role == "user"
                 && opencrabs::ui_core::message_reader::opens_in_reader(&row.content)
             {
-                // A prompt long enough to stop reading well in the column opens
-                // in the reader on a click (#3053). Nothing is cut to reach
-                // that: the row still draws every line, and the reader is the
-                // comfortable place to read it, not the only place.
+                // A prompt long enough to stop reading well in the column folds
+                // to its opening lines, and both the row and its document card
+                // open the whole message in the reader (#3053, #3064). Nothing
+                // is lost: the body is stored whole, copy and edit read all of
+                // it, and the card is one click from the rest.
                 let title = opencrabs::ui_core::message_reader::title(&row.content);
                 let content = row.content.clone();
                 let handler = cx.listener(move |this, ev: &ClickEvent, _window, cx| {
@@ -342,7 +343,7 @@ impl Render for Dashboard {
                     {
                         return;
                     }
-                    this.open_message_preview(title.clone(), content.clone(), cx);
+                    this.open_message_preview(id, title.clone(), content.clone(), cx);
                 });
                 message_click.insert(id, std::rc::Rc::new(handler));
             }

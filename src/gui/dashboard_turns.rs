@@ -852,6 +852,10 @@ impl Dashboard {
     /// open installs, so a re-read after a truncation leaves the window and the
     /// store saying the same thing.
     pub(crate) fn install_loaded(&mut self, loaded: transcript::Loaded, cx: &mut Context<Self>) {
+        // Before the rows move (#3064): the folded prompts among them are
+        // written to the conversation's project files, so the card on screen
+        // names a file that exists.
+        let documents = prompt_files::documents(&loaded.rows);
         let (hidden, turns) = transcript::turns_with_origins(
             &loaded.rows,
             loaded.total,
@@ -862,6 +866,7 @@ impl Dashboard {
         self.chat_state.transcript.turns = turns;
         self.chat_state.transcript.rows = loaded.rows;
         self.chat_state.transcript.reactions = loaded.reactions;
+        self.persist_prompt_documents(documents, cx);
         cx.notify();
     }
 
@@ -872,6 +877,7 @@ impl Dashboard {
         loaded: transcript::Loaded,
         cx: &mut Context<Self>,
     ) {
+        let documents = prompt_files::documents(&loaded.rows);
         let (hidden, turns) = transcript::turns_with_origins(
             &loaded.rows,
             loaded.total,
@@ -888,6 +894,37 @@ impl Dashboard {
             pane.transcript.reactions = loaded.reactions;
             cx.notify();
         });
+        self.persist_prompt_documents(documents, cx);
+    }
+
+    /// Write a window's folded prompts to the conversation's project files
+    /// (#3064), off the UI thread, and keep where each one landed so the card
+    /// can open that file instead of a copy held in memory.
+    ///
+    /// The write is best-effort by design: a conversation with no project, a
+    /// read-only home or a full disk leaves the row exactly as it was, and the
+    /// reader still opens the text the row already holds. Nothing here is
+    /// allowed to fail a load.
+    fn persist_prompt_documents(
+        &mut self,
+        documents: Vec<prompt_files::PromptDocument>,
+        cx: &mut Context<Self>,
+    ) {
+        if documents.is_empty() {
+            return;
+        }
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let paths = prompt_files::persist_off_thread(db_path, documents).await;
+            if paths.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.prompt_docs.extend(paths);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The two taps a plan waiting on approval offers (#2755).

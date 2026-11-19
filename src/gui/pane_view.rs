@@ -583,7 +583,7 @@ impl Render for PaneView {
                             return;
                         }
                         let _ = window.update(cx, |this, cx| {
-                            this.open_message_preview(title.clone(), content.clone(), cx);
+                            this.open_message_preview(id, title.clone(), content.clone(), cx);
                         });
                     });
                 (id, handler)

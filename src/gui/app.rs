@@ -527,6 +527,7 @@ pub(crate) fn run() {
                         group_warned: false,
                         group_filter: String::new(),
                         preview: None,
+                        prompt_docs: HashMap::new(),
                         preview_zoom: 1.0,
                         preview_video: None,
                         preview_document: None,

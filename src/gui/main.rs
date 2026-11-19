@@ -87,6 +87,7 @@ mod plan_strip;
 mod platform_icons;
 mod preview;
 mod preview_document;
+mod prompt_files;
 mod projects;
 mod projects_screen;
 mod projects_view;

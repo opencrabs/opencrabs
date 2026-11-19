@@ -441,6 +441,10 @@ pub(crate) struct Dashboard {
     /// the overlay is modal, so a second preview replaces the first instead of
     /// stacking.
     pub(crate) preview: Option<preview::Preview>,
+    /// Where each folded prompt's markdown lives, keyed by row id (#3064).
+    /// Written when the window installs its rows, so a card never promises a
+    /// file nobody made. Empty until the first install lands.
+    pub(crate) prompt_docs: HashMap<Uuid, std::path::PathBuf>,
     /// How far the previewed image is zoomed, 1.0 at open. Reset on every open
     /// so a fresh click never inherits the last picture's magnification.
     pub(crate) preview_zoom: f32,

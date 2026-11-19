@@ -23,6 +23,7 @@ use opencrabs::services::message::{CompletedPlanPayload, PLAN_COMPLETED_ROLE, TU
 use opencrabs::ui_core::card::{CARD_RADIUS, concentric_radius, glass_fill};
 use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::links::{self, ClickTarget};
+use opencrabs::ui_core::message_reader;
 use opencrabs::ui_core::plan_history::CompletedPlanView;
 use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
@@ -2602,7 +2603,7 @@ fn bubble_has_surface(role: &str) -> bool {
 /// roles so a folded history holds one rhythm, and only the user message
 /// carries a surface behind them. That surface takes `MESSAGE_RADIUS`, so the
 /// message corners stay tighter than the cards around them (#2571).
-// A render call: the eight arguments are the row's shape and its content, so a
+// A render call: the nine arguments are the row's shape and its content, so a
 // bundle would only move the same state one call away (#2972).
 #[allow(clippy::too_many_arguments)]
 fn bubble(
@@ -2614,6 +2615,7 @@ fn bubble(
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
     full: bool,
+    open: Option<&ClickHandler>,
 ) -> Div {
     // The cut happens on the raw source, before anything walks it (#2805): a
     // folded working-out body reads its first rows and the rest is one click
@@ -2621,10 +2623,14 @@ fn bubble(
     // instead of the tens of kilobytes a single stored row can carry. Answers
     // arrive with `full = true`; the copy path always reads the whole block.
     //
-    // A message the reader typed never takes the cut (#3053). The cost #2805
-    // measured was generated working-out and tool output, not the words a
-    // person wrote, and the cut landed before the markdown parse, so a long
-    // prompt lost its structure along with its tail.
+    // A prompt is never cut SILENTLY (#3053, #3064). Past the bound the row
+    // keeps the opening lines and the rest becomes a document card that opens
+    // the whole message in the reader, so the cut is announced and one click
+    // from everything it left out. Below the bound it draws every line, which
+    // is why a question that reads in the column has no control in its way.
+    //
+    // The fold only happens when the control that reopens it exists: a live
+    // turn has no stored row yet, so it passes no handler and draws whole.
     //
     // The blank run at the end goes before the cut either way. One stored body
     // carried hundreds of blank lines after its last line of text, which draws
@@ -2633,12 +2639,20 @@ fn bubble(
     // chat (#2981). A blank line carries nothing, so dropping it costs the
     // reader no text and hides no line behind the marker.
     let content = without_trailing_blanks(content);
-    let (content, hidden) = if full || role == "user" {
-        (std::borrow::Cow::Borrowed(content), 0)
-    } else {
-        excerpt_lines(content, MSG_EXCERPT_LINES)
+    // The files a stored body carries are read from the WHOLE body, before any
+    // cut: an attachment marker sits at the end of the message, the exact part
+    // a fold does not draw, and reading it after the cut would drop the file's
+    // cell from the row (#3064).
+    let paths = marker_paths(content);
+    let folded = match (role, open) {
+        ("user", Some(_)) => message_reader::fold(content),
+        _ => None,
     };
-    let paths = marker_paths(&content);
+    let (content, hidden) = match &folded {
+        Some(fold) => (std::borrow::Cow::Borrowed(fold.head.as_str()), 0),
+        None if full || role == "user" => (std::borrow::Cow::Borrowed(content), 0),
+        None => excerpt_lines(content, MSG_EXCERPT_LINES),
+    };
     let text = strip_markers(&content);
     // `min_w_0` lets a wide row shrink to the pane instead of pushing it wide.
     // Before #2395 the row had neither, so a tile laid out taller than `TILE`
@@ -2723,6 +2737,13 @@ fn bubble(
             _ => plain_block(text, PLAIN_TEXT_SIZE, selection),
         });
     }
+    // The rest of a folded prompt is a document, named and sized, and the card
+    // is the control itself: one click opens the whole message in the reader
+    // (#3064). A cut with no visible way back to the text is what #904 warns
+    // about, and the row's own click is invisible, so the card carries it.
+    if let Some(fold) = &folded {
+        col = col.child(folded_document_cell(fold, open));
+    }
     if !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
@@ -2743,6 +2764,71 @@ fn bubble(
         );
     }
     col
+}
+
+/// The document a folded prompt becomes (#3064): a tile shaped like the
+/// attachment cells beside it, so the eye reads "this message carries a file"
+/// the way it already reads a screenshot's tile. The name comes from the
+/// message's own opening words, and the second line carries the line count and
+/// size, so the reader knows how much sits behind the fold before opening it.
+///
+/// The tile is the click. It stops the event when it opens, because the row
+/// under it answers the same press, and one click must not open the reader
+/// twice.
+fn folded_document_cell(fold: &message_reader::Fold, open: Option<&ClickHandler>) -> Div {
+    let palette = palette::current();
+    let details = format!("{} \u{00b7} open in the reader", fold.summary);
+    let tile = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .max_w(px(420.0))
+        // No width of its own: the tile takes the bubble's column and the
+        // width it does not need stays with the message above it.
+        .p_2()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(rgb(palette.track))
+        .bg(glass_fill(palette.panel_hi))
+        .child(
+            div()
+                .flex_none()
+                .text_lg()
+                .child(SharedString::from("\u{1f4c4}")),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .text_color(rgb(palette.text))
+                        .child(SharedString::from(fold.name.clone())),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(palette.text_muted))
+                        .child(SharedString::from(details)),
+                ),
+        );
+    match open {
+        Some(handler) => {
+            let handler = handler.clone();
+            tile.cursor_pointer().on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                handler(event, window, cx);
+            })
+        }
+        None => tile,
+    }
 }
 
 /// A forwarded copy (#2608): an accent bar down the left edge instead of a
@@ -3889,6 +3975,7 @@ fn block_view(
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
     full: bool,
+    open: Option<&ClickHandler>,
 ) -> Div {
     match block {
         Block::Msg {
@@ -3923,6 +4010,7 @@ fn block_view(
             handlers,
             selection,
             full,
+            open,
         ),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls, selection),
@@ -4126,6 +4214,9 @@ fn live_block(
                 handlers,
                 Some(&selection),
                 true,
+                // A live row has no stored id yet, so there is no reader
+                // handler to open: it draws whole until it settles (#3064).
+                None,
             ),
         )
         .into_any_element(),
@@ -4217,7 +4308,8 @@ fn live_row_body(
     // see, so it is the only copy there is to drag.
     match live_block(drag, block, content_width, row_cap, handlers) {
         Some(row) => row,
-        None => block_view(block, content_width, row_cap, handlers, None, true).into_any_element(),
+        None => block_view(block, content_width, row_cap, handlers, None, true, None)
+            .into_any_element(),
     }
 }
 
@@ -4407,7 +4499,7 @@ fn live_view(
         col = col.child(
             match live_block(drag, &block, content_width, row_cap, handlers) {
                 Some(row) => row,
-                None => block_view(&block, content_width, row_cap, handlers, None, true)
+                None => block_view(&block, content_width, row_cap, handlers, None, true, None)
                     .into_any_element(),
             },
         );
@@ -5339,8 +5431,9 @@ pub struct ViewHooks {
     pub middle_click: Option<PressHandler>,
     /// Left click per stored message row, keyed by message id. Select mode
     /// mints one per row so a click toggles it. Outside the mode a message the
-    /// reader typed that runs past `READER_LINES` gets one that opens it in the
-    /// reader at full width (#3053); every other row stays inert (#2613).
+    /// reader typed that folds (`FOLD_AFTER_LINES` or `FOLD_BYTES`) gets one
+    /// that opens it in the reader at full width (#3053, #3064); every other
+    /// row stays inert (#2613).
     pub message_click: HashMap<uuid::Uuid, ClickHandler>,
     /// Right press per stored message row: opens the message menu (#2613).
     pub message_press: HashMap<uuid::Uuid, PressHandler>,
@@ -5742,6 +5835,8 @@ pub fn view(
             &attachment_handlers,
             None,
             true,
+            // A marker is not a message: it has no body to fold (#3064).
+            None,
         ));
     }
     // The turns past the drawn window wait behind their own marker (#2805),
@@ -5816,16 +5911,26 @@ pub fn view(
             }
             // Folding bounds working-out, never the conversation. A deliverable
             // report kept visible by the fold gets the same full-body path as
-            // the turn's final assistant message (#2855). A message the reader
-            // typed is never cut at all (#3053): the 20-line bound was measured
-            // on generated working-out, and applying it to his own prompt hid
-            // the rest behind a control that only expands the card. A turn with
-            // no card has no control to expand, so nothing in it is cut either.
+            // the turn's final assistant message (#2855), and a prompt that
+            // reads in the column is drawn in full (#3053). A prompt that does
+            // not read in the column folds to its opening lines behind a
+            // document card (#3064); that decision lives in the bubble, because
+            // only the row knows whether the click that reopens it exists.
             let full_body = !folded
                 || !carded
                 || (matches!(block, Block::Msg { role, .. }
                     if role == "assistant" || role == "user")
                     && visible_when_folded(block, turn.final_idx, i));
+            // The click that reopens a folded prompt, taken from the map the
+            // row itself answers to (#3064). The card and the row open the same
+            // reader, so they must not disagree about whether one exists.
+            let open_click = match block {
+                Block::Msg {
+                    message_id: Some(id),
+                    ..
+                } => message_click.get(id),
+                _ => None,
+            };
             // Every row here belongs to a turn the live card is NOT drawing,
             // which is why it is on screen at all. Narration and thinking stay
             // inside the card; the answer a settled turn already produced
@@ -5856,6 +5961,7 @@ pub fn view(
                             &attachment_handlers,
                             Some(&selection),
                             full_body,
+                            open_click,
                         ),
                     }
                 }
@@ -5868,6 +5974,7 @@ pub fn view(
                         &attachment_handlers,
                         None,
                         full_body,
+                        open_click,
                     ),
                 },
             };

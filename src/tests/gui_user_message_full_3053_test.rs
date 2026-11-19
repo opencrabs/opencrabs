@@ -1,9 +1,13 @@
-//! A message the reader typed is never cut, and a long one opens in the
-//! reader (#3053).
+//! A message the reader typed is never cut silently, and a long one opens in
+//! the reader (#3053, refined by #3064).
 //!
 //! The 20-line bound was measured on generated working-out (#2805). Applied to
 //! the reader's own prompt it hid the rest of what he wrote behind a control
 //! that only expands the card, and a turn with no card had no control at all.
+//! #3064 keeps that promise and names the exception: past a much higher bound
+//! the row keeps its opening lines and the rest becomes a document card, so the
+//! cut is announced and one click from everything it left out.
+//!
 //! These checks read source, the way the other gui tests do: the window has no
 //! headless harness, and the drawing lives in the gui binary.
 
@@ -13,6 +17,7 @@ const MAIN: &str = concat!(
     include_str!("../gui/app.rs"),
     include_str!("../gui/dashboard_render.rs"),
     include_str!("../gui/dashboard_state.rs"),
+    include_str!("../gui/dashboard_sessions.rs"),
 );
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 const PREVIEW: &str = include_str!("../gui/preview.rs");
@@ -34,18 +39,36 @@ fn region(start: &str, end: &str) -> &'static str {
     region_in(TRANSCRIPT, start, end)
 }
 
-/// The cut stays, for the body it was measured on. A message the reader typed
-/// takes the full path whether the turn is folded, carded, or neither.
+/// A prompt that reads in the column is drawn whole, and one that does not is
+/// folded behind a card instead of cut with nothing to press.
 #[test]
-fn a_message_the_reader_typed_is_never_cut() {
+fn a_prompt_is_never_cut_without_a_control() {
     let bubble = region("fn bubble(", "/// A forwarded copy");
     assert!(
-        bubble.contains("if full || role == \"user\""),
-        "a user body skips the excerpt in the bubble"
+        bubble.contains("message_reader::fold(content)"),
+        "the fold decision is the row's, made against the message reader's rules"
+    );
+    assert!(
+        bubble.contains("None if full || role == \"user\""),
+        "a body under the fold bound is drawn in full, whatever the turn is doing"
     );
     assert!(
         bubble.contains("excerpt_lines(content, MSG_EXCERPT_LINES)"),
-        "working-out bodies still take the bound"
+        "working-out bodies still take the bound they were measured on"
+    );
+    assert!(
+        bubble.contains("folded_document_cell(fold, open)"),
+        "a folded prompt draws the card that reopens the rest"
+    );
+    assert!(
+        bubble.contains("marker_paths(content)"),
+        "the attachments are read from the whole body, before any fold hides the tail"
+    );
+
+    let card = region("fn folded_document_cell(", "/// A forwarded copy");
+    assert!(
+        card.contains("open: Option<&ClickHandler>"),
+        "the card takes the click that opens the message in the reader"
     );
 
     let blocks = region(
@@ -53,8 +76,8 @@ fn a_message_the_reader_typed_is_never_cut() {
         "Block::Thinking { content } => thinking_block",
     );
     assert!(
-        blocks.contains("full || role == \"user\""),
-        "a forwarded message the reader sent is not cut either"
+        blocks.contains("open,"),
+        "block_view hands the open handler to the bubble it draws"
     );
 
     let view = region("pub fn view(", "/// The owner's test feedback");
@@ -70,15 +93,34 @@ fn a_message_the_reader_typed_is_never_cut() {
         view.contains("role == \"assistant\" || role == \"user\""),
         "the folded exemption covers the reader's own rows, not only answers"
     );
+    assert!(
+        view.contains("message_click.get(id)"),
+        "the row and its card open the same reader, so they cannot disagree"
+    );
 }
 
-/// The reader takes text that has no file behind it: nothing is written to
-/// disk to read a message, and the file actions are not drawn for one.
+/// A live row has no stored id, so it has no reader to open: it draws whole
+/// rather than folding behind a card nobody can press.
 #[test]
-fn the_reader_reads_a_message_without_a_file() {
+fn a_live_row_never_folds() {
+    let live = region("fn live_block(", "/// How much of one narration");
+    assert!(
+        live.contains("None,"),
+        "the live row passes no open handler"
+    );
+    assert!(
+        live.contains("draws whole until it settles"),
+        "so the fold is declined and the live text is drawn in full (#3064)"
+    );
+}
+
+/// The text with no file behind it is still readable, and once the window has
+/// written the file the reader opens that file (#3064).
+#[test]
+fn the_reader_prefers_the_written_file_and_falls_back_to_the_row() {
     assert!(
         PREVIEW_DOCUMENT.contains("pub fn parse_text(text: &str, flow: markdown::MdFlow)"),
-        "the document body parses text that is already in memory"
+        "the document body parses text, whether it came from a file or a row"
     );
     assert!(
         PREVIEW_DOCUMENT.contains("pub fn text(generation: u64) -> Self"),
@@ -91,6 +133,14 @@ fn the_reader_reads_a_message_without_a_file() {
     assert!(
         PREVIEW.contains("PreviewKind::Message => message_body(document, middle_click)"),
         "the message body is the reader, with no path row"
+    );
+    assert!(
+        MAIN.contains("self.prompt_docs.get(&id)"),
+        "the reader asks where the row's document was written"
+    );
+    assert!(
+        MAIN.contains("unwrap_or(content)"),
+        "a file that cannot be read falls back to the text the row holds"
     );
     assert!(
         !PREVIEW_DOCUMENT.contains("temp_dir()") && !PREVIEW_DOCUMENT.contains("write_all"),
