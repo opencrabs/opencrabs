@@ -1,3 +1,4 @@
+use crate::dashboard_rail::set_rail_open_state;
 use crate::dashboard_source::DASHBOARD;
 use crate::*;
 

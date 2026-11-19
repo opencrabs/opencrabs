@@ -3209,7 +3209,7 @@ fn ctrl_c_quits_on_a_second_press_inside_the_window_only() {
         "a second press one second later quits"
     );
     assert_eq!(
-        crate::ctrl_c_action(true, true, Some(now - crate::QUIT_WINDOW), now),
+        crate::ctrl_c_action(true, true, Some(now - QUIT_WINDOW), now),
         crate::CtrlCAction::ClearAndArm,
         "the window is three seconds wide and it is spent at the edge"
     );
