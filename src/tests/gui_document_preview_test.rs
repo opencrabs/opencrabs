@@ -102,7 +102,15 @@ fn document_preview_gui_keeps_io_parsing_scrolling_and_lifetime_wired() {
     assert!(transcript.contains("md_parsed_blocks(blocks, MdLook::body(USER_TEXT_SIZE), None)"));
 
     let preview = include_str!("../gui/preview.rs");
-    assert!(preview.contains("shell.child(content).child(actions)"));
+    // The body is a sequence, not a chain: content first, then the button row
+    // when the caller minted one (#3053). Pinning the order keeps the actions
+    // from sliding above the document they act on.
+    let content_at = preview.find("shell = shell.child(content);");
+    let actions_at = preview.find("shell = shell.child(actions);");
+    assert!(
+        content_at.is_some() && actions_at.is_some() && content_at < actions_at,
+        "the preview shell no longer holds the content and then the actions"
+    );
     assert!(preview.contains("modal_shell::render("));
     assert!(preview.contains("width_cap = if document_open { 1040.0 }"));
     assert!(preview.contains("PgUp PgDn"));
