@@ -2512,6 +2512,25 @@ impl Render for Dashboard {
                     this.msg_toggle(id, ev.modifiers().shift, cx);
                 });
                 message_click.insert(id, std::rc::Rc::new(handler));
+            } else if row.role == "user"
+                && opencrabs::ui_core::message_reader::opens_in_reader(&row.content)
+            {
+                // A prompt long enough to stop reading well in the column opens
+                // in the reader on a click (#3053). Nothing is cut to reach
+                // that: the row still draws every line, and the reader is the
+                // comfortable place to read it, not the only place.
+                let title = opencrabs::ui_core::message_reader::title(&row.content);
+                let content = row.content.clone();
+                let handler = cx.listener(move |this, ev: &ClickEvent, _window, cx| {
+                    // A drag is a copy gesture, not a request to open (#2678).
+                    if let gpui::ClickEvent::Mouse(click) = ev
+                        && (click.up.position - click.down.position).magnitude() > 2.0
+                    {
+                        return;
+                    }
+                    this.open_message_preview(title.clone(), content.clone(), cx);
+                });
+                message_click.insert(id, std::rc::Rc::new(handler));
             }
             if row.role == "assistant" {
                 let content = row.content.clone();

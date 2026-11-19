@@ -85,7 +85,7 @@ fn a_folded_turn_bounds_working_out_without_cutting_the_answer() {
     );
     assert!(
         view.contains("role == \"assistant\""),
-        "the folded full-body exception is limited to assistant answers"
+        "the folded full-body exception covers answers, and the reader's own rows (#3053)"
     );
     assert!(
         view.contains("visible_when_folded(block, turn.final_idx, i)"),

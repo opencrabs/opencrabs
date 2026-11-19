@@ -549,27 +549,81 @@ impl Dashboard {
         self.preview_document = None;
     }
 
+    /// Read a long message in the document reader (#3053). The text is already
+    /// in memory, so nothing is written to disk and there is no file to open:
+    /// the reader is the comfortable place to read what the row already shows
+    /// in full.
+    pub(crate) fn open_message_preview(
+        &mut self,
+        title: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.preview_document_generation.wrapping_add(1);
+        self.preview_document_generation = generation;
+        self.preview = Some(preview::Preview::message(title));
+        self.preview_document = Some(preview_document::DocumentState::text(generation));
+        self.preview_video = None;
+        self.preview_zoom = 1.0;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let parsed = cx
+                .background_executor()
+                .spawn(async move {
+                    // Verbatim is what the row itself draws, so the reader
+                    // shows the same line breaks the reader typed.
+                    preview_document::parse_text(&content, crate::markdown::MdFlow::Verbatim)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let current = this
+                    .preview_document
+                    .as_ref()
+                    .is_some_and(|document| document.matches_generation(generation));
+                if current {
+                    if let Some(document) = this.preview_document.as_mut() {
+                        document.complete(Ok(parsed));
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The inside of the preview: the part that differs per kind. The shell
-    /// (title, kind, esc) is the same for all three, so a picture, a clip and
-    /// a document cannot drift apart in how they open or close.
+    /// (title, kind, esc) is the same for all four, so a picture, a clip, a
+    /// document and a message cannot drift apart in how they open or close.
     pub(crate) fn preview_body(
         &self,
         open: &preview::Preview,
         document_height: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let path = open.path.clone();
-        let open_file = {
-            let path = path.clone();
-            cx.listener(move |_this, _ev, _window, _cx| {
-                preview::launch(&preview::open_command(&path));
-            })
-        };
-        let reveal_file = {
-            let path = path.clone();
-            cx.listener(move |_this, _ev, _window, _cx| {
-                preview::launch(&preview::reveal_command(&path));
-            })
+        // A message has no file behind it, so the two file actions would be
+        // dead buttons (#3053).
+        let actions = if open.kind == preview::PreviewKind::Message {
+            None
+        } else {
+            let path = open.path.clone();
+            let open_file = {
+                let path = path.clone();
+                cx.listener(move |_this, _ev, _window, _cx| {
+                    preview::launch(&preview::open_command(&path));
+                })
+            };
+            let reveal_file = {
+                let path = path.clone();
+                cx.listener(move |_this, _ev, _window, _cx| {
+                    preview::launch(&preview::reveal_command(&path));
+                })
+            };
+            Some(preview::actions_row(
+                open.open_label(),
+                open.path.exists(),
+                open_file,
+                reveal_file,
+            ))
         };
         let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
             let lines = match ev.delta {
@@ -596,12 +650,7 @@ impl Dashboard {
             });
         preview::body(
             open,
-            preview::actions_row(
-                open.open_label(),
-                open.path.exists(),
-                open_file,
-                reveal_file,
-            ),
+            actions,
             self.preview_zoom,
             wheel,
             self.preview_video.as_ref(),

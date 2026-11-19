@@ -32,6 +32,9 @@ pub enum PreviewKind {
     Video,
     /// Metadata and actions, plus a body for supported text documents.
     File,
+    /// A message from the transcript, read in the same body a document uses
+    /// (#3053). It has no file, so it carries no actions and no metadata.
+    Message,
 }
 
 /// The extensions the strip treats as an image. Kept beside the marker
@@ -51,6 +54,10 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 pub struct Preview {
     pub path: PathBuf,
     pub kind: PreviewKind,
+    /// What the header calls a preview that has no file name to print: a
+    /// message opened from the transcript. `None` for a file, which is named
+    /// by its own path.
+    pub title: Option<String>,
 }
 
 impl Preview {
@@ -59,19 +66,38 @@ impl Preview {
     pub fn open_label(&self) -> &'static str {
         match self.kind {
             PreviewKind::Video => "play",
-            PreviewKind::Image | PreviewKind::File => "open",
+            PreviewKind::Image | PreviewKind::File | PreviewKind::Message => "open",
         }
     }
 
     /// Open `path`, deciding the kind from its extension.
     pub fn of(path: PathBuf) -> Self {
         let kind = kind_of(&path);
-        Self { path, kind }
+        Self {
+            path,
+            kind,
+            title: None,
+        }
+    }
+
+    /// A message from the transcript, read in the document reader (#3053).
+    /// Its text is parsed in memory, so there is no path to open, reveal or
+    /// measure, and the header prints the title instead of a file name.
+    pub fn message(title: String) -> Self {
+        Self {
+            path: PathBuf::new(),
+            kind: PreviewKind::Message,
+            title: Some(title),
+        }
     }
 
     /// The file name, which is what every surface calls the file: the tile
-    /// caption, the overlay title, and the error when it is gone.
+    /// caption, the overlay title, and the error when it is gone. A message
+    /// preview has no file, so it is called by the title it was opened with.
     pub fn name(&self) -> String {
+        if let Some(title) = &self.title {
+            return title.clone();
+        }
         self.path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -533,10 +559,11 @@ pub struct DocumentBody<'a> {
 }
 
 /// What the shell holds for this file. `actions` is the shared button row, so
-/// the caller mints the listeners and this only decides the content.
+/// the caller mints the listeners and this only decides the content. A message
+/// preview passes `None`: it has no file to open or reveal (#3053).
 pub fn body(
     preview: &Preview,
-    actions: AnyElement,
+    actions: Option<AnyElement>,
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     facts: Option<&VideoFacts>,
@@ -547,13 +574,19 @@ pub fn body(
         PreviewKind::Image => image_body(preview, zoom, wheel),
         PreviewKind::Video => video_body(preview, facts.and_then(|f| f.poster.as_deref())),
         PreviewKind::File => file_body(preview, document, middle_click),
+        PreviewKind::Message => message_body(document, middle_click),
     };
-    let document_open = preview.kind == PreviewKind::File && document.is_some();
+    let document_open = matches!(preview.kind, PreviewKind::File | PreviewKind::Message)
+        && document.is_some();
     let mut shell = div().flex().flex_col().gap_3().w_full().min_w_0();
     if document_open {
         shell = shell.flex_1().min_h_0();
     }
-    shell.child(content).child(actions).into_any_element()
+    shell = shell.child(content);
+    if let Some(actions) = actions {
+        shell = shell.child(actions);
+    }
+    shell.into_any_element()
 }
 
 /// The box an image is drawn in, in points. Both sides are pinned because gpui
@@ -617,6 +650,7 @@ pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> 
             )
         }
         PreviewKind::Video => facts.map(VideoFacts::line).unwrap_or_default(),
+        PreviewKind::Message => "message".to_string(),
         PreviewKind::File => {
             let mut parts = vec![format!("{} document", preview.extension_or_unknown())];
             parts.extend(
@@ -680,6 +714,24 @@ fn file_body(
     // Kind, size and modification time live in the modal subtitle. The body
     // keeps only the path, so metadata does not eat the reader's height.
     col = col.child(row("path", preview.path.display().to_string()));
+    if let Some(document) = document {
+        col = col.flex_1().min_h_0().child(super::preview_document::body(
+            document.state,
+            document.height,
+            middle_click,
+        ));
+    }
+    col.into_any_element()
+}
+
+/// A message read in the document body (#3053). There is no path to print and
+/// no file to act on: the row's text is already parsed, so this is only the
+/// reader itself.
+fn message_body(
+    document: Option<DocumentBody<'_>>,
+    middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let mut col = div().flex().flex_col().w_full().min_w_0();
     if let Some(document) = document {
         col = col.flex_1().min_h_0().child(super::preview_document::body(
             document.state,
@@ -831,6 +883,7 @@ pub fn kind_label(kind: PreviewKind) -> &'static str {
         PreviewKind::Image => "image",
         PreviewKind::Video => "video",
         PreviewKind::File => "file",
+        PreviewKind::Message => "message",
     }
 }
 

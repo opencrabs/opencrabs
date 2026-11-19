@@ -72,14 +72,15 @@ impl markdown::MdPalette for palette::Palette {
 /// history stays behind the `Marker` block.
 const WINDOW: usize = 200;
 
-/// Lines of one non-answer body a folded turn draws before it hands the rest
+/// Lines of one working-out body a folded turn draws before it hands the rest
 /// to the reader (#2805). The pane builds one element per line, so a window
 /// that holds a 1.6 MB row built tens of thousands of them on every keystroke:
 /// the newest 200 rows of the largest local session measure 64,827 lines, and
 /// the composer paid that on every character typed. The TUI never shows more
 /// than an excerpt of its working-out for the same reason; expanding the turn
 /// is what asks for the whole thing. A final or deliverable answer that stays
-/// visible in a folded turn always draws in full (#2855).
+/// visible in a folded turn always draws in full (#2855), and a message the
+/// reader typed is never cut at all (#3053).
 const MSG_EXCERPT_LINES: usize = 20;
 
 /// Drop the blank lines a body ends on, before anything reads its length.
@@ -2616,10 +2617,15 @@ fn bubble(
     full: bool,
 ) -> Div {
     // The cut happens on the raw source, before anything walks it (#2805): a
-    // folded non-answer body reads its first rows and the rest is one click
+    // folded working-out body reads its first rows and the rest is one click
     // away, so `strip_markers` and the markdown parse only ever see the excerpt
     // instead of the tens of kilobytes a single stored row can carry. Answers
     // arrive with `full = true`; the copy path always reads the whole block.
+    //
+    // A message the reader typed never takes the cut (#3053). The cost #2805
+    // measured was generated working-out and tool output, not the words a
+    // person wrote, and the cut landed before the markdown parse, so a long
+    // prompt lost its structure along with its tail.
     //
     // The blank run at the end goes before the cut either way. One stored body
     // carried hundreds of blank lines after its last line of text, which draws
@@ -2628,7 +2634,7 @@ fn bubble(
     // chat (#2981). A blank line carries nothing, so dropping it costs the
     // reader no text and hides no line behind the marker.
     let content = without_trailing_blanks(content);
-    let (content, hidden) = if full {
+    let (content, hidden) = if full || role == "user" {
         (std::borrow::Cow::Borrowed(content), 0)
     } else {
         excerpt_lines(content, MSG_EXCERPT_LINES)
@@ -2722,6 +2728,11 @@ fn bubble(
         col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
     if hidden > 0 {
+        // Only a working-out body reaches this line now (#3053): every message
+        // the reader typed, every answer the fold keeps visible, and every
+        // body in a turn with no card draw in full. What is left belongs to a
+        // turn that has a card, and the card's header is what expands it, so
+        // the sentence names a control that is actually on screen.
         col = col.child(
             div()
                 .text_xs()
@@ -3987,6 +3998,7 @@ fn block_view(
 ) -> Div {
     match block {
         Block::Msg {
+            role,
             content,
             time,
             forward: Some(mark),
@@ -3999,7 +4011,9 @@ fn block_view(
             row_cap,
             handlers,
             selection,
-            full,
+            // A forwarded message the reader sent keeps the same rule as his
+            // own rows: no cut (#3053).
+            full || role == "user",
         ),
         Block::Msg {
             role,
@@ -5430,8 +5444,9 @@ pub struct ViewHooks {
     /// supplies its session so a split leaf cannot move the window's chat.
     pub middle_click: Option<PressHandler>,
     /// Left click per stored message row, keyed by message id. Select mode
-    /// mints one per row so a click toggles it; outside the mode the map is
-    /// empty and every row stays inert (#2613).
+    /// mints one per row so a click toggles it. Outside the mode a message the
+    /// reader typed that runs past `READER_LINES` gets one that opens it in the
+    /// reader at full width (#3053); every other row stays inert (#2613).
     pub message_click: HashMap<uuid::Uuid, ClickHandler>,
     /// Right press per stored message row: opens the message menu (#2613).
     pub message_press: HashMap<uuid::Uuid, PressHandler>,
@@ -5905,11 +5920,17 @@ pub fn view(
             if folded && !visible_when_folded(block, turn.final_idx, i) {
                 continue;
             }
-            // Folding bounds working-out, never the answer. A deliverable
+            // Folding bounds working-out, never the conversation. A deliverable
             // report kept visible by the fold gets the same full-body path as
-            // the turn's final assistant message (#2855).
+            // the turn's final assistant message (#2855). A message the reader
+            // typed is never cut at all (#3053): the 20-line bound was measured
+            // on generated working-out, and applying it to his own prompt hid
+            // the rest behind a control that only expands the card. A turn with
+            // no card has no control to expand, so nothing in it is cut either.
             let full_body = !folded
-                || (matches!(block, Block::Msg { role, .. } if role == "assistant")
+                || !carded
+                || (matches!(block, Block::Msg { role, .. }
+                    if role == "assistant" || role == "user")
                     && visible_when_folded(block, turn.final_idx, i));
             // Every row here belongs to a turn the live card is NOT drawing,
             // which is why it is on screen at all. Narration and thinking stay

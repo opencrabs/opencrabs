@@ -44,8 +44,25 @@ impl DocumentState {
         }
     }
 
+    /// A reader for text that has no file behind it: a message opened from the
+    /// transcript (#3053). It carries no path, so its generation is the only
+    /// identity it has, and the file actions are never drawn for it.
+    pub fn text(generation: u64) -> Self {
+        Self {
+            path: PathBuf::new(),
+            generation,
+            status: DocumentStatus::Loading,
+            scroll: ScrollHandle::new(),
+        }
+    }
+
     pub fn matches(&self, path: &Path, generation: u64) -> bool {
         self.path == path && self.generation == generation
+    }
+
+    /// The identity of a reader that came from memory instead of a file.
+    pub fn matches_generation(&self, generation: u64) -> bool {
+        self.generation == generation
     }
 
     pub fn complete(&mut self, result: Result<ParsedDocument, String>) {
@@ -60,17 +77,31 @@ impl DocumentState {
 /// stay off the UI thread; only the completed render model crosses back.
 pub fn parse(path: &Path, kind: DocumentKind) -> Result<ParsedDocument, String> {
     let loaded = local_document::load(path).map_err(|error| error.to_string())?;
-    // Markdown documents reflow like a reply; plain text keeps the breaks the
-    // author typed, because those breaks are the only structure it has.
-    let flow = match kind {
+    let mut document = parse_text(&loaded.text, flow_for(kind));
+    // A file past the loader's cap says so in the body. Text that came from a
+    // message was already in memory, so there is nothing to truncate.
+    document.truncated = loaded.truncated;
+    Ok(document)
+}
+
+/// The same parse for text that is already in memory, so a message opened from
+/// the transcript reads in the same body as a document (#3053). It still runs
+/// on the background executor: a pasted log can be large enough to stall a
+/// frame.
+pub fn parse_text(text: &str, flow: markdown::MdFlow) -> ParsedDocument {
+    ParsedDocument {
+        blocks: markdown::blocks_flow(text, flow),
+        truncated: false,
+    }
+}
+
+/// Markdown documents reflow like a reply; plain text keeps the breaks the
+/// author typed, because those breaks are the only structure it has.
+fn flow_for(kind: DocumentKind) -> markdown::MdFlow {
+    match kind {
         DocumentKind::Markdown => markdown::MdFlow::Prose,
         DocumentKind::PlainText => markdown::MdFlow::Verbatim,
-    };
-    let blocks = markdown::blocks_flow(&loaded.text, flow);
-    Ok(ParsedDocument {
-        blocks,
-        truncated: loaded.truncated,
-    })
+    }
 }
 
 pub fn body(

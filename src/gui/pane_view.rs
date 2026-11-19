@@ -558,6 +558,38 @@ impl Render for PaneView {
                 (id, handler)
             })
             .collect();
+        // A long message the reader typed opens in the reader from a split
+        // leaf too (#3053). The overlay lives on the window, so the click
+        // reports through it the way the tiles above do.
+        let message_click: HashMap<uuid::Uuid, transcript::ClickHandler> = self
+            .transcript
+            .rows
+            .iter()
+            .filter(|row| {
+                row.role == "user"
+                    && opencrabs::ui_core::message_reader::opens_in_reader(&row.content)
+            })
+            .map(|row| {
+                let id = row.id;
+                let title = opencrabs::ui_core::message_reader::title(&row.content);
+                let content = row.content.clone();
+                let window = edit_window.clone();
+                let handler: transcript::ClickHandler = std::rc::Rc::new(
+                    move |ev: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        // A drag is a copy gesture, not a request to open.
+                        if let ClickEvent::Mouse(click) = ev
+                            && (click.up.position - click.down.position).magnitude() > 2.0
+                        {
+                            return;
+                        }
+                        let _ = window.update(cx, |this, cx| {
+                            this.open_message_preview(title.clone(), content.clone(), cx);
+                        });
+                    },
+                );
+                (id, handler)
+            })
+            .collect();
         // Live entries report through the window too, but keep this leaf's
         // session and composer as their destination (#2925).
         let mut live_press: HashMap<transcript::LiveRow, transcript::PressHandler> = HashMap::new();
@@ -689,6 +721,8 @@ impl Render for PaneView {
                 // press, because the window's transcript does not hold this
                 // leaf's messages and could not look an id up in it.
                 message_press,
+                // A long message opens in the reader from here as well (#3053).
+                message_click,
                 live_press,
                 live_edit,
                 // A left press anywhere in the leaf dismisses that menu, the

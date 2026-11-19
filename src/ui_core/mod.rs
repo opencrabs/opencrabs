@@ -22,6 +22,7 @@ pub mod input_history;
 pub mod keys;
 pub mod links;
 pub mod local_document;
+pub mod message_reader;
 pub mod message_select;
 pub mod model_layout;
 pub mod model_selector;
