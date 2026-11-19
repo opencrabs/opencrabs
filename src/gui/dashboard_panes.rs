@@ -1253,3 +1253,71 @@ impl Dashboard {
         pane_element(tree, &mut ctx, &mut path)
     }
 }
+
+/// A divider drag in flight (#2472, #2476): which split, which divider in it,
+/// the axis it moves along, and where the pointer was on the last move.
+#[derive(Clone, Debug)]
+pub(crate) struct DividerDrag {
+    /// The split's path from the root, the way [`PaneTree::at`] addresses it.
+    pub(crate) path: Vec<usize>,
+    /// Which divider of that split: the one between children `divider` and
+    /// `divider + 1`.
+    pub(crate) divider: usize,
+    /// Whether the split stacks its children, which fixes the drag axis.
+    pub(crate) stacked: bool,
+    /// Where the pointer was along that axis on the last move, in px.
+    pub(crate) last: f32,
+}
+
+/// A pane picked up by its header (#2683). The drag carries the session that
+/// owns the pane and nothing else: where the pane lands is decided by the drop
+/// target under the pointer, not by the drag path it took.
+#[derive(Clone)]
+pub(crate) struct PaneDrag {
+    pub(crate) session: Uuid,
+}
+
+/// What follows the pointer while a pane is dragged (#2683): the pane's own
+/// title on a card, so the drag reads as the pane it will land as rather than
+/// as a nameless chip.
+pub(crate) struct PaneGhost {
+    pub(crate) title: SharedString,
+}
+
+impl Render for PaneGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(CARD_RADIUS))
+            .bg(rgb(palette::current().panel_hi))
+            .border_1()
+            .border_color(rgb(palette::current().accent))
+            .text_xs()
+            .text_color(rgb(palette::current().text))
+            .child(self.title.clone())
+    }
+}
+
+/// The drag handle between the rail and the chat pane. The hit target stays
+/// wide, but only its centered child paints a hairline.
+pub(crate) fn splitter(
+    grab: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<Div> {
+    div()
+        .id("rail-splitter")
+        .w(px(4.0))
+        .h_full()
+        .flex_none()
+        .flex()
+        .justify_center()
+        .cursor_col_resize()
+        .child(
+            div()
+                .w(px(1.0))
+                .h_full()
+                .bg(topic_tabs::separator_color())
+                .hover(|d| d.bg(rgb(palette::current().accent))),
+        )
+        .on_mouse_down(MouseButton::Left, grab)
+}
