@@ -73,7 +73,10 @@ fn a_long_prompt_folds_to_its_opening_lines() {
         .join("\n");
     let folded = fold(&body).expect("200 lines fold");
     assert_eq!(folded.head.lines().count(), FOLD_KEEP_LINES);
-    assert!(folded.name.ends_with(".md"), "the card names a markdown file");
+    assert!(
+        folded.name.ends_with(".md"),
+        "the card names a markdown file"
+    );
     assert!(
         folded.summary.contains("200 lines"),
         "the card says how much the fold hides"

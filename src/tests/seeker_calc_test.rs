@@ -53,17 +53,7 @@ fn percent_is_modulo() {
 #[test]
 fn rejects_prose_and_bare_numbers() {
     for query in [
-        "deploy",
-        "200",
-        "0",
-        "-200",
-        "(-5)",
-        "200 usd",
-        "1e5",
-        "2 3",
-        "2)",
-        "",
-        "   ",
+        "deploy", "200", "0", "-200", "(-5)", "200 usd", "1e5", "2 3", "2)", "", "   ",
     ] {
         assert_eq!(answer(query), None, "{query:?} is not arithmetic");
     }

@@ -490,7 +490,9 @@ pub enum PaletteAction {
     ToggleDictation,
     /// Copy the calculator's answer. The expression stays in the row's own
     /// subtitle, so the payload is only what the clipboard receives.
-    Calc { answer: String },
+    Calc {
+        answer: String,
+    },
 }
 
 /// Why the card is armed as a session picker. The purpose decides what a

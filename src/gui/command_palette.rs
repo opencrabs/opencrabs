@@ -98,12 +98,7 @@ pub fn status(state: &PaletteState) -> String {
                     .iter()
                     // Neither the miss row nor the answer row is a search
                     // result, so neither counts toward the total.
-                    .filter(|row| {
-                        !matches!(
-                            row.item.kind,
-                            PaletteKind::Ask | PaletteKind::Calc
-                        )
-                    })
+                    .filter(|row| !matches!(row.item.kind, PaletteKind::Ask | PaletteKind::Calc))
                     .count();
                 if matches == 1 {
                     "1 match".to_string()

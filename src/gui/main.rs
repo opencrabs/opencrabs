@@ -87,10 +87,10 @@ mod plan_strip;
 mod platform_icons;
 mod preview;
 mod preview_document;
-mod prompt_files;
 mod projects;
 mod projects_screen;
 mod projects_view;
+mod prompt_files;
 mod rail_activity;
 // The rail is an entity of its own (#2933): its rows, chips, badges and
 // filter menu are built once per frame it is handed, and a frame that matches

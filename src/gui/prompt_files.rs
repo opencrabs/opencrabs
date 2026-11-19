@@ -71,14 +71,11 @@ pub fn documents(rows: &[Message]) -> Vec<PromptDocument> {
 /// reader must never open a name that was never written.
 pub async fn directory(pool: &Pool, session: Uuid) -> Option<PathBuf> {
     let service = FileService::new(ServiceContext::new(pool.clone()));
-    let files = service
-        .project_files_dir(session)
-        .await
-        .unwrap_or_else(|| {
-            ProjectService::projects_dir()
-                .join(UNFILED_SLUG)
-                .join("files")
-        });
+    let files = service.project_files_dir(session).await.unwrap_or_else(|| {
+        ProjectService::projects_dir()
+            .join(UNFILED_SLUG)
+            .join("files")
+    });
     let dir = files.join(PROMPTS_DIR);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)

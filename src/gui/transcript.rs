@@ -4343,8 +4343,9 @@ fn live_row_body(
     // see, so it is the only copy there is to drag.
     match live_block(drag, block, content_width, row_cap, handlers) {
         Some(row) => row,
-        None => block_view(block, content_width, row_cap, handlers, None, true, None)
-            .into_any_element(),
+        None => {
+            block_view(block, content_width, row_cap, handlers, None, true, None).into_any_element()
+        }
     }
 }
 
