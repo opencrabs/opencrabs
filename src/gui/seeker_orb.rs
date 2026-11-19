@@ -12,6 +12,10 @@
 //!   left where the reference's own ring is brightest;
 //! - a horizon, cool above and warm below, with a thin band of light on the
 //!   seam;
+//! - density from geometry rather than from light, so the dome is deep black
+//!   crystal and the page behind it stops showing through;
+//! - chromatic caustics on the two inner walls, cold above the seam and warm
+//!   below, sitting just inside a hard silver top rim;
 //! - a hard circular silhouette, so the image's own square boundary never
 //!   paints a wash over the scrim.
 //!
@@ -158,8 +162,12 @@ const RIM_TILT_Y: f32 = 0.83;
 ///
 /// Its width is narrower than the ring's so the catch stays a one-pixel
 /// specular at `ORB_PIXELS` instead of blooming into the shoulder behind it.
-const RIM_TOP_GAIN: f32 = 0.42;
-const RIM_TOP_WIDTH: f32 = 0.0050;
+/// It is narrower again than the ring's own width, and brighter, because the
+/// reference's top arc is a hard silver line: the crystal's edge is where the
+/// material ends, and a soft edge there is what made the earlier passes read as
+/// a translucent sticker.
+const RIM_TOP_GAIN: f32 = 0.55;
+const RIM_TOP_WIDTH: f32 = 0.0040;
 const RIM_TOP_EDGE: f32 = -0.50;
 const RIM_TOP_FULL: f32 = -0.90;
 
@@ -169,7 +177,7 @@ const RIM_TOP_FULL: f32 = -0.90;
 /// top arc reads silver rather than cyan. The pull is applied after the tonal
 /// colour and before the composite correction, so it moves hue only: the
 /// correction still lands the pixel on the light field's own brightness.
-const RIM_SILVER: f32 = 0.50;
+const RIM_SILVER: f32 = 0.62;
 
 /// The shoulder the glass shows as it turns away, just inside the ring. This is
 /// what gives the edge thickness: without it the ring floats on the silhouette
@@ -224,25 +232,63 @@ const WARM_FOLLOW: f32 = 0.25;
 const HEAT_STOPS: [f32; 7] = [0.00, 0.15, 0.30, 0.50, 0.75, 0.93, 1.00];
 const SAT_STOPS: [f32; 7] = [0.10, 0.15, 0.34, 0.50, 0.55, 0.18, 0.05];
 
-/// How much of the backdrop the material passes.
+/// How much of the page the body passes, decided by geometry instead of light.
 ///
-/// This is what makes it glass rather than a painting of glass. The body is
-/// smoke: it lets the page behind it through, and only the band and the ring go
-/// dense. The floor is where the darkest part sits, because a body that went
-/// fully opaque would hide the scrim and read as a solid again.
+/// This is what makes it crystal rather than a grey film. The old model
+/// multiplied `heat`, so the dark dome went thin and the bright band went
+/// thick, and the whole circle read as one even wash of smoke with the page
+/// text legible through every part of it. Real glass does the opposite: what
+/// you cannot see through is the length of material along the view ray, and
+/// that is longest where the sphere is deepest. Alpha therefore follows the
+/// chord and the region, never the brightness, so the dome can be near black
+/// and still be the densest part of the body.
 ///
-/// The floor is almost the whole story, too: at 0.34 it carried about eighty
-/// percent of the body's opacity, with the entire light field accounting for
-/// the rest. Lowering it to 0.15 takes the body from forty-two percent paint to
-/// twenty-two, which is the difference between the page showing through and the
-/// page being veiled by a grey film. The band does not move at all, because
-/// `heat` saturates there and the glass is already at one.
+/// GPUI 0.2.2 hands an element no backdrop to sample, so there is no UV to
+/// bend: the crate's only blur is a shadow radius and a whole-window
+/// background appearance, and its shader sources are fixed pipelines. A lens
+/// that refracts the page is not available in this architecture, so the
+/// material refracts itself and the depth has to come from density.
 ///
-/// 0.15 is the no-clip boundary, not a taste call: the worst lift the body asks
-/// for is 3.33 against `MAX_LIFT` at 3.4. Below that the correction clips and
-/// the body starts reading darker than the reference, which is why the two
-/// constants are documented against each other.
-const GLASS_FLOOR: f32 = 0.15;
+/// `DOME_ALPHA` and `BOWL_ALPHA` are the two deep regions the reference has:
+/// the whole upper hemisphere, and the pocket under the band. `WALL_ALPHA` is
+/// what the body thins to at the extreme left and right, where the chord
+/// collapses and the chromatic caustics are what you see.
+const DOME_ALPHA: f32 = 0.92;
+const BOWL_ALPHA: f32 = 0.90;
+const WALL_ALPHA: f32 = 0.42;
+
+/// Where the walls start thinning, as a fraction of the radius, and where the
+/// thinning reaches full strength.
+///
+/// The chord through the sphere already collapses at the limb, but the
+/// reference thins further on the extreme sides than a pure chord would: that
+/// is where its chromatic walls show through. This band is the extra falloff,
+/// and it is weighted by the square of the horizontal position so it touches
+/// only the left and right walls, never the top or bottom rim.
+const WALL_FULL: f32 = 0.55;
+const WALL_EDGE: f32 = 0.95;
+
+/// The chromatic walls: light bent through the thick edge of the crystal.
+///
+/// A clear body with a lit seam still reads as a soft glow, because every
+/// bright thing in it has the same temperature as the surface. Real crystal
+/// concentrates light where the wall turns away from the eye, and that light
+/// carries the two temperatures the material is split into: cold blue on the
+/// upper walls, warm amber on the lower ones. The band is placed by radius,
+/// weighted by the square of the horizontal position so it touches only the
+/// left and right sides, and its gain is crossfaded across the horizon by
+/// `EDGE_COOL` and `EDGE_WARM`.
+///
+/// `EDGE_CAUSTIC` is the one place the material is allowed to stay saturated
+/// at full brightness. Everywhere else saturation falls as the value climbs,
+/// which is what keeps the seam reading as glass rather than gold leaf; a
+/// caustic is the exception, because a caustic is exactly light that has been
+/// squeezed until its colour separates.
+const EDGE_COOL: f32 = 0.34;
+const EDGE_WARM: f32 = 0.30;
+const EDGE_CAUSTIC: f32 = 0.64;
+const EDGE_DEPTH: f32 = 0.86;
+const EDGE_SPREAD: f32 = 0.15;
 
 /// What the glass is composited onto, as the luma of that resolved colour.
 ///
@@ -531,6 +577,14 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         let bowl = smooth(horizon, horizon + 0.60, ny);
         let dome = smooth(-0.04, 0.04, -ny);
 
+        // The wall caustic: a narrow band just inside the rim, on the two
+        // sides only, that carries the cool temperature above the horizon and
+        // the warm one below. `nx * nx` is what keeps it off the top and bottom
+        // arcs, where the rim itself is the event.
+        let edge_band = gaussian(radius - EDGE_DEPTH, EDGE_SPREAD) * nx * nx;
+        let edge_gain = EDGE_WARM + (EDGE_COOL - EDGE_WARM) * dome;
+        let caustic = edge_band * edge_gain;
+
         // The light field itself: how bright this pixel is, nought to one. The
         // border is three terms: the shoulder the glass shows as it turns away,
         // the specular ring that sits on the silhouette, and the overhead key's
@@ -559,14 +613,19 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
             + RIM_GAIN * rim_ring * (RIM_BASE + (1.0 - RIM_BASE) * rim_key)
             + RIM_TOP_GAIN * rim_top
             + FAR_WALL * gaussian(ny - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
-            + SPEC_GAIN * catch)
+            + SPEC_GAIN * catch
+            + caustic)
             .clamp(0.0, 1.0);
 
         // Two colours of equal brightness, crossfaded. Interpolating the hue
         // instead would walk from the warm side to the cool one through green,
         // and the band is exactly where both masks overlap, so the core of the
         // light came out green. Crossfading in light space cannot do that.
-        let saturation = saturation_at(heat);
+        // The wall caustic is the one exception to the saturation curve: it is
+        // light squeezed until its colour separates, so it stays chromatic
+        // where the rest of the material washes out as it brightens.
+        let base_saturation = saturation_at(heat);
+        let saturation = base_saturation + (EDGE_CAUSTIC - base_saturation) * edge_band.min(1.0);
         let fringe = DISPERSION * depth.powi(6);
         let warm_hue = BOWL_HUE + (accent_hue - AMBER_HUE) * WARM_FOLLOW;
         let warm = tinted(warm_hue + (ribbon - 0.5) * 0.10 - fringe, saturation, heat);
@@ -582,10 +641,15 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         red += (1.0 - red) * silver;
         green += (1.0 - green) * silver;
         blue += (1.0 - blue) * silver;
-        // How much of the page this pixel lets through. The body is smoke and
-        // the hot events are dense, which is the difference between glass and a
-        // painting of glass.
-        let glass = GLASS_FLOOR + (1.0 - GLASS_FLOOR) * heat;
+        // How much of the page this pixel lets through. This is geometry, not
+        // light: the chord through the sphere sets the base thickness, the
+        // region picks which of the two deep zones it belongs to, and the
+        // extreme sides thin so the wall caustics read through them.
+        let region = smooth(-0.15, 0.25, -ny);
+        let deep = BOWL_ALPHA + (DOME_ALPHA - BOWL_ALPHA) * region;
+        let chord = 0.55 + 0.45 * nz;
+        let wall = nx * nx * smooth(WALL_FULL, WALL_EDGE, radius);
+        let density = (deep * chord * (1.0 - wall) + WALL_ALPHA * wall).clamp(0.0, 1.0);
 
         // The fitted values are the reference's *composited* pixels, so over the
         // dark scrim the emitted colour has to be lifted to land on them:
@@ -593,10 +657,10 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // keeps the translucency from simply darkening the object. Without this
         // the marble came out a third too dark and no amount of extra light in
         // the field fixed it, because the field was already correct.
-        if glass > 1e-4 {
+        if density > 1e-4 {
             let emitted = relative_luma(red, green, blue);
             if emitted > 1e-4 {
-                let composited = (heat - SCRIM_LUMA * (1.0 - glass)) / glass;
+                let composited = (heat - SCRIM_LUMA * (1.0 - density)) / density;
                 let gain = (composited.max(0.0) / emitted).min(MAX_LIFT);
                 red = (red * gain).min(1.0);
                 green = (green * gain).min(1.0);
@@ -616,7 +680,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
         // every inner pixel to fully opaque, which is exactly how the glass
         // ended up with no transmission at all.
         let edge = ((1.0 - radius) * ORB_RADIUS * size as f32 * 0.5).clamp(0.0, 1.0);
-        let alpha = (glass * edge).clamp(0.0, 1.0);
+        let alpha = (density * edge).clamp(0.0, 1.0);
         if alpha <= 0.0 {
             continue;
         }
@@ -853,8 +917,12 @@ mod tests {
         let bytes = frame.as_bytes(0).expect("one frame");
         assert_eq!(bytes[3], 0, "the corner is clear, not a black square");
         let centre = ((48 * 96 + 48) * 4) as usize;
+        // The density field makes the body near opaque, but the exact centre
+        // sits on the horizon where the dome and bowl crossfade, so it lands a
+        // little under the dome's own 0.92 rather than at it. The bar is "solid,
+        // not a see-through lens", not a recorded sample.
         assert!(
-            bytes[centre + 3] > 230,
+            bytes[centre + 3] > 200,
             "the middle of the marble is solid, not a see-through lens"
         );
     }
@@ -880,9 +948,9 @@ mod tests {
         // image's square boundary painted a wash over the scrim and the user
         // saw a rectangle around the orb. A marble has a silhouette instead:
         // a hard circular boundary with a ramp narrow enough to read as an
-        // edge rather than as a fade. The body is translucent by design now, so
-        // the silhouette is measured by where the frame starts carrying
-        // anything at all, not by where it becomes fully opaque.
+        // edge rather than as a fade. The body carries density now but the wall
+        // still thins, so the silhouette is measured by where the frame starts
+        // carrying anything at all, not by where it becomes fully opaque.
         let size = 160;
         let frame = glass_frame(size);
         let bytes = frame.as_bytes(0).expect("one frame");
@@ -1057,26 +1125,83 @@ mod tests {
     }
 
     #[test]
-    fn the_body_passes_the_page_through_and_only_the_light_is_dense() {
-        // Glass over a page, not a painting of glass. The dark body is smoke:
-        // it lets a large part of the backdrop through, and only the band and
-        // the rim go dense. Pinned as alpha, because alpha is exactly what the
-        // compositor uses to decide how much of the text behind reaches the
-        // user's eye.
-        let size = 160;
+    fn the_dome_is_denser_than_the_wall() {
+        // Density follows the chord through the sphere, not the light field.
+        // The old model multiplied brightness, so the dark dome went thin and
+        // the page text showed through every part of the circle at the same
+        // strength. Alpha is what the compositor uses to decide how much of the
+        // text behind reaches the eye, so this pins the shape of it: deep in
+        // the dome, thin at the wall, which is the difference between crystal
+        // and a grey film.
+        let size = ORB_PIXELS;
         let frame = glass_frame(size);
         let bytes = frame.as_bytes(0).expect("one frame");
-        let body = sample(bytes, size, 0.0, -0.60).3;
-        let band = sample(bytes, size, 0.0, 0.02).3;
-        // Measured 53 in the body and 252 on the band.
+        let dome = sample(bytes, size, 0.0, -0.55).3;
+        let wall = sample(bytes, size, 0.94, -0.20).3;
         assert!(
-            body < 140,
-            "the dark body must stay translucent, got alpha {body}"
+            u32::from(dome) > u32::from(wall) + 30,
+            "the dome must be much denser than the wall, got {dome} against {wall}"
         );
-        assert!(body > 40, "the body must still carry density, got {body}");
         assert!(
-            band > 240,
-            "the band is the one dense event in the material, got alpha {band}"
+            dome > 200,
+            "the dome must be near opaque, not a lens, got alpha {dome}"
+        );
+    }
+
+    #[test]
+    fn the_lower_bowl_transmits_more_than_the_dome() {
+        // The reference is not one flat density: its dome is the deepest part of
+        // the body and the bowl under the band lets more of the page through.
+        // Sampling both at the same latitude either side of the seam is the
+        // cheapest way to pin that split, and it fails if the region crossfade
+        // ever collapses back to a single alpha.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let dome = sample(bytes, size, 0.0, -0.55).3;
+        let bowl = sample(bytes, size, 0.0, 0.55).3;
+        assert!(
+            bowl < dome,
+            "the bowl must transmit more than the dome, got {bowl} against {dome}"
+        );
+        assert!(
+            dome as i32 - bowl as i32 > 6,
+            "the split must be visible, got {dome} against {bowl}"
+        );
+    }
+
+    #[test]
+    fn both_wall_caustics_carry_light() {
+        // Light bent through the thick edge is what makes the walls read as
+        // crystal. Each side carries one of the material's two temperatures:
+        // cold blue above the seam, warm amber below it, and both have to be
+        // brighter than the body at the same latitude or the wall is just a
+        // darker rim.
+        let size = ORB_PIXELS;
+        let frame = glass_frame(size);
+        let bytes = frame.as_bytes(0).expect("one frame");
+        let body = luma(sample(bytes, size, 0.0, -0.55));
+        let cool = sample(bytes, size, 0.93, -0.25);
+        let warm = sample(bytes, size, 0.93, 0.25);
+        assert!(
+            luma(cool) > body + 15.0,
+            "the upper wall must carry light, got {:.1} against a body at {body:.1}",
+            luma(cool)
+        );
+        assert!(
+            luma(warm) > body + 15.0,
+            "the lower wall must carry light, got {:.1} against a body at {body:.1}",
+            luma(warm)
+        );
+        assert!(
+            cool.2 - cool.0 > 10.0,
+            "the upper caustic must run cool, got blue minus red of {:.1}",
+            cool.2 - cool.0
+        );
+        assert!(
+            warm.0 - warm.2 > 10.0,
+            "the lower caustic must run warm, got red minus blue of {:.1}",
+            warm.0 - warm.2
         );
     }
 
