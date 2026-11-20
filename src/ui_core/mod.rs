@@ -48,3 +48,8 @@ pub mod usage;
 // `card`.
 #[cfg(feature = "gui")]
 pub mod window_controls;
+// Where a window's frame lands when it opens (#3082). Same gating: the frame
+// is arithmetic over `gpui` rectangles, and the platform call that supplies the
+// work area lives in the GUI binary.
+#[cfg(feature = "gui")]
+pub mod window_geometry;

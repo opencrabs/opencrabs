@@ -223,13 +223,18 @@ pub(crate) fn run() {
         // its generic "exec" icon for the whole session otherwise.
         icon::apply_dock_icon();
         editor::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(980.0), px(760.0)), cx);
+        // The work area, not the whole screen (#3082). A fixed 980x760 asks for
+        // 1470x1140 physical on a 1080p display at 150%, which is taller than
+        // the screen: the input opened under the taskbar with no way to drag it
+        // back. Fitted, the frame always lands inside what the platform lets it
+        // use.
+        let bounds = window_geometry::boot_bounds(cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // Below this the single-column grid still fits every card's
                 // 420px minimum, so nothing clips on load.
-                window_min_size: Some(size(px(480.0), px(320.0))),
+                window_min_size: Some(opencrabs::ui_core::window_geometry::MIN_SIZE),
                 titlebar: Some(TitlebarOptions {
                     title: Some("OpenCrabs".into()),
                     // One constant, shared with the frame that decides who

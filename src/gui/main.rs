@@ -127,6 +127,7 @@ mod voice_media;
 mod voice_play;
 mod voice_preview;
 mod window_controls;
+mod window_geometry;
 mod window_input;
 
 use crate::composer_view::{
