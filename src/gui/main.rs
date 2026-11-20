@@ -97,6 +97,7 @@ mod rail_activity;
 // the last one replays the prepaint instead of rebuilding every listener.
 mod rail_view;
 mod screen_keys;
+mod composer_orb;
 mod seeker_orb;
 mod sessions;
 mod settings_modal;
