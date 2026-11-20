@@ -189,10 +189,11 @@ impl Dashboard {
     /// Write the split the window is showing, so the next launch puts the same
     /// panes back in the same slots at the same sizes (#2675). Called wherever
     /// the layout can change under the user's hand: a split, a close, a
-    /// divider drag, a caret move, a conversation switch. The chat's own leaf
-    /// goes with it, so a launch knows which pane was the window's transcript
-    /// (#2689), and the frame goes with it too, so a restart does not re-centre
-    /// a window the user placed (#3082).
+    /// divider drag, a caret move, a conversation switch, a rail toggle. The
+    /// chat's own leaf goes with it, so a launch knows which pane was the
+    /// window's transcript (#2689), the frame goes with it too, so a restart
+    /// does not re-centre a window the user placed (#3082), and the rail goes
+    /// with it, so a sidebar closed before a restart opens closed (#3105).
     pub(crate) fn persist_layout(&self) {
         layout_store::save(
             &layout_store::path(),
@@ -200,6 +201,7 @@ impl Dashboard {
             self.pane_focus,
             self.chat_session,
             self.window_frame,
+            self.rail_open,
         );
     }
 

@@ -199,6 +199,10 @@ pub(crate) fn run() {
     // `restore_layout` consumes the tree, and the boot needs the frame before
     // the window exists.
     let saved_window = saved_layout.as_ref().and_then(|saved| saved.window);
+    // Whether the rail was drawn (#3105). Read here for the same reason as the
+    // frame: the first paint already has to know, and a rail the user closed
+    // must not flash open and then shut on every launch.
+    let saved_rail_open = saved_layout.as_ref().and_then(|saved| saved.rail_open);
 
     // Chat is the default screen: the conversation the user was in opens on
     // launch, and a first run opens the newest. The usage ledger is something
@@ -499,7 +503,8 @@ pub(crate) fn run() {
                         rail_chips_expanded: std::collections::HashMap::new(),
                         voice_paint: voice_play::PaintState::default(),
                         rail_width: RAIL_DEFAULT_REM,
-                        rail_open: true,
+                        // The rail the last run closed stays closed (#3105).
+                        rail_open: saved_rail_open.unwrap_or(true),
                         rail_focused: false,
                         poll_tick: 0,
                         rail_anim_live: false,

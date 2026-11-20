@@ -9,9 +9,10 @@
 //!
 //! The file also holds the frame the window was showing (#3082), because where
 //! a user put the window is worth keeping even when the panes are the plain
-//! chat. That is the one thing a file can hold on its own: a frame with no tree
-//! loads, a tree with no frame is a file from before that change and still
-//! loads.
+//! chat, and whether the rail was drawn (#3105), because a rail the user closed
+//! should stay closed across a restart. Either can stand alone: a frame or a
+//! rail with no tree loads, a tree with no frame is a file from before that
+//! change and still loads.
 
 use crate::logging;
 use opencrabs::ui_core::pane_tree::PaneTree;
@@ -30,10 +31,10 @@ pub const FILE: &str = "gui_layout.json";
 pub const VERSION: u32 = 1;
 
 /// What the window writes down: the pane tree, the leaf that held the
-/// caret, the leaf that was the window's own chat, and the frame it was
-/// showing. `focus` is `None` when the chat itself owned it, the same `None`
-/// the window uses in memory, and `chat` says which leaf that chat was
-/// (#2689).
+/// caret, the leaf that was the window's own chat, the frame it was
+/// showing, and whether the rail was drawn. `focus` is `None` when the chat
+/// itself owned it, the same `None` the window uses in memory, and `chat`
+/// says which leaf that chat was (#2689).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedLayout {
     pub version: u32,
@@ -47,6 +48,17 @@ pub struct SavedLayout {
     /// have no such key and read as `None`, which opens on the fitted default.
     #[serde(default)]
     pub window: Option<WindowState>,
+    /// Whether the rail was drawn (#3105). Files written before that have no
+    /// such key and read as `None`, which opens the rail the way a first run
+    /// does.
+    ///
+    /// A closed rail is a real choice, so it is written down: a restart that
+    /// reopened it would undo something the user asked for. An open rail is
+    /// the default, so it is written too rather than left out, because the
+    /// file is one snapshot and a missing key would be read as a file from
+    /// before this change.
+    #[serde(default)]
+    pub rail_open: Option<bool>,
 }
 
 /// The frame the window was showing (#3082): where it sat, how big it was, and
@@ -73,6 +85,12 @@ pub fn path() -> PathBuf {
     opencrabs::config::opencrabs_home().join(FILE)
 }
 
+/// Whether a snapshot holds anything worth restoring. A tree, a frame and a
+/// recorded rail are each enough on their own; an empty file is not.
+fn holds_something(saved: &SavedLayout) -> bool {
+    saved.panes.is_some() || saved.window.is_some() || saved.rail_open.is_some()
+}
+
 /// Read a snapshot. `None` when the file is absent, corrupt, from another
 /// version, or holds neither a tree nor a frame. A file this function refuses
 /// is removed, so the next write starts clean instead of reading the same bad
@@ -88,9 +106,9 @@ pub fn load(path: &Path) -> Option<SavedLayout> {
             discard(path);
             None
         }
-        Ok(saved) if saved.panes.is_some() || saved.window.is_some() => Some(saved),
+        Ok(saved) if holds_something(&saved) => Some(saved),
         Ok(_) => {
-            logging::warn("gui layout: the file holds no tree and no frame, starting on the chat");
+            logging::warn("gui layout: the file holds nothing to restore, starting fresh");
             discard(path);
             None
         }
@@ -108,7 +126,9 @@ pub fn load(path: &Path) -> Option<SavedLayout> {
 /// tree is written: no tree means "no custom layout", which is the signal the
 /// terminal uses too, and it keeps a first run read-free. The frame is written
 /// either way, because where the window sat is worth keeping even when it holds
-/// nothing but the chat (#3082). A file with neither a tree nor a frame is
+/// nothing but the chat (#3082), and so is a closed rail (#3105), because a
+/// restart that reopened it would undo a choice the user made. A file with no
+/// tree, no frame and an open rail holds nothing worth keeping, so it is
 /// removed instead.
 pub fn save(
     path: &Path,
@@ -116,9 +136,10 @@ pub fn save(
     focus: Option<Uuid>,
     chat: Option<Uuid>,
     window: Option<WindowState>,
+    rail_open: bool,
 ) {
     let split = panes.is_some_and(|tree| tree.leaves().len() > 1);
-    if !split && window.is_none() {
+    if !split && window.is_none() && rail_open {
         discard(path);
         return;
     }
@@ -128,6 +149,7 @@ pub fn save(
         focus,
         chat,
         window,
+        rail_open: Some(rail_open),
     };
     let Ok(json) = serde_json::to_string_pretty(&saved) else {
         logging::error("gui layout: could not serialise the pane tree");
@@ -197,7 +219,7 @@ mod tests {
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
         let mut tree = split_tree(left, right);
         assert!(tree.drag_divider(&[], 0, 80.0, 800.0), "drag the divider");
-        save(&file, Some(&tree), Some(right), Some(left), None);
+        save(&file, Some(&tree), Some(right), Some(left), None, true);
 
         let saved = load(&file).expect("a saved layout reads back");
         assert_eq!(saved.version, VERSION);
@@ -235,7 +257,7 @@ mod tests {
             .iter()
             .map(|session| tree.leaf_width_share(*session))
             .collect();
-        save(&file, Some(&tree), Some(a), Some(a), None);
+        save(&file, Some(&tree), Some(a), Some(a), None, true);
 
         let saved = load(&file).expect("a saved layout reads back");
         let restored = saved.panes.expect("the tree");
@@ -264,7 +286,7 @@ mod tests {
         assert!(tree.drag_divider(&[1], 0, 120.0, 2400.0), "drag the pair");
         let nested_before = tree.leaf_width_share(b);
         assert_ne!(nested_before, Some(0.25), "the drag moved the share");
-        save(&file, Some(&tree), Some(b), Some(a), None);
+        save(&file, Some(&tree), Some(b), Some(a), None, true);
 
         let saved = load(&file).expect("a saved layout reads back");
         let restored = saved.panes.expect("the tree");
@@ -287,9 +309,17 @@ mod tests {
             None,
             Some(left),
             None,
+            true,
         );
         assert!(file.exists(), "a split writes the file");
-        save(&file, Some(&PaneTree::leaf(left)), None, Some(left), None);
+        save(
+            &file,
+            Some(&PaneTree::leaf(left)),
+            None,
+            Some(left),
+            None,
+            true,
+        );
         assert!(!file.exists(), "back to one pane removes it");
     }
 
@@ -316,6 +346,7 @@ mod tests {
             focus: None,
             chat: None,
             window: None,
+            rail_open: None,
         };
         std::fs::write(&file, serde_json::to_string(&saved).expect("json")).expect("write");
         assert!(load(&file).is_none());
@@ -353,6 +384,7 @@ mod tests {
             focus: Some(right),
             chat: Some(left),
             window: None,
+            rail_open: None,
         };
         let known: HashSet<Uuid> = [left, right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(left));
@@ -367,6 +399,7 @@ mod tests {
             focus: Some(right),
             chat: Some(left),
             window: None,
+            rail_open: None,
         };
         let known: HashSet<Uuid> = [right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(right));
@@ -381,6 +414,7 @@ mod tests {
             focus: None,
             chat: None,
             window: None,
+            rail_open: None,
         };
         let known: HashSet<Uuid> = [right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(right));
@@ -395,6 +429,7 @@ mod tests {
             focus: Some(right),
             chat: Some(left),
             window: None,
+            rail_open: None,
         };
         assert_eq!(boot_session(&saved, &HashSet::new()), None);
     }
@@ -429,6 +464,7 @@ mod tests {
             Some(right),
             Some(left),
             None,
+            true,
         );
         let saved = load(&file).expect("the layout reads back");
         assert_eq!(saved.chat, Some(left), "the chat leaf comes back");
@@ -447,7 +483,7 @@ mod tests {
             height: 800.0,
             maximized: false,
         };
-        save(&file, None, None, None, Some(frame));
+        save(&file, None, None, None, Some(frame), true);
         let saved = load(&file).expect("a frame on its own is worth reading");
         assert_eq!(saved.window, Some(frame));
         assert_eq!(saved.panes, None, "no tree means the plain chat");
@@ -511,9 +547,53 @@ mod tests {
             None,
             Some(left),
             None,
+            true,
         );
         assert!(file.exists(), "a split writes the file");
-        save(&file, None, None, None, None);
+        save(&file, None, None, None, None, true);
         assert!(!file.exists(), "nothing to remember removes it");
+    }
+
+    /// A closed rail comes back closed (#3105). The tree and the frame are not
+    /// the only things a restart has to respect: putting the sidebar away is a
+    /// choice, and reopening it on every launch undoes that choice.
+    #[test]
+    fn a_closed_rail_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        save(&file, None, None, None, None, false);
+        let saved = load(&file).expect("a closed rail on its own is worth reading");
+        assert_eq!(saved.rail_open, Some(false), "the rail comes back closed");
+        assert_eq!(saved.panes, None, "no tree still means the plain chat");
+    }
+
+    /// An open rail is the default, so on its own it writes nothing: a first
+    /// run stays read-free, the same way a plain chat does.
+    #[test]
+    fn an_open_rail_on_its_own_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        save(&file, None, None, None, None, true);
+        assert!(!file.exists(), "the default rail is not worth a file");
+    }
+
+    /// A file written before #3105 has no rail key and must still load its
+    /// tree: the missing key reads as "the rail opens", which is what those
+    /// launches did.
+    #[test]
+    fn an_old_file_without_a_rail_key_still_loads() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let json = serde_json::json!({
+            "version": VERSION,
+            "panes": split_tree(left, right),
+            "focus": serde_json::Value::Null,
+            "chat": serde_json::Value::Null,
+        });
+        std::fs::write(&file, json.to_string()).expect("write the old file");
+        let saved = load(&file).expect("a tree from before the rail key still loads");
+        assert_eq!(saved.rail_open, None, "no key means no recorded choice");
+        assert!(saved.panes.is_some(), "the tree comes back");
     }
 }
