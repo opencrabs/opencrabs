@@ -16,6 +16,7 @@ mod approval;
 pub(crate) mod blocklist;
 pub(crate) mod broadcast;
 mod cancel;
+pub(crate) mod chat_key;
 mod connection;
 pub(crate) mod ephemeral;
 pub(crate) mod flow_message;

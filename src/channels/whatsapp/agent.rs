@@ -209,6 +209,10 @@ impl WhatsAppAgent {
                             .into_iter()
                             .map(|e| (e.lid, e.phone_number))
                             .collect();
+                        // #2928: mirror the same pairs in memory, so a stanza
+                        // that arrives on the LID alone still keys its rows on
+                        // the phone number the contact started under.
+                        wa_state.seed_lid_pn_pairs(pairs.clone()).await;
                         match super::lid_migration::reconcile_lid_sessions(
                             &session_svc.pool(),
                             pairs,
