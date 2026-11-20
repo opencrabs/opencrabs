@@ -586,3 +586,57 @@ fn the_send_intent_is_spent_once_and_cleared_everywhere_else() {
         "leaving the conversation drops the press with the draft"
     );
 }
+
+/// The note the model reads never reaches a screen (#3092).
+///
+/// A voice turn's prompt is the transcript with `[voice note]` in front of it,
+/// because a model handed plain prose answers plain prose. The reader who spoke
+/// the words is not the model, so both ways a card starts strip it: a send, and
+/// a turn a restart resumed from the row the previous process wrote.
+#[test]
+fn the_note_that_tells_the_model_reaches_no_card() {
+    let begin = region_in(
+        TRANSCRIPT,
+        "pub fn begin(&mut self, user: String)",
+        "pub fn resume(&mut self, user: String)",
+    );
+    assert!(
+        begin.contains("spoken::without_prefix(&user)"),
+        "the card strips the note where the turn starts, so a resumed turn does too"
+    );
+    // A resumed turn draws the question the ledger holds. The parked prompt is
+    // words only, which is what put the note on the card and left the clip with
+    // no player; the row carries both halves.
+    let resume = region_in(
+        AGENT_BRIDGE,
+        "let user_message = match ledger_question(",
+        "let cancel = tokio_util::sync::CancellationToken::new();",
+    );
+    assert!(
+        resume.contains("&messages, session_id).await"),
+        "boot resume asks the ledger for the question instead of drawing the prompt"
+    );
+    assert!(
+        AGENT_BRIDGE.contains("async fn ledger_question("),
+        "the lookup is one function, so both halves of the question travel together"
+    );
+}
+
+/// A marker is the message's own attachment only at its tail (#3092).
+///
+/// The send path appends markers after the words. Reading every marker anywhere
+/// in a body made a reply that quoted one draw a player for a clip it never
+/// sent, and a quote shortened with an ellipsis opened nothing when pressed.
+#[test]
+fn a_quoted_marker_draws_no_player() {
+    let markers = editor("fn trailing_markers(", "pub fn split_audio_marker(");
+    assert!(
+        markers.contains("pub fn marker_paths(text: &str) -> Vec<PathBuf>")
+            && markers.contains("let Some(tail) = trailing_markers(text)"),
+        "the paths a row draws come from the tail, never from the whole body"
+    );
+    assert!(
+        markers.contains("head.rfind(\"<<\")"),
+        "the tail is read from the end, so a run of markers needs no count"
+    );
+}
