@@ -20,23 +20,33 @@
 //! refit there reaches both surfaces. The per-pixel maths has to differ,
 //! because the dynamics differ.
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use gpui::RenderImage;
+use gpui::{
+    App, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage, SharedString,
+    Styled, canvas, div, img, prelude::*, px,
+};
 use image::{Frame, RgbaImage};
 
 use super::seeker_orb::{
     AMBER_HUE, AMBIENT, BAND_ARCH, BAND_GAIN, BAND_REACH, BAND_SIGMA, BAND_WALL, BAYER, BOW_BOWL,
     BOWL_ALPHA, BOWL_HUE, BOWL_LIFT, BREATHE, COOL_HUE, DISPERSION, DOME_ALPHA, EDGE_CAUSTIC,
     EDGE_COOL, EDGE_DEPTH, EDGE_SPREAD, EDGE_WARM, FAR_LIFT, FAR_WALL, GLOW_GAIN, GLOW_SIGMA,
-    HORIZON, MAX_LIFT, ORB_PIXELS, ORB_RADIUS, RIM_BASE, RIM_FALL_GAIN, RIM_FALL_SIGMA, RIM_GAIN,
-    RIM_RADIUS, RIM_SILVER, RIM_TILT_X, RIM_TILT_Y, RIM_TOP_EDGE, RIM_TOP_FULL, RIM_TOP_GAIN,
-    RIM_TOP_WIDTH, RIM_WIDTH, SCRIM_LUMA, SIDE_BIAS, SPEC_DIR_X, SPEC_DIR_Y, SPEC_GAIN,
-    SPEC_RADIUS, SPEC_SPAN_HIGH, SPEC_SPAN_LOW, SPEC_WIDTH, Surface, VOICE_SAMPLES, WALL_ALPHA,
-    WALL_EDGE, WALL_FULL, WARM_FOLLOW, bgra, gaussian, hash_noise, relative_luma, rgb_hsv,
-    saturation_at, sine, smooth, smooth_voice, tinted, voice_at,
+    HORIZON, MAX_LIFT, ORB_RADIUS, RIM_BASE, RIM_FALL_GAIN, RIM_FALL_SIGMA, RIM_GAIN, RIM_RADIUS,
+    RIM_SILVER, RIM_TILT_X, RIM_TILT_Y, RIM_TOP_EDGE, RIM_TOP_FULL, RIM_TOP_GAIN, RIM_TOP_WIDTH,
+    RIM_WIDTH, SCRIM_LUMA, SIDE_BIAS, SPEC_DIR_X, SPEC_DIR_Y, SPEC_GAIN, SPEC_RADIUS,
+    SPEC_SPAN_HIGH, SPEC_SPAN_LOW, SPEC_WIDTH, Surface, VOICE_SAMPLES, WALL_ALPHA, WALL_EDGE,
+    WALL_FULL, WARM_FOLLOW, bgra, gaussian, hash_noise, relative_luma, rgb_hsv, saturation_at,
+    sine, smooth, smooth_voice, tinted, voice_at,
 };
-use super::voice_play;
+use super::voice_play::{self, ClipState};
+use super::voice_preview::{clip_length, fallback_peaks};
+use crate::{logging, palette, voice_media};
 
 /// How far the silhouette moves, in orb units, at full amplitude.
 ///
@@ -98,7 +108,7 @@ impl PlayerOrb {
     /// Build a player for one take. `peaks` is whatever the decoder produced,
     /// at whatever length, and is pooled down to the meter's own width.
     pub(crate) fn new(colour: u32, peaks: &[f32]) -> Self {
-        Self::at(ORB_PIXELS, colour, peaks)
+        Self::at(PLAYER_PIXELS, colour, peaks)
     }
 
     /// The same player at an arbitrary frame size, so the tests can render a
@@ -123,30 +133,6 @@ impl PlayerOrb {
     /// Move the playhead to `fraction` of the take, clamped to the track.
     pub(crate) fn scrub(path: &Path, fraction: f32) -> Result<(), String> {
         voice_play::seek(path, fraction.clamp(0.0, 1.0))
-    }
-
-    /// The state for this instant: position and pause from the player, pointer
-    /// and clock from the composer.
-    pub(crate) fn state(path: &Path, hovered: bool, clock: f32) -> PlayerState {
-        let live = voice_play::state(path);
-        let (progress, playing) = match live {
-            Some(clip) => {
-                let total = clip.duration.as_secs_f32();
-                let progress = if total > 0.0 {
-                    (clip.position.as_secs_f32() / total).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                (progress, clip.playing)
-            }
-            None => (0.0, false),
-        };
-        PlayerState {
-            progress,
-            playing,
-            hovered,
-            clock,
-        }
     }
 
     /// Render one frame. Straight alpha BGRA, the layout GPUI's atlas expects.
@@ -324,6 +310,337 @@ impl PlayerOrb {
         }
         RenderImage::new(vec![Frame::new(pixels)])
     }
+}
+
+/// The size the composer's player is rasterised at, in pixels.
+///
+/// The orb is drawn at sixty-four points, so this is three times its on-screen
+/// size: enough for a retina display without paying the recording orb's full
+/// frame every time the playhead moves a hair.
+const PLAYER_PIXELS: u32 = 192;
+
+/// The size the player is drawn at, in points.
+const ORB_POINTS: f32 = 64.0;
+
+/// How many steps of the track the playhead takes before the frame is redrawn.
+///
+/// The band is about sixty points wide, so one step in a hundred and
+/// twenty-eight is half a point: invisible, and it keeps a repaint every forty
+/// milliseconds from re-rasterising the whole orb on every single tick.
+const PROGRESS_STEPS: f32 = 128.0;
+
+/// One rendered player, kept so an unrelated repaint costs nothing.
+struct Cached {
+    orb: PlayerOrb,
+    peaks: Arc<Vec<f32>>,
+    path: PathBuf,
+    state: PlayerState,
+    started: Instant,
+    frame: Arc<RenderImage>,
+}
+
+thread_local! {
+    static PLAYERS: RefCell<HashMap<String, Cached>> = RefCell::new(HashMap::new());
+    static HOVERED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+fn hovering(id: &str) -> bool {
+    HOVERED.with(|hovered| hovered.borrow().get(id).copied().unwrap_or(false))
+}
+
+/// The frame for this instant, rendered only when something visible changed.
+///
+/// The recording orb renders on its own thread because it never stops moving.
+/// A player sits still for most of its life, so rendering on demand and
+/// remembering the frame is both cheaper and simpler: an unrelated keystroke
+/// repaints the composer and finds the same texture waiting.
+fn frame_for(
+    id: &str,
+    path: &Path,
+    peaks: &Arc<Vec<f32>>,
+    colour: u32,
+    state: PlayerState,
+    cx: &mut App,
+) -> Arc<RenderImage> {
+    let (frame, retired) = PLAYERS.with(|players| {
+        let mut players = players.borrow_mut();
+        if let Some(cached) = players.get(id)
+            && cached.path == path
+            && Arc::ptr_eq(&cached.peaks, peaks)
+            && cached.state.progress == state.progress
+            && cached.state.playing == state.playing
+            && cached.state.hovered == state.hovered
+        {
+            return (Arc::clone(&cached.frame), None);
+        }
+        let previous = players.remove(id);
+        let (orb, started, retired) = match previous {
+            Some(old) => {
+                let orb = if old.path == path && Arc::ptr_eq(&old.peaks, peaks) {
+                    old.orb
+                } else {
+                    PlayerOrb::new(colour, peaks)
+                };
+                (orb, old.started, Some(old.frame))
+            }
+            None => (PlayerOrb::new(colour, peaks), Instant::now(), None),
+        };
+        let clock = started.elapsed().as_secs_f32();
+        let frame = Arc::new(orb.render(PlayerState { clock, ..state }));
+        players.insert(
+            id.to_string(),
+            Cached {
+                orb,
+                peaks: Arc::clone(peaks),
+                path: path.to_path_buf(),
+                state,
+                started,
+                frame: Arc::clone(&frame),
+            },
+        );
+        (frame, retired)
+    });
+    if let Some(retired) = retired {
+        cx.drop_image(retired, None);
+    }
+    frame
+}
+
+/// How far a press has to travel before it counts as a scrub rather than a tap.
+const TAP_SLOP: f32 = 3.0;
+
+/// Where a player sits on screen, recorded by the probe it paints.
+type Track = Rc<RefCell<Option<[f32; 4]>>>;
+
+/// One press on the glass, so a scrub and a tap can be told apart on release.
+struct Press {
+    id: String,
+    from: f32,
+    moved: bool,
+}
+
+thread_local! {
+    static BOUNDS: RefCell<HashMap<String, Track>> = RefCell::new(HashMap::new());
+    static PRESS: RefCell<Option<Press>> = const { RefCell::new(None) };
+}
+
+fn bounds_track(id: &str) -> Track {
+    BOUNDS.with(|tracks| {
+        Rc::clone(
+            tracks
+                .borrow_mut()
+                .entry(id.to_string())
+                .or_insert_with(|| Rc::new(RefCell::new(None))),
+        )
+    })
+}
+
+/// A transparent layer that records where the orb was painted.
+///
+/// Pointer events arrive in window coordinates, and the orb has to turn one of
+/// them into a position along its band. That needs the rectangle it was drawn
+/// in, and the probe is how a div learns its own.
+fn bounds_probe(track: Track) -> impl IntoElement {
+    canvas(
+        |bounds, _window, _cx| bounds,
+        move |bounds, _, _window, _cx| {
+            let left = f32::from(bounds.origin.x);
+            let top = f32::from(bounds.origin.y);
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            track
+                .borrow_mut()
+                .replace([left, top, left + width, top + height]);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .w_full()
+    .h_full()
+}
+
+fn set_drag(id: &str, from: f32) {
+    PRESS.with(|press| {
+        *press.borrow_mut() = Some(Press {
+            id: id.to_string(),
+            from,
+            moved: false,
+        });
+    });
+}
+
+/// Whether this press has become a scrub. Reports `true` once it has, so the
+/// caller seeks on the move that crosses the threshold and on every one after.
+fn drag_moved(id: &str, x: f32) -> bool {
+    PRESS.with(|press| {
+        let mut press = press.borrow_mut();
+        let Some(held) = press.as_mut().filter(|held| held.id == id) else {
+            return false;
+        };
+        if (x - held.from).abs() <= TAP_SLOP {
+            return false;
+        }
+        held.moved = true;
+        true
+    })
+}
+
+/// End the press, reporting whether it was a tap rather than a scrub.
+fn release_drag(id: &str) -> bool {
+    PRESS.with(|press| {
+        let mut press = press.borrow_mut();
+        let tap = match press.as_ref() {
+            Some(held) if held.id == id => !held.moved,
+            _ => return false,
+        };
+        *press = None;
+        tap
+    })
+}
+
+fn fraction_at(id: &str, x: f32) -> Option<f32> {
+    let track = BOUNDS.with(|tracks| tracks.borrow().get(id).cloned())?;
+    let bounds = *track.borrow();
+    let [left, _, right, _] = bounds?;
+    if right <= left {
+        return None;
+    }
+    Some(((x - left) / (right - left)).clamp(0.0, 1.0))
+}
+
+fn seek_at(id: &str, path: &Path, x: f32) {
+    let Some(fraction) = fraction_at(id, x) else {
+        return;
+    };
+    if let Err(reason) = PlayerOrb::scrub(path, fraction) {
+        logging::error(&format!("composer player: {reason}"));
+    }
+}
+
+/// Where the playhead is and how long the take is.
+///
+/// The player knows both once a clip has been started, and the draft knows the
+/// length before that, so the two are asked in that order. One helper, because
+/// the band and the caption must never disagree about where the take ends.
+fn span(live: Option<ClipState>, seconds: Option<f32>) -> (Duration, Option<Duration>) {
+    let total = live
+        .map(|state| state.duration)
+        .filter(|duration| !duration.is_zero())
+        .or_else(|| {
+            seconds
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .map(Duration::from_secs_f32)
+        });
+    let position = live.map(|state| state.position).unwrap_or_default();
+    (total.map_or(position, |total| position.min(total)), total)
+}
+
+/// The take as a player: the glass, its waveform, its band and its mark.
+///
+/// Nothing else belongs inside it. The discard control stays outside the
+/// element so a click meant for the ✕ can never land on the glass, and the
+/// transcript stays outside so the words are selectable text and not part of a
+/// texture.
+pub(crate) fn player(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+    cx: &mut App,
+) -> Div {
+    let live = voice_play::state(path);
+    let (position, total) = span(live, seconds);
+    let fraction = total
+        .filter(|total| !total.is_zero())
+        .map(|total| (position.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let state = PlayerState {
+        // Quantised so the band advances in half-point steps instead of
+        // asking for a new texture on every tick of the dashboard.
+        progress: (fraction * PROGRESS_STEPS).round() / PROGRESS_STEPS,
+        playing: live.is_some_and(|state| state.playing),
+        hovered: hovering(id),
+        clock: 0.0,
+    };
+    let peaks = voice_media::visual(path)
+        .map(|visual| Arc::clone(&visual.peaks))
+        .unwrap_or_else(|| Arc::new(fallback_peaks(fallback_levels)));
+    let frame = frame_for(id, path, &peaks, palette::current().amber, state, cx);
+
+    let hover_id = id.to_string();
+    let press_path = path.to_path_buf();
+    let drag_path = path.to_path_buf();
+    let down_id = id.to_string();
+    let move_id = id.to_string();
+    let up_id = id.to_string();
+    let out_id = id.to_string();
+    let painted = bounds_track(id);
+    div()
+        .id(SharedString::from(format!("voice-orb-{id}")))
+        .relative()
+        .flex_none()
+        .size(px(ORB_POINTS))
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                set_drag(&down_id, f32::from(event.position.x));
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+            if drag_moved(&move_id, f32::from(event.position.x)) {
+                cx.stop_propagation();
+                seek_at(&move_id, &drag_path, f32::from(event.position.x));
+                window.refresh();
+            }
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, window, _cx| {
+                // A press that never travelled is a tap: it starts or stops the
+                // take. A press that travelled was a scrub and has already
+                // moved the playhead, so letting go must not also toggle.
+                if release_drag(&up_id)
+                    && let Err(reason) = PlayerOrb::activate(&press_path)
+                {
+                    logging::error(&format!("composer player: {reason}"));
+                }
+                window.refresh();
+            },
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, window, _cx| {
+                release_drag(&out_id);
+                window.refresh();
+            },
+        )
+        .on_hover(move |over: &bool, window, _cx| {
+            let changed = HOVERED.with(|hovered| {
+                let mut hovered = hovered.borrow_mut();
+                if hovered.get(&hover_id).copied().unwrap_or(false) == *over {
+                    return false;
+                }
+                hovered.insert(hover_id.clone(), *over);
+                true
+            });
+            if changed {
+                window.refresh();
+            }
+        })
+        .child(img(frame).absolute().inset_0().size_full())
+        .child(bounds_probe(painted))
+}
+
+/// The take's position and length, for the caption beside the orb.
+pub(crate) fn label(path: &Path, seconds: Option<f32>) -> String {
+    let (position, total) = span(voice_play::state(path), seconds);
+    let length = total
+        .map(|total| clip_length(total.as_secs()))
+        .unwrap_or_else(|| "--:--".to_string());
+    format!("{} / {length}", clip_length(position.as_secs()))
 }
 
 /// Pool whatever the decoder produced down to the meter's own width, keeping

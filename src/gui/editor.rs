@@ -3380,6 +3380,18 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         cx.stop_propagation();
         this.discard_voice(cx);
     });
+    // The take is the orb now: its own peaks displace the glass, the band is
+    // the scrub track and the mark in the middle starts and stops it (#3092).
+    // The discard stays outside the element, so a click meant for the ✕ can
+    // never land on the player.
+    let player = crate::composer_orb::player(
+        "recorded-draft",
+        &draft.clip,
+        Some(draft.seconds),
+        &draft.levels,
+        &mut **cx,
+    );
+    let label = crate::composer_orb::label(&draft.clip, Some(draft.seconds));
     div()
         .flex()
         .flex_col()
@@ -3393,16 +3405,19 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
             div()
                 .flex()
                 .flex_row()
-                .items_start()
+                .items_center()
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .child(div().flex_1().min_w_0().child(crate::voice_preview::player(
-                    "recorded-draft",
-                    &draft.clip,
-                    Some(draft.seconds),
-                    &draft.levels,
-                )))
+                .child(player)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(11.0))
+                        .text_color(rgb(palette.text_muted))
+                        .child(SharedString::from(label)),
+                )
                 .child(
                     div()
                         .id("voice-preview-discard")
@@ -3415,13 +3430,14 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                         .on_mouse_down(MouseButton::Left, discard),
                 ),
         )
-        // The recogniser's words stay a draft caption. Enter still sends the
-        // composer's actual field, exactly as before this visual change.
+        // The recogniser's words stay a draft caption, aligned with the text
+        // column rather than the glass. Enter still sends the composer's actual
+        // field, exactly as before this visual change.
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .pl(px(40.0))
+                .pl(px(72.0))
                 .pr(px(20.0))
                 .text_xs()
                 .text_color(rgb(palette.text_muted))
