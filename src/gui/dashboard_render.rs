@@ -2445,8 +2445,12 @@ impl Render for Dashboard {
                         let offers = agent_bridge::options_snapshot(sid);
                         if !offers.is_empty() {
                             let rows = self.option_rows(sid, offers, cx);
+                            let focus = self
+                                .options_focus
+                                .filter(|(session, _)| *session == sid)
+                                .map(|(_, at)| at);
                             above = above.child(central(
-                                options_strip(&rows).into_any_element(),
+                                options_strip(&rows, focus).into_any_element(),
                                 centred_chat,
                                 chat_measure_px,
                             ));
@@ -2608,6 +2612,12 @@ impl Render for Dashboard {
                     // take the keyboard, so the composer needed an Esc before
                     // it would type again.
                     this.rail_hands_back();
+                    // A press anywhere but the card is a press on the
+                    // conversation, so the offer's ring steps aside and the
+                    // keyboard goes back to wherever the press landed (#3101).
+                    if this.options_focus.take().is_some() {
+                        cx.notify();
+                    }
                     if this.sessions.rail_menu.take().is_some() {
                         cx.notify();
                     }
@@ -3575,6 +3585,13 @@ impl Dashboard {
             clear_base: 0,
             update_version: self.update_available.clone(),
             turns: self.chat_state.transcript.turns.len(),
+            // An offer waiting above the composer is the most actionable thing
+            // on screen, so the row says how to reach it (#3101). Read from the
+            // session on screen, the same one the card is drawn for.
+            offers: self
+                .chat_session
+                .map(|sid| agent_bridge::options_snapshot(sid).len())
+                .unwrap_or(0),
         };
         // What a `/clear` leaves behind is the system prompt and the tool
         // schemas. Counting it tokenises every tool schema, so it is measured
@@ -3600,20 +3617,23 @@ impl Dashboard {
 fn hint_row(state: &HintState) -> Option<AnyElement> {
     let hint = gui_hint(state)?;
     let shown = palette::current();
-    // The command is the actionable half, so it is the half that is coloured.
-    // Split around it rather than styling the whole line: a line that is all
-    // accent reads as an error, and one that is all muted is chrome nobody
-    // notices.
-    let (before, after) = hint
-        .text
-        .split_once(hint.command)
-        .map(|(b, a)| (b.to_string(), a.to_string()))
-        .unwrap_or((hint.text.clone(), String::new()));
+    // A hint with no command names keys instead (the offer rung), and splitting
+    // on an empty needle would colour the whole line as the actionable half.
+    let (before, after) = if hint.command.is_empty() {
+        (hint.text.clone(), String::new())
+    } else {
+        hint.text
+            .split_once(hint.command)
+            .map(|(b, a)| (b.to_string(), a.to_string()))
+            .unwrap_or((hint.text.clone(), String::new()))
+    };
     let mut line = div().flex().flex_row().items_center().px_1();
     if !before.is_empty() {
         line = line.child(text(before, Size::Xs, shown.text_muted));
     }
-    line = line.child(text(hint.command, Size::Xs, shown.accent));
+    if !hint.command.is_empty() {
+        line = line.child(text(hint.command, Size::Xs, shown.accent));
+    }
     if !after.is_empty() {
         line = line.child(text(after, Size::Xs, shown.text_muted));
     }

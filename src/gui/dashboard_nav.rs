@@ -667,6 +667,15 @@ impl Dashboard {
         if self.task_focus.is_some() {
             open.push(OverlayId::Tasks);
         }
+        // The follow-up offer sits where the task list does, one direction up,
+        // and it takes the keys from the composer the same way (#3101). An
+        // offer that left while the ring stood on it gives the keys straight
+        // back: a card that is no longer drawn must never hold the keyboard.
+        if let Some((session, _)) = self.options_focus
+            && !agent_bridge::options_snapshot(session).is_empty()
+        {
+            open.push(OverlayId::Options);
+        }
         if self.split_pick.is_some() {
             open.push(OverlayId::SplitPick);
         }

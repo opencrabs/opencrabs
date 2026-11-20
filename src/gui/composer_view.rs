@@ -11,10 +11,10 @@
 //! new. The slash list's doc comment sat above the emoji list's and now sits
 //! on the function it describes.
 
-use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, SEEKER_RADIUS, glass_fill, seeker_concentric_radius};
 use opencrabs::ui_core::commands as slash;
 
 use std::ops::Range;
@@ -77,47 +77,121 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
 }
 
 /// The follow-up options `suggest_options` offered, above the composer where
-/// the queued list sits. One numbered row per label, styled the way the
-/// channel buttons are: primary in the accent, danger in the red, default
-/// quiet. A click sends that exact label as the next turn (#2708).
+/// the queued list sits. One button per label, styled the way the channel
+/// buttons are: primary in the accent, danger in the red, default quiet. A
+/// click sends that exact label as the next turn (#2708).
+///
+/// Drawn as a card from the Seeker's family (#3101): its radius, its glass
+/// fill, and its shadow, so an offer reads as the same kind of floating
+/// surface as the command card rather than a bare list of words. The buttons
+/// wrap, because a card that grows wider than the composer would push the
+/// conversation around.
+///
+/// `focused` is the row the keyboard stands on, `None` while the field has the
+/// caret. Up from the composer hands the keyboard here instead of walking
+/// history (#3101), which is what the focus ring exists to show.
 ///
 /// The rows arrive with their handlers already minted by the window, because
 /// only it knows which session the offer belongs to. Nothing here reaches the
 /// database: see `agent_bridge::SUGGESTIONS` for why there is nothing to
 /// persist.
-pub(crate) fn options_strip(rows: &[(SuggestionItem, transcript::ClickHandler)]) -> Div {
+pub(crate) fn options_strip(
+    rows: &[(SuggestionItem, transcript::ClickHandler)],
+    focused: Option<usize>,
+) -> Div {
+    let p = palette::current();
     let mut col = div()
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_2()
         .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
+        .rounded(px(SEEKER_RADIUS))
+        .bg(glass_fill(p.panel))
+        .shadow_2xl()
         .child(
             div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from("suggested")),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.text_muted))
+                        .child(SharedString::from("suggested")),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.text_faint))
+                        .child(SharedString::from(if rows.len() > 1 {
+                            "↑↓ walk · enter sends"
+                        } else {
+                            "↑ picks · enter sends"
+                        })),
+                ),
         );
+    let mut buttons = div().flex().flex_row().flex_wrap().gap_1p5();
     for (i, (item, pick)) in rows.iter().enumerate() {
-        let color = match item.style {
-            SuggestionStyle::Primary => palette::current().accent,
-            SuggestionStyle::Danger => palette::current().red,
-            SuggestionStyle::Default => palette::current().text_muted,
+        let (ink, wash) = match item.style {
+            SuggestionStyle::Primary => (p.accent, rgba((p.accent << 8) | 0x1c)),
+            SuggestionStyle::Danger => (p.red, rgba((p.red << 8) | 0x1c)),
+            SuggestionStyle::Default => (p.text_normal, rgba(0xffffff0d)),
         };
+        let on = focused == Some(i);
         let pick = pick.clone();
-        col = col.child(
+        // The keyboard's row is the one Enter would send, so it carries the
+        // accent edge and the return mark. A pointer row lifts on hover
+        // instead: the same wash, one step quieter, so two rows can never look
+        // equally armed.
+        buttons = buttons.child(
             div()
                 .id(SharedString::from(format!("option-row-{i}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded(px(seeker_concentric_radius(12.0)))
+                .border_1()
+                .border_color(if on {
+                    rgba((ink << 8) | 0x88)
+                } else {
+                    rgba(0xffffff1a)
+                })
+                .when(on, |d| d.bg(wash))
+                .when(!on, |d| {
+                    d.hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
+                })
                 .text_xs()
-                .text_color(rgb(color))
+                .text_color(rgb(ink))
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                .child(SharedString::from(format!("{}. {}", i + 1, item.label)))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(p.text_faint))
+                        .child(SharedString::from(format!("{}", i + 1))),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(item.label.clone())),
+                )
+                .when(on, |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(p.text_faint))
+                            .child(SharedString::from("↵")),
+                    )
+                })
                 .on_click(move |ev, window, app| pick(ev, window, app)),
         );
     }
-    col
+    col.child(buttons)
 }
 
 /// Whether a speech-to-text engine is configured, which decides what the

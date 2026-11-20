@@ -111,6 +111,15 @@ impl Dashboard {
             self.task_detail_key(&ev.keystroke, cx);
             return;
         }
+        // The follow-up offer holds the keyboard after Up from the composer
+        // (#3101): the arrows walk it, Enter sends the row the ring stands on,
+        // Esc hands the keys back without sending anything. It reads here, in
+        // front of the task list, because only one of the two can be armed and
+        // this one is the direction the user just pressed.
+        if self.options_focus.is_some() {
+            self.options_key(&ev.keystroke, cx);
+            return;
+        }
         if let Some(session) = self.task_focus
             && self.screen == Screen::Chat
         {

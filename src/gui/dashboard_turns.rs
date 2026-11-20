@@ -74,6 +74,12 @@ impl Dashboard {
         // A send ends that pane's offer, the same rule the window's own
         // composer follows (#2708).
         agent_bridge::options_take(session);
+        // And the ring that was standing on it: leaving the index behind would
+        // let a later offer steal the keyboard without anyone pressing up
+        // (#3101).
+        if self.options_focus.map(|(sid, _)| sid) == Some(session) {
+            self.options_focus = None;
+        }
         // A slash line is a screen command: `/help`, `/models` and `/sessions`
         // read and write the window's own chrome, so they run there and the
         // leaf is left where it is. A prompt is the pane's own turn (#2614).
@@ -552,6 +558,11 @@ impl Dashboard {
         // stale follow-up into it.
         if let Some(sid) = self.chat_state.session() {
             agent_bridge::options_take(sid);
+            // The keyboard's ring goes with it, or the next offer would arrive
+            // already holding keys nobody handed it (#3101).
+            if self.options_focus.map(|(focused, _)| focused) == Some(sid) {
+                self.options_focus = None;
+            }
         }
         // The composer the text came from: when it sends a recalled message,
         // that message leaves the queue with the text while the rest of its

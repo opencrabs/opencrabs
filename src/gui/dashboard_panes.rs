@@ -575,6 +575,7 @@ impl Dashboard {
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
             editor::EditorEvent::Below => this.focus_tasks(id, cx),
+            editor::EditorEvent::Above => this.focus_options(id, cx),
         })
         .detach();
         // The pane's own drag-to-copy (#2623). The transcript cannot reach a
@@ -1222,7 +1223,11 @@ impl Dashboard {
                 let offers = agent_bridge::options_snapshot(*session);
                 if !offers.is_empty() {
                     let rows = self.option_rows(*session, offers, cx);
-                    col = col.child(options_strip(&rows));
+                    let focus = self
+                        .options_focus
+                        .filter(|(s, _)| s == session)
+                        .map(|(_, at)| at);
+                    col = col.child(options_strip(&rows, focus));
                 }
                 // The same line the walk resolved above (#2805): asking for
                 // it again here took the manager's lock a second time for a

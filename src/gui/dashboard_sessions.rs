@@ -214,12 +214,79 @@ impl Dashboard {
                     move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
                         cx.stop_propagation();
                         agent_bridge::options_take(session);
+                        // A click is the pointer's version of Enter, so the
+                        // keyboard's ring steps aside with the offer (#3101).
+                        this.options_focus = None;
                         this.send_turn_to(session, label.clone(), None, cx);
                     },
                 ));
                 (item, pick)
             })
             .collect()
+    }
+
+    /// Up from a composer with an offer waiting hands the keyboard to the card
+    /// above it (#3101). With nothing to walk the field keeps the caret, and Up
+    /// keeps its history: an empty card must never eat the key.
+    pub(crate) fn focus_options(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if agent_bridge::options_snapshot(session).is_empty() {
+            return;
+        }
+        self.options_focus = Some((session, 0));
+        self.refocus_overlay();
+        cx.notify();
+    }
+
+    /// One key while the offer holds the keyboard: the arrows walk it, Enter
+    /// sends the row the ring stands on, Esc hands the keys back to the field
+    /// without sending anything. Any other key hands them back too, because it
+    /// means the user went back to typing and the field is where typing lands.
+    pub(crate) fn options_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some((session, at)) = self.options_focus else {
+            return;
+        };
+        let offers = agent_bridge::options_snapshot(session);
+        // The offer can leave under the keyboard: a stop takes it, and a new
+        // turn takes it. Hand the keys back rather than walking a list that is
+        // no longer on screen.
+        if offers.is_empty() {
+            self.options_focus = None;
+            self.request_composer_caret(cx);
+            return;
+        }
+        match ks.key.as_str() {
+            "up" => self.options_focus = Some((session, at.saturating_sub(1))),
+            "down" => self.options_focus = Some((session, (at + 1).min(offers.len() - 1))),
+            "enter" => {
+                let Some(item) = offers.get(at) else {
+                    self.options_focus = None;
+                    self.request_composer_caret(cx);
+                    return;
+                };
+                let label = item.label.clone();
+                // The offer belongs to the turn that made it, so it is taken as
+                // the send lands: a second press must not send a stale one.
+                agent_bridge::options_take(session);
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+                self.send_turn_to(session, label, None, cx);
+                return;
+            }
+            "escape" => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+            // Anything else is the user going back to typing, so the ring
+            // steps aside and the field takes the caret again. The key itself
+            // is dropped rather than guessed at: the card never had a caret to
+            // put it in, and typing a stray letter into a message behind the
+            // ring would be the worse surprise.
+            _ => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn drain_pending(&mut self, cx: &mut Context<Self>) {

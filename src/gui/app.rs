@@ -318,6 +318,14 @@ pub(crate) fn run() {
                                 this.focus_tasks(session, cx);
                             }
                         }
+                        // Up off the top of the field reaches the follow-up
+                        // offer above it, the mirror of Below and ahead of
+                        // history (#3101).
+                        editor::EditorEvent::Above => {
+                            if let Some(session) = this.chat_session {
+                                this.focus_options(session, cx);
+                            }
+                        }
                     })
                     .detach();
                     // The poll tick: drains bridge events onto the UI thread
@@ -623,6 +631,7 @@ pub(crate) fn run() {
                         plan_expanded: std::collections::HashSet::new(),
                         tasks_open: std::collections::HashSet::new(),
                         task_focus: None,
+                        options_focus: None,
                         task_open: HashMap::new(),
                         task_tails: HashMap::new(),
                         task_detail: None,

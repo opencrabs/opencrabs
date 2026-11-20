@@ -290,6 +290,9 @@ impl Dashboard {
         if let Some(sid) = self.split_focus().or(self.chat_session) {
             agent_bridge::options_take(sid);
         }
+        // The keyboard goes with it: a ring standing on a card that just left
+        // the screen would hold the keys for nothing (#3101).
+        self.options_focus = None;
         // A split leaf runs its own turn, so `/stop` reaches the pane the
         // keyboard is on before it reports nothing to stop (#2614).
         if self.cancel_focused_pane_turn("/stop", cx) {

@@ -57,6 +57,12 @@ pub struct HintState {
     pub update_version: Option<String>,
     /// Exchanges in the conversation on screen.
     pub turns: usize,
+    /// Follow-up options waiting above the composer.
+    ///
+    /// A count rather than a flag, because the row says what the arrows do and
+    /// the reader needs to know there is more than one to walk. Zero means the
+    /// turn offered nothing, which is the common case.
+    pub offers: usize,
 }
 
 impl HintState {
@@ -95,6 +101,20 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     let mut hints = Vec::new();
     let percent = state.context_percent();
 
+    // First, because it is the only rung about something already on screen and
+    // one keystroke away: an offer the turn just made, waiting to be sent. No
+    // command to point at, so the text carries its own keys.
+    if state.offers > 0 {
+        hints.push(Hint {
+            text: if state.offers == 1 {
+                "↑ picks the option · enter sends".to_string()
+            } else {
+                "↑↓ pick an option · enter sends".to_string()
+            },
+            command: "",
+        });
+    }
+
     if percent >= CONTEXT_TIGHT {
         let freed = compact_tokens(state.clearable());
         hints.push(Hint {
@@ -131,7 +151,9 @@ pub fn hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<Hint>
     }
     candidates(state)
         .into_iter()
-        .find(|hint| supported(hint.command))
+        // A hint with no command names keys instead, and every surface has
+        // keys, so there is nothing to filter it against.
+        .find(|hint| hint.command.is_empty() || supported(hint.command))
 }
 
 /// The same line for the desktop app, which answers the commands in its own

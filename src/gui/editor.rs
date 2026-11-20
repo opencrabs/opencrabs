@@ -423,6 +423,11 @@ pub enum EditorEvent {
     /// end and there is no later history entry. What sits under the field is
     /// the window's to decide, so the editor only says it was asked.
     Below,
+    /// Up was pressed with nowhere left to go while a follow-up offer is
+    /// waiting above the field. The offer is the most actionable thing on
+    /// screen, so it takes the key ahead of history (#3101): the window moves
+    /// the keyboard onto it, and the editor says only that it was asked.
+    Above,
 }
 
 /// A queue recall the composer is holding: every message Up took out of one
@@ -1656,6 +1661,18 @@ impl Editor {
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        // A follow-up offer sits directly above the field, so Up reaches it
+        // before the queue and before history (#3101). It is the most
+        // actionable thing on screen: the turn just ended by offering it, and
+        // sending one is the whole point. Only from a field with nowhere left
+        // to go, so a multi-line draft still walks its own rows first.
+        let offer_waiting = self
+            .session
+            .is_some_and(|s| !crate::agent_bridge::options_snapshot(s).is_empty());
+        if offer_waiting && self.content.is_empty() && self.recall.is_none() {
+            cx.emit(EditorEvent::Above);
+            return;
+        }
         // Up brings the WHOLE queue into the field in one press (#2696): every
         // waiting message joins into one edit, oldest first, so three queued
         // messages are one correction instead of three. The take empties the
@@ -1698,6 +1715,13 @@ impl Editor {
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
         if target != self.cursor_offset() {
             self.move_to(target, cx);
+            return;
+        }
+        // Off the top row of a draft the offer still wins over history: the
+        // caret has nowhere left to go, and the card above the field is the
+        // only thing up there that does something.
+        if offer_waiting {
+            cx.emit(EditorEvent::Above);
             return;
         }
         // The guard is released before anything else touches `self`: holding it

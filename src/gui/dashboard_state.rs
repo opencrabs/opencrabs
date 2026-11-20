@@ -623,6 +623,11 @@ pub(crate) struct Dashboard {
     /// The session whose task list holds the keyboard, after Down from its
     /// composer. The row the keys stand on is that session's `task_open`.
     pub(crate) task_focus: Option<Uuid>,
+    /// The follow-up offer holding the keyboard, after Up from a composer with
+    /// an offer waiting (#3101): the session it belongs to and the row the
+    /// keys stand on. One at a time, because the caret is in one place; `None`
+    /// while the field has it.
+    pub(crate) options_focus: Option<(Uuid, usize)>,
     /// The task whose output is showing, per session.
     pub(crate) task_open: HashMap<Uuid, Uuid>,
     /// The last output read for an open task, with when it was read and the

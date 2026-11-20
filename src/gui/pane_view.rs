@@ -241,6 +241,14 @@ impl PaneView {
                 win.forward_pick.is_some() && win.forward_leaf == Some(session),
             )
         };
+        // Which row of this pane's offer the keyboard stands on, if it is this
+        // pane's offer at all (#3101). Read on its own, so the facts above keep
+        // the shape they had and this stays one pane's business.
+        let option_at = window
+            .read(cx)
+            .options_focus
+            .filter(|(armed, _)| *armed == session)
+            .map(|(_, at)| at);
         // How much plan this pane can read (#2624): a wall of panes keeps a
         // bar, a pair keeps the running task and the next one or two. The
         // width is the one the walk measured for this leaf.
@@ -313,6 +321,9 @@ impl PaneView {
                             cx.stop_propagation();
                             agent_bridge::options_take(session);
                             let _ = weak.update(cx, |this, cx| {
+                                // A click is the pointer's Enter: the ring goes
+                                // with the offer it was standing on (#3101).
+                                this.options_focus = None;
                                 this.send_turn_to(session, label.clone(), None, cx);
                             });
                         },
@@ -320,7 +331,7 @@ impl PaneView {
                     (item, pick)
                 })
                 .collect();
-            above = above.child(options_strip(&rows));
+            above = above.child(options_strip(&rows, option_at));
             above_used = true;
         }
         if let Some(label) = running

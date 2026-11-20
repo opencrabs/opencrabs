@@ -44,6 +44,10 @@ fn state_of(app: &App) -> HintState {
             .iter()
             .filter(|message| message.role == "user")
             .count(),
+        // The offer the last turn made, waiting above the field. The terminal
+        // already walks it with the arrows (#596), so the row only has to say
+        // that it is there.
+        offers: app.followup_suggestions.len(),
     }
 }
 
@@ -75,6 +79,17 @@ pub(crate) fn render_hint(f: &mut Frame, app: &App, area: Rect) {
     // chrome nobody notices. The pieces are taken owned first so the split's
     // borrow of the text ends before the text is handed to a span.
     let command = hint.command;
+    // A hint with no command names keys instead (the offer rung), and there is
+    // nothing to emphasise inside it: splitting on an empty needle would mark
+    // the whole line as the actionable part.
+    if command.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(hint.text.clone(), muted())))
+                .style(Style::default().bg(theme::background().unwrap_or_default())),
+            area,
+        );
+        return;
+    }
     let (before, after) = match hint.text.split_once(command) {
         Some((before, after)) => (before.to_string(), after.to_string()),
         None => (hint.text.clone(), String::new()),

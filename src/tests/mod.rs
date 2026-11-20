@@ -1395,6 +1395,7 @@ pub mod dock_icon_test;
 pub mod input_history_test;
 pub mod input_layout_test;
 pub mod option_halt_turn_test;
+pub mod options_card_3101_test;
 pub mod phantom_question_offer_test;
 pub mod telegram_guest_session_resolve_test;
 pub mod theme_boot_pack_test;
