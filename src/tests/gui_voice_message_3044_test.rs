@@ -329,25 +329,25 @@ fn the_marker_never_comes_back_as_context() {
     );
 }
 
-/// The glass is the meter now (#3092): the take's own peaks reach the orb on
-/// every tick of the dictation loop, and the orb lives exactly as long as the
-/// microphone does. A worker that outlived its take would keep painting a
+/// The glass is the composer now (#3092): the take's own peaks reach the block
+/// on every tick of the dictation loop, and the block lives exactly as long as
+/// the microphone does. A worker that outlived its take would keep painting a
 /// recording that already closed.
 #[test]
 fn the_glass_is_fed_the_take_and_closes_with_it() {
     let poll = editor("fn poll_voice(", "fn land_voice(");
     assert!(
-        poll.contains("orb.update(recording, &self.voice_levels, palette::current().red)"),
-        "the strip stopped handing the take to the orb"
+        poll.contains("block.update(") && poll.contains("&self.voice_levels"),
+        "the block stopped being handed the take"
     );
     assert!(
-        poll.contains("self.voice_orb.take()") && poll.contains("orb.dispose(cx)"),
-        "the orb has to be retired when the capture ends, not on the next take"
+        poll.contains("self.voice_block.take()") && poll.contains("block.dispose(cx)"),
+        "the block has to be retired when the capture ends, not on the next take"
     );
     let start = editor("pub(crate) fn toggle_dictation(", "fn pump_voice(");
     assert!(
-        start.contains("OrbAnimation::start("),
-        "the orb opens with the microphone"
+        start.contains("LiveSlab::start("),
+        "the block opens with the microphone"
     );
     // Assembled rather than written out, so the assertion cannot match its own
     // text: a source scan that finds itself proves nothing.
@@ -358,31 +358,42 @@ fn the_glass_is_fed_the_take_and_closes_with_it() {
     );
 }
 
-/// One control whose meaning follows the state, which is how every recorder
-/// works: while the microphone is open it counts, shows the take as glass, and
-/// the whole marble is what ends it.
+/// The block is what stops the take, and it is the whole composer while the
+/// microphone is open: the strip in the row was the version the owner could not
+/// see, and the takeover is the point of it.
 #[test]
-fn the_microphone_becomes_the_thing_that_stops_it() {
-    let mic = editor("fn mic(", "/// How large the recording glass is");
+fn the_block_is_the_thing_that_stops_it() {
+    let block = editor("fn voice_block(", "fn voice_strip(");
     assert!(
-        mic.contains("\"editor-mic\""),
-        "the control keeps the id the composer row and the tests look for"
+        block.contains("crate::composer_orb::BLOCK_ID"),
+        "the block carries the id the composer row and the tests look for"
     );
     assert!(
-        mic.contains("orb.frame(cx)"),
-        "the recording strip draws the orb, not a bar strip"
+        block.contains("block.frame(cx)"),
+        "the composer draws the block, not a bar strip"
     );
     assert!(
-        mic.contains("secs / 60") && mic.contains("secs % 60"),
+        block.contains("secs / 60") && block.contains("secs % 60"),
         "the counter says how long, which a red mark alone never does"
     );
     assert!(
-        mic.contains("this.toggle_dictation(cx)"),
-        "a control that draws a stop and answers nothing is worse than none"
+        block.contains("this.toggle_dictation(cx)"),
+        "a surface that draws a stop and answers nothing is worse than none"
     );
     assert!(
-        mic.contains("crate::icon::stop_icon(colour, 1.05)"),
-        "a capture with no orb still needs a way to stop"
+        block.contains("measure_width"),
+        "a block that never learns its width is drawn at the wrong aspect"
+    );
+    // The row's microphone is only the idle mark now: a take is not stopped
+    // from a glyph the size of a full stop.
+    let mic = editor("fn mic(", "fn voice_block(");
+    assert!(
+        mic.contains("\"editor-mic\""),
+        "the idle control keeps the id the composer row and the tests look for"
+    );
+    assert!(
+        mic.contains("crate::icon::mic_icon("),
+        "the idle control still shows the microphone"
     );
 }
 

@@ -871,17 +871,20 @@ impl Editor {
                 changed = true;
             }
         }
-        // The glass is painted from the worker's newest texture, so the row has
-        // to ask for a frame even on a tick where nothing else moved: a
-        // recording that stops repainting is a recording that looks stopped
-        // (#3092).
+        // The glass is painted by its own worker, so the row only has to hand
+        // it this tick's reading and ask for a frame: a recording that stops
+        // repainting is a recording that looks stopped (#3092).
         let recording = self.voice_phase() == VoicePhase::Recording;
-        if let Some(block) = self.voice_block.as_mut() {
+        if let Some(block) = self.voice_block.as_ref() {
             block.update(
                 recording,
                 &self.voice_levels,
                 palette::current().red,
-                &mut **cx,
+                crate::composer_orb::hovering(crate::composer_orb::BLOCK_ID),
+                (
+                    crate::composer_orb::measured_width(),
+                    crate::composer_orb::BLOCK_HEIGHT,
+                ),
             );
             changed = true;
         }
@@ -2878,47 +2881,56 @@ impl Render for Editor {
             // why the microphone refused to start over it.
             .filter(|_| !self.content.is_empty() || self.voice_draft.is_some())
             .map(str::to_string);
-        // The attachment control leads the row, as the messaging apps place it
-        // (#3037). It used to trail the text on the right, where a control the
-        // field already implied had to be hunted for past the caret.
-        body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(paperclip(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        // No left inset here: the paperclip and the row gap are
-                        // the inset, so the text starts after the control
-                        // instead of indenting twice.
-                        // A draft taller than the box scrolls inside it. Without
-                        // the cap the field grew with every line and painted
-                        // over the pane below, the overlap the owner saw
-                        // (#2773).
-                        .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
-                        // The scroll methods live on a stateful element, so
-                        // the box carries an id before it asks to scroll at
-                        // all. A plain div has neither method and the gui
-                        // binary stopped compiling without this (#2773).
-                        .id("composer-input")
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .child(EditorElement { input: cx.entity() }),
-                )
-                // The microphone closes the row (#3044), where the messaging
-                // apps put theirs: the paperclip attaches on the left, the
-                // voice control sits at the caret's own end.
-                .child(mic(
-                    self.voice_phase(),
-                    self.voice_secs,
-                    self.voice_block.as_ref(),
-                    cx,
-                )),
+        // The microphone's block is the composer while a take is running
+        // (#3092): the box turns into the glass, at the width the row had, and
+        // the whole slab ends the recording. The input row it replaces is not
+        // drawn underneath, because a caret blinking behind the animation would
+        // invite typing into a field the take will overwrite.
+        let live = matches!(
+            self.voice_phase(),
+            VoicePhase::Recording | VoicePhase::Finishing
         );
+        if let Some(block) = self.voice_block.as_ref().filter(|_| live) {
+            body = body.child(voice_block(block, self.voice_secs, cx));
+        } else {
+            // The attachment control leads the row, as the messaging apps place
+            // it (#3037). It used to trail the text on the right, where a
+            // control the field already implied had to be hunted for past the
+            // caret.
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(paperclip(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // No left inset here: the paperclip and the row gap
+                            // are the inset, so the text starts after the
+                            // control instead of indenting twice.
+                            // A draft taller than the box scrolls inside it.
+                            // Without the cap the field grew with every line and
+                            // painted over the pane below, the overlap the owner
+                            // saw (#2773).
+                            .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
+                            // The scroll methods live on a stateful element, so
+                            // the box carries an id before it asks to scroll at
+                            // all. A plain div has neither method and the gui
+                            // binary stopped compiling without this (#2773).
+                            .id("composer-input")
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(EditorElement { input: cx.entity() }),
+                    )
+                    // The microphone closes the row (#3044), where the messaging
+                    // apps put theirs: the paperclip attaches on the left, the
+                    // voice control sits at the caret's own end.
+                    .child(mic(self.voice_phase(), cx)),
+            );
+        }
         let root = div()
             .relative()
             .flex()
@@ -3291,30 +3303,24 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 }
 
 /// The microphone that closes the composer row (#3044): a themed mark in the
-/// paperclip's 1.8rem hit area while it is idle, so the two ends of the field
-/// are one control line instead of a control and an afterthought.
+/// paperclip's 1.8rem hit area, so the two ends of the field are one control
+/// line instead of a control and an afterthought.
 ///
-/// It carries the phase itself. Idle is the quiet grey the paperclip wears;
-/// recording opens the block, the same glass the attached take wears, with the
-/// elapsed time beside it and the whole slab as the stop (#3092). A take in
-/// progress has to say that it is running, how long for, and how to end it,
-/// without asking the person to find a second control; a WAV being built keeps
-/// the glass but stops it moving, and the transcription turns the mark amber,
-/// the same "working" tone the rest of the window uses. Like the paperclip, the
-/// colour goes into the vector and the hover raises the control's opacity.
-fn mic(
-    phase: VoicePhase,
-    secs: u64,
-    block: Option<&crate::composer_orb::LiveSlab>,
-    cx: &mut Context<Editor>,
-) -> impl IntoElement {
+/// The open microphone is not this control any more. A take turns the whole
+/// composer into the glass block (#3092), because a seventy-eight point strip
+/// in the corner said "something is happening" to whoever already knew to look
+/// at it. Idle is the quiet grey the paperclip wears; a transcription turns the
+/// mark amber, the same "working" tone the rest of the window uses. Like the
+/// paperclip, the colour goes into the vector and the hover raises the
+/// control's opacity.
+fn mic(phase: VoicePhase, cx: &mut Context<Editor>) -> impl IntoElement {
     let palette = palette::current();
     let colour = match phase {
         VoicePhase::Idle => palette.text_muted,
         VoicePhase::Recording | VoicePhase::Finishing => palette.red,
         VoicePhase::Transcribing => palette.amber,
     };
-    let mut control = div()
+    div()
         .id("editor-mic")
         .flex()
         .flex_none()
@@ -3325,50 +3331,16 @@ fn mic(
         .rounded_sm()
         .cursor_pointer()
         .opacity(if phase == VoicePhase::Idle { 0.8 } else { 1.0 })
-        .hover(|d| d.opacity(1.0));
-    // While the microphone is open the control becomes a recording strip: the
-    // counter says how long and the glass says it is hearing something. One
-    // control whose meaning changes with the state, which is how every recorder
-    // works and why there is no second button to find (#3044).
-    let live = matches!(phase, VoicePhase::Recording | VoicePhase::Finishing);
-    if live {
-        // The counter sits in the row, left of the glass: a red mark alone says
-        // "something is happening", never "for how long", and the one thing a
-        // person wants to know mid-sentence is that the thing is still running.
-        control = control.child(
+        .hover(|d| d.opacity(1.0))
+        .child(
             div()
-                .text_size(px(11.0))
-                .text_color(rgb(palette.red))
-                .child(format!("{}:{:02}", secs / 60, secs % 60)),
-        );
-    }
-    let mark: gpui::AnyElement = match block.filter(|_| live) {
-        // The slab is the strip and the stop at once: it has already been
-        // painted for this tick, so the row only swaps the texture. Its size is
-        // the recorder's, a third of the attached player's, because a control
-        // in the row cannot be as wide as the message it will become.
-        Some(block) => div()
-            .relative()
-            .flex_none()
-            .w(px(crate::composer_orb::RECORDER_WIDTH))
-            .h(px(crate::composer_orb::RECORDER_HEIGHT))
-            .child(gpui::img(block.frame()).absolute().inset_0().size_full())
-            .into_any_element(),
-        None => div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(gpui::rems(1.8))
-            .child(if phase == VoicePhase::Recording {
-                crate::icon::stop_icon(colour, 1.05).into_any_element()
-            } else {
-                crate::icon::mic_icon(colour, 1.25).into_any_element()
-            })
-            .into_any_element(),
-    };
-    control
-        .child(mark)
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(gpui::rems(1.8))
+                .child(crate::icon::mic_icon(colour, 1.25)),
+        )
         // The hover names the key, the same sentence the Seeker's microphone
         // shows: two surfaces, one binding, one explanation (#3044).
         .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
@@ -3379,6 +3351,79 @@ fn mic(
                 this.toggle_dictation(cx);
             }),
         )
+}
+
+/// The composer, while the microphone is open (#3092).
+///
+/// The block is the box: it takes the width the input row had, stands as tall
+/// as the field did, and the whole surface is the stop. That is the point of
+/// the takeover. A recording has to be visible from across the desk, and a
+/// control the size of a glyph is only visible to someone already watching it.
+///
+/// The elapsed time rides on the glass instead of beside it, because the block
+/// has no beside: it is the composer's full width. The width is measured here,
+/// in paint, and handed to the worker through the module's thread-local, since
+/// a block that opens before the first layout is drawn at a fallback and
+/// resized on the next frame.
+fn voice_block(
+    block: &crate::composer_orb::LiveSlab,
+    secs: u64,
+    cx: &mut Context<Editor>,
+) -> impl IntoElement {
+    let palette = palette::current();
+    div()
+        .id(crate::composer_orb::BLOCK_ID)
+        .relative()
+        .flex_none()
+        .w_full()
+        .h(px(crate::composer_orb::BLOCK_HEIGHT))
+        .rounded(px(COMPOSER_RADIUS))
+        .overflow_hidden()
+        .cursor_pointer()
+        .on_hover(|over: &bool, window, _cx| {
+            if crate::composer_orb::note_hover(crate::composer_orb::BLOCK_ID, *over) {
+                window.refresh();
+            }
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_dictation(cx);
+            }),
+        )
+        .child(gpui::img(block.frame(cx)).absolute().inset_0().size_full())
+        // Measured during paint, after layout: the worker needs a width in
+        // points, and the only place that knows it is the box that was just
+        // given one.
+        .child(
+            gpui::canvas(
+                |bounds, _window, _cx| bounds.size.width,
+                |_bounds, width, _window, _cx| {
+                    crate::composer_orb::measure_width(f32::from(width));
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h_full(),
+        )
+        // The counter sits on the glass, top left, where the mark's own lane
+        // is: a red figure over the liquid reads as part of the material rather
+        // than as a label stuck to it.
+        .child(
+            div()
+                .absolute()
+                .top(px(6.0))
+                .left(px(10.0))
+                .text_size(px(11.0))
+                .text_color(rgb(palette.red))
+                .child(format!("{}:{:02}", secs / 60, secs % 60)),
+        )
+        // The one sentence a takeover needs: the surface looks clickable and it
+        // stops the take, so say which it is.
+        .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
 }
 
 /// The take waiting to be sent, drawn above the input row (#3044).
@@ -5054,27 +5099,45 @@ mod tests {
         );
     }
 
-    /// The recording strip is the block, and the block is the stop (#3092).
+    /// The composer is the block while the microphone is open (#3092).
     ///
-    /// A take has to read as one object: the glass says the microphone is
-    /// hearing something, the counter says for how long, and the whole slab
-    /// ends it. The click listener is the part worth pinning, because a control
-    /// that draws a stop and answers nothing is worse than no stop at all.
+    /// The takeover is the whole point: a strip in the row was easy to miss,
+    /// and the owner asked for the animation to be what the box turns into. The
+    /// three parts worth pinning are that the live phase renders the block
+    /// instead of the input row, that the block is the stop, and that the width
+    /// it was given reaches the worker.
     #[test]
-    fn the_recording_strip_is_the_block_and_the_block_is_the_stop() {
+    fn the_composer_is_the_block_and_the_block_is_the_stop() {
         let src = include_str!("editor.rs");
-        let body = src
-            .split("fn mic(")
+        let render = src
+            .split("impl Render for Editor")
             .nth(1)
-            .and_then(|rest| rest.split("fn voice_strip(").next())
-            .expect("the composer's microphone");
+            .and_then(|rest| rest.split("fn reply_strip(").next())
+            .expect("the composer's render");
         assert!(
-            body.contains("RECORDER_WIDTH") && body.contains("RECORDER_HEIGHT"),
-            "the recording strip stopped painting the recorder's block"
+            render.contains("voice_block(block, self.voice_secs, cx)"),
+            "a live take no longer turns the composer into the block"
         );
         assert!(
-            body.contains("block.frame()"),
+            render.contains("VoicePhase::Recording | VoicePhase::Finishing"),
+            "the block is not gated on the phases that own it"
+        );
+        let body = src
+            .split("fn voice_block(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn voice_strip(").next())
+            .expect("the composer's block");
+        assert!(
+            body.contains("BLOCK_HEIGHT"),
+            "the block is not sized to the composer"
+        );
+        assert!(
+            body.contains("block.frame(cx)"),
             "the block is sized but its texture is never taken"
+        );
+        assert!(
+            body.contains("measure_width"),
+            "the width the row gave the block never reaches the worker"
         );
         assert!(
             body.contains("this.toggle_dictation(cx)"),

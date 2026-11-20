@@ -21,7 +21,9 @@
 //! - the player has no worker thread. `OrbAnimation` renders every 33 ms until
 //!   it is dropped, which is right for a microphone and wrong for a player that
 //!   sits paused for most of its life. The player renders on demand and keeps
-//!   its frame;
+//!   its frame. The block the microphone wears is the exception, for the
+//!   opposite reason: it is as wide as the composer and redrawn thirty times a
+//!   second, so it runs the same worker the orb does;
 //! - the seam is still. The recording orb lets a syllable bend the whole
 //!   horizon; here the bowl and the dome are pinned and only the band moves,
 //!   because a block read at a glance has to keep its shape while the light
@@ -31,15 +33,16 @@
 //! - the mark sits in its own lane at the left end, where the round play button
 //!   used to be, so the liquid never has to share the middle with it.
 //!
-//! The recording strip draws the same block with the live microphone levels in
-//! place of a take's peaks: one material, one shape, before and after the take
-//! ends.
+//! The composer wears the same block while the microphone is open, in place of
+//! its input row, with the live levels in place of a take's peaks: one material,
+//! one shape, before and after the take ends.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -155,13 +158,35 @@ const HOVER_RIM: f32 = 0.35;
 const PLAYER_POINTS: (f32, f32) = (138.0, 30.0);
 const PLAYER_SCALE: f32 = 2.5;
 
-/// The recording strip's on-screen size in points, and its raster multiple.
+/// The block's on-screen height in points.
 ///
-/// Two rather than three: this one is redrawn thirty times a second, so it is
-/// the only frame in the module whose cost is continuous.
-pub(crate) const RECORDER_WIDTH: f32 = 78.0;
-pub(crate) const RECORDER_HEIGHT: f32 = 30.0;
-const RECORDER_SCALE: f32 = 2.0;
+/// It stands in for the composer's input row while the microphone is open, so
+/// the box grows by this much for the length of a take. Tall enough that the
+/// seam has room to travel and the stop mark is a target rather than a speck.
+pub(crate) const BLOCK_HEIGHT: f32 = 88.0;
+
+/// The width the first frame is drawn at, before the row has measured itself.
+pub(crate) const BLOCK_FALLBACK_WIDTH: f32 = 520.0;
+
+/// The id the composer's block answers hover under, and the one the row paints
+/// it with.
+pub(crate) const BLOCK_ID: &str = "composer-voice-block";
+
+/// The most pixels the block is rasterised at across its width.
+///
+/// The material is a smooth gradient, so past a point more samples buy nothing
+/// the eye can find and cost the worker a linear amount of time. A wide window
+/// gets a coarser multiple instead of a bigger frame.
+const BLOCK_PIXEL_BUDGET: f32 = 1600.0;
+const BLOCK_MAX_SCALE: f32 = 2.0;
+
+/// How often the worker builds a frame while the microphone is open.
+const BLOCK_INTERVAL: Duration = Duration::from_millis(33);
+
+/// The multiple the block is rasterised at for a given width.
+fn block_scale(width: f32) -> f32 {
+    (BLOCK_PIXEL_BUDGET / width.max(1.0)).clamp(1.0, BLOCK_MAX_SCALE)
+}
 
 /// The liquid's own clock, and the loudness that drives it.
 ///
@@ -392,89 +417,189 @@ impl PlayerBlock {
 
 /// The block while a microphone is open (#3092).
 ///
-/// The recording orb runs a worker because it never stops moving and its raster
-/// is a full three-hundred-pixel sphere. This one is a fraction of that and is
-/// redrawn from the composer's own thirty-three millisecond tick, so a thread
-/// would buy nothing and cost a mutex, a shutdown flag and a texture the
-/// composer has to remember to retire. It is drawn where it is needed instead.
+/// The composer wears it in place of its input row, so the raster is the width
+/// of the pane rather than the seventy-eight points the strip used to be. That
+/// is roughly twenty times the pixels, redrawn thirty times a second, which is
+/// not work the UI thread can carry while the caret, the transcript and the
+/// conversation keep painting: the field it replaced was the cheap part of the
+/// frame. So it runs the worker shape the Seeker's orb already uses. The thread
+/// owns the liquid, the composer takes the newest texture on its own tick, and
+/// the one it replaces goes back to the atlas.
 pub(crate) struct LiveSlab {
-    slab: Slab,
+    latest: Arc<Mutex<Arc<RenderImage>>>,
+    presented: RefCell<Option<Arc<RenderImage>>>,
+    input: Arc<Mutex<SlabInput>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// One tick of the microphone, handed to the worker.
+///
+/// The size travels with it: the composer measures itself during paint, so the
+/// width of a take is only known a frame after the block opened, and a pane
+/// resized mid-sentence has to follow.
+#[derive(Clone, Copy)]
+struct SlabInput {
+    recording: bool,
     levels: [f32; VOICE_SAMPLES],
     colour: u32,
-    /// Liquid seconds and the loudness driving them, carried between ticks the
-    /// same way the player carries them between frames.
-    phase: f32,
-    energy: f32,
-    last: Instant,
-    frame: Arc<RenderImage>,
+    hovered: bool,
+    points: (f32, f32),
 }
 
 impl LiveSlab {
     pub(crate) fn start(colour: u32) -> Self {
-        let (width, height) = pixels((RECORDER_WIDTH, RECORDER_HEIGHT), RECORDER_SCALE);
-        let slab = Slab::new(width, height);
-        let levels = [0.0; VOICE_SAMPLES];
+        let points = (measured_width(), BLOCK_HEIGHT);
+        let (width, height) = pixels(points, block_scale(points.0));
+        let mut surface = Slab::new(width, height);
+        let input = Arc::new(Mutex::new(SlabInput {
+            recording: true,
+            levels: [0.0; VOICE_SAMPLES],
+            colour,
+            hovered: false,
+            points,
+        }));
         let state = PlayerState {
             progress: 1.0,
             playing: true,
             recording: true,
             hovered: false,
         };
-        let frame = Arc::new(paint(&slab, &levels, colour, state, 0.0, 0.0));
+        let levels = [0.0; VOICE_SAMPLES];
+        let first = Arc::new(paint(&surface, &levels, colour, state, 0.0, 0.0));
+        let latest: Arc<Mutex<Arc<RenderImage>>> = Arc::new(Mutex::new(first));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_input = Arc::clone(&input);
+        let worker_latest = Arc::clone(&latest);
+        let worker_stop = Arc::clone(&stop);
+        let spawned = std::thread::Builder::new()
+            .name("gui-composer-block".into())
+            .spawn(move || {
+                let mut fitted = points;
+                let mut liquid = 0.0_f32;
+                let mut energy = 0.0_f32;
+                let mut last = Instant::now();
+                while !worker_stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+                    let tick = *lock(&worker_input);
+                    if tick.points != fitted {
+                        let (width, height) = pixels(tick.points, block_scale(tick.points.0));
+                        surface = Slab::new(width, height);
+                        fitted = tick.points;
+                    }
+                    let target = if tick.recording {
+                        tick.levels[VOICE_SAMPLES - 1]
+                    } else {
+                        0.0
+                    };
+                    advance(&mut liquid, &mut energy, &mut last, target);
+                    let state = PlayerState {
+                        progress: 1.0,
+                        playing: tick.recording,
+                        recording: tick.recording,
+                        hovered: tick.hovered,
+                    };
+                    let next = Arc::new(paint(
+                        &surface,
+                        &tick.levels,
+                        tick.colour,
+                        state,
+                        liquid,
+                        energy,
+                    ));
+                    *lock(&worker_latest) = next;
+                    let spent = began.elapsed();
+                    if spent < BLOCK_INTERVAL {
+                        std::thread::sleep(BLOCK_INTERVAL - spent);
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            logging::error(&format!("composer block thread did not start: {error}"));
+        }
         Self {
-            slab,
-            levels,
-            colour,
-            phase: 0.0,
-            energy: 0.0,
-            last: Instant::now(),
-            frame,
+            latest,
+            presented: RefCell::new(None),
+            input,
+            stop,
         }
     }
 
-    /// Take this tick's microphone levels and redraw.
+    /// Hand this tick's reading of the microphone to the worker.
     ///
     /// `recording` is false once the microphone has been asked to stop: the WAV
     /// is still being built, so the block stays up, but the liquid settles
     /// instead of answering a device that is already closed.
-    pub(crate) fn update(&mut self, recording: bool, levels: &[f32], colour: u32, cx: &mut App) {
-        self.levels = microphone_history(levels);
-        self.colour = colour;
-        let target = if recording {
-            self.levels[VOICE_SAMPLES - 1]
-        } else {
-            0.0
-        };
-        advance(&mut self.phase, &mut self.energy, &mut self.last, target);
-        let state = PlayerState {
-            progress: 1.0,
-            playing: recording,
+    pub(crate) fn update(
+        &self,
+        recording: bool,
+        levels: &[f32],
+        colour: u32,
+        hovered: bool,
+        points: (f32, f32),
+    ) {
+        *lock(&self.input) = SlabInput {
             recording,
-            hovered: false,
+            levels: microphone_history(levels),
+            colour,
+            hovered,
+            points,
         };
-        // Painted from the field rather than the argument, so the block always
-        // redraws in the colour it is currently wearing.
-        let next = Arc::new(paint(
-            &self.slab,
-            &self.levels,
-            self.colour,
-            state,
-            self.phase,
-            self.energy,
-        ));
-        let previous = std::mem::replace(&mut self.frame, next);
-        cx.drop_image(previous, None);
     }
 
-    pub(crate) fn frame(&self) -> Arc<RenderImage> {
-        Arc::clone(&self.frame)
+    /// The newest frame, retiring the one it replaces from the atlas.
+    pub(crate) fn frame(&self, cx: &mut App) -> Arc<RenderImage> {
+        let next = Arc::clone(&lock(&self.latest));
+        let mut presented = self.presented.borrow_mut();
+        if let Some(previous) = presented.as_ref()
+            && !Arc::ptr_eq(previous, &next)
+        {
+            cx.drop_image(Arc::clone(previous), None);
+        }
+        *presented = Some(Arc::clone(&next));
+        next
     }
 
-    /// Retire the last texture from the atlas. Taking `self` is deliberate:
-    /// there is nothing left to paint once this returns.
-    pub(crate) fn dispose(self, cx: &mut App) {
-        cx.drop_image(self.frame, None);
+    /// Stop the worker and retire the last texture it handed over.
+    pub(crate) fn dispose(&self, cx: &mut App) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(last) = self.presented.borrow_mut().take() {
+            cx.drop_image(last, None);
+        }
     }
+}
+
+impl Drop for LiveSlab {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+thread_local! {
+    /// The width the composer row gave the block, written during the paint
+    /// phase of the frame that drew it.
+    static BLOCK_WIDTH: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// Record the width the composer handed the block this frame.
+pub(crate) fn measure_width(width: f32) {
+    BLOCK_WIDTH.with(|cell| cell.set(width));
+}
+
+/// The width to draw at: the last one the row measured, or the fallback before
+/// the first frame has been laid out.
+pub(crate) fn measured_width() -> f32 {
+    BLOCK_WIDTH.with(|cell| {
+        let width = cell.get();
+        if width > 0.0 {
+            width
+        } else {
+            BLOCK_FALLBACK_WIDTH
+        }
+    })
 }
 
 /// The warm hue this accent asks for, taken the short way round the wheel.
@@ -717,7 +842,20 @@ thread_local! {
     static HOVERED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
 }
 
-fn hovering(id: &str) -> bool {
+/// Remember whether the pointer is over a block, reporting whether that
+/// changed, so the caller only asks for a frame when it did.
+pub(crate) fn note_hover(id: &str, over: bool) -> bool {
+    HOVERED.with(|hovered| {
+        let mut hovered = hovered.borrow_mut();
+        if hovered.get(id).copied().unwrap_or(false) == over {
+            return false;
+        }
+        hovered.insert(id.to_string(), over);
+        true
+    })
+}
+
+pub(crate) fn hovering(id: &str) -> bool {
     HOVERED.with(|hovered| hovered.borrow().get(id).copied().unwrap_or(false))
 }
 
@@ -1040,15 +1178,7 @@ fn player_into(
             },
         )
         .on_hover(move |over: &bool, window, _cx| {
-            let changed = HOVERED.with(|hovered| {
-                let mut hovered = hovered.borrow_mut();
-                if hovered.get(&hover_id).copied().unwrap_or(false) == *over {
-                    return false;
-                }
-                hovered.insert(hover_id.clone(), *over);
-                true
-            });
-            if changed {
+            if note_hover(&hover_id, *over) {
                 window.refresh();
             }
         })
