@@ -20,8 +20,9 @@
 //! * the marker is a display cue, so it is stripped before a stored row becomes
 //!   context, or the model learns to emit markers of its own;
 //! * the control that started the recording becomes the thing that stops it;
-//! * and the three ways out of a take stay distinct (#3092): the chord sends,
-//!   a click parks the words for reading, escape throws the take away.
+//! * and the four ways out of a take stay distinct (#3092): Enter stops a take
+//!   and keeps it, the chord stops it and sends, a click parks the words for
+//!   reading, and escape throws the take away.
 //!
 //! The window has no headless harness, so the drawing rules are read from
 //! source the way the other gui tests read them. The marker strip itself is
@@ -153,6 +154,39 @@ fn one_send_spends_the_take() {
     assert!(
         send.contains("<<AUD:{}>>"),
         "the clip goes out as the marker the row draws as a player"
+    );
+}
+
+/// Enter stops a take and keeps it (#3092).
+///
+/// The key used to reach the send path with the microphone still open, where an
+/// empty field had nothing to send and the press did nothing at all. That left
+/// the mouse as the only way to keep a take without sending it. Enter parks the
+/// take instead, so the words land in the preview beside anything typed there
+/// and the next Enter is the send.
+#[test]
+fn enter_stops_a_take_and_keeps_it() {
+    let send = editor("fn send(", "fn submit(");
+    let phase = send
+        .find("if self.voice_phase() != VoicePhase::Idle")
+        .expect("enter knows the microphone is open");
+    let park = send
+        .find("self.toggle_dictation(TakeEnd::Park, cx)")
+        .expect("the press parks the take instead of dropping it");
+    assert!(
+        phase < park,
+        "the phase is read first, so a take in flight never reaches the emoji list or the send"
+    );
+    assert!(
+        send[phase..]
+            .split("return;")
+            .next()
+            .is_some_and(|arm| arm.contains("self.toggle_dictation(TakeEnd::Park, cx)")),
+        "the arm hands the key over and stops: a park that fell through would send an empty field"
+    );
+    assert!(
+        !send.contains("EditorEvent::Sent"),
+        "Enter on a recording sends nothing, because the words are still being made"
     );
 }
 

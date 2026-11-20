@@ -668,6 +668,11 @@ enum VoicePhase {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TakeEnd {
     /// Stop and leave the words in the preview for reading and editing.
+    ///
+    /// The stop square, the microphone's second press and Enter all ask for
+    /// this. Enter is the keyboard's way out without sending (#3092): the
+    /// words land in the preview, extra text can be typed beside them, and the
+    /// next Enter is the send.
     Park,
     /// Stop and send the words the moment they land.
     Send,
@@ -1838,8 +1843,23 @@ impl Editor {
         self.replace_text_in_range(None, "\n", window, cx)
     }
 
-    /// Enter sends: non-empty content goes out as an event, the field clears.
+    /// Enter stops a take, or sends what the field holds.
+    ///
+    /// While the microphone is open the key has no message to send: the words
+    /// are still being made, so the press fell through and did nothing at all
+    /// (#3092). That left the mouse as the only way to keep a take without
+    /// sending it, and the chord as the only way to send without the mouse.
+    /// Enter parks the take instead, so the words land in the preview beside
+    /// anything typed there, and the next Enter is the send.
     fn send(&mut self, _: &Send, _window: &mut Window, cx: &mut Context<Self>) {
+        // Every phase but idle is a take in flight, and the park is what a
+        // press means in all three: a recording stops, and a take already
+        // closing or being transcribed keeps the outcome its own press asked
+        // for instead of being sent from under the words.
+        if self.voice_phase() != VoicePhase::Idle {
+            self.toggle_dictation(TakeEnd::Park, cx);
+            return;
+        }
         // Enter on an open emoji list takes the highlighted glyph, as the TUI does.
         if self.emoji_popup().is_some() {
             self.accept_emoji(cx);
