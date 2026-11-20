@@ -156,9 +156,15 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         });
     }
 
+    // Two ways out, because they cost different things: `/new` starts a fresh
+    // session and takes the conversation with it, which is what a new use case
+    // wants, while `/clear` only drops the context and leaves the history and
+    // the title in place. Naming one of them is how the cheaper option stays a
+    // secret (#3113).
     if state.turns >= LONG_SESSION_TURNS && percent < CONTEXT_ROOMY {
         hints.push(Hint {
-            text: "keep going, or /new for a clean slate".to_string(),
+            text: "/new for a fresh start or new use case · /clear wipes context, keeps history"
+                .to_string(),
             command: "/new",
         });
     }

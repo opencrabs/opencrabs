@@ -78,7 +78,7 @@ fn a_waiting_update_outranks_a_long_conversation() {
 }
 
 #[test]
-fn a_long_but_roomy_conversation_offers_a_clean_slate() {
+fn a_long_but_roomy_conversation_names_both_ways_out() {
     let mut state = fresh();
     state.turns = LONG_SESSION_TURNS;
     let hint = tui(&state).expect("a dozen turns is worth mentioning");
@@ -87,6 +87,18 @@ fn a_long_but_roomy_conversation_offers_a_clean_slate() {
         state.context_percent() < CONTEXT_ROOMY,
         "this hint is only for a conversation with room left"
     );
+    // Both names, because they cost different things: a fresh session takes the
+    // conversation with it, a clear only frees the window and leaves the history
+    // and the title where they are (#3113).
+    assert!(hint.text.contains("/new"), "got {:?}", hint.text);
+    assert!(hint.text.contains("/clear"), "got {:?}", hint.text);
+    assert!(
+        hint.text.contains("history"),
+        "the line has to say what /clear keeps: {:?}",
+        hint.text
+    );
+    // One line, one decision: the window prints what the terminal prints.
+    assert_eq!(gui_hint(&state).map(|hint| hint.text), Some(hint.text.clone()));
 }
 
 #[test]
