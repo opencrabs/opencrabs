@@ -9,7 +9,8 @@
 //! opening only after a copy found nothing) is read from source.
 
 use crate::ui_core::links::{
-    ClickTarget, target_at_byte_with, target_at_with, target_for_click, target_for_click_with,
+    ClickTarget, target_at_byte_with, target_at_roots, target_at_with, target_for_click,
+    target_for_click_roots, target_for_click_with,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -370,5 +371,137 @@ fn open_target_survives_a_split_and_routes_through_the_dashboard() {
     assert!(
         open.contains("transcript link: nothing to open at"),
         "a miss writes a line too, so a click that found nothing can be told from one that never arrived"
+    );
+}
+
+/// A relative name resolves against the conversation's directory (#2846).
+///
+/// A window launched from a desktop entry has no shell cwd, so every relative
+/// name in the transcript used to resolve against `/tmp` and the click did
+/// nothing. The session directory is now the first root.
+#[test]
+fn a_relative_name_resolves_against_the_session_directory() {
+    let box_ = Sandbox::new("roots", &["notes.md"]);
+    let line = "the report is in notes.md for you";
+    let col = line.find("notes.md").expect("fixture word") + 2;
+
+    let target = target_at_roots(line, col, &[box_.dir.as_path()], None);
+    assert_eq!(
+        target,
+        Some(ClickTarget::File(box_.dir.join("notes.md"))),
+        "a relative name must resolve under the session directory"
+    );
+}
+
+/// The first root wins, so the session directory beats the process cwd
+/// (#2846). Without an order the two would race and the window would open a
+/// file from a directory the conversation never worked in.
+#[test]
+fn the_first_root_wins_when_both_hold_the_name() {
+    let first = Sandbox::new("root-a", &["report.md"]);
+    let second = Sandbox::new("root-b", &["report.md"]);
+    let line = "see report.md";
+
+    let target = target_at_roots(line, 5, &[first.dir.as_path(), second.dir.as_path()], None);
+    assert_eq!(
+        target,
+        Some(ClickTarget::File(first.dir.join("report.md"))),
+        "the session directory must be tried before the process cwd"
+    );
+}
+
+/// A name the transcript wraps in prose can hold a space, and a space ends a
+/// token, so neither half exists on its own (#2846).
+#[test]
+fn a_name_with_a_space_opens_from_the_session_directory() {
+    let name = "AUDIT-GUI-BEBAN 121126-1837.md";
+    let box_ = Sandbox::new("spaced", &[name]);
+    let line = format!("wrote {name} just now");
+
+    // Click inside the second word: its own token is `121126-1837.md`, which
+    // does not exist, so only the joined span names the real file.
+    let col = line.find("121126").expect("second word") + 3;
+    assert_eq!(
+        target_at_roots(&line, col, &[box_.dir.as_path()], None),
+        Some(ClickTarget::File(box_.dir.join(name))),
+        "a spaced name must resolve as one span"
+    );
+
+    // And from the first word, which is the other half of the same name.
+    let col = line.find("AUDIT").expect("first word") + 2;
+    assert_eq!(
+        target_at_roots(&line, col, &[box_.dir.as_path()], None),
+        Some(ClickTarget::File(box_.dir.join(name))),
+        "the first half of a spaced name must resolve too"
+    );
+}
+
+/// Joining adjacent words must not turn prose into a click target: every span
+/// is probed against the disk, so a sentence naming nothing stays inert
+/// (#2846).
+#[test]
+fn prose_with_spaces_stays_inert() {
+    let box_ = Sandbox::new("prose", &["notes.md"]);
+    let line = "the quick brown fox jumps over the lazy dog";
+
+    for col in [0usize, 5, 11, 17] {
+        assert_eq!(
+            target_at_roots(line, col, &[box_.dir.as_path()], None),
+            None,
+            "no span of this sentence names a file, so column {col} must be inert"
+        );
+    }
+
+    // The same line with a real name in it still resolves, so the guard above
+    // is not simply refusing everything.
+    let with_file = "the quick notes.md over the lazy dog";
+    let col = with_file.find("notes.md").expect("fixture word");
+    assert_eq!(
+        target_at_roots(with_file, col, &[box_.dir.as_path()], None),
+        Some(ClickTarget::File(box_.dir.join("notes.md")))
+    );
+}
+
+/// A markdown destination resolves through the same roots (#2846), so a link
+/// to a local file opens from the session directory too.
+#[test]
+fn a_link_destination_uses_the_same_roots() {
+    let box_ = Sandbox::new("link-roots", &["docs/report.md"]);
+    let text = "report";
+    let links = vec![(0..text.len(), "docs/report.md".to_string())];
+
+    assert_eq!(
+        target_for_click_roots(text, &links, 1, &[box_.dir.as_path()], None),
+        Some(ClickTarget::File(box_.dir.join("docs/report.md")))
+    );
+}
+
+/// The window and the terminal both hand the resolver a directory (#2846).
+///
+/// Neither surface can reach a session from `ui_core`, so the wiring lives in
+/// their own sources: the window writes the roots onto the drag state and
+/// snapshots them at press, and the terminal passes its working directory.
+#[test]
+fn both_surfaces_pass_the_session_directory() {
+    let transcript = flat(TRANSCRIPT);
+    assert!(
+        transcript.contains("links::target_for_click_roots"),
+        "the window's press must resolve through the roots form"
+    );
+    assert!(
+        transcript.contains("roots:pressed.roots_snapshot()"),
+        "the press must snapshot the roots so a release cannot resolve against a moved base"
+    );
+
+    let render = flat(MAIN);
+    assert!(
+        render.contains("copy_drag.set_roots("),
+        "the window must hand its session directory to the drag state each frame"
+    );
+
+    let terminal = flat(include_str!("../tui/app/clickable.rs"));
+    assert!(
+        terminal.contains("links::target_at_roots"),
+        "the terminal must resolve through the roots form too"
     );
 }

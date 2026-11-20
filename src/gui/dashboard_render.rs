@@ -551,6 +551,19 @@ impl Render for Dashboard {
                 // Minted before the view borrows the transcript (#2826): the
                 // two clicks are listeners, so they need `self` mutably.
                 let inline_edit = self.inline_edit_hooks(cx);
+                // Click resolution needs the conversation's own directory
+                // (#2846). A window launched from a desktop entry has no
+                // shell cwd, so a relative name in the transcript had no base
+                // and the click did nothing.
+                let click_roots = self
+                    .chat_session
+                    .and_then(|id| {
+                        agent_bridge::bridge()
+                            .map(|b| b.service.get_working_directory_for_session(id))
+                    })
+                    .into_iter()
+                    .collect();
+                self.copy_drag.set_roots(click_roots);
                 let primary = transcript::view(
                     &self.chat_state.transcript,
                     &self.chat_state.scroll,

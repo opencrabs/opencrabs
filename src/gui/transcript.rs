@@ -30,6 +30,7 @@ use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
@@ -4577,13 +4578,18 @@ struct PendingClick {
     links: Vec<(Range<usize>, String)>,
     /// Byte offset into `text`, as the shaped layout reported it.
     offset: usize,
+    /// Directories the press resolved against, snapshotted so a release
+    /// cannot resolve against roots that moved mid-gesture (#2846).
+    roots: Vec<PathBuf>,
 }
 
 impl PendingClick {
     /// The destination this press named, if any: the label it landed on
     /// first, then any path or url the token at that offset resolves to.
     fn target(&self) -> Option<ClickTarget> {
-        links::target_for_click(&self.text, &self.links, self.offset)
+        let roots: Vec<&Path> = self.roots.iter().map(PathBuf::as_path).collect();
+        let home = dirs::home_dir();
+        links::target_for_click_roots(&self.text, &self.links, self.offset, &roots, home.as_deref())
     }
 
     /// The word the pointer was on, for the log line a miss writes. Clipped by
@@ -4621,9 +4627,33 @@ pub struct CopyDrag {
     on_copied: RefCell<Option<CopiedListener>>,
     /// Routes a resolved click through the window that owns this transcript.
     on_open_target: RefCell<Option<OpenTargetListener>>,
+    /// Directories a click resolves against, nearest first (#2846).
+    ///
+    /// The transcript cannot reach the session's working directory on its own:
+    /// it draws text, and a relative name needs a base. The view that owns the
+    /// session writes it here each frame, so a `/cd` takes effect on the next
+    /// repaint, and a press snapshots the list so a release cannot resolve
+    /// against roots that moved mid-gesture.
+    roots: RefCell<Vec<PathBuf>>,
 }
 
 impl CopyDrag {
+    /// Point click resolution at the session's working directory (#2846).
+    ///
+    /// Called per frame by the owner, so it has to be cheap: the list is
+    /// replaced only when it actually differs.
+    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+        let mut current = self.roots.borrow_mut();
+        if *current != roots {
+            *current = roots;
+        }
+    }
+
+    /// The roots a press should snapshot.
+    fn roots_snapshot(&self) -> Vec<PathBuf> {
+        self.roots.borrow().clone()
+    }
+
     /// The owning view wires the acknowledgement here. The transcript cannot
     /// reach the composer, so the composer's parent is the only place that
     /// knows both halves of the gesture.
@@ -4916,6 +4946,7 @@ fn selectable_text_segment(
             text: click_text.clone(),
             links: click_links.clone(),
             offset: local,
+            roots: pressed.roots_snapshot(),
         });
         let offset = start + local;
         begin.anchor.set(Some(TextPoint::new(row, offset)));

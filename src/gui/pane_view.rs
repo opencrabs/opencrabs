@@ -681,6 +681,14 @@ impl Render for PaneView {
             Some(window) => window.read(cx).copied_row(),
             None => None,
         };
+        // The pane's own conversation directory (#2846): a relative name in
+        // its transcript resolves against the session, not the process cwd,
+        // which a desktop launch never sets.
+        let click_roots = agent_bridge::bridge()
+            .map(|b| b.service.get_working_directory_for_session(self.session))
+            .into_iter()
+            .collect();
+        self.copy_drag.set_roots(click_roots);
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
