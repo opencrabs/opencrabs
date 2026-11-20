@@ -3776,11 +3776,15 @@ fn hint_card(line: &SharedString) -> Div {
         .flex_row()
         .items_center()
         .w_full()
-        // Two insets, not one (#3100): the key hints below pad their row by 12
-        // (`px_3`) and their first item is the hover pill, padded another 4
-        // (`px_1`), so their first glyph starts at 16. This strip carries both,
-        // so its text sits on the same column as everything else in the card.
-        .px_3()
+        // Two insets, not one (#3100): the strip carries the row's own step and
+        // the hover pill's, 20 (`px_5`) plus 4 (`px_1`), so its first glyph
+        // starts at 24. That is the column the field pads to and the column a
+        // message bubble's text lands on, so the strip, the field and the
+        // transcript share one left edge (#3115). It used to lean on the
+        // composer shell's own gutter for 8 of those pixels, and when the
+        // footer went edge to edge (#3112) the strip slid 8 left of everything
+        // it was meant to line up with.
+        .px_5()
         .py_1()
         .border_b(px(1.))
         .border_color(rgb(shown.panel_hi))

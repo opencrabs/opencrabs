@@ -124,7 +124,12 @@ pub(crate) fn pane_composer_dim(
         .overflow_hidden()
         .line_height(px(22.))
         .min_h(px(44.))
-        .p_3()
+        // The inset matches the focused field's own (#3115): both sides pad
+        // 24, so a draft does not shift sideways when the keyboard leaves the
+        // pane. A uniform `p_3` here put this row at 12 while the real field
+        // sits at 24, which read as one box in two positions.
+        .px(px(24.))
+        .py_3()
         // Same box, same height, same flat shape as the focused dock: the dim
         // row must not change shape when the keyboard leaves the pane (#2987).
         // The composer is a footer, not a card (#3112), so the dim state is a

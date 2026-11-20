@@ -16,6 +16,7 @@ const COMPOSER_VIEW: &str = include_str!("../gui/composer_view.rs");
 const DASHBOARD_SESSIONS: &str = include_str!("../gui/dashboard_sessions.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
+const DASHBOARD_RENDER: &str = include_str!("../gui/dashboard_render.rs");
 
 /// The slice of a file between two anchors, so a pin cannot match a string
 /// somewhere else in the same file by accident.
@@ -127,5 +128,56 @@ fn the_offer_line_names_the_way_back_to_the_field() {
     assert!(
         many.contains('3'),
         "and how long the list is: {many}"
+    );
+}
+
+/// The composer's own inset matches the column the conversation sits on
+/// (#3115).
+///
+/// A message bubble's text lands 24 from the session edge: its row pads 8 and
+/// the bubble pads 16. The footer runs edge to edge since #3112, so every row
+/// inside it carries the whole 24 itself. A uniform `p_3` on the field left
+/// its text, its paperclip and its mic at 12, and the task strip leaned on a
+/// gutter that no longer exists and sat at 16, so three rows of one surface
+/// started on three different columns.
+#[test]
+fn the_field_pads_the_same_sides_as_the_card_around_it() {
+    let field = region(
+        EDITOR,
+        ".when(!self.docked, |d| {",
+        ".line_height(px(22.))",
+    );
+    assert!(
+        field.contains(".px(px(24.))"),
+        "the field's sides take the conversation's 24"
+    );
+    assert!(
+        field.contains(".py_3()"),
+        "the vertical step stays where it was"
+    );
+    assert!(
+        !field.contains(".p_3()"),
+        "one uniform inset is what put the text out of line"
+    );
+    // The dim row in a split keeps the same shape, or a draft jumps sideways
+    // the moment the keyboard leaves the pane.
+    assert!(
+        PANE_CHROME.contains(".px(px(24.))\n        .py_3()"),
+        "the unfocused pane's composer matches the focused one"
+    );
+    assert!(
+        !PANE_CHROME.contains(".p_3()"),
+        "and keeps no uniform inset of its own"
+    );
+    // The task strip is the top row of the same footer, so it lands on the same
+    // column: its own 20 plus the hover pill's 4.
+    let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
+    assert!(
+        strip.contains(".px_5()") && strip.contains(".px_1()"),
+        "the strip's two insets add up to the field's 24"
+    );
+    assert!(
+        !strip.contains(".px_3()"),
+        "the 16 it inherited from the shell's old gutter is gone"
     );
 }

@@ -253,7 +253,7 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         .get(at..)
         .expect("the dock gate offset lands on a char boundary");
     let gate = gate
-        .get(..gate.find(".p_3()").expect("the field's padding"))
+        .get(..gate.find(".py_3()").expect("the field's vertical padding"))
         .expect("the field padding ends on a char boundary");
     for gone in [".shadow_sm()", ".rounded("] {
         assert!(

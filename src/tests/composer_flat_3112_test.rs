@@ -39,7 +39,7 @@ fn undocked_chrome() -> &'static str {
         .find(".when(!self.docked, |d| {")
         .expect("a pane's composer still paints its own surface");
     let tail = &EDITOR[start..];
-    tail.get(..tail.find(".p_3()").expect("the field's padding"))
+    tail.get(..tail.find(".py_3()").expect("the field's vertical padding"))
         .expect("the chrome ends on a char boundary")
 }
 

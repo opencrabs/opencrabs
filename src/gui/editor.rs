@@ -3283,7 +3283,15 @@ impl Render for Editor {
                     .border_t(px(1.))
                     .border_color(rgb(palette::current().panel_hi))
             })
-            .p_3()
+            // The inset is the conversation's own (#3115): a message bubble's
+            // text lands 24 from the session edge (its row's `px_2` plus the
+            // bubble's 16), so the field, its paperclip and its mic pad 24 and
+            // the words the reader types sit on the column of the words above
+            // them. A uniform `p_3` left them at 12, twelve pixels left of the
+            // transcript, and the offer card and the task strip follow the same
+            // column. The vertical step stays 12: only the sides were off.
+            .px(px(24.))
+            .py_3()
             .line_height(px(22.))
             .text_size(px(14.))
             .text_color(rgb(palette::current().text))
