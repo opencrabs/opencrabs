@@ -21,6 +21,9 @@ pub mod composer;
 pub mod copy_select;
 pub mod docs;
 pub mod help_keys;
+// The line under the composer that says what to do next, shared so the
+// terminal and the desktop app cannot recommend different things (#2279).
+pub mod hints;
 pub mod input_history;
 pub mod keys;
 pub mod links;

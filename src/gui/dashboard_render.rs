@@ -5,6 +5,7 @@
 //! earlier (#2690).
 
 use super::*;
+use opencrabs::ui_core::hints::{CONTEXT_TIGHT, HintState, gui_hint};
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2524,26 +2525,33 @@ impl Render for Dashboard {
                     // as one card instead of a floating pill parked above a
                     // separate footer row (#2987). The column has no gap: the only
                     // separation inside the card is the 1px hairline.
+                    let mut dock = div()
+                        .id("composer-dock")
+                        .flex()
+                        .flex_col()
+                        .gap_0()
+                        .bg(glass_fill(palette::current().panel))
+                        .border_1()
+                        .border_color(rgb(palette::current().panel_hi))
+                        .rounded(px(COMPOSER_RADIUS))
+                        .overflow_hidden()
+                        .child(composer)
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(1.))
+                                .bg(rgb(palette::current().panel_hi)),
+                        );
+                    // The hint row (#2279) sits inside the card, between the
+                    // hairline and the key hints: the card is what the reader
+                    // is looking at when they wonder what to do next, and a
+                    // suggestion parked outside it reads as a different
+                    // widget's footer.
+                    if let Some(hint) = hint_row(&self.hint_state()) {
+                        dock = dock.child(hint);
+                    }
                     col = col.child(central(
-                        div()
-                            .id("composer-dock")
-                            .flex()
-                            .flex_col()
-                            .gap_0()
-                            .bg(glass_fill(palette::current().panel))
-                            .border_1()
-                            .border_color(rgb(palette::current().panel_hi))
-                            .rounded(px(COMPOSER_RADIUS))
-                            .overflow_hidden()
-                            .child(composer)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(1.))
-                                    .bg(rgb(palette::current().panel_hi)),
-                            )
-                            .child(footer.into_any_element())
-                            .into_any_element(),
+                        dock.child(footer.into_any_element()).into_any_element(),
                         centred_chat,
                         chat_measure_px,
                     ));
@@ -3549,4 +3557,72 @@ impl Render for Dashboard {
         self.schedule_middle_scroll_frame(window, cx);
         root
     }
+}
+
+/// The facts the hint row is decided from, read off state the app already
+/// keeps for its own gauge, footer and update badge.
+///
+/// Nothing here is bookkeeping kept only for the hint: `ctx_tokens` and
+/// `ctx_max` are the numbers the context gauge prints, `busy` is what the
+/// composer shows while a turn runs, and `update_available` is the version the
+/// badge already names.
+impl Dashboard {
+    pub(crate) fn hint_state(&self) -> HintState {
+        let mut state = HintState {
+            processing: self.turn.busy,
+            context_used: u64::from(self.turn.ctx_tokens.unwrap_or(0)),
+            context_max: u64::from(self.ctx_max),
+            clear_base: 0,
+            update_version: self.update_available.clone(),
+            turns: self.chat_state.transcript.turns.len(),
+        };
+        // What a `/clear` leaves behind is the system prompt and the tool
+        // schemas. Counting it tokenises every tool schema, so it is measured
+        // only when the context rung is live: this runs on every frame, and
+        // the other rungs never print the number.
+        if state.context_percent() >= CONTEXT_TIGHT {
+            state.clear_base = agent_bridge::bridge()
+                .map(|b| u64::from(b.service.base_context_tokens_raw()))
+                .unwrap_or(0);
+        }
+        state
+    }
+}
+
+/// The hint row (#2279): one line inside the composer card, under the hairline
+/// and above the key hints.
+///
+/// The same `ui_core::hints` answer the terminal draws, filtered through the
+/// commands the desktop app answers, so the two surfaces cannot recommend
+/// different things about the same conversation. `None` when there is nothing
+/// worth saying: unlike the terminal, the card does not reserve the row, so an
+/// empty answer costs no space at all.
+fn hint_row(state: &HintState) -> Option<AnyElement> {
+    let hint = gui_hint(state)?;
+    let shown = palette::current();
+    // The command is the actionable half, so it is the half that is coloured.
+    // Split around it rather than styling the whole line: a line that is all
+    // accent reads as an error, and one that is all muted is chrome nobody
+    // notices.
+    let (before, after) = hint
+        .text
+        .split_once(hint.command)
+        .map(|(b, a)| (b.to_string(), a.to_string()))
+        .unwrap_or((hint.text.clone(), String::new()));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .px(px(12.))
+        .pb(px(4.))
+        .overflow_hidden();
+    if !before.is_empty() {
+        row = row.child(text(before, Size::Xs, shown.text_muted));
+    }
+    row = row.child(text(hint.command, Size::Xs, shown.accent));
+    if !after.is_empty() {
+        row = row.child(text(after, Size::Xs, shown.text_muted));
+    }
+    Some(row.into_any_element())
 }
