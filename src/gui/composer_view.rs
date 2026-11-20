@@ -115,6 +115,13 @@ pub(crate) fn options_strip(
     let col = div()
         .flex()
         .flex_col()
+        // The buttons hug their labels (#3114): a column stretches its children
+        // to the card's width by default, so every row was a full-width bar with
+        // its words bunched at the left and an empty half that read as part of
+        // the button. `items_start` makes the button column take its own width,
+        // and the widest label in the card is what every button then shares: one
+        // size, set by the text instead of by the window.
+        .items_start()
         .gap_2()
         .p_3()
         .rounded(px(SEEKER_RADIUS))

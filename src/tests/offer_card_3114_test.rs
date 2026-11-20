@@ -18,6 +18,7 @@ const EDITOR: &str = include_str!("../gui/editor.rs");
 const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
 const DASHBOARD_RENDER: &str = include_str!("../gui/dashboard_render.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const PLAN_STRIP: &str = include_str!("../gui/plan_strip.rs");
 
 /// The slice of a file between two anchors, so a pin cannot match a string
 /// somewhere else in the same file by accident.
@@ -235,5 +236,43 @@ fn the_gap_under_the_last_card_is_the_gap_between_cards() {
     assert!(
         above.contains(".gap_2()"),
         "and the strips between history and field take that step too: {above}"
+    );
+}
+
+/// A button is the size of its words, not of the card (#3114).
+///
+/// The offer card's column stretched every row to the card's width, so a label
+/// like "yes" sat at the head of a bar the width of the window with an empty
+/// half that read as part of the button. The owner asked for the space to fit
+/// the text. `items_start` on the card makes the button column take its own
+/// width, and because the column still stretches its own children, the widest
+/// label in the card is the width all of them share: one size, decided by the
+/// text.
+#[test]
+fn the_offer_buttons_fit_their_labels() {
+    let strip = region(
+        COMPOSER_VIEW,
+        "pub(crate) fn options_strip(",
+        "/// Whether a speech-to-text engine is configured",
+    );
+    assert!(
+        strip.contains(".items_start()"),
+        "the card must not stretch its buttons to its own width: {strip}"
+    );
+    assert!(
+        !strip.contains("w_full"),
+        "no row asks for the card's whole width any more"
+    );
+    // The plan approval card already sizes its chips to their labels; the pin
+    // is here so the two cards cannot drift apart again.
+    let card = region(PLAN_STRIP, "pub fn editing_view(", "/// The plan as a split pane draws it");
+    assert!(
+        card.contains("flex_row()") && card.contains(".gap_2()"),
+        "the two decisions sit side by side: {card}"
+    );
+    let chip = region(PLAN_STRIP, "fn action_chip(", "/// How much of a plan one pane shows");
+    assert!(
+        chip.contains(".flex_none()"),
+        "and each chip keeps its own width instead of growing: {chip}"
     );
 }
