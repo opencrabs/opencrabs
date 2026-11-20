@@ -13,7 +13,7 @@
 //! whole screen; the panels a desktop keeps there (menu bar, dock) are smaller
 //! than the margin this app leaves, so the full screen is a usable answer.
 
-use gpui::{App, Bounds, Pixels, PlatformDisplay, WindowBounds, point, px, size};
+use gpui::{App, Bounds, Pixels, WindowBounds, point, px, size};
 
 use crate::layout_store;
 use opencrabs::ui_core::window_geometry::{MIN_SIZE, PREFERRED_SIZE, fit, is_on, place};
@@ -61,7 +61,6 @@ pub fn restored_bounds(frame: &layout_store::WindowState, cx: &App) -> Option<Bo
     );
     is_on(area, requested).then(|| place(area, requested, MIN_SIZE))
 }
-
 
 /// The work area of the primary display, in logical pixels. Outside Windows
 /// `bounds()` is the whole screen: the menu bar and dock a desktop keeps there

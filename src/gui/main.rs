@@ -95,9 +95,9 @@ mod rail_activity;
 // The rail is an entity of its own (#2933): its rows, chips, badges and
 // filter menu are built once per frame it is handed, and a frame that matches
 // the last one replays the prepaint instead of rebuilding every listener.
+mod composer_orb;
 mod rail_view;
 mod screen_keys;
-mod composer_orb;
 mod seeker_orb;
 mod sessions;
 mod settings_modal;
@@ -213,11 +213,11 @@ use opencrabs::ui_core::help_keys;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, AnyView, App, Application, Bounds, ClickEvent, ClipboardItem, Context, Div,
-    DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
+    AnyElement, AnyView, App, Application, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
+    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.
