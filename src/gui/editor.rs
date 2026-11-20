@@ -498,14 +498,15 @@ pub struct Editor {
     /// moved no digit leaves the frame alone.
     voice_secs: u64,
     /// The meter's window while recording, newest last (#3044). Copied out of
-    /// the capture on every tick and handed straight to the orb, which is the
+    /// the capture on every tick and handed straight to the block, which is the
     /// only part of the composer that changes ten times a second and therefore
     /// the only reason the row repaints while the microphone is open.
     voice_levels: Vec<f32>,
-    /// The orb the composer listens through, if the microphone is open
-    /// (#3092). Its worker renders the glass; the composer only swaps the
-    /// texture, so a take costs the row one image and no per-pixel work.
-    voice_orb: Option<crate::seeker_orb::OrbAnimation>,
+    /// The block the composer listens through, if the microphone is open
+    /// (#3092). It is painted from the composer's own tick and its texture is
+    /// swapped in place, so a take costs the row one image and no per-pixel
+    /// work in the paint pass.
+    voice_block: Option<crate::composer_orb::LiveSlab>,
     /// The take that has been transcribed and is waiting to be sent (#3044).
     ///
     /// A recording is a message of its own, so it does not go through the caret:
@@ -653,7 +654,7 @@ impl Editor {
             voice_looping: false,
             voice_secs: 0,
             voice_levels: Vec::new(),
-            voice_orb: None,
+            voice_block: None,
             voice_draft: None,
         }
     }
@@ -754,12 +755,11 @@ impl Editor {
                 self.voice_finishing = false;
                 self.voice_secs = 0;
                 self.voice_levels.clear();
-                // The orb is the strip now (#3092): it opens with the
+                // The block is the strip now (#3092): it opens with the
                 // microphone and closes with it, so its worker never outlives
                 // the take it was painting.
-                self.voice_orb = Some(crate::seeker_orb::OrbAnimation::start(
-                    palette::current().red,
-                ));
+                self.voice_block =
+                    Some(crate::composer_orb::LiveSlab::start(palette::current().red));
                 self.pump_voice(cx);
             }
             VoicePhase::Recording => {
@@ -817,13 +817,13 @@ impl Editor {
                     self.voice_capture = None;
                     self.voice_finishing = false;
                     // The glass belongs to a recording that is over: leaving
-                    // it up would paint a frozen marble beside the spinner.
+                    // it up would paint a frozen block beside the spinner.
                     self.voice_levels.clear();
                     // The glass closes with the microphone. Retiring it here
-                    // rather than on the next take keeps the worker and its
-                    // texture from outliving the recording they were painting.
-                    if let Some(orb) = self.voice_orb.take() {
-                        orb.dispose(cx);
+                    // rather than on the next take keeps its last texture from
+                    // outliving the recording it was painting.
+                    if let Some(block) = self.voice_block.take() {
+                        block.dispose(cx);
                     }
                     changed = true;
                     match answer {
@@ -875,9 +875,14 @@ impl Editor {
         // to ask for a frame even on a tick where nothing else moved: a
         // recording that stops repainting is a recording that looks stopped
         // (#3092).
-        if let Some(orb) = self.voice_orb.as_ref() {
-            let recording = self.voice_phase() == VoicePhase::Recording;
-            orb.update(recording, &self.voice_levels, palette::current().red);
+        let recording = self.voice_phase() == VoicePhase::Recording;
+        if let Some(block) = self.voice_block.as_mut() {
+            block.update(
+                recording,
+                &self.voice_levels,
+                palette::current().red,
+                &mut **cx,
+            );
             changed = true;
         }
         if changed {
@@ -2910,7 +2915,7 @@ impl Render for Editor {
                 .child(mic(
                     self.voice_phase(),
                     self.voice_secs,
-                    self.voice_orb.as_ref(),
+                    self.voice_block.as_ref(),
                     cx,
                 )),
         );
@@ -3290,8 +3295,8 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 /// are one control line instead of a control and an afterthought.
 ///
 /// It carries the phase itself. Idle is the quiet grey the paperclip wears;
-/// recording opens the orb, the same glass the Seeker listens through, with the
-/// elapsed time beside it and the whole marble as the stop (#3092). A take in
+/// recording opens the block, the same glass the attached take wears, with the
+/// elapsed time beside it and the whole slab as the stop (#3092). A take in
 /// progress has to say that it is running, how long for, and how to end it,
 /// without asking the person to find a second control; a WAV being built keeps
 /// the glass but stops it moving, and the transcription turns the mark amber,
@@ -3300,7 +3305,7 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 fn mic(
     phase: VoicePhase,
     secs: u64,
-    orb: Option<&crate::seeker_orb::OrbAnimation>,
+    block: Option<&crate::composer_orb::LiveSlab>,
     cx: &mut Context<Editor>,
 ) -> impl IntoElement {
     let palette = palette::current();
@@ -3337,16 +3342,17 @@ fn mic(
                 .child(format!("{}:{:02}", secs / 60, secs % 60)),
         );
     }
-    let mark: gpui::AnyElement = match orb.filter(|_| live) {
-        // The marble is the strip and the stop at once: the worker has already
-        // painted the pixels, so the row only swaps the texture. It is sized in
-        // rems rather than the microphone's 1.8 so the liquid has room to bend
-        // without the field's line jumping when a take starts.
-        Some(orb) => div()
+    let mark: gpui::AnyElement = match block.filter(|_| live) {
+        // The slab is the strip and the stop at once: it has already been
+        // painted for this tick, so the row only swaps the texture. Its size is
+        // the recorder's, a third of the attached player's, because a control
+        // in the row cannot be as wide as the message it will become.
+        Some(block) => div()
             .relative()
             .flex_none()
-            .size(gpui::rems(RECORDING_ORB))
-            .child(gpui::img(orb.frame(cx)).absolute().inset_0().size_full())
+            .w(px(crate::composer_orb::RECORDER_WIDTH))
+            .h(px(crate::composer_orb::RECORDER_HEIGHT))
+            .child(gpui::img(block.frame()).absolute().inset_0().size_full())
             .into_any_element(),
         None => div()
             .flex()
@@ -3375,14 +3381,6 @@ fn mic(
         )
 }
 
-/// How large the recording glass is, in rems.
-///
-/// A step above the microphone's 1.8rem tile: the liquid has to be visible
-/// enough to read as a response to the voice, and the row is already the
-/// tallest thing in the composer while a take runs. Larger than this and the
-/// composer visibly jumps the moment the microphone opens.
-const RECORDING_ORB: f32 = 2.4;
-
 /// The take waiting to be sent, drawn above the input row (#3044).
 ///
 /// The microphone's own preview: the clip can be heard before Enter spends it,
@@ -3397,8 +3395,8 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         cx.stop_propagation();
         this.discard_voice(cx);
     });
-    // The take is the orb now: its own peaks displace the glass, the band is
-    // the scrub track and the mark in the middle starts and stops it (#3092).
+    // The take is the block now: its own peaks displace the glass, the band is
+    // the scrub track and the mark on the left starts and stops it (#3092).
     // The discard stays outside the element, so a click meant for the ✕ can
     // never land on the player.
     let player = crate::composer_orb::player(
@@ -3448,13 +3446,15 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                 ),
         )
         // The recogniser's words stay a draft caption, aligned with the text
-        // column rather than the glass. Enter still sends the composer's actual
-        // field, exactly as before this visual change.
+        // column rather than the glass: the block's width plus the row's gap
+        // and padding, so the caption starts where the label above it does.
+        // Enter still sends the composer's actual field, exactly as before this
+        // visual change.
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .pl(px(72.0))
+                .pl(px(150.0))
                 .pr(px(20.0))
                 .text_xs()
                 .text_color(rgb(palette.text_muted))
@@ -5049,27 +5049,27 @@ mod tests {
         );
     }
 
-    /// The recording strip is the orb, and the orb is the stop (#3092).
+    /// The recording strip is the block, and the block is the stop (#3092).
     ///
     /// A take has to read as one object: the glass says the microphone is
-    /// hearing something, the counter says for how long, and the whole marble
+    /// hearing something, the counter says for how long, and the whole slab
     /// ends it. The click listener is the part worth pinning, because a control
     /// that draws a stop and answers nothing is worse than no stop at all.
     #[test]
-    fn the_recording_strip_is_the_orb_and_the_orb_is_the_stop() {
+    fn the_recording_strip_is_the_block_and_the_block_is_the_stop() {
         let src = include_str!("editor.rs");
         let body = src
             .split("fn mic(")
             .nth(1)
-            .and_then(|rest| rest.split("/// How large the recording glass is").next())
+            .and_then(|rest| rest.split("fn voice_strip(").next())
             .expect("the composer's microphone");
         assert!(
-            body.contains("RECORDING_ORB"),
-            "the recording strip stopped painting the orb"
+            body.contains("RECORDER_WIDTH") && body.contains("RECORDER_HEIGHT"),
+            "the recording strip stopped painting the recorder's block"
         );
         assert!(
-            body.contains("orb.frame(cx)"),
-            "the orb is sized but its texture is never taken"
+            body.contains("block.frame()"),
+            "the block is sized but its texture is never taken"
         );
         assert!(
             body.contains("this.toggle_dictation(cx)"),

@@ -520,7 +520,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-fn microphone_history(levels: &[f32]) -> [f32; VOICE_SAMPLES] {
+/// The microphone's last few peaks, gained into the range the liquid answers in.
+///
+/// Shared with the composer's block (#3092) so both surfaces move to the same
+/// reading of the take: one curve, whichever shape it is poured into.
+pub(crate) fn microphone_history(levels: &[f32]) -> [f32; VOICE_SAMPLES] {
     let mut history = [0.0; VOICE_SAMPLES];
     let shown = &levels[levels.len().saturating_sub(history.len())..];
     let offset = history.len() - shown.len();
