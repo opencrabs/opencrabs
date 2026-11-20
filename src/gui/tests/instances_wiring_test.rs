@@ -8,11 +8,12 @@ use crate::dashboard_instances::{PairingForm, RemoteState, RemoteView};
 
 #[test]
 fn a_busy_form_refuses_to_look_idle() {
+    // `..Default::default()` on purpose: the form grows fields as the keyboard
+    // work lands, and a literal here breaks the test build every time it does.
     let form = PairingForm {
         url: "http://a:7878".into(),
         code: "123456".into(),
-        label: String::new(),
-        busy: false,
+        ..Default::default()
     }
     .busy();
     assert!(form.busy);
