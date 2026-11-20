@@ -1696,36 +1696,55 @@ fn a_chat_topic_chip_answers_the_split_pick() {
 }
 
 #[test]
-fn the_split_pick_scrim_starts_below_the_topic_row() {
+fn the_split_pick_scrim_leaves_the_topic_row_bright() {
     // #3097: the scrim is `.occlude()`, which blocks the mouse for everything
-    // behind its hitbox, and the row sits inside the band it covered. The row
+    // behind its hitbox, and the row sat inside the band it covered. The row
     // was therefore dead while a pick waited, and the only way to choose a
-    // topic was the sidebar.
+    // topic was the sidebar, which the scrim never covered. The band is
+    // measured now, so a row on any edge keeps its place instead of only the
+    // top one: a side row is centred beside the conversation, so a constant
+    // put the band in the wrong place for every edge but the top.
     let overlays = include_str!("../overlays.rs");
     let scrim = fn_body(overlays, "split_pick_overlay");
     assert!(
-        scrim.contains("band: Option<gpui::Pixels>"),
-        "the scrim is told the height of the row it has to leave alone"
+        scrim.contains("hole: Option<topic_tabs::StripRect>"),
+        "the scrim is told where the row it has to leave alone actually sat"
     );
     assert!(
-        scrim.contains("scrim.top(band)"),
-        "a drawn row keeps its band bright"
+        scrim.contains("topic_tabs::scrim_band(hole, f32::from(rail_px))"),
+        "and asks the shared band function which way to split"
     );
     assert!(
-        scrim.contains("None => scrim.top_0()"),
-        "with no row up there the chat dims whole"
+        scrim.contains(".when(vertical, |d| d.flex_row())"),
+        "a side row splits the scrim left to right"
     );
-    // The render is what decides whether a row is drawn, and a band over a
-    // row that is not there is a bright stripe across the chat. A split draws
-    // no window row but a strip in every pane, so both cases reserve it.
+    assert!(
+        scrim.contains(".when(!vertical, |d| d.flex_col())"),
+        "a top or bottom row splits it top to bottom"
+    );
+    // A band that blocked the mouse would leave the row as dead as before.
+    let band = fn_body(overlays, "pick_row");
+    assert!(
+        !band.contains(".occlude()"),
+        "the bright band must not take the pointer"
+    );
+    assert!(
+        !band.contains(".bg("),
+        "and must not dim the row it exists to leave bright"
+    );
+    // The render measures the row rather than deriving it.
     let render = dashboard_render(DASHBOARD);
     assert!(
-        render.contains("let top_strip = split_draws_its_own"),
-        "the band is read from the rows the render actually built"
+        render.contains("on_children_prepainted({"),
+        "the row records where it landed on each paint"
     );
     assert!(
-        render.contains("split_pick_overlay(layout, rail_px, pick_band)"),
-        "and handed to the scrim"
+        render.contains("let pick_hole = if split_draws_its_own"),
+        "a split's own strips take a constant, the window row its measurement"
+    );
+    assert!(
+        render.contains("split_pick_overlay(layout, rail_px, pick_hole)"),
+        "and the measured band is handed to the scrim"
     );
 }
 

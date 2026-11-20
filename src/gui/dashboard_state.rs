@@ -488,6 +488,12 @@ pub(crate) struct Dashboard {
     pub(crate) pane_warning: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
     pub(crate) topic_edge: topic_tabs::Edge,
+    /// Where the chat's topic row landed on the last paint, in window
+    /// coordinates (#3097). A split pick's scrim leaves that band bright so a
+    /// press reaches a chip on any edge, and it is measured rather than
+    /// derived because a side row is centred beside the conversation, so no
+    /// constant knows where it starts.
+    pub(crate) topic_strip_rect: std::rc::Rc<std::cell::RefCell<Option<topic_tabs::StripRect>>>,
     /// Whether the chat's topic row shows its whole family (#2949). The row
     /// folds past `BAR_TOPICS_SHOWN` and prints a pill; the pill was a label,
     /// so the folded topics could only be reached from the rail. A press

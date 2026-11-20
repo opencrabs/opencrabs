@@ -51,6 +51,46 @@ impl Edge {
     }
 }
 
+/// Where the chat's topic strip sat on the last paint, in window coordinates
+/// (#3097).
+///
+/// The split pick has to leave the row bright, the way it always left the
+/// sidebar bright: the scrim stops at the rail, and a row on any edge needs
+/// the same treatment or a press never reaches a chip. Measured rather than
+/// derived, because a side strip is centred beside the conversation, so its
+/// distance from the rail moves with the window's width and the text measure
+/// instead of staying on a constant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StripRect {
+    pub edge: Edge,
+    /// The near edge along the strip's own axis: y for a top or bottom row,
+    /// x for a side one.
+    pub start: f32,
+    /// The far edge on that same axis.
+    pub end: f32,
+}
+
+/// The band a split pick's scrim leaves bright: the direction it splits in,
+/// the length before the row, and the row's own length (#3097).
+///
+/// `None` means there is no row to leave alone, so the chat dims whole. The
+/// scrim is built from a leading piece, the bright row and a trailing piece
+/// that takes what is left, so neither the window's size nor the row's
+/// distance from the far edge is needed to place it.
+pub(crate) fn scrim_band(rect: Option<StripRect>, rail_px: f32) -> Option<(bool, f32, f32)> {
+    let rect = rect?;
+    let lead = if rect.edge.is_vertical() {
+        rect.start - rail_px
+    } else {
+        rect.start
+    };
+    let span = rect.end - rect.start;
+    if span <= 0.0 {
+        return None;
+    }
+    Some((rect.edge.is_vertical(), lead.max(0.0), span))
+}
+
 /// The square geometry shared by every vertical topic cell, including `All`.
 /// The rotate control uses the same size so it is readable and easy to hit.
 pub const CELL_REMS: f32 = 4.5;
@@ -146,6 +186,41 @@ mod tests {
         assert_eq!(Edge::Left.next(), Edge::Bottom);
         assert_eq!(Edge::Bottom.next(), Edge::Right);
         assert_eq!(Edge::Right.next(), Edge::Top);
+    }
+
+    /// The split pick leaves the topic row bright so a press can answer it
+    /// (#3097). The band is the row's measured edges, not a constant: a side
+    /// row is centred beside the conversation, so where it starts moves with
+    /// the window's width and the text measure.
+    #[test]
+    fn the_pick_scrim_leaves_the_measured_row_bright() {
+        let top = StripRect {
+            edge: Edge::Top,
+            start: 12.0,
+            end: 85.0,
+        };
+        assert_eq!(scrim_band(Some(top), 0.0), Some((false, 12.0, 73.0)));
+        let left = StripRect {
+            edge: Edge::Left,
+            start: 100.0,
+            end: 173.0,
+        };
+        assert_eq!(scrim_band(Some(left), 40.0), Some((true, 60.0, 73.0)));
+        // A row measured left of the rail cannot ask for a negative band.
+        let pinned = StripRect {
+            edge: Edge::Right,
+            start: 20.0,
+            end: 93.0,
+        };
+        assert_eq!(scrim_band(Some(pinned), 40.0), Some((true, 0.0, 73.0)));
+        // No row drawn, or a row measured as zero, dims the chat whole.
+        assert_eq!(scrim_band(None, 40.0), None);
+        let flat = StripRect {
+            edge: Edge::Bottom,
+            start: 9.0,
+            end: 9.0,
+        };
+        assert_eq!(scrim_band(Some(flat), 0.0), None);
     }
 
     #[test]

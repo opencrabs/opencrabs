@@ -24,6 +24,7 @@ use opencrabs::ui_core::text_field::TextField;
 use crate::palette;
 use crate::sessions;
 use crate::topic_icons;
+use crate::topic_tabs;
 
 /// The update dialog (#2406). The first stage asks whether to update by
 /// running /evolve; the second stage asks again before the download starts.
@@ -125,14 +126,15 @@ pub(crate) fn update_prompt_overlay(
 /// for its second session (#2438). The scrim starts past the sidebar, so the
 /// rows stay bright and clickable.
 ///
-/// `band` is the height the chat draws its topic row in, and the scrim starts
-/// below it when the row is there (#3097). The scrim blocks the mouse for
-/// everything behind it, so a row under it could not answer the pick, and that
-/// row is the shortest way to the topic the split wants.
+/// `hole` is where the chat's topic strip sat on the last paint, measured, and
+/// the scrim leaves that band bright on whichever edge the row is on (#3097).
+/// The scrim blocks the mouse for everything behind it, so a row under it
+/// could not answer the pick, and that row is the shortest way to the topic
+/// the split wants. `None` means no row is drawn, so the chat dims whole.
 pub(crate) fn split_pick_overlay(
     layout: Layout,
     rail_px: gpui::Pixels,
-    band: Option<gpui::Pixels>,
+    hole: Option<topic_tabs::StripRect>,
 ) -> impl IntoElement {
     let card = div()
         .absolute()
@@ -161,20 +163,68 @@ pub(crate) fn split_pick_overlay(
                 .text_color(rgb(palette::current().text_faint))
                 .child("or press N for a new session · esc cancels"),
         );
-    let scrim = div()
+    let dim = rgba(0x0a0a0a88);
+    let mut scrim = div()
         .id("split-pick-scrim")
-        .occlude()
         .absolute()
+        // The root spans the chat so its flex pieces have a height to divide:
+        // without `top_0` the height is the content's, and `h_full` inside an
+        // auto height parent has nothing to resolve against.
+        .top_0()
         .bottom_0()
         .right_0()
         .left(rail_px);
-    // A row on the top edge keeps its band bright; with no row up there the
-    // whole chat dims, because there is no picker to leave alone (#3097).
-    let scrim = match band {
-        Some(band) => scrim.top(band),
-        None => scrim.top_0(),
+    // The scrim blocks the mouse for everything behind it, so a row it covers
+    // cannot answer the pick at all (#3097). It is built as a leading piece,
+    // the bright row and a trailing piece that takes what is left, so the row
+    // keeps its place on any edge. The sidebar always worked for the same
+    // reason: the scrim stopped at the rail (#2438).
+    scrim = match topic_tabs::scrim_band(hole, f32::from(rail_px)) {
+        None => scrim.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .occlude()
+                .bg(dim),
+        ),
+        Some((vertical, lead_px, span)) => {
+            let before = div()
+                .flex_none()
+                .occlude()
+                .bg(dim)
+                .when(vertical, |d| d.w(px(lead_px)).h_full())
+                .when(!vertical, |d| d.h(px(lead_px)).w_full());
+            let after = div()
+                .flex_1()
+                .occlude()
+                .bg(dim)
+                .when(vertical, |d| d.h_full())
+                .when(!vertical, |d| d.w_full());
+            scrim
+                .flex()
+                .when(vertical, |d| d.flex_row())
+                .when(!vertical, |d| d.flex_col())
+                .child(before)
+                .child(pick_row(vertical, span))
+                .child(after)
+        }
     };
-    scrim.bg(rgba(0x0a0a0a88)).child(card)
+    scrim.child(card)
+}
+
+/// The band a split pick leaves bright, where the topic row sits (#3097).
+///
+/// It carries no background and no hitbox on purpose: the scrim's job is to
+/// block the mouse, and a band that blocked it too would leave the row as dead
+/// as it was before it was measured. A press here has to reach the chip.
+fn pick_row(vertical: bool, span: f32) -> Div {
+    div()
+        .flex_none()
+        .when(vertical, |d| d.w(px(span)).h_full())
+        .when(!vertical, |d| d.h(px(span)).w_full())
 }
 
 /// The icon a topic gets when none is picked (#2414, #2824).

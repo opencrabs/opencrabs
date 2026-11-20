@@ -2259,24 +2259,67 @@ impl Render for Dashboard {
                 tabs,
                 self.chat_topics_expanded,
                 pill,
-            );
+            )
+            // Where the row actually landed, recorded for the pick's scrim
+            // (#3097). Measured from the strip's own children, because a side
+            // row is centred beside the conversation and no constant knows
+            // where that puts it. The value read this frame is the last
+            // paint's: prepaint runs after the tree is built, and the row
+            // does not move between frames.
+            .on_children_prepainted({
+                let slot = self.topic_strip_rect.clone();
+                let edge = self.topic_edge;
+                move |bounds, _window, _cx| {
+                    // The union of every child, not the first and the last: a
+                    // fold pill is shorter than the cells beside it, and a
+                    // band cut to the last child's edge would dim the bottom
+                    // of the row it exists to leave bright.
+                    let mut start = f32::INFINITY;
+                    let mut end = f32::NEG_INFINITY;
+                    for child in &bounds {
+                        let (near, far) = if edge.is_vertical() {
+                            (
+                                f32::from(child.origin.x),
+                                f32::from(child.origin.x + child.size.width),
+                            )
+                        } else {
+                            (
+                                f32::from(child.origin.y),
+                                f32::from(child.origin.y + child.size.height),
+                            )
+                        };
+                        start = start.min(near);
+                        end = end.max(far);
+                    }
+                    if start.is_finite() && end > start {
+                        *slot.borrow_mut() = Some(topic_tabs::StripRect { edge, start, end });
+                    }
+                }
+            });
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
-        // The band a split pick's scrim leaves bright (#3097). The row is the
-        // shortest way to the topic a split wants, and the scrim blocks the
-        // mouse for everything behind it, so a row under the scrim cannot
-        // answer the pick at all. A row on a side or at the bottom is not in
-        // this band, and no row at all means the chat dims whole.
+        // Where a split pick's scrim leaves the chat bright (#3097). The row
+        // is the shortest way to the topic a split wants, and the scrim blocks
+        // the mouse for everything behind it, so a row under the scrim cannot
+        // answer the pick at all. No row means the chat dims whole.
         //
         // A split draws no window row (#2687), but every pane draws its own
-        // strip on the top edge, inside the pane's own border and under the
-        // same column padding, so the same band covers both.
-        let top_strip = split_draws_its_own
-            || topic_row
-                .as_ref()
-                .is_some_and(|(edge, _)| *edge == topic_tabs::Edge::Top);
-        let pick_band =
-            top_strip.then(|| px(topic_tabs::CELL_REMS * self.rem + 14.0));
+        // strip on the top edge at one height, so a constant covers all of
+        // them. The window's row is measured instead of derived: a side strip
+        // is centred beside the conversation, so its distance from the rail
+        // moves with the window's width and the text measure, and a constant
+        // put the band in the wrong place for every edge but the top.
+        let pick_hole = if split_draws_its_own {
+            Some(topic_tabs::StripRect {
+                edge: topic_tabs::Edge::Top,
+                start: 0.0,
+                end: topic_tabs::CELL_REMS * self.rem + 14.0,
+            })
+        } else if topic_row.is_some() {
+            *self.topic_strip_rect.borrow()
+        } else {
+            None
+        };
         // The dock owns the chrome, so the field must not paint a second card
         // inside it. A split pane renders the same editor bare and keeps its own
         // card, which is why this is a flag on the field and not a deleted style
@@ -3161,10 +3204,11 @@ impl Render for Dashboard {
         }
         // While a split waits for its session the chat dims, and a card says what
         // to do. The sidebar is left bright so its rows can be picked (#2438),
-        // and so is the topic row on the top edge, for the same reason (#3097).
+        // and so is the topic row, on whichever edge it sits, for the same
+        // reason (#3097).
         if let Some(layout) = self.split_pick {
             let rail_px = px(self.visible_rail_width() * self.rem);
-            root = root.child(split_pick_overlay(layout, rail_px, pick_band));
+            root = root.child(split_pick_overlay(layout, rail_px, pick_hole));
         }
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).

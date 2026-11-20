@@ -569,6 +569,7 @@ pub(crate) fn run() {
                                 .as_deref(),
                         ),
                         chat_topics_expanded: false,
+                        topic_strip_rect: std::rc::Rc::default(),
                         topic_rename: None,
                         topic_info: None,
                         themes_hue: 24.47,
