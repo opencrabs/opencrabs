@@ -167,6 +167,16 @@ pub(crate) struct Dashboard {
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     pub(crate) rem: f32,
+    /// The frame the window is showing (#3082), recorded on every paint because
+    /// that is the only place the window is in hand. `poll` writes it once it
+    /// stops moving, and `persist_layout` carries it with the pane tree.
+    pub(crate) window_frame: Option<layout_store::WindowState>,
+    /// The frame `poll` saw on its previous tick. A drag produces a new frame
+    /// on every paint, so the write waits for two ticks to agree before it
+    /// happens: one write at the end of a drag instead of twenty a second.
+    pub(crate) window_frame_seen: Option<layout_store::WindowState>,
+    /// The frame already on disk, so a settled window costs no write at all.
+    pub(crate) window_frame_saved: Option<layout_store::WindowState>,
     /// Ledger path resolved once at startup, before the window opens.
     /// Period fetches reuse it; they never re-read the config, because
     /// tiny-stack background threads must not run `Config::load`.

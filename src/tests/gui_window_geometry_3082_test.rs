@@ -9,7 +9,7 @@
 
 #![cfg(feature = "gui")]
 
-use crate::ui_core::window_geometry::{EDGE_MARGIN, MIN_SIZE, PREFERRED_SIZE, fit};
+use crate::ui_core::window_geometry::{EDGE_MARGIN, MIN_SIZE, PREFERRED_SIZE, fit, is_on, place};
 use gpui::{Bounds, Pixels, point, px, size};
 
 fn area(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
@@ -83,8 +83,8 @@ fn the_floor_yields_to_a_screen_too_small_to_hold_it() {
 fn the_window_opens_from_the_fitted_frame() {
     let app = include_str!("../gui/app.rs");
     assert!(
-        app.contains("window_geometry::boot_bounds(cx)"),
-        "the window is opened from the fitted frame"
+        app.contains("window_geometry::boot_window_bounds(saved_window.as_ref(), cx)"),
+        "the window is opened from the frame the last run left, fitted to the work area"
     );
     assert!(
         !app.contains("Bounds::centered(None, size(px(980.0)"),
@@ -107,5 +107,73 @@ fn the_work_area_on_windows_comes_from_the_work_rect() {
     assert!(
         module.contains("MONITOR_DEFAULTTOPRIMARY"),
         "the primary monitor is asked for by flag, not by a window handle"
+    );
+}
+
+/// A remembered frame comes back where the user left it (#3082). Centring it
+/// again would undo the only thing the file is for.
+#[test]
+fn a_remembered_frame_keeps_its_place() {
+    let work = area(0.0, 0.0, 1920.0, 1040.0);
+    let saved = Bounds::new(point(px(300.0), px(120.0)), size(px(1000.0), px(700.0)));
+    let bounds = place(work, saved, MIN_SIZE);
+    assert_eq!(bounds, saved, "a frame that still fits is untouched");
+}
+
+/// The size is clamped and the frame is pushed back inside, which is what a
+/// screen that shrank since the last run needs: the window is smaller, and it
+/// is reachable.
+#[test]
+fn a_remembered_frame_is_pushed_back_inside_a_smaller_screen() {
+    let work = area(0.0, 0.0, 1280.0, 688.0);
+    let saved = Bounds::new(point(px(600.0), px(400.0)), size(px(1200.0), px(900.0)));
+    let bounds = place(work, saved, MIN_SIZE);
+    assert!(
+        bounds.origin.x + bounds.size.width <= work.origin.x + work.size.width,
+        "the frame ends inside the screen: {bounds:?}"
+    );
+    assert!(
+        bounds.origin.y + bounds.size.height <= work.origin.y + work.size.height,
+        "the frame ends inside the screen: {bounds:?}"
+    );
+    assert!(
+        bounds.size.width <= px(1280.0) && bounds.size.height <= px(688.0),
+        "the frame is no larger than the screen: {bounds:?}"
+    );
+}
+
+/// A frame remembered on a monitor that is no longer attached is not restored:
+/// opening it would put the window where nothing can be clicked. The top left
+/// corner decides, so a second-monitor frame is not dragged to the primary.
+#[test]
+fn a_frame_from_a_detached_monitor_is_not_restored() {
+    let work = area(0.0, 0.0, 1920.0, 1040.0);
+    let here = Bounds::new(point(px(100.0), px(100.0)), size(px(900.0), px(700.0)));
+    let gone = Bounds::new(point(px(2400.0), px(100.0)), size(px(900.0), px(700.0)));
+    let behind = Bounds::new(point(px(-1400.0), px(100.0)), size(px(900.0), px(700.0)));
+    assert!(is_on(work, here), "a frame on this screen is restored");
+    assert!(!is_on(work, gone), "a frame to the right of this screen is not");
+    assert!(!is_on(work, behind), "a frame to the left of this screen is not");
+}
+
+/// The frame is written where the window is in hand, and written once it
+/// settles: a drag paints a new frame on every tick, and twenty writes a second
+/// would rewrite the layout file for the whole duration of the drag.
+#[test]
+fn the_frame_is_recorded_on_paint_and_written_once_it_settles() {
+    let render = include_str!("../gui/dashboard_render.rs");
+    assert!(
+        render.contains("self.observe_window(window)"),
+        "the paint is where the window is in hand"
+    );
+    let panes = include_str!("../gui/dashboard_panes.rs");
+    assert!(
+        panes.contains("fn observe_window"),
+        "the frame is recorded, not written, on every paint"
+    );
+    let poll = include_str!("../gui/dashboard_turns.rs");
+    assert!(
+        poll.contains("self.settle_window_frame()"),
+        "the write rides the poll tick, which outlives a drag"
     );
 }

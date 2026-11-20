@@ -169,14 +169,60 @@ impl Dashboard {
     /// the layout can change under the user's hand: a split, a close, a
     /// divider drag, a caret move, a conversation switch. The chat's own leaf
     /// goes with it, so a launch knows which pane was the window's transcript
-    /// (#2689).
+    /// (#2689), and the frame goes with it too, so a restart does not re-centre
+    /// a window the user placed (#3082).
     pub(crate) fn persist_layout(&self) {
         layout_store::save(
             &layout_store::path(),
             self.panes.as_ref(),
             self.pane_focus,
             self.chat_session,
+            self.window_frame,
         );
+    }
+
+    /// Record the frame the window is showing (#3082). `render` is the only
+    /// place the window is in hand, and it runs on every paint, so recording it
+    /// costs a comparison.
+    ///
+    /// A maximized window reports the maximized bounds, so only a windowed
+    /// frame moves the numbers: the size kept is the one the window restores
+    /// to, and un-maximizing must not land on the full screen.
+    pub(crate) fn observe_window(&mut self, window: &Window) {
+        let bounds = window.bounds();
+        let maximized = window.is_maximized();
+        let mut frame = self.window_frame.unwrap_or(layout_store::WindowState {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            maximized,
+        });
+        if !maximized {
+            frame.x = f32::from(bounds.origin.x);
+            frame.y = f32::from(bounds.origin.y);
+            frame.width = f32::from(bounds.size.width);
+            frame.height = f32::from(bounds.size.height);
+        }
+        frame.maximized = maximized;
+        if self.window_frame != Some(frame) {
+            self.window_frame = Some(frame);
+        }
+    }
+
+    /// Write the frame once it stops moving (#3082). A drag paints a new frame
+    /// on every tick, so the write waits for two ticks to agree: one write at
+    /// the end of a drag instead of twenty a second.
+    pub(crate) fn settle_window_frame(&mut self) {
+        if self.window_frame != self.window_frame_seen {
+            self.window_frame_seen = self.window_frame;
+            return;
+        }
+        if self.window_frame.is_none() || self.window_frame == self.window_frame_saved {
+            return;
+        }
+        self.window_frame_saved = self.window_frame;
+        self.persist_layout();
     }
 
     /// Put back the split the last run left (#2675). Runs once, after the boot

@@ -6,6 +6,12 @@
 //! would let either one corrupt the other. A missing, unreadable or outdated
 //! file is not an error: the window opens on the plain chat, exactly as a
 //! first run does.
+//!
+//! The file also holds the frame the window was showing (#3082), because where
+//! a user put the window is worth keeping even when the panes are the plain
+//! chat. That is the one thing a file can hold on its own: a frame with no tree
+//! loads, a tree with no frame is a file from before that change and still
+//! loads.
 
 use crate::logging;
 use opencrabs::ui_core::pane_tree::PaneTree;
@@ -24,9 +30,10 @@ pub const FILE: &str = "gui_layout.json";
 pub const VERSION: u32 = 1;
 
 /// What the window writes down: the pane tree, the leaf that held the
-/// caret, and the leaf that was the window's own chat. `focus` is `None` when
-/// the chat itself owned it, the same `None` the window uses in memory, and
-/// `chat` says which leaf that chat was (#2689).
+/// caret, the leaf that was the window's own chat, and the frame it was
+/// showing. `focus` is `None` when the chat itself owned it, the same `None`
+/// the window uses in memory, and `chat` says which leaf that chat was
+/// (#2689).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedLayout {
     pub version: u32,
@@ -36,6 +43,29 @@ pub struct SavedLayout {
     /// such key and read as `None`; the boot pick then uses the caret leaf.
     #[serde(default)]
     pub chat: Option<Uuid>,
+    /// The frame the window was showing (#3082). Files written before that
+    /// have no such key and read as `None`, which opens on the fitted default.
+    #[serde(default)]
+    pub window: Option<WindowState>,
+}
+
+/// The frame the window was showing (#3082): where it sat, how big it was, and
+/// whether it was maximized.
+///
+/// Logical pixels, the same units `Window::bounds` reports and `WindowOptions`
+/// takes, so the file round-trips through the one type the platform speaks
+/// rather than a physical size that a scale change would misplace.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Maximized is a state, not a size. The four lengths above are the frame
+    /// the window restores to, so un-maximizing does not land on the full
+    /// screen.
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 /// Where the window keeps its layout.
@@ -44,17 +74,23 @@ pub fn path() -> PathBuf {
 }
 
 /// Read a snapshot. `None` when the file is absent, corrupt, from another
-/// version, or holds no tree. A file this function refuses is removed, so the
-/// next write starts clean instead of reading the same bad bytes every boot.
+/// version, or holds neither a tree nor a frame. A file this function refuses
+/// is removed, so the next write starts clean instead of reading the same bad
+/// bytes every boot.
 pub fn load(path: &Path) -> Option<SavedLayout> {
     let data = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str::<SavedLayout>(&data) {
-        Ok(saved) if saved.version == VERSION && saved.panes.is_some() => Some(saved),
-        Ok(saved) => {
+        Ok(saved) if saved.version != VERSION => {
             logging::warn(&format!(
                 "gui layout: version {} is not {VERSION}, starting on the chat",
                 saved.version
             ));
+            discard(path);
+            None
+        }
+        Ok(saved) if saved.panes.is_some() || saved.window.is_some() => Some(saved),
+        Ok(_) => {
+            logging::warn("gui layout: the file holds no tree and no frame, starting on the chat");
             discard(path);
             None
         }
@@ -68,20 +104,30 @@ pub fn load(path: &Path) -> Option<SavedLayout> {
     }
 }
 
-/// Write the layout the window is showing. One pane is the plain chat, so the
-/// file is removed instead: no file means "no custom layout", which is the
-/// signal the terminal uses too, and it keeps a first run read-free.
-pub fn save(path: &Path, panes: Option<&PaneTree>, focus: Option<Uuid>, chat: Option<Uuid>) {
+/// Write the layout the window is showing. One pane is the plain chat, so no
+/// tree is written: no tree means "no custom layout", which is the signal the
+/// terminal uses too, and it keeps a first run read-free. The frame is written
+/// either way, because where the window sat is worth keeping even when it holds
+/// nothing but the chat (#3082). A file with neither a tree nor a frame is
+/// removed instead.
+pub fn save(
+    path: &Path,
+    panes: Option<&PaneTree>,
+    focus: Option<Uuid>,
+    chat: Option<Uuid>,
+    window: Option<WindowState>,
+) {
     let split = panes.is_some_and(|tree| tree.leaves().len() > 1);
-    if !split {
+    if !split && window.is_none() {
         discard(path);
         return;
     }
     let saved = SavedLayout {
         version: VERSION,
-        panes: panes.cloned(),
+        panes: if split { panes.cloned() } else { None },
         focus,
         chat,
+        window,
     };
     let Ok(json) = serde_json::to_string_pretty(&saved) else {
         logging::error("gui layout: could not serialise the pane tree");
@@ -151,7 +197,7 @@ mod tests {
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
         let mut tree = split_tree(left, right);
         assert!(tree.drag_divider(&[], 0, 80.0, 800.0), "drag the divider");
-        save(&file, Some(&tree), Some(right), Some(left));
+        save(&file, Some(&tree), Some(right), Some(left), None);
 
         let saved = load(&file).expect("a saved layout reads back");
         assert_eq!(saved.version, VERSION);
@@ -189,7 +235,7 @@ mod tests {
             .iter()
             .map(|session| tree.leaf_width_share(*session))
             .collect();
-        save(&file, Some(&tree), Some(a), Some(a));
+        save(&file, Some(&tree), Some(a), Some(a), None);
 
         let saved = load(&file).expect("a saved layout reads back");
         let restored = saved.panes.expect("the tree");
@@ -218,7 +264,7 @@ mod tests {
         assert!(tree.drag_divider(&[1], 0, 120.0, 2400.0), "drag the pair");
         let nested_before = tree.leaf_width_share(b);
         assert_ne!(nested_before, Some(0.25), "the drag moved the share");
-        save(&file, Some(&tree), Some(b), Some(a));
+        save(&file, Some(&tree), Some(b), Some(a), None);
 
         let saved = load(&file).expect("a saved layout reads back");
         let restored = saved.panes.expect("the tree");
@@ -235,9 +281,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp home");
         let file = dir.path().join("gui_layout.json");
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
-        save(&file, Some(&split_tree(left, right)), None, Some(left));
+        save(&file, Some(&split_tree(left, right)), None, Some(left), None);
         assert!(file.exists(), "a split writes the file");
-        save(&file, Some(&PaneTree::leaf(left)), None, Some(left));
+        save(&file, Some(&PaneTree::leaf(left)), None, Some(left), None);
         assert!(!file.exists(), "back to one pane removes it");
     }
 
@@ -263,6 +309,7 @@ mod tests {
             panes: Some(split_tree(left, right)),
             focus: None,
             chat: None,
+            window: None,
         };
         std::fs::write(&file, serde_json::to_string(&saved).expect("json")).expect("write");
         assert!(load(&file).is_none());
@@ -299,6 +346,7 @@ mod tests {
             panes: Some(split_tree(left, right)),
             focus: Some(right),
             chat: Some(left),
+            window: None,
         };
         let known: HashSet<Uuid> = [left, right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(left));
@@ -312,6 +360,7 @@ mod tests {
             panes: Some(split_tree(left, right)),
             focus: Some(right),
             chat: Some(left),
+            window: None,
         };
         let known: HashSet<Uuid> = [right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(right));
@@ -325,6 +374,7 @@ mod tests {
             panes: Some(split_tree(left, right)),
             focus: None,
             chat: None,
+            window: None,
         };
         let known: HashSet<Uuid> = [right].into_iter().collect();
         assert_eq!(boot_session(&saved, &known), Some(right));
@@ -338,6 +388,7 @@ mod tests {
             panes: Some(split_tree(left, right)),
             focus: Some(right),
             chat: Some(left),
+            window: None,
         };
         assert_eq!(boot_session(&saved, &HashSet::new()), None);
     }
@@ -371,8 +422,86 @@ mod tests {
             Some(&split_tree(left, right)),
             Some(right),
             Some(left),
+            None,
         );
         let saved = load(&file).expect("the layout reads back");
         assert_eq!(saved.chat, Some(left), "the chat leaf comes back");
+    }
+
+    /// Where the window sat comes back, so a restart does not re-centre a frame
+    /// the user placed by hand (#3082).
+    #[test]
+    fn the_frame_survives_a_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let frame = WindowState {
+            x: -1450.0,
+            y: 40.0,
+            width: 1200.0,
+            height: 800.0,
+            maximized: false,
+        };
+        save(&file, None, None, None, Some(frame));
+        let saved = load(&file).expect("a frame on its own is worth reading");
+        assert_eq!(saved.window, Some(frame));
+        assert_eq!(saved.panes, None, "no tree means the plain chat");
+    }
+
+    /// A file that holds only the frame is a real file, not a corrupt one: the
+    /// window writes it the first time it settles, before any split exists.
+    #[test]
+    fn a_file_that_holds_only_a_frame_loads() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let json = serde_json::json!({
+            "version": VERSION,
+            "panes": serde_json::Value::Null,
+            "focus": serde_json::Value::Null,
+            "window": { "x": 10.0, "y": 20.0, "width": 900.0, "height": 700.0 },
+        });
+        std::fs::write(&file, json.to_string()).expect("write the frame file");
+        let saved = load(&file).expect("the frame reads back");
+        assert_eq!(
+            saved.window,
+            Some(WindowState {
+                x: 10.0,
+                y: 20.0,
+                width: 900.0,
+                height: 700.0,
+                maximized: false,
+            }),
+            "a frame without the maximize key is a windowed frame"
+        );
+        assert!(file.exists(), "a readable file is left alone");
+    }
+
+    /// A file from before #3082 has no frame key and must still load its tree.
+    #[test]
+    fn an_old_file_without_a_frame_still_loads() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        let json = serde_json::json!({
+            "version": VERSION,
+            "panes": split_tree(left, right),
+            "focus": serde_json::Value::Null,
+            "chat": serde_json::Value::Null,
+        });
+        std::fs::write(&file, json.to_string()).expect("write the old file");
+        let saved = load(&file).expect("an old file reads back");
+        assert_eq!(saved.window, None, "no frame means the fitted default");
+        assert_eq!(saved.panes.expect("the tree").leaves(), vec![left, right]);
+    }
+
+    /// Nothing to say means no file: no tree and no frame is the first run.
+    #[test]
+    fn no_tree_and_no_frame_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("temp home");
+        let file = dir.path().join("gui_layout.json");
+        let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
+        save(&file, Some(&split_tree(left, right)), None, Some(left), None);
+        assert!(file.exists(), "a split writes the file");
+        save(&file, None, None, None, None);
+        assert!(!file.exists(), "nothing to remember removes it");
     }
 }

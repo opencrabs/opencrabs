@@ -195,6 +195,11 @@ pub(crate) fn run() {
     // to exist before the tree can agree with it. Nothing is drawn from it
     // until then, so a stale or unreadable file costs one log line.
     let saved_layout = layout_store::load(&layout_store::path());
+    // The frame that file remembers (#3082). Kept beside the tree because
+    // `restore_layout` consumes the tree, and the boot needs the frame before
+    // the window exists.
+    let saved_window = saved_layout.as_ref().and_then(|saved| saved.window);
+
     // Chat is the default screen: the conversation the user was in opens on
     // launch, and a first run opens the newest. The usage ledger is something
     // the user asks for (ctrl+u); the two never share the pane, so a
@@ -228,10 +233,15 @@ pub(crate) fn run() {
         // the screen: the input opened under the taskbar with no way to drag it
         // back. Fitted, the frame always lands inside what the platform lets it
         // use.
-        let bounds = window_geometry::boot_bounds(cx);
+        //
+        // A frame the last run left wins over the default, as long as it still
+        // sits on a screen this launch can see: a window remembered on a
+        // monitor that is no longer attached would open where nothing can be
+        // clicked.
+        let bounds = window_geometry::boot_window_bounds(saved_window.as_ref(), cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
                 // Below this the single-column grid still fits every card's
                 // 420px minimum, so nothing clips on load.
                 window_min_size: Some(opencrabs::ui_core::window_geometry::MIN_SIZE),
@@ -457,6 +467,12 @@ pub(crate) fn run() {
                         mc_logs: None,
                         mc_notice: None,
                         rem: BASE_REM,
+                        // The frame the last run left (#3082). Seeded from the
+                        // file so the first paint already knows where the
+                        // window is, and so an untouched window writes nothing.
+                        window_frame: saved_window,
+                        window_frame_seen: saved_window,
+                        window_frame_saved: saved_window,
                         db_path: db_path.clone(),
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),

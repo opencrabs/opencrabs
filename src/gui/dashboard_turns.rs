@@ -975,6 +975,9 @@ impl Dashboard {
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.
         self.poll_tick = self.poll_tick.wrapping_add(1);
+        // A frame that stopped moving gets written once (#3082). Sits above the
+        // early returns because an idle window is exactly when a drag ends.
+        self.settle_window_frame();
         // Playback and background waveform decoding leave no event behind
         // (#3054). One snapshot covers position, pause, completion and the
         // pending visual count, so the dashboard paints exactly when either

@@ -13,11 +13,10 @@
 //! whole screen; the panels a desktop keeps there (menu bar, dock) are smaller
 //! than the margin this app leaves, so the full screen is a usable answer.
 
-use gpui::{App, Bounds, Pixels, PlatformDisplay};
-#[cfg(target_os = "windows")]
-use gpui::{point, px, size};
+use gpui::{App, Bounds, Pixels, PlatformDisplay, WindowBounds, point, px, size};
 
-use opencrabs::ui_core::window_geometry::{MIN_SIZE, PREFERRED_SIZE, fit};
+use crate::layout_store;
+use opencrabs::ui_core::window_geometry::{MIN_SIZE, PREFERRED_SIZE, fit, is_on, place};
 
 /// The frame the app opens with: the preferred size, fitted to the work area
 /// of the screen it opens on.
@@ -30,6 +29,39 @@ pub fn boot_bounds(cx: &App) -> Bounds<Pixels> {
         None => Bounds::centered(None, PREFERRED_SIZE, cx),
     }
 }
+
+/// The frame the window opens with (#3082): where the last run left it when
+/// that frame still belongs to a screen this launch can see, and the fitted
+/// default otherwise.
+///
+/// A maximized window opens maximized, carrying the frame it restores to, so
+/// un-maximizing lands where the user had it instead of on the whole screen.
+pub fn boot_window_bounds(saved: Option<&layout_store::WindowState>, cx: &App) -> WindowBounds {
+    let restore = saved
+        .and_then(|frame| restored_bounds(frame, cx))
+        .unwrap_or_else(|| boot_bounds(cx));
+    if saved.is_some_and(|frame| frame.maximized) {
+        WindowBounds::Maximized(restore)
+    } else {
+        WindowBounds::Windowed(restore)
+    }
+}
+
+/// The frame a previous run left, if it belongs on the screen this run opens
+/// on (#3082).
+///
+/// `None` when no display answers, or when the saved frame was on a monitor
+/// this launch cannot see: in both cases the caller opens on the fitted
+/// default, which is a frame the user can find.
+pub fn restored_bounds(frame: &layout_store::WindowState, cx: &App) -> Option<Bounds<Pixels>> {
+    let area = work_area(cx)?;
+    let requested = Bounds::new(
+        point(px(frame.x), px(frame.y)),
+        size(px(frame.width), px(frame.height)),
+    );
+    is_on(area, requested).then(|| place(area, requested, MIN_SIZE))
+}
+
 
 /// The work area of the primary display, in logical pixels. Outside Windows
 /// `bounds()` is the whole screen: the menu bar and dock a desktop keeps there

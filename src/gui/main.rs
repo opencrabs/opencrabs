@@ -216,8 +216,7 @@ use gpui::{
     DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, point, prelude::*, px, rems, rgb,
-    rgba, size,
+    WindowBackgroundAppearance, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba, size,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.

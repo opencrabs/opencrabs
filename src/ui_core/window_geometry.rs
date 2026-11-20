@@ -28,7 +28,11 @@ pub const EDGE_MARGIN: Pixels = px(16.0);
 /// (the Windows taskbar, the macOS menu bar and dock). The result is centred in
 /// that area, so it never straddles an edge, and it is clamped on both sides:
 /// down to the room available, up to [`MIN_SIZE`].
-pub fn fit(work_area: Bounds<Pixels>, preferred: Size<Pixels>, min: Size<Pixels>) -> Bounds<Pixels> {
+pub fn fit(
+    work_area: Bounds<Pixels>,
+    preferred: Size<Pixels>,
+    min: Size<Pixels>,
+) -> Bounds<Pixels> {
     let width = extent(work_area.size.width, preferred.width, min.width);
     let height = extent(work_area.size.height, preferred.height, min.height);
     let origin = point(
@@ -43,4 +47,49 @@ pub fn fit(work_area: Bounds<Pixels>, preferred: Size<Pixels>, min: Size<Pixels>
 fn extent(available: Pixels, preferred: Pixels, min: Pixels) -> Pixels {
     let room = (available - EDGE_MARGIN * 2.0).max(px(0.0));
     preferred.min(room).max(min.min(room))
+}
+
+/// A frame the user placed, put back where it was without leaving the work
+/// area (#3082).
+///
+/// Unlike [`fit`], the origin is kept: the point of remembering a frame is that
+/// the window opens where the user left it, not centred again. The size is
+/// clamped the same way, and the origin is pushed back inside when the frame
+/// would straddle an edge, which is what a screen that shrank since the last
+/// run produces.
+pub fn place(
+    work_area: Bounds<Pixels>,
+    requested: Bounds<Pixels>,
+    min: Size<Pixels>,
+) -> Bounds<Pixels> {
+    let width = extent(work_area.size.width, requested.size.width, min.width);
+    let height = extent(work_area.size.height, requested.size.height, min.height);
+    let rightmost = work_area.origin.x + (work_area.size.width - width);
+    let lowest = work_area.origin.y + (work_area.size.height - height);
+    let origin = point(
+        requested
+            .origin
+            .x
+            .max(work_area.origin.x)
+            .min(rightmost.max(work_area.origin.x)),
+        requested
+            .origin
+            .y
+            .max(work_area.origin.y)
+            .min(lowest.max(work_area.origin.y)),
+    );
+    Bounds::new(origin, size(width, height))
+}
+
+/// Whether a saved frame belongs on this work area at all.
+///
+/// A frame remembered on a monitor that is no longer attached cannot be
+/// checked against a work area it is not inside, and clamping it onto this one
+/// would drag a second-monitor window to the primary every launch. Its top left
+/// corner is the test: inside the area means this is the screen it was on.
+pub fn is_on(work_area: Bounds<Pixels>, frame: Bounds<Pixels>) -> bool {
+    frame.origin.x >= work_area.origin.x
+        && frame.origin.x < work_area.origin.x + work_area.size.width
+        && frame.origin.y >= work_area.origin.y
+        && frame.origin.y < work_area.origin.y + work_area.size.height
 }
