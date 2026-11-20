@@ -609,6 +609,13 @@ impl Render for Dashboard {
                         // row that runs past the box is a frame to correct or
                         // a place they chose to be.
                         following: self.chat_state.follow.is_following(),
+                        // Whether a clip is being made for this conversation
+                        // right now (#3092). The set is the window's, keyed by
+                        // session, so a split leaf and the chat can never
+                        // disagree about which answer is being spoken.
+                        voice_pending: self
+                            .chat_session
+                            .is_some_and(|id| self.voice_pending.contains(&id)),
                     },
                 );
                 // The conversation takes the measure and the column centres it

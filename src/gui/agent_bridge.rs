@@ -64,12 +64,28 @@ pub enum TurnEvent {
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
     Failed { session: Uuid, text: String },
+    /// A spoken reply for a voice-originated turn started (#3092). Sent after
+    /// the `Done` that settled the turn and before the synthesis call, because
+    /// making the clip is a network round trip per chunk: the answer is on
+    /// screen and the ear is still waiting. The window holds the session while
+    /// this is in flight and the settled card says the reply is being spoken,
+    /// instead of the card freezing and a clip appearing out of nowhere
+    /// seconds later.
+    VoiceReplyPending { session: Uuid },
+    /// The attempt ended, spoken or not (#3092). Always follows the pending
+    /// one, on every failure path, so a card can never keep claiming a clip is
+    /// on the way.
+    VoiceReplyDone { session: Uuid },
     /// A spoken reply for a voice-originated turn is on disk and its marker is
     /// in the assistant row (#3044). Sent after the `Done` that settled the
     /// turn, because synthesis is a network call the settle must not wait on:
     /// the answer is drawn as text first, and the clip appears under it when
     /// the audio lands.
-    VoiceReplySaved { session: Uuid },
+    ///
+    /// It carries the file so the window can start it without waiting for the
+    /// row to reload and hand the path back (#3092): the clip the reader just
+    /// waited for plays itself.
+    VoiceReplySaved { session: Uuid, path: PathBuf },
     /// The user stopped this turn and the stop dropped it where it stood
     /// (#2657). No `Done` and no `Failed` follows a dropped future, so this is
     /// the only thing that tells the window the turn is gone. It carries no
@@ -774,6 +790,25 @@ pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>
     }
 }
 
+/// Clears the window's in-flight marker however the attempt ends (#3092).
+///
+/// Every early return in the thread below is a way for the clip to never
+/// arrive, and a card left saying "speaking the reply" is worse than one that
+/// said nothing at all. A `Drop` covers all of them, panics included, so the
+/// clear is not something each new return has to remember.
+struct VoiceReplyGuard {
+    sink: EventSink,
+    session: Uuid,
+}
+
+impl Drop for VoiceReplyGuard {
+    fn drop(&mut self) {
+        let _ = self.sink.send(TurnEvent::VoiceReplyDone {
+            session: self.session,
+        });
+    }
+}
+
 /// Speak one answer back, for the turn that began as a recording (#3044).
 ///
 /// The window's half of what every channel already does: a voice note is
@@ -807,6 +842,20 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                 crate::logging::info("voice reply: tts disabled, answering in text only");
                 return;
             }
+            // The card already carries the whole report, so only the spoken
+            // half is needed here. A model that skipped the block is still
+            // read aloud, from the paragraph it led with: a voice turn gets a
+            // voice back either way (#3092).
+            let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
+            let speech = match spoken {
+                Some(spoken) => spoken,
+                None => {
+                    crate::logging::warn(
+                        "voice reply: no spoken block, reading the first paragraph",
+                    );
+                    opencrabs::channels::voice::spoken::first_paragraph(&answer)
+                }
+            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -817,8 +866,18 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                     return;
                 }
             };
+            // The card is told the clip is coming before the first chunk goes
+            // out (#3092). Synthesis is a network round trip per chunk, and the
+            // window has nothing else to paint in the meantime.
+            let _ = sink.send(TurnEvent::VoiceReplyPending {
+                session: session_id,
+            });
+            let _cleared = VoiceReplyGuard {
+                sink: sink.clone(),
+                session: session_id,
+            };
             let audio = match runtime
-                .block_on(async { opencrabs::channels::voice::synthesize(&text, &voice).await })
+                .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
             {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -868,6 +927,10 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                 ));
                 let _ = sink.send(TurnEvent::VoiceReplySaved {
                     session: session_id,
+                    // The thread is done with it: the marker above is the last
+                    // read of the file, so the event takes ownership instead of
+                    // leaving a clone to be dropped (#3092).
+                    path,
                 });
             });
         });

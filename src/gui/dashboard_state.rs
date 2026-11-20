@@ -714,6 +714,14 @@ pub(crate) struct Dashboard {
     /// screen and restores the destination's, and the window never has to
     /// guess which conversation a card belongs to.
     pub(crate) stashed: std::collections::HashMap<Uuid, chat_leaf::Turn>,
+    /// Sessions whose spoken reply is being made right now (#3092).
+    ///
+    /// The turn has settled and its card is on screen, and the clip is still a
+    /// network round trip away. Kept on the window rather than on the card
+    /// because the reload that follows `Done` rebuilds every card, so a flag
+    /// living on one of them would be erased by the next read. A split leaf
+    /// reads the same set, so a pane's card says it too.
+    pub(crate) voice_pending: std::collections::HashSet<Uuid>,
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     pub(crate) ctx_max: u32,

@@ -1046,6 +1046,10 @@ impl Dashboard {
             }
             if self.turn.busy
                 || pane_busy
+                // A clip being made is work in flight with no event to carry
+                // it (#3092): the card's speaking segment has to keep blinking
+                // for however long synthesis takes.
+                || !self.voice_pending.is_empty()
                 // A rail flash is an animation of its own: the plan bar has to
                 // keep alternating orange and its resting colour while the
                 // window is open, and stop the moment it closes. The window
@@ -1057,8 +1061,15 @@ impl Dashboard {
                 // branch, so they repaint on a slower cadence than the poll
                 // itself. At 20 Hz this walked every pane's transcript five
                 // times as often as the animation needed (#2688).
+                //
+                // A clip being made is the exception (#3092): its highlight
+                // travels on the clock alone, and at a fifth of the poll it
+                // moved further than its own width between frames, which reads
+                // as a stutter instead of a sweep. The burst lasts exactly as
+                // long as synthesis does.
+                let waiting_clip = !self.voice_pending.is_empty();
                 self.composer.anim_tick = self.composer.anim_tick.wrapping_add(1);
-                if busy_repaint_due(self.composer.anim_tick) {
+                if waiting_clip || busy_repaint_due(self.composer.anim_tick) {
                     cx.notify();
                 }
             }
@@ -1899,12 +1910,41 @@ impl Dashboard {
                     self.refresh_rail(cx);
                     cx.notify();
                 }
+                // The clip for a voice turn is being made (#3092):
+                // `VoiceReplyPending` says synthesis started, which is a
+                // network round trip per chunk. The answer settled a moment
+                // ago, so the card is told to say the clip is coming rather
+                // than sitting finished and then growing a clip out of nowhere.
+                agent_bridge::TurnEvent::VoiceReplyPending { session } => {
+                    if self.voice_pending.insert(session) {
+                        cx.notify();
+                    }
+                }
+                // Spoken or not, the attempt is over (#3092). The success path
+                // sends `VoiceReplySaved` first, which is what reloads the row;
+                // this only takes the segment off the card.
+                agent_bridge::TurnEvent::VoiceReplyDone { session } => {
+                    if self.voice_pending.remove(&session) {
+                        cx.notify();
+                    }
+                }
                 // The spoken reply for a voice turn is on disk and its marker
                 // is in the assistant row (#3044). The `Done` that settled the
                 // turn has already reloaded without it, so this read is what
                 // puts the clip under the words it speaks.
-                agent_bridge::TurnEvent::VoiceReplySaved { session } => {
+                //
+                // It plays itself (#3092), which is the whole point of waiting
+                // for it, but only in the conversation the reader is looking at
+                // and only when nothing else is already sounding: a reply that
+                // lands while he is listening to another clip waits, and a
+                // conversation off screen starts silent.
+                agent_bridge::TurnEvent::VoiceReplySaved { session, path } => {
                     if self.chat_state.session() == Some(session) {
+                        if crate::voice_play::sounding().is_none()
+                            && let Err(reason) = crate::voice_play::autoplay(&path)
+                        {
+                            logging::error(&format!("voice reply autoplay: {reason}"));
+                        }
                         reload = Some(session);
                     } else if self.pane_view(session).is_some() {
                         self.reload_pane(session, cx);

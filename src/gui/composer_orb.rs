@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage, SharedString,
-    Styled, canvas, div, img, prelude::*, px,
+    Styled, canvas, div, img, prelude::*, px, rgb,
 };
 use image::{Frame, RgbaImage};
 
@@ -211,6 +211,32 @@ const LONGEST_STEP: f32 = 0.10;
 /// milliseconds from re-rasterising the glass on every single tick.
 const PROGRESS_STEPS: f32 = 128.0;
 
+// The block with no take yet (#3092) ---------------------------------------
+
+/// How far the material is drained of colour while the clip is being made.
+///
+/// A spoken reply is a network round trip per chunk, so the block sits there for
+/// seconds. Full colour would read as a finished take that refuses to play, and
+/// the muted glass reads as the same block before it has anything to hold.
+const PENDING_DRAIN: f32 = 0.82;
+
+/// How bright the one highlight that crosses the waiting block is.
+///
+/// It has to be visible over the drained glass without pretending to be the
+/// band: the band answers a take, and there is no take yet.
+const PENDING_SHEEN_GAIN: f32 = 0.34;
+
+/// How wide that highlight is, in units of half the height.
+const PENDING_SHEEN_WIDTH: f32 = 0.26;
+
+/// How fast it crosses, in widths per phase unit.
+///
+/// The phase crawls at `PHASE_CRAWL` when nothing is sounding, which is the
+/// whole life of a waiting block, so this multiplies a clock that is already
+/// slow: at this value a crossing takes about four seconds, fast enough to read
+/// as work and slow enough not to flicker.
+const PENDING_SWEEP_SPEED: f32 = 1.6;
+
 /// The raster the block is drawn into, for an on-screen size and a multiple.
 fn pixels(points: (f32, f32), scale: f32) -> (u32, u32) {
     (
@@ -300,6 +326,12 @@ pub(crate) struct PlayerState {
     pub(crate) recording: bool,
     /// Whether the pointer is over the block.
     pub(crate) hovered: bool,
+    /// Whether the clip this block stands for is still being made (#3092).
+    ///
+    /// A waiting block carries no take, so it draws no mark, no track and no
+    /// playhead: only the glass, drained of colour, with one highlight crossing
+    /// it. Anything else would offer a press on audio that does not exist yet.
+    pub(crate) pending: bool,
 }
 
 impl PlayerState {
@@ -463,6 +495,7 @@ impl LiveSlab {
             playing: true,
             recording: true,
             hovered: false,
+            pending: false,
         };
         let levels = [0.0; VOICE_SAMPLES];
         let first = Arc::new(paint(&surface, &levels, colour, state, 0.0, 0.0));
@@ -497,6 +530,7 @@ impl LiveSlab {
                         playing: tick.recording,
                         recording: tick.recording,
                         hovered: tick.hovered,
+                        pending: false,
                     };
                     let next = Arc::new(paint(
                         &surface,
@@ -653,6 +687,13 @@ fn paint(
     let mark_x = -aspect + MARK_INSET;
     let travel = (aspect - TRACK_PAD).max(0.01);
     let head_x = -aspect + TRACK_PAD + state.progress.clamp(0.0, 1.0) * 2.0 * travel;
+    // Where the waiting block's highlight is this frame, in the same units the
+    // pixels are drawn in. It runs off both ends so the block spends a moment
+    // empty between crossings instead of bouncing back and forth (#3092).
+    let sheen_x = (phase * PENDING_SWEEP_SPEED).rem_euclid(1.0)
+        * (2.0 * aspect + 2.0 * PENDING_SHEEN_WIDTH)
+        - aspect
+        - PENDING_SHEEN_WIDTH;
 
     // Everything that depends on the column and not the row is worked out once
     // per column instead of once per pixel: how far the band reaches, how lit
@@ -730,10 +771,17 @@ fn paint(
         // stop square while the microphone is open. It sits at the left end and
         // punches through the light, so the seam frames it instead of washing
         // it out.
-        let glyph = match mark {
-            Mark::Play => play_mark(x - mark_x, y, feather),
-            Mark::Pause => pause_mark(x - mark_x, y, feather),
-            Mark::Stop => stop_mark(x - mark_x, y, feather),
+        //
+        // A waiting block draws none (#3092): there is nothing to press, so a
+        // play triangle would be a control that answers nothing.
+        let glyph = if state.pending {
+            0.0
+        } else {
+            match mark {
+                Mark::Play => play_mark(x - mark_x, y, feather),
+                Mark::Pause => pause_mark(x - mark_x, y, feather),
+                Mark::Stop => stop_mark(x - mark_x, y, feather),
+            }
         };
 
         // The wall caustic: the narrow chromatic band just inside the rim, cool
@@ -760,9 +808,19 @@ fn paint(
         // the band and its halo step aside so the white glyph is not swallowed
         // by the brightest thing in the material.
         let lit = 1.0 - glyph;
+        // The one thing that moves on a waiting block (#3092): a soft highlight
+        // crossing the seam, which is what says the clip is being made. It rides
+        // the band's own seam so it reads as the same light rather than a bar
+        // sliding over a picture of glass.
+        let sheen = if state.pending {
+            gaussian(nx - sheen_x, PENDING_SHEEN_WIDTH) * lateral
+        } else {
+            0.0
+        };
         let heat = (AMBIENT
             + BAND_GAIN * band * track * lit
             + GLOW_GAIN * glow * track * lit
+            + PENDING_SHEEN_GAIN * sheen
             + BOWL_LIFT * bowl
             + RIM_FALL_GAIN * (-inside / RIM_FALL_SIGMA).exp()
             + RIM_GAIN * rim_ring * (RIM_BASE + (1.0 - RIM_BASE) * rim_key) * (1.0 + hover)
@@ -784,6 +842,16 @@ fn paint(
         let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
         let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
         let mut blue = warm.2 * (1.0 - dome) + cool.2 * dome;
+        // A waiting block has no take, so the colour drains out of it (#3092):
+        // the same glass, before it has anything to hold. What is left of the
+        // hue keeps the block in the accent's family without claiming to be
+        // reading a sound.
+        if state.pending {
+            let grey = relative_luma(red, green, blue);
+            red += (grey - red) * PENDING_DRAIN;
+            green += (grey - green) * PENDING_DRAIN;
+            blue += (grey - blue) * PENDING_DRAIN;
+        }
         // The mark and the overhead catch lose their hue: a play button is
         // white, not a lit cyan shape.
         let silver = (RIM_SILVER * rim_top + glyph).clamp(0.0, 1.0);
@@ -874,7 +942,10 @@ fn frame_for(
 ) -> Arc<RenderImage> {
     let (frame, retired) = PLAYERS.with(|players| {
         let mut players = players.borrow_mut();
-        if let Some(cached) = players.get(id)
+        // A waiting block is the one block whose frame changes with nothing in
+        // the state: its highlight moves on the clock alone (#3092). Serving a
+        // cached frame would freeze it, so it always redraws.
+        if let Some(cached) = players.get(id).filter(|_| !state.pending)
             && cached.path.as_path() == path
             && Arc::ptr_eq(&cached.peaks, peaks)
             && cached.state.progress == state.progress
@@ -1121,6 +1192,7 @@ fn player_into(
         playing: live.is_some_and(|state| state.playing),
         recording: false,
         hovered: hovering(id),
+        pending: false,
     };
     let peaks = voice_media::visual(path)
         .map(|visual| Arc::clone(&visual.peaks))
@@ -1184,6 +1256,68 @@ fn player_into(
         })
         .child(img(frame).absolute().inset_0().size_full())
         .child(bounds_probe(painted))
+}
+
+/// The block while its clip is still being made (#3092).
+///
+/// The same glass at the same size as the player it becomes, holding nothing
+/// yet: no mark, no track, no playhead, and a caption that says the length is
+/// unknown. It exists so a voice turn does not sit finished and then grow a clip
+/// out of nowhere ten seconds later. The answer row draws it where the player
+/// will land, at the player's own size and with the same padding the attachment
+/// strip carries, so the swap moves nothing.
+///
+/// No press and no pointer: there is no audio to start, and a control that
+/// answers nothing teaches the reader to stop pressing blocks.
+pub(crate) fn pending(id: &str) -> impl IntoElement {
+    let state = PlayerState {
+        pending: true,
+        ..PlayerState::default()
+    };
+    // One `Arc` for every waiting block, so the frame cache keeps each block
+    // across repaints: a fresh allocation would read as a different take and
+    // restart the highlight from the left edge on every frame.
+    let frame = frame_for(
+        id,
+        Path::new(""),
+        &pending_peaks(),
+        palette::current().amber,
+        state,
+        None,
+    );
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .min_w_0()
+        .gap_1()
+        // The same top padding the attachment strip puts above a real player,
+        // so the block does not step down when the audio arrives.
+        .pt_1()
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .w(px(PLAYER_POINTS.0))
+                .h(px(PLAYER_POINTS.1))
+                .child(img(frame).absolute().inset_0().size_full()),
+        )
+        // The caption a clip of unknown length carries, built by the same
+        // formatter `label` uses, so the block neither changes height nor
+        // changes wording when the audio arrives: only the total stops being
+        // unknown.
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!("{} / --:--", clip_length(0)))),
+        )
+}
+
+/// The flat peaks a waiting block draws with.
+fn pending_peaks() -> Arc<Vec<f32>> {
+    static PEAKS: std::sync::OnceLock<Arc<Vec<f32>>> = std::sync::OnceLock::new();
+    Arc::clone(PEAKS.get_or_init(|| Arc::new(fallback_peaks(&[]))))
 }
 
 /// The take's position and length, for the caption beside the block.

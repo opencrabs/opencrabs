@@ -2617,6 +2617,7 @@ fn bubble(
     selection: Option<&SelectionContext>,
     full: bool,
     open: Option<&ClickHandler>,
+    voice_pending: bool,
 ) -> Div {
     // The cut happens on the raw source, before anything walks it (#2805): a
     // folded working-out body reads its first rows and the rest is one click
@@ -2747,6 +2748,20 @@ fn bubble(
     }
     if !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    // The clip for this answer is still being made (#3092), so the row holds the
+    // block it will land in: the same glass at the same size, drawn in the same
+    // column, and swapped for the player when the audio arrives. A placeholder
+    // anywhere else would be a second element that disappears the moment the
+    // real one appears, and the answer would jump.
+    //
+    // It waits on the marker, not only on the flag: a row that already carries
+    // its clip has nothing to wait for, and a second block would sit under a
+    // player that is already there.
+    if voice_pending && role == "assistant" && !paths.iter().any(|path| audio_path(path)) {
+        col = col.child(crate::composer_orb::pending(&format!(
+            "voice-pending-{time}"
+        )));
     }
     if hidden > 0 {
         // Only a working-out body reaches this line now (#3053): every message
@@ -2947,6 +2962,12 @@ fn forward_block(
 /// gpui re-derives an image's height from its own aspect ratio whenever the
 /// height is left `Auto`, so every tile pins both sides here and lets
 /// `object_fit` crop inside the box instead of growing it.
+/// Whether a stored path is a clip, the kind of attachment the row draws as a
+/// player rather than a tile (#3092).
+fn audio_path(path: &std::path::Path) -> bool {
+    Attachment::for_display(path.to_path_buf()).is_audio()
+}
+
 fn history_attachments(
     paths: &[std::path::PathBuf],
     content_width: f32,
@@ -3248,7 +3269,12 @@ fn tool_ledger_text(calls: &[ToolCall]) -> String {
 /// rounded box holding the head row, the working-out rows when the turn is
 /// open, and the footer that keeps the count, the ctx and the clock after the
 /// turn ends. `None` for a turn that did no work, which earns no card (#758).
-fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<Stateful<Div>> {
+fn settled_card(
+    turn: &Turn,
+    body: Vec<AnyElement>,
+    max_width: f32,
+    voice_pending: bool,
+) -> Option<Stateful<Div>> {
     turn.header.as_ref()?;
     let (glyph, verb) = settled_verdict(turn);
     let failed = glyph == "\u{274c}";
@@ -3281,6 +3307,20 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
                 .flex_shrink_0()
                 .min_w_0(),
         );
+    // The clip for this answer is being made (#3092). One grey segment says so
+    // while it happens, carrying the same braille cell the rail spins, so the
+    // reader watches the ear being served instead of meeting a finished card
+    // that grows a clip out of nowhere ten seconds later.
+    if voice_pending {
+        head = head.child(head_dot(palette::current().text_muted)).child(
+            head_run(
+                format!("{} speaking the reply", spin_frame()),
+                palette::current().text_muted,
+                Some(1),
+            )
+            .flex_shrink_0(),
+        );
+    }
     // The count, the ctx and the clock ride the verdict's own line (#3042),
     // behind the same dot the live head divides its segments with (#3046), so
     // the finished card is one sentence in one colour instead of a verdict with
@@ -4031,6 +4071,7 @@ fn block_view(
     selection: Option<&SelectionContext>,
     full: bool,
     open: Option<&ClickHandler>,
+    voice_pending: bool,
 ) -> Div {
     match block {
         Block::Msg {
@@ -4066,6 +4107,7 @@ fn block_view(
             selection,
             full,
             open,
+            voice_pending,
         ),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls, selection),
@@ -4192,6 +4234,17 @@ fn head_dot(colour: u32) -> AnyElement {
         .into_any_element()
 }
 
+/// The braille cell the settled card's speaking segment carries (#3092).
+///
+/// The rail's own frames ([`rail_activity::frame`]), read from an origin of the
+/// card's own: the rail asks for its own repaints, while the card is redrawn by
+/// the window's busy tick, which the pending session keeps running. Only the
+/// cadence has to match, and it does, because both read the same frame list.
+fn spin_frame() -> &'static str {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    crate::rail_activity::frame(ORIGIN.get_or_init(std::time::Instant::now).elapsed())
+}
+
 /// What `live_status_line` answers while a turn has nothing at all, worded for
 /// the session rail's preview. The card drops it: the head's slot already shows
 /// the turn working, counting the seconds, so the sentence would only repeat it
@@ -4278,6 +4331,9 @@ fn live_block(
                 // A live row has no stored id yet, so there is no reader
                 // handler to open: it draws whole until it settles (#3064).
                 None,
+                // A live turn has no clip in flight: the reply is still being
+                // written (#3092).
+                false,
             ),
         )
         .into_any_element(),
@@ -4369,9 +4425,17 @@ fn live_row_body(
     // see, so it is the only copy there is to drag.
     match live_block(drag, block, content_width, row_cap, handlers) {
         Some(row) => row,
-        None => {
-            block_view(block, content_width, row_cap, handlers, None, true, None).into_any_element()
-        }
+        None => block_view(
+            block,
+            content_width,
+            row_cap,
+            handlers,
+            None,
+            true,
+            None,
+            false,
+        )
+        .into_any_element(),
     }
 }
 
@@ -4561,8 +4625,17 @@ fn live_view(
         col = col.child(
             match live_block(drag, &block, content_width, row_cap, handlers) {
                 Some(row) => row,
-                None => block_view(&block, content_width, row_cap, handlers, None, true, None)
-                    .into_any_element(),
+                None => block_view(
+                    &block,
+                    content_width,
+                    row_cap,
+                    handlers,
+                    None,
+                    true,
+                    None,
+                    false,
+                )
+                .into_any_element(),
             },
         );
     }
@@ -4614,7 +4687,13 @@ impl PendingClick {
     fn target(&self) -> Option<ClickTarget> {
         let roots: Vec<&Path> = self.roots.iter().map(PathBuf::as_path).collect();
         let home = dirs::home_dir();
-        links::target_for_click_roots(&self.text, &self.links, self.offset, &roots, home.as_deref())
+        links::target_for_click_roots(
+            &self.text,
+            &self.links,
+            self.offset,
+            &roots,
+            home.as_deref(),
+        )
     }
 
     /// The word the pointer was on, for the log line a miss writes. Clipped by
@@ -5577,6 +5656,12 @@ pub struct ViewHooks {
     /// The row whose rewrite is open (#2826). Its message is replaced by a
     /// field and two buttons, in place, and the composer is not involved.
     pub edit_row: Option<InlineEditView>,
+    /// Whether this transcript's session has a spoken reply being made right
+    /// now (#3092). The window holds the set; the card only asks. Only the
+    /// newest turn's card draws the segment: the clip belongs to the answer
+    /// that just settled, and a history full of cards claiming to be speaking
+    /// would be a lie about every one of them.
+    pub voice_pending: bool,
     /// Whether this transcript is following its own bottom (#3027).
     ///
     /// The owner holds the state, because only it can tell a reader who scrolled
@@ -5788,6 +5873,7 @@ pub fn view(
         copy,
         copied,
         following,
+        voice_pending,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -5929,6 +6015,7 @@ pub fn view(
             true,
             // A marker is not a message: it has no body to fold (#3064).
             None,
+            false,
         ));
     }
     // The turns past the drawn window wait behind their own marker (#2805),
@@ -5992,6 +6079,13 @@ pub fn view(
             _ => 0,
         };
         let carded = turn.header.is_some();
+        // The answer this turn ends on, which is the row the clip belongs to
+        // (#3092). A turn that answered twice draws the block once, under the
+        // answer the reader is waiting on.
+        let answer_at = turn
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::Msg { role, .. } if role == "assistant"));
         let mut pre: Vec<AnyElement> = Vec::new();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut post: Vec<AnyElement> = Vec::new();
@@ -6054,6 +6148,10 @@ pub fn view(
                             Some(&selection),
                             full_body,
                             open_click,
+                            // The clip belongs to the answer of the turn that
+                            // just settled, which is the newest one drawn
+                            // (#3092).
+                            voice_pending && ti == last && answer_at == Some(i),
                         ),
                     }
                 }
@@ -6067,6 +6165,7 @@ pub fn view(
                         None,
                         full_body,
                         open_click,
+                        voice_pending && ti == last && answer_at == Some(i),
                     ),
                 },
             };
@@ -6163,7 +6262,16 @@ pub fn view(
             }
         }
         col = col.children(pre);
-        if carded && let Some(card) = settled_card(turn, body, row_cap) {
+        if carded
+            && let Some(card) = settled_card(
+                turn,
+                body,
+                row_cap,
+                // The clip belongs to the answer that just settled, which is
+                // the newest turn drawn (#3092).
+                voice_pending && ti == last,
+            )
+        {
             // The listener is per turn and used exactly here, so it is taken
             // out of the map instead of cloned.
             col = col.child(match handlers.remove(&turn.anchor) {

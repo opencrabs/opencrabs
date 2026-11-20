@@ -741,6 +741,13 @@ impl Render for PaneView {
                 // has its own follow, so reading it here judged a transcript
                 // the reader was not looking at.
                 following: self.follow.is_following(),
+                // A clip being made for this leaf's conversation (#3092): the
+                // window holds the set, and a split leaf answers a recording
+                // the same way the chat does.
+                voice_pending: match edit_window.upgrade() {
+                    Some(owner) => owner.read(cx).voice_pending.contains(&self.session),
+                    None => false,
+                },
                 ..Default::default()
             },
         )

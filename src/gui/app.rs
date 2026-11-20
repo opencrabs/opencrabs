@@ -655,6 +655,7 @@ pub(crate) fn run() {
                         agent_ready: false,
                         turn: chat_leaf::Turn::default(),
                         stashed: HashMap::new(),
+                        voice_pending: std::collections::HashSet::new(),
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
                         footer_dir: None,
