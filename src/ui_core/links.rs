@@ -98,6 +98,43 @@ fn char_col(text: &str, byte: usize) -> usize {
     text.get(..cut).unwrap_or_default().chars().count()
 }
 
+/// The token under a byte offset, cleaned the way resolution cleans it.
+///
+/// A miss has to log the string resolution actually tried. Logging the raw
+/// tail from the click offset instead made a click on
+/// `brain-audit-2026-11-17.md` read as `26-11-17.md`, which looks exactly
+/// like a path truncated by word wrap and sends the next diagnosis chasing a
+/// bug that does not exist.
+pub fn token_at_byte(text: &str, byte: usize) -> Option<String> {
+    let token = token_at(text, char_col(text, byte))?;
+    let cleaned = clean_token(token);
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+/// Whether a click at `offset` was an attempt to open something at all.
+///
+/// A press on ordinary prose ("bisa", "etap") cannot name a destination, and
+/// writing a line for every one of them buried the misses that matter under
+/// one entry per click.
+pub fn click_names_target(text: &str, links: &[(Range<usize>, String)], offset: usize) -> bool {
+    if links.iter().any(|(span, _)| span.contains(&offset)) {
+        return true;
+    }
+    token_at_byte(text, offset).is_some_and(|token| looks_openable(&token))
+}
+
+/// The shapes that earn a disk probe or a launch. `resolve_path` and the log
+/// gate share this, so a line can never claim a different attempt from the
+/// one that was made.
+fn looks_openable(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("file://")
+        || lower.starts_with("mailto:")
+        || path_like(token)
+}
+
 /// The destination a click at `offset` names, given the link labels drawn on
 /// the same text (#2317).
 ///
@@ -246,6 +283,20 @@ fn classify(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
     resolve_path(token, cwd, home)
 }
 
+/// Forms that could name a file on disk. Bare prose words without a dot have
+/// no chance of resolving anyway; bare dotted names ("README.md") DO get
+/// probed, because clicking exactly the word that names a real file in cwd is
+/// the point.
+fn path_like(token: &str) -> bool {
+    let token = strip_line_ref(token);
+    token.starts_with('/')
+        || token.starts_with('~')
+        || token.starts_with('.')
+        || token.contains('/')
+        || token.contains('\\')
+        || looks_extended(token)
+}
+
 /// Try the token as a local path: expand `~`, drop any `:line[:col]`
 /// reference suffix, resolve relative to `cwd`, and require existence.
 fn resolve_path(token: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
@@ -253,17 +304,8 @@ fn resolve_path(token: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTar
     // the extension check below: `chat.rs:1618` would read as extension
     // `rs:1618` and never get probed.
     let token = strip_line_ref(token);
-    // Only forms that plausibly name a file get a disk probe. Bare prose
-    // words without a dot have no chance of resolving anyway; bare dotted
-    // names ("README.md") DO get probed because clicking exactly the word
-    // that names a real file in cwd is the point.
-    let path_like = token.starts_with('/')
-        || token.starts_with('~')
-        || token.starts_with('.')
-        || token.contains('/')
-        || token.contains('\\')
-        || looks_extended(token);
-    if !path_like {
+    // Only forms that plausibly name a file get a disk probe.
+    if !path_like(token) {
         return None;
     }
     let expanded = expand_tilde(token, home)?;
