@@ -52,6 +52,10 @@ pub(crate) struct RailView {
     /// Poll ticks since the rail opened, so the spinner advances on the
     /// repaint cadence rather than on the poll's.
     tick: u64,
+    /// The motion the last paint drew (#2842). A tick that would draw the same
+    /// it already drew asks for nothing, which is how an idle rail sleeps even
+    /// while it holds a badge.
+    painted: rail_activity::Motion,
     frame: RailFrame,
 }
 
@@ -262,6 +266,7 @@ impl RailView {
             scroll,
             clock: Instant::now(),
             tick: 0,
+            painted: rail_activity::Motion::STILL,
             frame: RailFrame::default(),
         }
     }
@@ -283,36 +288,51 @@ impl RailView {
     /// Advance the rail's clock (#2933).
     ///
     /// Called from the window's poll, which already runs at 20 Hz. Only a frame
-    /// with a spinner or a waiting-plan ring asks for the next paint, and it
-    /// asks the rail alone: the window is not notified, so the transcripts
-    /// beside the rail are replayed rather than rebuilt for a glyph.
+    /// that actually moves asks for the next paint, and it asks the rail alone:
+    /// the window is not notified, so the transcripts beside the rail are
+    /// replayed rather than rebuilt for a glyph.
+    ///
+    /// The paint is owed when the motion would differ from the one already on
+    /// screen, never merely because a tick came round (#2842). A badge that
+    /// holds still, which is what a plan task in flight draws, asks for nothing
+    /// and the idle window stops repainting altogether. The cadence gate stays
+    /// so a comparison can never turn the 20 Hz poll into a 20 Hz paint.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
         self.tick = self.tick.wrapping_add(1);
-        if !self.frame.animates() || !crate::busy_repaint_due(self.tick) {
+        if !crate::busy_repaint_due(self.tick) {
             return;
         }
+        let motion = self.frame.motion(self.clock.elapsed());
+        if motion == self.painted {
+            return;
+        }
+        self.painted = motion;
         cx.notify();
     }
 }
 
 impl RailFrame {
-    /// Whether anything in this frame moves on its own.
+    /// What the rail's own clock draws right now (#2842).
     ///
     /// The spinner glyph and the waiting-plan ring are the rail's animations:
     /// the plan bar's settle flash is not, because the window resolves its lit
     /// half from its own clock and the frame carries the answer.
-    fn animates(&self) -> bool {
-        self.rows.iter().any(|row| {
-            let mark = row.flags.mark;
-            mark.badge.is_some()
-                || mark.ring
-                || row.chips.as_ref().is_some_and(|chips| {
-                    chips
-                        .kids
+    ///
+    /// Every animating surface reads the same phase, so one glyph and one ring
+    /// alpha describe the whole column however many rows carry them. The
+    /// decision lives in `rail_activity::motion` so it can be tested without a
+    /// window; this only gathers the marks it reads.
+    pub(crate) fn motion(&self, phase: Duration) -> rail_activity::Motion {
+        rail_activity::motion(
+            self.rows.iter().flat_map(|row| {
+                std::iter::once(row.flags.mark).chain(
+                    row.chips
                         .iter()
-                        .any(|kid| kid.mark.badge.is_some() || kid.mark.ring)
-                })
-        })
+                        .flat_map(|chips| chips.kids.iter().map(|kid| kid.mark)),
+                )
+            }),
+            phase,
+        )
     }
 }
 
@@ -411,8 +431,13 @@ impl RailView {
             indented: row.flags.indented,
             closed: row.flags.closed,
             // One glyph cell, from the rail's own clock, so a list of busy rows
-            // blinks as one spinner instead of ten (#2636).
-            badge: row.flags.mark.badge.map(|_| rail_activity::frame(phase)),
+            // blinks as one spinner instead of ten (#2636). Only a live turn
+            // spins; a plan badge holds still (#2842).
+            badge: row
+                .flags
+                .mark
+                .badge
+                .map(|badge| rail_activity::glyph(badge, phase)),
             preview: row.flags.preview.clone(),
             activity: row.flags.activity.clone(),
             plan: row.flags.plan,
@@ -499,7 +524,10 @@ impl RailView {
             }
             let kid_id = kid.id;
             let title = &kid.title;
-            let live = kid.mark.badge.map(|_| rail_activity::frame(phase));
+            let live = kid
+                .mark
+                .badge
+                .map(|badge| rail_activity::glyph(badge, phase));
             let link = self.dashboard.clone();
             let open = {
                 let link = link.clone();
@@ -780,8 +808,14 @@ mod tests {
         // #3020: a spinner, a plan waiting for approval and an active plan are
         // three different reasons the reader may need the chip.
         assert!(chip_in_flight(&kid(0, true, false, false)), "a live turn");
-        assert!(chip_in_flight(&kid(1, false, true, false)), "a waiting plan");
-        assert!(chip_in_flight(&kid(2, false, false, true)), "a running plan");
+        assert!(
+            chip_in_flight(&kid(1, false, true, false)),
+            "a waiting plan"
+        );
+        assert!(
+            chip_in_flight(&kid(2, false, false, true)),
+            "a running plan"
+        );
         assert!(
             !chip_in_flight(&kid(3, false, false, false)),
             "an idle topic folds with the rest"

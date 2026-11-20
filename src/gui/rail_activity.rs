@@ -1,13 +1,18 @@
 //! What the sessions rail says about work in flight (#2636).
 //!
 //! The rail answers one question per row without opening the conversation:
-//! is something happening there, and does the owner have to act? Two signals,
-//! two meanings:
+//! is something happening there, and does the owner have to act? Three
+//! signals, two meanings:
 //!
 //! | Signal | Meaning | Clock |
 //! |---|---|---|
 //! | braille spinner by the name | a turn is running right now | 80 ms |
+//! | still mark by the name | a plan holds a task in flight | none |
 //! | slow ring around the row | a plan is written and waits for approval | 2.4 s |
+//!
+//! Only the spinner and the ring move, and [`Motion`] is the whole of what
+//! moves, so a tick can ask whether the next paint would differ instead of
+//! repainting on a cadence (#2842).
 //!
 //! The frames are the chat's own ([`crate::transcript::SPINNER_FRAMES`], the
 //! TUI's order), so the rail blinks in phase with the turn card instead of
@@ -63,6 +68,69 @@ pub fn badge(live: bool, plan_running: bool) -> Option<Badge> {
 pub fn frame(phase: Duration) -> &'static str {
     let frames = crate::transcript::SPINNER_FRAMES;
     frames[(phase.as_millis() / FRAME_MS) as usize % frames.len()]
+}
+
+/// The mark a plan holds down while a task is in flight (#2842).
+///
+/// The spinner's own first cell, so the badge keeps its weight and colour and
+/// only stops claiming to be flowing. A plan badge used to spin, which meant an
+/// idle window with one approved plan repainted at 5 Hz forever: nothing in the
+/// plan file had changed, the rail simply could not see that. The reporter's
+/// window held 113% of a core drawing that glyph.
+pub const PLAN_GLYPH: &str = crate::transcript::SPINNER_FRAMES[0];
+
+/// The cell a row's badge paints.
+///
+/// The one place the two badges differ: a live turn is data arriving right now
+/// and spins, a plan holding a task is a state the rail re-reads only when the
+/// plan file changes and holds still.
+pub fn glyph(badge: Badge, phase: Duration) -> &'static str {
+    match badge {
+        Badge::Live => frame(phase),
+        Badge::Plan => PLAN_GLYPH,
+    }
+}
+
+/// The only two things on the rail that move on their own clock (#2842).
+///
+/// One value for the whole column, and deliberately comparable: the spinner and
+/// the ring read the same phase, so two rails that both draw a glyph draw the
+/// same one. That makes "would the next paint differ?" a comparison instead of
+/// a guess, which is what lets an idle rail stay asleep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Motion {
+    /// The spinner cell, when a row reports a live turn.
+    pub glyph: Option<&'static str>,
+    /// The ring's alpha, when a plan waits for approval.
+    pub ring: Option<u8>,
+}
+
+impl Motion {
+    /// Nothing on the rail moves: no repaint is owed until the model changes.
+    pub const STILL: Self = Self {
+        glyph: None,
+        ring: None,
+    };
+}
+
+/// What a column of row marks moves on `phase` (#2842).
+///
+/// The rail's whole animation decision, kept off the frame so it can be tested
+/// without a window: every row and every topic chip contributes one mark, and
+/// the column moves exactly when one of them spins or rings. Only a live turn
+/// spins, so a rail whose badges all report a plan holding a task resolves to
+/// [`Motion::STILL`] and an idle window has nothing left to repaint.
+pub fn motion(marks: impl IntoIterator<Item = RowState>, phase: Duration) -> Motion {
+    let mut motion = Motion::STILL;
+    for mark in marks {
+        if motion.glyph.is_none() && mark.badge == Some(Badge::Live) {
+            motion.glyph = Some(frame(phase));
+        }
+        if motion.ring.is_none() && mark.ring {
+            motion.ring = Some(ring_alpha(phase));
+        }
+    }
+    motion
 }
 
 /// The in-memory half of the badge: which sessions are streaming with no pane
@@ -249,6 +317,18 @@ pub fn ring(row: impl IntoElement, on: bool, phase: Duration) -> impl IntoElemen
         rgba(0)
     };
     div().w_full().border_1().border_color(colour).child(row)
+}
+
+/// Poll ticks between repaints a live turn asks for. The poll runs at 20 Hz;
+/// the only things moving in that branch are a spinner and a clock, and every
+/// one of those repaints walks every pane's transcript (#2688). Five frames a
+/// second keeps the animation alive at a quarter of the rebuilds.
+pub(crate) const BUSY_REPAINT_TICKS: u64 = 4;
+
+/// True on the poll tick that paints a live turn's animation. Pure, so the
+/// cadence stays a rule rather than an accident of where the counter is bumped.
+pub(crate) fn busy_repaint_due(tick: u64) -> bool {
+    tick.is_multiple_of(BUSY_REPAINT_TICKS)
 }
 
 #[cfg(test)]
@@ -797,5 +877,106 @@ mod tests {
             ring_alpha(phase + Duration::from_millis(RING_PERIOD_MS as u64)),
             ring_alpha(phase)
         );
+    }
+
+    /// #2842: a plan badge is a state, not a flow, so it paints one cell and
+    /// never reads the clock. The reporter's idle window held 113% of a core
+    /// spinning it.
+    #[test]
+    fn a_plan_badge_paints_one_still_cell() {
+        for ms in (0..800).step_by(40) {
+            let phase = Duration::from_millis(ms);
+            assert_eq!(glyph(Badge::Plan, phase), PLAN_GLYPH);
+        }
+        // The live badge is still the spinner, and still moves.
+        assert_eq!(glyph(Badge::Live, Duration::ZERO), frame(Duration::ZERO));
+        assert_ne!(
+            glyph(Badge::Live, Duration::ZERO),
+            glyph(Badge::Live, Duration::from_millis(FRAME_MS as u64))
+        );
+    }
+
+    /// #2842: a rail whose only mark is a plan holding a task moves on nothing,
+    /// which is what lets the idle window stop repainting.
+    #[test]
+    fn a_plan_only_column_has_no_motion() {
+        let marks = [
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: None,
+                ring: false,
+            },
+        ];
+        for ms in [0u64, 200, 2_400, 10_000] {
+            let motion = motion(marks, Duration::from_millis(ms));
+            assert_eq!(motion, Motion::STILL);
+        }
+    }
+
+    /// #2842: the two things that do animate keep doing it. A live spinner and a
+    /// waiting plan's ring both draw something different on the next tick, which
+    /// is the only reason they are allowed to ask for a repaint.
+    #[test]
+    fn a_live_badge_and_a_waiting_ring_still_move() {
+        let live = [RowState {
+            badge: Some(Badge::Live),
+            ring: false,
+        }];
+        let at_0 = motion(live, Duration::ZERO);
+        let at_200 = motion(live, Duration::from_millis(200));
+        assert!(at_0.glyph.is_some());
+        assert_ne!(at_0, at_200, "a live spinner advances with the clock");
+
+        let ring = [RowState {
+            badge: None,
+            ring: true,
+        }];
+        let ring_a = motion(ring, Duration::ZERO);
+        let ring_b = motion(ring, Duration::from_millis(200));
+        assert!(ring_a.ring.is_some());
+        assert_ne!(ring_a, ring_b, "a waiting plan keeps pulsing");
+    }
+
+    /// #2842: one column, one clock. Every row and chip that animates resolves
+    /// to the same glyph and the same alpha, so the count of busy rows never
+    /// changes what the paint does.
+    #[test]
+    fn motion_is_one_answer_for_the_whole_column() {
+        let one = [RowState {
+            badge: Some(Badge::Live),
+            ring: true,
+        }];
+        let many = [
+            RowState {
+                badge: Some(Badge::Live),
+                ring: true,
+            },
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: Some(Badge::Live),
+                ring: true,
+            },
+        ];
+        let phase = Duration::from_millis(347);
+        assert_eq!(motion(one, phase), motion(many, phase));
+        // Precedence: a live turn wins the badge, so a plan mark beside it
+        // neither adds a second glyph nor stills the column.
+        let mixed = [
+            RowState {
+                badge: Some(Badge::Plan),
+                ring: false,
+            },
+            RowState {
+                badge: Some(Badge::Live),
+                ring: false,
+            },
+        ];
+        assert_eq!(motion(mixed, phase).glyph, Some(frame(phase)));
     }
 }

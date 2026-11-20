@@ -1899,6 +1899,44 @@ pub(crate) async fn handle_message(
         })
     };
 
+    // The live tool block on an ordinary turn (#2609). Until now only a
+    // background completion had one (#2023): a typed message showed the
+    // composing indicator and its narration, and nothing at all about the
+    // tools in between, which is the half of a long turn worth watching from
+    // a phone. Gated on `live_tool_block` because every tick of the block is
+    // an edit charged to the chat, and the cadence on a personal chat is
+    // unverified against WhatsApp's rate heuristics.
+    let live_block = wa_cfg.live_tool_block.then(|| {
+        let rl_jid = reply_target.to_string();
+        super::flow_message::spawn(super::flow_message::FlowConfig {
+            client: client.clone(),
+            jid: reply_target.clone(),
+            state: wa_state.clone(),
+            rate_limit: wa_cfg.rate_limit.clone(),
+            is_owner: wa_cfg.is_owner(rl_jid.split('@').next().unwrap_or(&rl_jid)),
+            interactive_buttons: wa_cfg.interactive_buttons,
+            // A turn that calls no tools must not create a message (#2609),
+            // so the block waits for its first row before it posts.
+            wait_for_first_tool: true,
+            posted: Arc::new(TokioMutex::new(Vec::new())),
+        })
+    });
+    // One callback, two consumers. The block sees only the events that draw a
+    // row: narration already owns the streamed message below, and the
+    // suggestions are sent by this handler, so forwarding either into the
+    // block would post it twice.
+    let progress_cb: ProgressCallback = match live_block.as_ref() {
+        Some((flow, _)) => {
+            let rows = flow.row_callback();
+            let turn = progress_cb;
+            Arc::new(move |session_id, event| {
+                rows.as_ref()(session_id, event.clone());
+                turn.as_ref()(session_id, event);
+            })
+        }
+        None => progress_cb,
+    };
+
     // Build per-call approval callback.
     // If the user previously chose "Always (session)", auto-approve without asking.
     // Otherwise send a 3-button message (Yes / Always / No) and wait up to 5 min.
@@ -2064,6 +2102,20 @@ pub(crate) async fn handle_message(
             "WhatsApp streaming task still running after 60s; a progress callback \
              clone outlived the agent call, so the final edit may be skipped"
         ),
+    }
+
+    // The block settles BEFORE the answer is sent, so a finished turn never
+    // folds its reply into the tool list (#2030). Awaiting it here, while the
+    // answer is still unsent, is the whole ordering guarantee: the block's
+    // last edit lands first, and the reply arrives as its own message.
+    if let Some((flow, flow_task)) = live_block {
+        flow.settle(match &result {
+            Ok(_) => super::flow_render::Phase::Finished,
+            Err(_) => super::flow_render::Phase::Failed,
+        });
+        if let Err(e) = flow_task.await {
+            tracing::warn!(error = %e, "WhatsApp: live tool block task failed");
+        }
     }
 
     wa_state.remove_cancel_token(session_id).await;

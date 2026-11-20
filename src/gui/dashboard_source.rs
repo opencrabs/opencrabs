@@ -7,11 +7,23 @@
 //! The concat is therefore kept here, once, and `tests/gui_dashboard_source.rs`
 //! holds the library's identical copy for the tests that live over there.
 //!
-//! The modules come first so a scan that cuts the window's own test module off
-//! the end still sees every one of them: the split marker sits in `main.rs`,
-//! and it is the last part of this text.
+//! A module that keeps code of its own beside this file has to be listed here,
+//! or a rule pinning its window behaviour reads a text that does not contain
+//! it. The window's boot, input and launch helpers moved out of `main.rs`
+//! (#3060) and are listed with the rest.
 pub const DASHBOARD: &str = concat!(
+    include_str!("app.rs"),
+    include_str!("boot.rs"),
+    include_str!("channel_chip.rs"),
+    include_str!("launch.rs"),
+    include_str!("live_fold.rs"),
+    include_str!("pane_focus.rs"),
+    include_str!("task_strip.rs"),
+    include_str!("turn_swap.rs"),
+    include_str!("usage_load.rs"),
+    include_str!("window_input.rs"),
     include_str!("dashboard_commands.rs"),
+    include_str!("dashboard_config.rs"),
     include_str!("dashboard_finder.rs"),
     include_str!("dashboard_keys.rs"),
     include_str!("dashboard_messages.rs"),
@@ -21,29 +33,30 @@ pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_projects.rs"),
     include_str!("projects_screen.rs"),
     include_str!("dashboard_rail.rs"),
+    include_str!("dashboard_render.rs"),
     include_str!("rail_view.rs"),
     include_str!("dashboard_screens.rs"),
     include_str!("dashboard_sessions.rs"),
+    include_str!("dashboard_state.rs"),
     include_str!("dashboard_topics.rs"),
     include_str!("dashboard_turns.rs"),
     include_str!("main.rs"),
 );
 
-/// Everything in [`DASHBOARD`] before the window's own test module.
+/// Everything in [`DASHBOARD`] that the dashboard runs.
 ///
-/// The concat above puts the modules first and `main.rs` last, so the window's
-/// own `mod tests` is the LAST marker in this text, not the first. Modules with
-/// test modules of their own matter here: `dashboard_rail.rs` and
-/// `rail_view.rs` both carry one, and a scan that cut at the first marker
-/// stopped at the rail's, so every rule checking anything in `rail_view.rs`,
-/// `dashboard_screens.rs` or `main.rs` was reading a text that did not contain
-/// the code it pinned. Take the last marker instead, so a module that grows a
-/// test module can never hide the ones behind it.
+/// This used to cut at the window's inline `mod tests` and return what came
+/// before it. That cut is gone, and the window file is why (#3060): the
+/// declaration `mod tests;` matches the same marker as the inline block it
+/// replaced, so the cut landed 108 lines into `main.rs` and every rule pinning
+/// the render or the launch read a text without either in it.
+///
+/// Nothing is lost by not cutting. The window's tests live in `gui/tests/`,
+/// beside this file and outside this concat, so no assertion's own needle can
+/// be mistaken for the code it forbids (#2999). `dashboard_rail.rs` and
+/// `rail_view.rs` still carry inline test modules and their text stays in,
+/// which is the state every rule here already passed on; a marker cut could
+/// only reach the last module in the concat and would drop the five after it.
 pub fn production_half() -> &'static str {
-    // The window's own test module, as it appears at the end of `main.rs`.
-    const MARKER: &str = "\n#[cfg(test)]\nmod tests";
-    match DASHBOARD.rsplit_once(MARKER) {
-        Some((head, _tail)) => head,
-        None => DASHBOARD,
-    }
+    DASHBOARD
 }

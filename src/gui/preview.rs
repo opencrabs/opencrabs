@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, IntoElement, ObjectFit, ScrollWheelEvent, SharedString, Window,
-    div, img, px, rgb, rgba,
+    AnyElement, App, ClickEvent, IntoElement, MouseDownEvent, ObjectFit, ScrollWheelEvent,
+    SharedString, Window, div, img, px, rgb,
 };
 
 use crate::attachment_view;
 use crate::logging;
+use crate::modal_shell;
 use crate::palette;
 
 /// What opening a file shows.
@@ -31,6 +32,9 @@ pub enum PreviewKind {
     Video,
     /// Metadata and actions, plus a body for supported text documents.
     File,
+    /// A message from the transcript, read in the same body a document uses
+    /// (#3053). It has no file, so it carries no actions and no metadata.
+    Message,
 }
 
 /// The extensions the strip treats as an image. Kept beside the marker
@@ -50,6 +54,10 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 pub struct Preview {
     pub path: PathBuf,
     pub kind: PreviewKind,
+    /// What the header calls a preview that has no file name to print: a
+    /// message opened from the transcript. `None` for a file, which is named
+    /// by its own path.
+    pub title: Option<String>,
 }
 
 impl Preview {
@@ -58,19 +66,38 @@ impl Preview {
     pub fn open_label(&self) -> &'static str {
         match self.kind {
             PreviewKind::Video => "play",
-            PreviewKind::Image | PreviewKind::File => "open",
+            PreviewKind::Image | PreviewKind::File | PreviewKind::Message => "open",
         }
     }
 
     /// Open `path`, deciding the kind from its extension.
     pub fn of(path: PathBuf) -> Self {
         let kind = kind_of(&path);
-        Self { path, kind }
+        Self {
+            path,
+            kind,
+            title: None,
+        }
+    }
+
+    /// A message from the transcript, read in the document reader (#3053).
+    /// Its text is parsed in memory, so there is no path to open, reveal or
+    /// measure, and the header prints the title instead of a file name.
+    pub fn message(title: String) -> Self {
+        Self {
+            path: PathBuf::new(),
+            kind: PreviewKind::Message,
+            title: Some(title),
+        }
     }
 
     /// The file name, which is what every surface calls the file: the tile
-    /// caption, the overlay title, and the error when it is gone.
+    /// caption, the overlay title, and the error when it is gone. A message
+    /// preview has no file, so it is called by the title it was opened with.
     pub fn name(&self) -> String {
+        if let Some(title) = &self.title {
+            return title.clone();
+        }
         self.path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -525,27 +552,41 @@ fn action_button(
         .on_click(handler)
 }
 
+#[derive(Clone, Copy)]
+pub struct DocumentBody<'a> {
+    pub state: &'a super::preview_document::DocumentState,
+    pub height: f32,
+}
+
 /// What the shell holds for this file. `actions` is the shared button row, so
-/// the caller mints the listeners and this only decides the content.
+/// the caller mints the listeners and this only decides the content. A message
+/// preview passes `None`: it has no file to open or reveal (#3053).
 pub fn body(
     preview: &Preview,
-    actions: AnyElement,
+    actions: Option<AnyElement>,
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     facts: Option<&VideoFacts>,
-    document: Option<&super::preview_document::DocumentState>,
+    document: Option<DocumentBody<'_>>,
+    middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let content = match preview.kind {
         PreviewKind::Image => image_body(preview, zoom, wheel),
         PreviewKind::Video => video_body(preview, facts.and_then(|f| f.poster.as_deref())),
-        PreviewKind::File => file_body(preview, document),
+        PreviewKind::File => file_body(preview, document, middle_click),
+        PreviewKind::Message => message_body(document, middle_click),
     };
-    let document_open = preview.kind == PreviewKind::File && document.is_some();
-    let mut shell = div().flex().flex_col().gap_2().min_w_0();
+    let document_open =
+        matches!(preview.kind, PreviewKind::File | PreviewKind::Message) && document.is_some();
+    let mut shell = div().flex().flex_col().gap_3().w_full().min_w_0();
     if document_open {
         shell = shell.flex_1().min_h_0();
     }
-    shell.child(content).child(actions).into_any_element()
+    shell = shell.child(content);
+    if let Some(actions) = actions {
+        shell = shell.child(actions);
+    }
+    shell.into_any_element()
 }
 
 /// The box an image is drawn in, in points. Both sides are pinned because gpui
@@ -609,7 +650,17 @@ pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> 
             )
         }
         PreviewKind::Video => facts.map(VideoFacts::line).unwrap_or_default(),
-        PreviewKind::File => String::new(),
+        PreviewKind::Message => "message".to_string(),
+        PreviewKind::File => {
+            let mut parts = vec![format!("{} document", preview.extension_or_unknown())];
+            parts.extend(
+                FileFacts::probe(&preview.path)
+                    .rows()
+                    .into_iter()
+                    .map(|(_, value)| value),
+            );
+            parts.join(" \u{b7} ")
+        }
     }
 }
 
@@ -656,19 +707,37 @@ fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
 
 fn file_body(
     preview: &Preview,
-    document: Option<&super::preview_document::DocumentState>,
+    document: Option<DocumentBody<'_>>,
+    middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let mut col = div().flex().flex_col().gap_1().w(px(IMAGE_BOX.0));
-    col = col.child(row("kind", preview.extension_or_unknown()));
-    for (label, value) in FileFacts::probe(&preview.path).rows() {
-        col = col.child(row(label, value));
-    }
+    let mut col = div().flex().flex_col().gap_3().w_full().min_w_0();
+    // Kind, size and modification time live in the modal subtitle. The body
+    // keeps only the path, so metadata does not eat the reader's height.
     col = col.child(row("path", preview.path.display().to_string()));
     if let Some(document) = document {
-        col = col
-            .flex_1()
-            .min_h_0()
-            .child(super::preview_document::body(document));
+        col = col.flex_1().min_h_0().child(super::preview_document::body(
+            document.state,
+            document.height,
+            middle_click,
+        ));
+    }
+    col.into_any_element()
+}
+
+/// A message read in the document body (#3053). There is no path to print and
+/// no file to act on: the row's text is already parsed, so this is only the
+/// reader itself.
+fn message_body(
+    document: Option<DocumentBody<'_>>,
+    middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let mut col = div().flex().flex_col().w_full().min_w_0();
+    if let Some(document) = document {
+        col = col.flex_1().min_h_0().child(super::preview_document::body(
+            document.state,
+            document.height,
+            middle_click,
+        ));
     }
     col.into_any_element()
 }
@@ -814,106 +883,56 @@ pub fn kind_label(kind: PreviewKind) -> &'static str {
         PreviewKind::Image => "image",
         PreviewKind::Video => "video",
         PreviewKind::File => "file",
+        PreviewKind::Message => "message",
     }
 }
 
-/// The preview, drawn over everything.
-///
-/// The shape is the delete dialog's, because a modal that behaves differently
-/// from the last modal is how muscle memory breaks: a scrim that takes the
-/// pointer (`.occlude()`), the whole window covered (`.absolute()`, `size_full`),
-/// and a card in the middle. Two dismissal paths, one for each reflex: the
-/// scrim closes it and so does the button, while a click on the card itself is
-/// inert so inspecting the picture never throws it away.
-///
-/// `body` is the part that differs per kind: the image, the poster, or the
-/// metadata. The shell is shared so those three can never drift apart.
+/// The preview shares the Theme and task-detail modal chrome: the same scrim,
+/// glass card, header, close button and footer. Its size follows the window,
+/// while a zoomed image keeps the clipping the old card provided.
 pub fn overlay(
     preview: &Preview,
     detail: String,
     body: AnyElement,
+    document_open: bool,
+    viewport: (f32, f32),
     close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let close = std::rc::Rc::new(close);
-    let scrim_close = close.clone();
-    let button_close = close.clone();
-    div()
-        .id("preview-scrim")
-        // Modal: the dim scrim owns the pointer, so a click meant for the
-        // transcript behind it cannot fold a turn or open another file.
-        .occlude()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .bg(rgba(0x0a0a0add))
-        .on_click(move |ev, window, cx| scrim_close(ev, window, cx))
-        .child(
-            div()
-                .id("preview-card")
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .max_w(px(860.0))
-                .max_h(px(620.0))
-                // A zoomed picture is clipped to the card instead of painting
-                // over the window: the card is the frame, the picture is what
-                // fits in it.
-                .overflow_hidden()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(rgb(palette::current().panel_hi))
-                .bg(rgb(palette::current().panel))
-                // Inert: the click stops here instead of reaching the scrim,
-                // so looking closely at a picture never closes it.
-                .on_click(|_ev, _window, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(palette::current().text))
-                                .truncate()
-                                .child(SharedString::from(preview.name())),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(palette::current().text_muted))
-                                .child(SharedString::from(kind_label(preview.kind))),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(palette::current().text_muted))
-                                .child(SharedString::from(detail)),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .id("preview-close")
-                                .px_2()
-                                .py_1()
-                                .rounded_sm()
-                                .text_xs()
-                                .text_color(rgb(palette::current().text_normal))
-                                .cursor_pointer()
-                                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                                .child(SharedString::from("esc"))
-                                .on_click(move |ev, window, cx| button_close(ev, window, cx)),
-                        ),
-                )
-                .child(body),
-        )
+    let width_cap = if document_open { 1040.0 } else { 860.0 };
+    let width = (viewport.0 - 64.0).clamp(320.0, width_cap);
+    let subtitle = if detail.is_empty() {
+        kind_label(preview.kind).to_string()
+    } else {
+        detail
+    };
+    let footer = if document_open {
+        "wheel or middle-click + move \u{b7} \u{2191} \u{2193} PgUp PgDn \u{b7} Home End \u{b7} Esc close"
+    } else {
+        "Esc close"
+    };
+    let body = if document_open {
+        body
+    } else {
+        div()
+            .w_full()
+            .overflow_hidden()
+            .child(body)
+            .into_any_element()
+    };
+    modal_shell::render(
+        modal_shell::ModalView {
+            id: "preview",
+            title: preview.name(),
+            subtitle,
+            actions: None,
+            header_close: true,
+            body,
+            footer: Some(modal_shell::footer(footer.to_string()).into_any_element()),
+            width,
+            max_height: (viewport.1 - 48.0).max(160.0),
+        },
+        close,
+    )
 }
 
 #[cfg(test)]
@@ -1147,23 +1166,22 @@ mod tests {
     #[test]
     fn preview_shell_is_modal_dismissable_and_inert_inside() {
         let src = include_str!("preview.rs");
+        let shell = include_str!("modal_shell.rs");
+        assert!(src.contains("modal_shell::render("));
+        assert!(src.contains("id: \"preview\""));
+        assert!(shell.contains(".occlude()"), "a modal takes the pointer");
+        assert!(shell.contains(".absolute()"), "it sits over the window");
+        assert!(shell.contains(".inset_0()"), "and covers all of it");
         assert!(
-            src.contains(".id(\"preview-scrim\")"),
-            "the scrim needs an id"
-        );
-        assert!(src.contains(".occlude()"), "a modal takes the pointer");
-        assert!(src.contains(".absolute()"), "it sits over the window");
-        assert!(src.contains(".size_full()"), "and covers all of it");
-        assert!(
-            src.contains("scrim_close(ev, window, cx)"),
+            shell.contains(".on_click(scrim_door)"),
             "a click on the scrim closes the preview"
         );
         assert!(
-            src.contains(".id(\"preview-close\")"),
+            shell.contains("format!(\"{prefix}-close\")"),
             "there is a visible close affordance"
         );
         assert!(
-            src.contains("cx.stop_propagation()"),
+            shell.contains("cx.stop_propagation()"),
             "the body swallows its clicks so inspecting never closes it"
         );
     }

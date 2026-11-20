@@ -373,6 +373,16 @@ pub const ROWS: &[HelpRow] = &[
         Some("ctrl-u"),
         "Delete to line start (vim)",
     ),
+    // The microphone (#3044). The window answers it with the composer's own
+    // control; the terminal dictates through `/whisper` and never draws the
+    // field, so the row is the window's alone. A terminal listing a chord it
+    // has no control for is the drift #2438 was about.
+    window_row(
+        HelpSection::InputEditing,
+        "ctrl+alt+r",
+        "ctrl-alt-r",
+        "Dictate a message (microphone)",
+    ),
     // ── SESSIONS ──
     // Every chord here is answered on both surfaces, each with its own
     // spelling. The window's rail answers arrows only while it owns the
@@ -495,11 +505,22 @@ pub fn find(neutral: &str) -> Option<&'static HelpRow> {
     ROWS.iter().find(|r| r.neutral == neutral)
 }
 
+/// Whether the chord already has a live Seeker row of its own.
+///
+/// The microphone is an action, not a help page: the window's catalog prints
+/// `start dictation`, and a second row that only opened the help surface would
+/// take the query and then do nothing about it (#3044). The key table keeps
+/// the chord so the help screen lists it; Seeker keeps the action.
+fn has_live_row(row: &HelpRow) -> bool {
+    matches!(row.neutral, "ctrl+alt+r")
+}
+
 /// Build Seeker rows from the chords this client actually supports. Every
 /// row opens the existing help surface; the chord and description supply the
 /// searchable knowledge without adding another command.
 pub fn seeker_items(client: HelpClient) -> Vec<PaletteItem> {
     ROWS.iter()
+        .filter(|row| !has_live_row(row))
         .filter_map(|row| {
             let chord = client.chord(row)?;
             let mut keywords = format!(
@@ -708,9 +729,11 @@ mod tests {
     #[test]
     fn seeker_rows_convert_every_supported_entry_with_unique_titles() {
         for client in [HelpClient::Tui, HelpClient::Gui] {
+            // The chords that already have a live Seeker row are skipped by
+            // the builder and by this list alike (#3044).
             let supported: Vec<&HelpRow> = ROWS
                 .iter()
-                .filter(|row| client.chord(row).is_some())
+                .filter(|row| client.chord(row).is_some() && !has_live_row(row))
                 .collect();
             let items = seeker_items(client);
             assert_eq!(items.len(), supported.len());
@@ -724,6 +747,26 @@ mod tests {
                 assert_eq!(item.action, PaletteAction::OpenSurface(Surface::Help));
                 assert!(titles.insert(item.title), "duplicate help title");
             }
+        }
+    }
+
+    /// The dictation chord is documented for the window and kept out of
+    /// Seeker, because the microphone row is the live door (#3044).
+    #[test]
+    fn the_dictation_chord_is_listed_for_the_window_and_left_out_of_seeker() {
+        let row = find("ctrl+alt+r").expect("the dictation chord is in the table");
+        assert_eq!(row.gui, Some("ctrl-alt-r"), "the window answers it");
+        assert_eq!(row.tui, None, "the terminal has no microphone control");
+        assert_eq!(row.section, HelpSection::InputEditing);
+
+        for client in [HelpClient::Tui, HelpClient::Gui] {
+            assert!(
+                !seeker_items(client)
+                    .iter()
+                    .any(|item| item.title.contains("Dictate")),
+                "the help page would take the query and do nothing: the \
+                 catalog's own row is the door"
+            );
         }
     }
 

@@ -10,7 +10,6 @@
 //! turning one tool call's memory spike into a full daemon restart.
 
 use crate::cli::commands::build_systemd_unit;
-use crate::tui::onboarding::build_onboarding_systemd_unit;
 
 /// Assert the OOM policy is present, and that it sits on a line of its own.
 ///
@@ -56,16 +55,4 @@ fn user_unit_has_no_user_directive_and_targets_default() {
 fn profile_label_is_threaded_into_description() {
     let unit = build_systemd_unit("staging", "/bin/opencrabs -p staging daemon", None, true);
     assert!(unit.contains("Description=OpenCrabs Daemon [staging]"));
-}
-
-/// The onboarding wizard writes its own hand-rolled unit rather than calling
-/// `build_systemd_unit`, so it needs its own coverage: without the directive a
-/// fresh wizard install keeps the dangerous default. Reached through the
-/// `cfg(test)` bridge in `crate::tui::onboarding`.
-#[test]
-fn onboarding_unit_survives_child_oom_kill() {
-    let unit = build_onboarding_systemd_unit("/usr/local/bin/opencrabs");
-    assert_oom_policy_continue(&unit, "onboarding unit");
-    assert!(unit.contains("ExecStart=/usr/local/bin/opencrabs daemon"));
-    assert!(unit.contains("WantedBy=default.target"));
 }

@@ -120,14 +120,36 @@ pub(crate) fn options_strip(rows: &[(SuggestionItem, transcript::ClickHandler)])
     col
 }
 
+/// Whether a speech-to-text engine is configured, which decides what the
+/// composer may promise (#3044).
+///
+/// `Config::current()` is the in-memory mirror behind an `Arc`, so this is a
+/// pointer clone plus the small derivation `voice_config` builds, never a disk
+/// read. It is asked on the UI thread only, the same way the recorder asks
+/// before it sends a take: a window with no engine cannot record, so the hint
+/// names `/voice` instead of a chord that would only print an error.
+pub(crate) fn voice_ready() -> bool {
+    opencrabs::config::Config::current()
+        .voice_config()
+        .stt_enabled
+}
+
 /// The composer's hint line for a state. Grey and quiet, it names the keys
 /// that work right now: stopping the turn, recalling a queued message, and
 /// queueing another (#2630).
-pub(crate) fn composer_hint_for(busy: bool, queued: usize) -> SharedString {
+///
+/// An idle field also says how to reach the microphone (#3044): the chord that
+/// records when an engine is configured, and the one command that configures it
+/// when there is none. A promise the window cannot keep is worse than silence,
+/// so the two never show at once.
+pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> SharedString {
     match (busy, queued) {
         (true, 0) => SharedString::from("esc stops · typing queues"),
         (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
-        (false, 0) => SharedString::from("Talk to the crab…"),
+        (false, 0) if voice => {
+            SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to stop")
+        }
+        (false, 0) => SharedString::from("Talk to the crab… · /voice sets up the mic"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),
     }
 }

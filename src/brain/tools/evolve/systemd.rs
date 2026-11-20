@@ -35,7 +35,7 @@ pub(crate) const EVOLVE_UNIT_PREFIX: &str = "opencrabs-evolve-";
 /// A resolved restart target: which bus, and the exact units to restart.
 pub(crate) struct RestartTargets {
     /// `true` to target user-level units (`systemctl --user`), e.g. when
-    /// OpenCrabs was installed via `install_systemd_service()` which writes
+    /// OpenCrabs was installed via `opencrabs service install` which writes
     /// to `~/.config/systemd/user/`.
     pub(crate) user: bool,
     /// Explicit unit names. Never a pattern.
@@ -62,7 +62,7 @@ pub(crate) enum RestartPlan {
 /// didn't restart" symptom that issue #136 reported.
 ///
 /// Set `user` to `true` to target user-level units (`systemctl --user`),
-/// e.g. when OpenCrabs was installed via `install_systemd_service()` which
+/// e.g. when OpenCrabs was installed via `opencrabs service install` which
 /// writes to `~/.config/systemd/user/`.
 ///
 /// The `pid` argument is used to derive a unique transient unit
@@ -238,7 +238,7 @@ fn lookup_bus(pattern: &str, user: bool) -> BusLookup {
 /// the bus rules cannot drift apart.
 ///
 /// The user-bus fallback is the substance of #162: OpenCrabs installed as a
-/// user service (`install_systemd_service()` writes to
+/// user service (`opencrabs service install` writes to
 /// `~/.config/systemd/user/`) has zero system-level units, and checking only
 /// the system bus is what produced the "Evolved! but the daemon never
 /// restarted" line of reports (#136).

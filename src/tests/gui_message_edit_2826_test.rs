@@ -20,7 +20,7 @@ const ICON: &str = include_str!("../gui/icon.rs");
 #[test]
 fn only_a_user_row_draws_the_edit_button() {
     let arm = TRANSCRIPT
-        .split("Block::Msg {\n                    message_id: Some(id),")
+        .split("let child: AnyElement = match block {")
         .nth(1)
         .expect("the stored-row arm matches a message by its id");
     let arm = arm.split("_ => match").next().unwrap_or_default();

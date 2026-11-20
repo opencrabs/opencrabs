@@ -309,6 +309,14 @@ cargo test --all-features my_feature_test
 
 If you find an existing inline `#[cfg(test)] mod tests` while working on a file, move it into `src/tests/` as part of your change. Leaving the violation in place will fail review.
 
+#### The GUI binary crate
+
+The desktop client is a separate binary crate, so `src/tests/` cannot see it: that tree belongs to the library and the window is not part of it. The window's tests live in `src/gui/tests/`, one file per module they exercise, declared in `src/gui/tests/mod.rs`. Same rule as the library: no inline `#[cfg(test)] mod tests { ... }` blocks under `src/gui/`, and a test that needs an internal helper gets that helper bumped to `pub(crate)`.
+
+`src/gui/main.rs` is wiring only. That means the module declarations and `fn main` starting the run sequence, nothing else: no types, no impls, no traits, no helper functions, and a 400 line budget. The window is 96 modules because the code that lived in the file moved to the module named after its concern, and the module tree is the map. A struct pasted back into the window file is the regression the budget exists to catch.
+
+Three tests hold the shape, in `src/gui/tests/layout_guard_test.rs`: the line budget and the "declares nothing but `fn main`" scan, a frozen list of the inline test modules that were in the window when the split landed (it can shrink as the tests move here, it cannot grow), and a cross-check that every module file under `src/gui/` is declared in `main.rs` and every file under `src/gui/tests/` is declared in its `mod.rs`. A file nothing declares is dead weight, and the guard says so.
+
 ### Tests Never Touch the Live Config or Keys
 
 **No test may write `~/.opencrabs/config.toml`, `keys.toml`, or anything else in the live default home.** Any test that reaches a config or keys writer (the onboarding wizard's save, `Config::write_key`, `Config::write_array`, `save_keys`, a migration) must run under a home override so the write lands in a throwaway directory:

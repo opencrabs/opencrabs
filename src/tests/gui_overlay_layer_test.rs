@@ -7,7 +7,12 @@
 //! pinning a comma made these guards fail on a refactor that left the order
 //! intact (#2395).
 
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 
 /// The Help Center moved to its own module when it became four section cards
 /// (#2893), so the layer guards read the screen where it is now painted.

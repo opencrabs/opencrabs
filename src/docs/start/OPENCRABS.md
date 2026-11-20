@@ -131,7 +131,7 @@ Outbound, the agent sends media through the channel send tools (e.g. a Telegram 
 
 ```bash
 opencrabs status              # version, provider, channels, database, brain
-opencrabs doctor              # diagnostics: config, provider, channel health, tools
+opencrabs doctor              # diagnostics: config, provider, channel health, tools, service labels, lock owners
 opencrabs doctor --fix        # also repairs: stuck cron rows, stale plan markers, loose permissions
 opencrabs channel list        # configured channels and their status
 opencrabs channel doctor      # health checks on all enabled channels

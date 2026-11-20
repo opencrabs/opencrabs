@@ -14,7 +14,12 @@ const SESSIONS: &str = include_str!("../gui/sessions.rs");
 const RAIL_VIEW: &str = include_str!("../gui/rail_view.rs");
 const DASH_RAIL: &str = include_str!("../gui/dashboard_rail.rs");
 const DASH_TOPICS: &str = include_str!("../gui/dashboard_topics.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const ICON: &str = include_str!("../gui/icon.rs");
 
 fn block<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

@@ -3,7 +3,12 @@
 //! harness, so these checks read source.
 
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
-const GUI_MAIN: &str = include_str!("../gui/main.rs");
+const GUI_MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const MODEL_PICKER: &str = include_str!("../gui/model_picker.rs");
 
 #[test]

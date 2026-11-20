@@ -6,6 +6,46 @@
 use super::*;
 
 impl Dashboard {
+    /// A preview is modal: unsupported keys go nowhere instead of reaching the
+    /// composer, tasks or transcript underneath it. Documents own their scroll
+    /// directly and have no transcript follow flag to reconcile (#3041).
+    fn preview_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = ev.keystroke.key.as_str();
+        if key == "escape" {
+            self.close_preview();
+            self.refocus_screen();
+            cx.notify();
+            return;
+        }
+        let Some(document) = self.preview_document.as_ref() else {
+            return;
+        };
+        let scroll = &document.scroll;
+        let current = scroll.offset();
+        let max = f32::from(scroll.max_offset().height);
+        let reader_height = f32::from(scroll.bounds().size.height);
+        let page = if reader_height > 0.0 {
+            reader_height * 0.8
+        } else {
+            f32::from(window.viewport_size().height) * 0.6
+        };
+        let next = match key {
+            "up" | "down" => {
+                Some(page_landing(f32::from(current.y), max, 48.0, key == "up").offset)
+            }
+            "pageup" | "pagedown" => {
+                Some(page_landing(f32::from(current.y), max, page, key == "pageup").offset)
+            }
+            "home" => Some(0.0),
+            "end" => Some(-max),
+            _ => None,
+        };
+        if let Some(next) = next {
+            scroll.set_offset(point(current.x, px(next)));
+            cx.notify();
+        }
+    }
+
     pub(crate) fn on_key(
         &mut self,
         ev: &KeyDownEvent,
@@ -16,6 +56,11 @@ impl Dashboard {
         // key still reaches its normal owner, so Esc and page keys keep their
         // existing behavior instead of being swallowed by the marker (#2964).
         self.cancel_middle_scroll(cx);
+        // The visible preview gets every key before any screen-level owner.
+        if self.preview.is_some() {
+            self.preview_key(ev, window, cx);
+            return;
+        }
         // The settings modal owns every key while it is open, on every screen
         // (#2878): an armed credential edit must not leak a typed character
         // into the composer, and the rows' arrows belong to the modal alone.
@@ -558,16 +603,6 @@ impl Dashboard {
                 if self.help_filter.take().is_none() {
                     self.help_open = false;
                 }
-                cx.notify();
-                return;
-            }
-            // A preview is the nearest thing to the pointer that Esc can
-            // answer: it covers the window, so it goes before anything under
-            // it (#2395).
-            if self.preview.is_some() {
-                // The facts and document state belong to the file that was
-                // open, so they leave with it and invalidate pending reads.
-                self.close_preview();
                 cx.notify();
                 return;
             }

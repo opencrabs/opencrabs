@@ -13,6 +13,25 @@ use crate::utils::string::truncate_str;
 const GROQ_TRANSCRIPTION_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const OPENAI_SPEECH_URL: &str = "https://api.openai.com/v1/audio/speech";
 
+/// What every speech endpoint is told about the language of a take (#3044).
+///
+/// Whisper picks the language itself, and on a short take that pick is close to
+/// a coin toss: two seconds of English recorded on a machine set to Portuguese
+/// came back spelled in Portuguese, word for word, because the detector settled
+/// on the wrong language and the decoder then honoured it. The hint forbids
+/// translating and asks the decoder to stay in the language that was spoken, so
+/// the words come back as the speaker said them instead of as a translation of
+/// them. It is a hint, not a switch: whichever language wins, nothing is
+/// translated.
+pub const STT_PROMPT: &str = "Transcribe word for word in the language that is actually spoken. \
+     Never translate, and never re-spell what was said in another language.";
+
+/// The same rule, phrased as an instruction for endpoints that answer on the
+/// chat route instead of the transcription route (#3044).
+pub(crate) const STT_CHAT_INSTRUCTION: &str = "Transcribe this audio note word for word, in the language that is actually spoken in it. \
+     Reply with the transcription only. Never translate, and never re-spell what was said in \
+     another language.";
+
 /// Transcribe audio bytes using Groq Whisper (whisper-large-v3-turbo).
 ///
 /// Accepts OGG/Opus audio (Telegram voice note format).
@@ -38,6 +57,25 @@ pub async fn transcribe_audio(audio_bytes: Vec<u8>, groq_api_key: &str) -> Resul
 /// returns a composite error citing every attempted provider if the whole
 /// chain failed.
 pub async fn transcribe(audio_bytes: Vec<u8>, voice_config: &VoiceConfig) -> Result<String> {
+    transcribe_with_language(audio_bytes, voice_config)
+        .await
+        .map(|(text, _)| text)
+}
+
+/// Transcribe, and report the language the provider heard (#3044).
+///
+/// The window logs the language beside the transcript: a take that came back
+/// spelled in a language nobody spoke is otherwise a riddle, while the reported
+/// language says at once which half misread it. `None` means the provider
+/// answered without saying, or the local model does not report; it never means
+/// the audio was in no language.
+///
+/// Same provider chain and fallback rules as [`transcribe`], which is this
+/// function with the language dropped.
+pub async fn transcribe_with_language(
+    audio_bytes: Vec<u8>,
+    voice_config: &VoiceConfig,
+) -> Result<(String, Option<String>)> {
     let primary = resolve_primary_stt(voice_config);
     let chain = resolve_fallback_chain(voice_config, primary);
     let candidates: Vec<SttProviderKind> = std::iter::once(primary).chain(chain).collect();
@@ -61,7 +99,7 @@ pub async fn transcribe(audio_bytes: Vec<u8>, voice_config: &VoiceConfig) -> Res
         let bytes_for_next = bytes.clone();
         attempts.push(kind.label());
         match try_stt(kind, bytes, voice_config).await {
-            Ok(text) => {
+            Ok((text, language)) => {
                 if attempts.len() > 1 {
                     tracing::info!(
                         "STT recovered via fallback chain: {} (attempts: {})",
@@ -69,7 +107,7 @@ pub async fn transcribe(audio_bytes: Vec<u8>, voice_config: &VoiceConfig) -> Res
                         attempts.join(" → "),
                     );
                 }
-                return Ok(text);
+                return Ok((text, language));
             }
             Err(e) => {
                 tracing::warn!(
@@ -170,10 +208,16 @@ fn provider_is_configured(kind: SttProviderKind, cfg: &VoiceConfig) -> bool {
     }
 }
 
-async fn try_stt(kind: SttProviderKind, audio_bytes: Vec<u8>, cfg: &VoiceConfig) -> Result<String> {
+async fn try_stt(
+    kind: SttProviderKind,
+    audio_bytes: Vec<u8>,
+    cfg: &VoiceConfig,
+) -> Result<(String, Option<String>)> {
     match kind {
         SttProviderKind::Voicebox => {
-            super::voicebox_stt::transcribe(audio_bytes, &cfg.voicebox_stt_base_url).await
+            super::voicebox_stt::transcribe(audio_bytes, &cfg.voicebox_stt_base_url)
+                .await
+                .map(|text| (text, None))
         }
         SttProviderKind::OpenAiCompatible => {
             let base = cfg
@@ -192,9 +236,13 @@ async fn try_stt(kind: SttProviderKind, audio_bytes: Vec<u8>, cfg: &VoiceConfig)
             // answers no /v1/audio/* path at all; every other [OI]-compatible
             // endpoint keeps the multipart request it has always used (#2107).
             if super::openai_stt::serves_audio_on_chat_route(base) {
-                super::openai_stt::transcribe_audio_chat(audio_bytes, key, model, base).await
+                super::openai_stt::transcribe_audio_chat(audio_bytes, key, model, base)
+                    .await
+                    .map(|text| (text, None))
             } else {
-                super::openai_stt::transcribe_audio(audio_bytes, key, model, base).await
+                super::openai_stt::transcribe_audio(audio_bytes, key, model, base)
+                    .await
+                    .map(|text| (text, None))
             }
         }
         SttProviderKind::Groq => {
@@ -203,7 +251,7 @@ async fn try_stt(kind: SttProviderKind, audio_bytes: Vec<u8>, cfg: &VoiceConfig)
                 .as_ref()
                 .and_then(|p| p.api_key.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("Groq STT missing api_key"))?;
-            transcribe_audio(audio_bytes, key).await
+            transcribe_audio_with_language(audio_bytes, key, GROQ_TRANSCRIPTION_URL).await
         }
         SttProviderKind::Local => {
             #[cfg(feature = "local-stt")]
@@ -240,7 +288,9 @@ async fn try_stt(kind: SttProviderKind, audio_bytes: Vec<u8>, cfg: &VoiceConfig)
                     tracing::info!("Local STT model '{}' downloaded successfully", model_id);
                 }
                 tracing::info!("Local STT: transcribing with model {}", model_id);
-                transcribe_audio_local(audio_bytes, model_id.clone()).await
+                transcribe_audio_local(audio_bytes, model_id.clone())
+                    .await
+                    .map(|text| (text, None))
             }
             #[cfg(not(feature = "local-stt"))]
             {
@@ -285,11 +335,34 @@ impl SttProviderKind {
 }
 
 /// Internal: transcribe with configurable URL (for testing).
+///
+/// The words only, for callers with no use for the language the detector
+/// settled on. [`transcribe_audio_with_language`] is the same request with the
+/// language kept.
 pub(crate) async fn transcribe_audio_with_url(
     audio_bytes: Vec<u8>,
     api_key: &str,
     url: &str,
 ) -> Result<String> {
+    transcribe_audio_with_language(audio_bytes, api_key, url)
+        .await
+        .map(|(text, _)| text)
+}
+
+/// Internal: transcribe with configurable URL, reporting the language (#3044).
+///
+/// `verbose_json` is what makes the language visible at all: the plain `json`
+/// shape carries the words and nothing else, so a take decoded in the wrong
+/// language left no trace of why it read that way. The segments the verbose
+/// answer adds are ignored.
+///
+/// The prompt is the language rule in [`STT_PROMPT`]: without it the decoder
+/// decided for itself, and on a two second take it decided wrong.
+pub(crate) async fn transcribe_audio_with_language(
+    audio_bytes: Vec<u8>,
+    api_key: &str,
+    url: &str,
+) -> Result<(String, Option<String>)> {
     let client = Client::new();
 
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
@@ -299,7 +372,11 @@ pub(crate) async fn transcribe_audio_with_url(
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("model", "whisper-large-v3-turbo")
-        .text("response_format", "json");
+        .text("response_format", "verbose_json")
+        // Zero temperature keeps a short take from being "improved" into a
+        // different sentence, the same reason the prompt exists.
+        .text("temperature", "0")
+        .text("prompt", STT_PROMPT);
 
     let response = client
         .post(url)
@@ -320,9 +397,16 @@ pub(crate) async fn transcribe_audio_with_url(
         .await
         .context("Failed to parse Groq transcription response")?;
 
-    tracing::info!("Groq STT: transcribed {} chars", result.text.len());
+    tracing::info!(
+        "Groq STT: transcribed {} chars in {}",
+        result.text.len(),
+        result
+            .language
+            .as_deref()
+            .unwrap_or("an unreported language"),
+    );
 
-    Ok(result.text)
+    Ok((result.text, result.language))
 }
 
 /// Maximum bytes per TTS chunk. Empirically, Voicebox (Kokoro) handles up to
@@ -911,6 +995,12 @@ pub(crate) async fn synthesize_speech_with_url(
 #[derive(Deserialize)]
 pub(crate) struct TranscriptionResponse {
     pub(crate) text: String,
+    /// The language the provider says it heard (#3044). Absent on the plain
+    /// `json` shape and on servers that never report it, which is why it is an
+    /// option rather than a defaulted string: "nobody said" has to stay
+    /// distinguishable from "it heard English".
+    #[serde(default)]
+    pub(crate) language: Option<String>,
 }
 
 /// Cached local whisper model — loaded once, reused across transcriptions.

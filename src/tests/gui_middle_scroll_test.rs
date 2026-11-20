@@ -7,7 +7,12 @@ use crate::ui_core::scroll::{
     AUTO_SCROLL_MAX_SPEED_PX_PER_SEC, auto_scroll_delta, auto_scroll_landing,
 };
 
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const MIDDLE_SCROLL: &str = include_str!("../gui/middle_scroll.rs");
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
@@ -130,6 +135,7 @@ fn every_exit_and_the_follow_landing_stay_wired() {
         MIDDLE_SCROLL
             .contains("self.screen == Screen::Chat && self.pane_states.contains_key(&session)")
     );
+    assert!(MIDDLE_SCROLL.contains("self.preview.is_some() && self.preview_document.is_some()"));
     assert!(MIDDLE_SCROLL.contains("if !target_visible {"));
     assert!(MIDDLE_SCROLL.contains("follow.release();"));
     assert!(MIDDLE_SCROLL.contains("follow.rearm();"));
@@ -143,8 +149,8 @@ fn upward_departure_does_not_fight_bottom_follow_slack() {
         MIDDLE_SCROLL
             .matches("!landing.moved || (delta < 0.0 && landing.at_end)")
             .count(),
-        2,
-        "both chat and pane retire on downward bottom arrival, not upward departure"
+        3,
+        "chat, panes and documents retire on downward bottom arrival, not upward departure"
     );
     assert!(MIDDLE_SCROLL.contains("if delta < 0.0 && landing.at_end"));
 }

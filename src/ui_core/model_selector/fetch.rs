@@ -5,6 +5,23 @@
 
 use super::{FetchOutcome, FetchRequest};
 
+/// Model discovery is a small JSON GET. A provider that does not answer within
+/// this window is treated as offline and the caller falls back to its baseline
+/// list, so the picker opens instead of waiting on a dead host.
+const MODELS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// One model-list request on the process-wide client (#2843).
+///
+/// The client is shared so the native root store loads once per process; the
+/// timeout belongs to the request. A per-request timeout never needed its own
+/// CA store, and this path runs on a boot burst where building one per call
+/// dominated the window's startup.
+fn models_request(url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+    crate::utils::http::shared()
+        .get(url)
+        .timeout(MODELS_TIMEOUT)
+}
+
 /// The `/models` URL for an OpenCode plan (#2040). Go is the default; `zen`
 /// selects the Zen catalog. Each plan serves its own model list.
 pub(crate) fn opencode_models_url(plan: Option<&str>) -> &'static str {
@@ -117,8 +134,7 @@ pub async fn fetch_provider_models(
             .unwrap_or_else(|| "https://api.minimax.io/v1".to_string());
         let models_url = format!("{}/models", base_url.trim_end_matches('/'));
 
-        let client = reqwest::Client::new();
-        let mut req = client.get(&models_url);
+        let mut req = models_request(models_url.as_str());
         if let Some(key) = api_key
             && !key.is_empty()
         {
@@ -177,8 +193,7 @@ pub async fn fetch_provider_models(
             _ => "https://api.xiaomimimo.com/v1/models",
         };
 
-        let client = reqwest::Client::new();
-        let mut req = client.get(base_url);
+        let mut req = models_request(base_url);
         if let Some(key) = api_key
             && !key.is_empty()
         {
@@ -224,13 +239,10 @@ pub async fn fetch_provider_models(
         return merge_minimax_baseline(api_models, user_models);
     }
 
-    let client = reqwest::Client::new();
-
     let result = match provider_id {
         "anthropic" => {
             // Anthropic - /v1/models is public
-            let mut req = client
-                .get("https://api.anthropic.com/v1/models")
+            let mut req = models_request("https://api.anthropic.com/v1/models")
                 .header("anthropic-version", "2023-06-01");
 
             // Include key if available (may show more models)
@@ -248,7 +260,7 @@ pub async fn fetch_provider_models(
         }
         "openai" => {
             // OpenAI - /v1/models
-            let mut req = client.get("https://api.openai.com/v1/models");
+            let mut req = models_request("https://api.openai.com/v1/models");
             if let Some(key) = api_key
                 && !key.is_empty()
             {
@@ -305,7 +317,11 @@ pub async fn fetch_provider_models(
             struct GeminiModelsResponse {
                 models: Vec<GeminiModel>,
             }
-            match client.get(url).header("x-goog-api-key", key).send().await {
+            match models_request(url)
+                .header("x-goog-api-key", key)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<GeminiModelsResponse>().await {
                         Ok(body) => {
@@ -350,7 +366,7 @@ pub async fn fetch_provider_models(
         }
         "openrouter" => {
             // OpenRouter - /api/v1/models
-            let mut req = client.get("https://openrouter.ai/api/v1/models");
+            let mut req = models_request("https://openrouter.ai/api/v1/models");
             if let Some(key) = api_key
                 && !key.is_empty()
             {
@@ -360,7 +376,7 @@ pub async fn fetch_provider_models(
         }
         "opencode" => {
             // OpenCode API: each plan serves its own catalog (#2040).
-            let mut req = client.get(opencode_models_url(opencode_endpoint_type));
+            let mut req = models_request(opencode_models_url(opencode_endpoint_type));
             if let Some(key) = api_key
                 && !key.is_empty()
             {
@@ -389,7 +405,7 @@ pub async fn fetch_provider_models(
                 Some(endpoint_type.as_str()),
             );
 
-            let mut req = client.get(&base);
+            let mut req = models_request(base.as_str());
             if let Some(key) = api_key
                 && !key.is_empty()
             {
@@ -460,7 +476,7 @@ pub async fn fetch_provider_models(
                 _ => "https://api.moonshot.ai/v1/models",
             };
 
-            let mut req = client.get(base);
+            let mut req = models_request(base);
             if let Some(key) = api_key
                 && !key.is_empty()
             {
@@ -521,7 +537,7 @@ pub async fn fetch_provider_models(
             struct OllamaModelsResponse {
                 models: Vec<OllamaModel>,
             }
-            let mut req = client.get(format!("{}/api/tags", base));
+            let mut req = models_request(format!("{}/api/tags", base));
             if let Some(key) = api_key
                 && !key.is_empty()
             {

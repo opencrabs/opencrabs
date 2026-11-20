@@ -289,6 +289,23 @@ pub fn gui_commands() -> impl Iterator<Item = &'static SlashCommand> {
     SLASH_COMMANDS.iter().chain(GUI_ONLY_COMMANDS)
 }
 
+/// The commands the Help Center prints: everything this window runs, in table
+/// order, with the description that goes beside each name.
+///
+/// `Support::Missing` never prints. The reference exists to tell a person what
+/// they can type here, and a name that answers "no screen for it yet" would be
+/// a promise the surface cannot keep, the same reason the key table leaves out
+/// a chord the window does not bind (#2438).
+///
+/// `gui_commands` rather than `SLASH_COMMANDS` because the window's own
+/// screens are commands here too: `/settings` has no terminal equivalent and
+/// was invisible on the reference for exactly that reason (#3048).
+pub fn gui_help_commands() -> Vec<&'static SlashCommand> {
+    gui_commands()
+        .filter(|command| support_gui(command.name) == Support::Runs)
+        .collect()
+}
+
 /// The table entry a typed name refers to, following [`ALIASES`].
 ///
 /// Matching is exact, the same as the terminal's dispatcher: `/Models` is not

@@ -144,7 +144,11 @@ impl Dashboard {
     /// live under the caret because that is where the user is typing, and the
     /// queue card is a list, not an instruction manual (#2630).
     pub(crate) fn composer_hint(&self) -> SharedString {
-        composer_hint_for(self.turn.busy, self.queued_for_strip().len())
+        composer_hint_for(
+            self.turn.busy,
+            self.queued_for_strip().len(),
+            crate::composer_view::voice_ready(),
+        )
     }
 
     /// Every split pane's own composer. The window's field lives on the chat
@@ -488,9 +492,8 @@ impl Dashboard {
         let generation = self.preview_document_generation.wrapping_add(1);
         self.preview_document_generation = generation;
         let document_kind = opencrabs::ui_core::local_document::DocumentKind::of_path(&path);
-        self.preview_document = document_kind.map(|_| {
-            preview_document::DocumentState::loading(path.clone(), generation)
-        });
+        self.preview_document = document_kind
+            .map(|_| preview_document::DocumentState::loading(path.clone(), generation));
         // A clip's poster frame and length are still probed on the click, as
         // before. Document bytes and Markdown parsing use the async path below.
         self.preview_video = if open.kind == preview::PreviewKind::Video {
@@ -522,10 +525,7 @@ impl Dashboard {
                     .spawn(async move { preview_document::parse(&load_path, kind) })
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let visible = this
-                        .preview
-                        .as_ref()
-                        .is_some_and(|open| open.path == path);
+                    let visible = this.preview.as_ref().is_some_and(|open| open.path == path);
                     let current = this
                         .preview_document
                         .as_ref()
@@ -549,26 +549,94 @@ impl Dashboard {
         self.preview_document = None;
     }
 
+    /// Read a long message in the document reader (#3053). When the window has
+    /// written the row's markdown to the conversation's project files, the
+    /// reader opens THAT file (#3064): the card on the row names it, so reading
+    /// the file is the card keeping its word. A row the window has no file for
+    /// falls back to the text it holds, because a reader that refuses what the
+    /// row already shows is worse than one with no file behind it.
+    pub(crate) fn open_message_preview(
+        &mut self,
+        id: uuid::Uuid,
+        title: String,
+        content: String,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.preview_document_generation.wrapping_add(1);
+        self.preview_document_generation = generation;
+        self.preview = Some(preview::Preview::message(title));
+        self.preview_document = Some(preview_document::DocumentState::text(generation));
+        self.preview_video = None;
+        self.preview_zoom = 1.0;
+        let path = self.prompt_docs.get(&id).cloned();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let parsed = cx
+                .background_executor()
+                .spawn(async move {
+                    // A file the window wrote is the same bytes as the row, so
+                    // the read is only about which copy is authoritative. It
+                    // stays on this half of the work: a failed read falls back
+                    // to the row's own text instead of an error the reader
+                    // cannot do anything with.
+                    let body = match path {
+                        Some(path) => std::fs::read_to_string(path).unwrap_or(content),
+                        None => content,
+                    };
+                    // Verbatim is what the row itself draws, so the reader
+                    // shows the same line breaks the reader typed.
+                    preview_document::parse_text(&body, crate::markdown::MdFlow::Verbatim)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let current = this
+                    .preview_document
+                    .as_ref()
+                    .is_some_and(|document| document.matches_generation(generation));
+                if current {
+                    if let Some(document) = this.preview_document.as_mut() {
+                        document.complete(Ok(parsed));
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The inside of the preview: the part that differs per kind. The shell
-    /// (title, kind, esc) is the same for all three, so a picture, a clip and
-    /// a document cannot drift apart in how they open or close.
+    /// (title, kind, esc) is the same for all four, so a picture, a clip, a
+    /// document and a message cannot drift apart in how they open or close.
     pub(crate) fn preview_body(
         &self,
         open: &preview::Preview,
+        document_height: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let path = open.path.clone();
-        let open_file = {
-            let path = path.clone();
-            cx.listener(move |_this, _ev, _window, _cx| {
-                preview::launch(&preview::open_command(&path));
-            })
-        };
-        let reveal_file = {
-            let path = path.clone();
-            cx.listener(move |_this, _ev, _window, _cx| {
-                preview::launch(&preview::reveal_command(&path));
-            })
+        // A message has no file behind it, so the two file actions would be
+        // dead buttons (#3053).
+        let actions = if open.kind == preview::PreviewKind::Message {
+            None
+        } else {
+            let path = open.path.clone();
+            let open_file = {
+                let path = path.clone();
+                cx.listener(move |_this, _ev, _window, _cx| {
+                    preview::launch(&preview::open_command(&path));
+                })
+            };
+            let reveal_file = {
+                let path = path.clone();
+                cx.listener(move |_this, _ev, _window, _cx| {
+                    preview::launch(&preview::reveal_command(&path));
+                })
+            };
+            Some(preview::actions_row(
+                open.open_label(),
+                open.path.exists(),
+                open_file,
+                reveal_file,
+            ))
         };
         let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
             let lines = match ev.delta {
@@ -583,18 +651,24 @@ impl Dashboard {
                 cx.notify();
             }
         });
+        let middle_click = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+            this.middle_scroll_down(middle_scroll::MiddleScrollTarget::Preview, ev.position, cx);
+        });
+        let document = self
+            .preview_document
+            .as_ref()
+            .map(|state| preview::DocumentBody {
+                state,
+                height: document_height,
+            });
         preview::body(
             open,
-            preview::actions_row(
-                open.open_label(),
-                open.path.exists(),
-                open_file,
-                reveal_file,
-            ),
+            actions,
             self.preview_zoom,
             wheel,
             self.preview_video.as_ref(),
-            self.preview_document.as_ref(),
+            document,
+            middle_click,
         )
     }
 

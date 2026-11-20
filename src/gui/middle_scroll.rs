@@ -11,6 +11,7 @@ use opencrabs::ui_core::scroll::{AutoScrollLanding, auto_scroll_delta, auto_scro
 pub(super) enum MiddleScrollTarget {
     Chat(Uuid),
     Pane(Uuid),
+    Preview,
 }
 
 pub(super) struct MiddleScroll {
@@ -139,6 +140,9 @@ impl Dashboard {
             MiddleScrollTarget::Pane(session) => {
                 self.screen == Screen::Chat && self.pane_states.contains_key(&session)
             }
+            MiddleScrollTarget::Preview => {
+                self.preview.is_some() && self.preview_document.is_some()
+            }
         };
         // Even a dead-zone marker must not survive a hidden screen or a leaf
         // that was closed. Checking before the zero-delta exit keeps that true.
@@ -172,6 +176,13 @@ impl Dashboard {
                 }
                 None => true,
             },
+            MiddleScrollTarget::Preview => match self.preview_document.as_ref() {
+                Some(document) => {
+                    let landing = move_scroll(&document.scroll, delta);
+                    !landing.moved || (delta < 0.0 && landing.at_end)
+                }
+                None => true,
+            },
         };
         if finished {
             self.cancel_middle_scroll(cx);
@@ -181,15 +192,23 @@ impl Dashboard {
 
 /// Move one viewport and fold the landing into its existing follow rule.
 fn apply_delta(scroll: &ScrollHandle, follow: &mut Follow, delta: f32) -> AutoScrollLanding {
+    let landing = move_scroll(scroll, delta);
+    if landing.moved {
+        follow.release();
+    }
+    if delta < 0.0 && landing.at_end {
+        follow.rearm();
+    }
+    landing
+}
+
+/// Documents have no bottom-follow state, so they use only the measured move.
+fn move_scroll(scroll: &ScrollHandle, delta: f32) -> AutoScrollLanding {
     let current = scroll.offset();
     let max = f32::from(scroll.max_offset().height);
     let landing = auto_scroll_landing(f32::from(current.y), max, delta);
     if landing.moved {
-        follow.release();
         scroll.set_offset(point(current.x, px(landing.offset)));
-    }
-    if delta < 0.0 && landing.at_end {
-        follow.rearm();
     }
     landing
 }

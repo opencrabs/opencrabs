@@ -9,7 +9,12 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 use crate::ui_core::message_select::MessageAction;
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
 
 /// The menu is the set of actions that can actually be carried out, in the
@@ -159,14 +164,14 @@ fn forward_opens_the_destination_and_stages_a_composer_reply() {
 }
 
 /// Every visible live entry is selectable and has its own action target in
-/// both chat surfaces (#2925). Collapsed previews and the activity lead count
-/// too; they are visible text, not a special dead zone.
+/// both chat surfaces (#2925). The head line counts too: it is one exact tool
+/// entry, rendered as visible text rather than a special dead zone (#3046).
 #[test]
 fn live_entries_wire_exact_actions_in_main_and_split() {
     let body = TRANSCRIPT
         .split("fn live_card_body(")
         .nth(1)
-        .and_then(|rest| rest.split("/// One line of the live card's body").next())
+        .and_then(|rest| rest.split("fn live_card_line_text(").next())
         .expect("the live body");
     assert!(body.contains("selectable_row(d, ordinal, body)"));
     assert!(body.contains("press.get(&LiveRow::Card(entry))"));
@@ -177,9 +182,14 @@ fn live_entries_wire_exact_actions_in_main_and_split() {
         .nth(1)
         .and_then(|rest| rest.split("fn live_card_footer(").next())
         .expect("the live card");
-    assert!(card.contains("format!(\"live-preview-{entry}\")"));
-    assert!(card.contains("\"live-activity\".to_string()"));
-    assert!(card.contains("Some(entry)"));
+    // #3046: the head is one status line carrying the sentence, the call and
+    // the numbers, and it renders one exact tool entry, so a click on it opens
+    // that entry's own menu. The ledger moved into the opened card, where every
+    // line keeps its `live-entry-{entry}` target.
+    assert!(card.contains("\"live-head\""));
+    assert!(card.contains("activity_entry"));
+    assert!(card.contains("live_entry_text("));
+    assert!(card.contains("live_card_body("));
 
     assert!(MAIN.contains("transcript::live_action_rows(&self.turn.live, session)"));
     assert!(MAIN.contains("this.live_menu_open(row.clone(), None, ev.position, cx)"));
@@ -238,7 +248,7 @@ fn only_stored_messages_can_be_picked() {
     );
 
     let arm = TRANSCRIPT
-        .split("Block::Msg {\n                    message_id: Some(id),")
+        .split("let child: AnyElement = match block {")
         .nth(1)
         .expect("the pickable arm matches a stored message by its id");
     let arm = arm.split("_ => match").next().unwrap_or_default();

@@ -107,8 +107,10 @@ fn collapse_svg(colour: u32) -> Vec<u8> {
     .into_bytes()
 }
 
-/// One chevron, drawn from the bytes above, sized in rems.
-fn chevron_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
+/// Bytes of an inline SVG as a fixed-size element, sized in rems. The
+/// chevrons and the composer's paperclip all go through it, so one place
+/// decides how an inline mark is sized and fitted.
+fn svg_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
     img(std::sync::Arc::new(Image::from_bytes(
         ImageFormat::Svg,
         svg,
@@ -121,14 +123,85 @@ fn chevron_icon(svg: Vec<u8>, size: f32) -> impl IntoElement {
 
 /// The disclosure arrow in `colour`, sized in rems.
 pub fn disclosure_icon(colour: u32, size: f32) -> impl IntoElement {
-    chevron_icon(disclosure_svg(colour), size)
+    svg_icon(disclosure_svg(colour), size)
 }
 
 /// The fold arrow in `colour`, sized in rems. It sits in the footer of an
 /// expanded card, so a block with many calls ends in a control that says the
 /// click folds it back instead of leaving the reader to guess.
 pub fn collapse_icon(colour: u32, size: f32) -> impl IntoElement {
-    chevron_icon(collapse_svg(colour), size)
+    svg_icon(collapse_svg(colour), size)
+}
+
+/// The composer's attachment control (#3037): Telegram's monoline paperclip,
+/// drawn from bytes so the theme colour reaches it. The field used to draw the
+/// native 📎 emoji, and an emoji carries its own shading: no text colour could
+/// turn it into the quiet grey outline the messaging apps use, so it read as a
+/// sticker sitting on the card instead of a control belonging to the row.
+fn paperclip_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The attachment paperclip in `colour`, sized in rems.
+pub fn paperclip_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(paperclip_svg(colour), size)
+}
+
+/// The composer's dictation control (#3044): the same monoline microphone the
+/// messaging apps put beside their field, at the paperclip's weight so the two
+/// ends of the row read as one line of controls. The capsule is the diaphragm,
+/// the arc is the pickup, the stem is the stand.
+fn mic_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><rect x="9" y="2" width="6" height="12" rx="3" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 10v1a7 7 0 0 1-14 0v-1" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 18v3" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The dictation microphone in `colour`, sized in rems.
+pub fn mic_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(mic_svg(colour), size)
+}
+
+/// The composer's stop control (#3044): the square a recording turns into.
+///
+/// Filled, not outlined. The microphone beside it is a monoline outline, and a
+/// second outline would read as another input at a glance; a solid rounded
+/// square is the shape every recorder and every messaging app uses for "this is
+/// running, press it to end". Same 24-unit grid and same optical size as the
+/// microphone, so the control does not jump when the phase changes.
+fn stop_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.6" fill="#{colour:06x}"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The stop square in `colour`, sized in rems.
+pub fn stop_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(stop_svg(colour), size)
+}
+
+/// The voice card's play control (#3044): a monoline triangle, the outline
+/// twin of the stop square above so a card that starts playing swaps one glyph
+/// for the other without the tile moving or changing weight.
+fn play_svg(colour: u32) -> Vec<u8> {
+    let colour = gpui_svg_colour(colour);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none"><path d="M8 5.5v13l11-6.5-11-6.5Z" stroke="#{colour:06x}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// The play triangle in `colour`, sized in rems.
+pub fn play_icon(colour: u32, size: f32) -> impl IntoElement {
+    svg_icon(play_svg(colour), size)
 }
 
 /// Set the Dock icon from the embedded `.icns`. macOS only: the Dock is an
@@ -161,7 +234,7 @@ pub fn apply_dock_icon() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_svg, disclosure_svg};
+    use super::{collapse_svg, disclosure_svg, paperclip_svg};
 
     #[test]
     fn the_disclosure_arrow_is_a_full_size_rounded_vector() {
@@ -187,5 +260,23 @@ mod tests {
         assert!(svg.contains("stroke-width=\"2.2\""));
         assert!(svg.contains("stroke-linecap=\"round\""));
         assert!(svg.contains("viewBox=\"0 0 24 24\""));
+    }
+
+    /// The composer's paperclip is a thin monoline outline, not a filled mark
+    /// (#3037): the control has to sit in the row like the messaging apps'
+    /// does, and a heavy glyph would pull the eye off the text it belongs to.
+    #[test]
+    fn the_paperclip_is_a_thin_themed_outline() {
+        let svg = String::from_utf8(paperclip_svg(0x12ab34)).unwrap();
+        assert!(svg.contains("stroke-width=\"1.8\""));
+        assert!(
+            svg.contains("fill=\"none\""),
+            "an outline, not a filled shape"
+        );
+        assert!(svg.contains("stroke-linecap=\"round\""));
+        assert!(svg.contains("viewBox=\"0 0 24 24\""));
+        // Same channel cancellation the chevrons need, so the caller's colour
+        // is the colour the window paints.
+        assert!(svg.contains("stroke=\"#34ab12\""));
     }
 }

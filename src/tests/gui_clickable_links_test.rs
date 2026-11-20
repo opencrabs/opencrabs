@@ -16,9 +16,22 @@ use std::path::{Path, PathBuf};
 
 const MARKDOWN: &str = include_str!("../gui/markdown.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-const MAIN: &str = include_str!("../gui/main.rs");
+const MAIN: &str = concat!(
+    include_str!("../gui/main.rs"),
+    include_str!("../gui/app.rs"),
+    include_str!("../gui/dashboard_render.rs"),
+    include_str!("../gui/dashboard_state.rs"),
+);
 const PANES: &str = include_str!("../gui/dashboard_panes.rs");
 const SESSIONS: &str = include_str!("../gui/dashboard_sessions.rs");
+
+/// Source text with every whitespace character removed, so a pin on a call
+/// shape survives rustfmt wrapping that call across lines. The pin still
+/// proves the receiver and the method are one expression; only the line
+/// breaks are free.
+fn flat(src: &str) -> String {
+    src.chars().filter(|c| !c.is_whitespace()).collect()
+}
 
 /// A temp dir unique per test, holding the fixtures it names.
 struct Sandbox {
@@ -168,10 +181,7 @@ fn open_target_resolves_an_explicit_file_url() {
     let file = box_.dir.join("notes.md");
     let text = "read notes now";
     let label = text.find("notes").expect("label");
-    let links = vec![(
-        label..label + 5,
-        format!("file://{}", file.display()),
-    )];
+    let links = vec![(label..label + 5, format!("file://{}", file.display()))];
     assert_eq!(
         target_for_click_with(text, &links, label + 1, &box_.dir, None),
         Some(ClickTarget::File(file))
@@ -184,7 +194,11 @@ fn open_target_resolves_an_explicit_file_url() {
 fn open_target_keeps_explicit_external_schemes() {
     let text = "read docs now";
     let label = text.find("docs").expect("label");
-    for dest in ["https://x", "mailto:docs@example.com", "ftp://example.com/file"] {
+    for dest in [
+        "https://x",
+        "mailto:docs@example.com",
+        "ftp://example.com/file",
+    ] {
         let links = vec![(label..label + 4, dest.to_string())];
         assert_eq!(
             target_for_click_with(text, &links, label + 1, Path::new("/nonexistent"), None),
@@ -339,8 +353,8 @@ fn open_target_survives_a_split_and_routes_through_the_dashboard() {
         "the transcript hands the target to its window"
     );
     assert!(
-        MAIN.contains("this.copy_drag.set_open_target_listener")
-            && PANES.contains("pane_copy.set_open_target_listener"),
+        flat(MAIN).contains("this.copy_drag.set_open_target_listener")
+            && flat(PANES).contains("pane_copy.set_open_target_listener"),
         "both the main transcript and every split pane attach the dashboard route"
     );
     let dashboard = body_of(SESSIONS, "pub(crate) fn open_transcript_target(");

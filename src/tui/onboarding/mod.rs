@@ -44,10 +44,3 @@ pub(crate) use crate::ui_core::model_selector::{
 };
 pub use brain::parse_brain_sections;
 pub use fetch::is_first_time;
-// build_onboarding_systemd_unit is used by tests via
-// `crate::tui::onboarding::build_onboarding_systemd_unit`; `config` is private,
-// so it needs the same cfg(test) bridge as `fetch` above. The path is `self::`
-// because `config` is also an external crate dependency, which would make a
-// bare `use config::…` ambiguous.
-#[cfg(test)]
-pub(crate) use self::config::build_onboarding_systemd_unit;

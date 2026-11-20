@@ -64,6 +64,12 @@ pub enum TurnEvent {
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
     Failed { session: Uuid, text: String },
+    /// A spoken reply for a voice-originated turn is on disk and its marker is
+    /// in the assistant row (#3044). Sent after the `Done` that settled the
+    /// turn, because synthesis is a network call the settle must not wait on:
+    /// the answer is drawn as text first, and the clip appears under it when
+    /// the audio lands.
+    VoiceReplySaved { session: Uuid },
     /// The user stopped this turn and the stop dropped it where it stood
     /// (#2657). No `Done` and no `Failed` follows a dropped future, so this is
     /// the only thing that tells the window the turn is gone. It carries no
@@ -363,6 +369,17 @@ static SURFACE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync
 /// claimed (#2452, #2607).
 static SURFACE_STACK: std::sync::OnceLock<opencrabs::services::surface::SurfaceServices> =
     std::sync::OnceLock::new();
+
+/// Whether this window booted the shared surface, which starts the terminal's
+/// config watcher and posts its reload failures in the conversation.
+///
+/// The window runs a watcher of its own (#3040) because the surface can refuse
+/// to boot, and in that case nothing else would tell the view that a save did
+/// not apply. When the surface IS serving, its watcher already says the line,
+/// so the window's copy of it stays quiet: one file, one message.
+pub fn surface_serving() -> bool {
+    SURFACE_STACK.get().is_some()
+}
 
 /// The window must exist before the GUI claims the profile (#2784). Claiming
 /// preempts (SIGTERMs) the running TUI/daemon, so doing it before the window
@@ -754,6 +771,108 @@ pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>
         });
     if let Err(e) = spawned {
         crate::logging::error(&format!("file track thread spawn: {e}"));
+    }
+}
+
+/// Speak one answer back, for the turn that began as a recording (#3044).
+///
+/// The window's half of what every channel already does: a voice note is
+/// answered with a voice note. `channels::voice::synthesize` is the same call
+/// Telegram makes, so the reply sounds like a channel reply rather than a
+/// second implementation of one, and it already returns OGG/Opus.
+///
+/// Off the UI thread for two reasons. Synthesis is a network round trip per
+/// chunk and the window must not stall on it while the answer is already on
+/// screen. And the marker has to reach the ROW, not just the card: the audio is
+/// appended to the assistant message in the ledger, so every later read of the
+/// conversation draws the clip and the row keeps it across restarts, exactly as
+/// a channel reply does.
+///
+/// Silence is the normal failure: no TTS provider configured, or synthesis
+/// failed. The turn already answered in text, so nothing here is allowed to
+/// turn a spoken reply into an error the user has to read.
+pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-voice-reply".into())
+        .spawn(move || {
+            let voice = Config::current().voice_config();
+            if !voice.tts_enabled {
+                // A recording is answered in text when speech output is off.
+                // The mic works either way; this is the same switch that
+                // decides whether a Telegram voice note gets a voice back.
+                crate::logging::info("voice reply: tts disabled, answering in text only");
+                return;
+            }
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    crate::logging::error(&format!("voice reply runtime: {e}"));
+                    return;
+                }
+            };
+            let audio = match runtime
+                .block_on(async { opencrabs::channels::voice::synthesize(&text, &voice).await })
+            {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    crate::logging::error(&format!("voice reply synthesis: {e:#}"));
+                    return;
+                }
+            };
+            let path = match crate::voice_input::save_reply_audio(&audio) {
+                Ok(path) => path,
+                Err(e) => {
+                    crate::logging::error(&format!("voice reply save: {e}"));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let db = match Database::connect(&db_path).await {
+                    Ok(db) => db,
+                    Err(e) => {
+                        crate::logging::error(&format!("voice reply db connect: {e}"));
+                        return;
+                    }
+                };
+                let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
+                // The row this turn wrote. It settles just before this thread
+                // starts, so the last assistant row in the session is the
+                // answer being spoken.
+                let row = match repo.get_last_assistant_message(session_id).await {
+                    Ok(row) => row,
+                    Err(e) => {
+                        crate::logging::error(&format!("voice reply row lookup: {e}"));
+                        return;
+                    }
+                };
+                let Some(row) = row else {
+                    crate::logging::error("voice reply: the answer row is not in the ledger");
+                    return;
+                };
+                let marker = format!("\n\n<<AUD:{}>>", path.display());
+                if let Err(e) = repo.append_content(row.id, &marker).await {
+                    crate::logging::error(&format!("voice reply marker: {e}"));
+                    return;
+                }
+                crate::logging::info(&format!(
+                    "voice reply: {} bytes spoken into {}",
+                    audio.len(),
+                    path.display()
+                ));
+                let _ = sink.send(TurnEvent::VoiceReplySaved {
+                    session: session_id,
+                });
+            });
+        });
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("voice reply thread spawn: {e}"));
     }
 }
 

@@ -21,6 +21,35 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // A voice message is its transcription plus the clip it came from
+        // (#3044): `transcript <<AUD:/…/voice-123.ogg>>` goes in, `transcript`
+        // goes to the agent and the whole line to the row. The agent reads the
+        // words, because a recording is not something it can answer; the row
+        // keeps the marker, because the transcript draws the clip and plays it
+        // back. `original` keeps the marker for the file tracker, which has to
+        // see the path that was just stripped off the words.
+        let original = text.clone();
+        // Only a clip the window recorded is a voice message whose words stand
+        // in for the audio (#3044). A clip picked with the paperclip is a file
+        // the agent may need to open, so its marker stays in the prompt.
+        let voice = editor::split_audio_marker(&original).filter(|(_, marker)| {
+            editor::marker_paths(marker)
+                .first()
+                .is_some_and(|path| crate::voice_input::is_recording(path))
+        });
+        let text = match &voice {
+            // The agent cannot play the clip, so the one thing it has to learn
+            // from the marker is that the words in front of it were spoken: a
+            // transcript read as a typed question gets a typed answer, and the
+            // point of a voice note is the spoken reply (#3044). Added where
+            // the marker comes off, so the note never reaches the screen.
+            Some((spoken, _)) => format!("{} {spoken}", editor::VOICE_NOTE_PREFIX),
+            None => text,
+        };
+        let display = match &voice {
+            Some((spoken, marker)) => Some(display.unwrap_or_else(|| format!("{spoken} {marker}"))),
+            None => display,
+        };
         // A send under an open overlay is the composer answering keys nobody
         // gave it (#2767). The caret repair keeps the composer out of the
         // dispatch path, and this refuses the one path that got around it: a
@@ -124,7 +153,12 @@ impl Dashboard {
         }
         // Attachments are tracked against the pane's session, so the file
         // lands in that conversation's artifacts, exactly as the window's does.
-        let attached = editor::marker_paths(&text);
+        let attached = editor::marker_paths(&original);
+        // A turn that began as a recording is answered with speech when it
+        // settles (#3044), so the settle has to know which turns those are.
+        if voice.is_some() {
+            self.voice_turns.insert(session);
+        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             session,
@@ -489,6 +523,28 @@ impl Dashboard {
         if text.is_empty() {
             return;
         }
+        // A voice message is its transcription plus the clip it came from
+        // (#3044), the same split `send_from_pane` makes: the agent reads the
+        // words and the row keeps the marker that draws the clip.
+        let original = text.clone();
+        // Only a clip the window recorded is a voice message whose words stand
+        // in for the audio (#3044). A clip picked with the paperclip is a file
+        // the agent may need to open, so its marker stays in the prompt.
+        let voice = editor::split_audio_marker(&original).filter(|(_, marker)| {
+            editor::marker_paths(marker)
+                .first()
+                .is_some_and(|path| crate::voice_input::is_recording(path))
+        });
+        let text = match &voice {
+            // Same note as the pane path (#3044): the words were spoken, and a
+            // transcript handed over as ordinary prose gets an ordinary answer.
+            Some((spoken, _)) => format!("{} {spoken}", editor::VOICE_NOTE_PREFIX),
+            None => text,
+        };
+        let display = match &voice {
+            Some((spoken, marker)) => Some(display.unwrap_or_else(|| format!("{spoken} {marker}"))),
+            None => display,
+        };
         // A send ends the offer (#2708): the buttons belonged to the turn that
         // made them, and leaving them up over a new question would send a
         // stale follow-up into it.
@@ -613,7 +669,12 @@ impl Dashboard {
         // Attachments are tracked against the session the same way the TUI
         // does it (`FileService::get_or_create_file`), so the file lands in
         // the session's artifacts, not just in the message text.
-        let attached = editor::marker_paths(&text);
+        let attached = editor::marker_paths(&original);
+        // A turn that began as a recording is answered with speech when it
+        // settles (#3044).
+        if voice.is_some() {
+            self.voice_turns.insert(sid);
+        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             sid,
@@ -791,6 +852,10 @@ impl Dashboard {
     /// open installs, so a re-read after a truncation leaves the window and the
     /// store saying the same thing.
     pub(crate) fn install_loaded(&mut self, loaded: transcript::Loaded, cx: &mut Context<Self>) {
+        // Before the rows move (#3064): the folded prompts among them are
+        // written to the conversation's project files, so the card on screen
+        // names a file that exists.
+        let documents = prompt_files::documents(&loaded.rows);
         let (hidden, turns) = transcript::turns_with_origins(
             &loaded.rows,
             loaded.total,
@@ -801,6 +866,7 @@ impl Dashboard {
         self.chat_state.transcript.turns = turns;
         self.chat_state.transcript.rows = loaded.rows;
         self.chat_state.transcript.reactions = loaded.reactions;
+        self.persist_prompt_documents(documents, cx);
         cx.notify();
     }
 
@@ -811,6 +877,7 @@ impl Dashboard {
         loaded: transcript::Loaded,
         cx: &mut Context<Self>,
     ) {
+        let documents = prompt_files::documents(&loaded.rows);
         let (hidden, turns) = transcript::turns_with_origins(
             &loaded.rows,
             loaded.total,
@@ -827,6 +894,37 @@ impl Dashboard {
             pane.transcript.reactions = loaded.reactions;
             cx.notify();
         });
+        self.persist_prompt_documents(documents, cx);
+    }
+
+    /// Write a window's folded prompts to the conversation's project files
+    /// (#3064), off the UI thread, and keep where each one landed so the card
+    /// can open that file instead of a copy held in memory.
+    ///
+    /// The write is best-effort by design: a conversation with no project, a
+    /// read-only home or a full disk leaves the row exactly as it was, and the
+    /// reader still opens the text the row already holds. Nothing here is
+    /// allowed to fail a load.
+    fn persist_prompt_documents(
+        &mut self,
+        documents: Vec<prompt_files::PromptDocument>,
+        cx: &mut Context<Self>,
+    ) {
+        if documents.is_empty() {
+            return;
+        }
+        let db_path = self.db_path.clone();
+        cx.spawn(async move |this, cx| {
+            let paths = prompt_files::persist_off_thread(db_path, documents).await;
+            if paths.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.prompt_docs.extend(paths);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The two taps a plan waiting on approval offers (#2755).
@@ -869,10 +967,23 @@ impl Dashboard {
     /// the turn on Done/Failed, reload the transcript so the DB becomes the
     /// rendering.
     pub(crate) fn poll(&mut self, cx: &mut Context<Self>) {
+        // Config reloads first (#3040): the watcher thread has already loaded
+        // the file and published it to `Config::current()`, so this tick only
+        // re-derives the values the window cached at boot.
+        self.drain_config_reloads(cx);
         // One clock for the whole tick (#2899): the checks below that cost a
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.
         self.poll_tick = self.poll_tick.wrapping_add(1);
+        // Playback and background waveform decoding leave no event behind
+        // (#3054). One snapshot covers position, pause, completion and the
+        // pending visual count, so the dashboard paints exactly when either
+        // kind of visible voice state changes.
+        let voice_paint = crate::voice_play::paint_state();
+        if voice_paint != self.voice_paint {
+            self.voice_paint = voice_paint;
+            cx.notify();
+        }
         // A click on a desktop banner posts the conversation it named (#2751).
         // Drained before the early return below, because an idle window is
         // exactly when a banner gets clicked. The app comes forward first: a
@@ -1435,6 +1546,28 @@ impl Dashboard {
                             });
                         }
                         self.settle_pane(session, tokens_per_second, cx);
+                        // A leaf's voice turn is answered aloud too (#3044),
+                        // on the same rule the window's is: `spawn_speak_reply`
+                        // runs `channels::voice::synthesize` on the answer the
+                        // leaf just drew. Read before the settle finalizes the
+                        // card's stream.
+                        if self.voice_turns.remove(&session) {
+                            let spoken = if content.trim().is_empty() {
+                                self.pane_view(session)
+                                    .and_then(|pane| {
+                                        pane.read(cx).live.answer().map(str::to_string)
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                content.clone()
+                            };
+                            agent_bridge::spawn_speak_reply(
+                                self.db_path.clone(),
+                                self.sink.clone(),
+                                session,
+                                spoken,
+                            );
+                        }
                         // A sub-agent's turn ends the same way and has no pane
                         // to settle (#2636). Clearing is idempotent, so a leaf
                         // that was never recorded costs nothing.
@@ -1502,11 +1635,41 @@ impl Dashboard {
                         tokens_per_second
                     ));
                     reload = self.chat_state.session();
+                    // A turn that began as a recording is answered the way a
+                    // channel answers a voice note (#3044): aloud, when speech
+                    // output is configured. `spawn_speak_reply` runs
+                    // `channels::voice::synthesize` on the answer that just
+                    // settled, and the clip is written into the assistant row
+                    // so the transcript draws it under the words it speaks and
+                    // keeps it across a restart. Off-thread on purpose: the
+                    // answer is already on screen and synthesis is a network
+                    // call per chunk.
+                    if self.voice_turns.remove(&session) {
+                        let spoken = if content.trim().is_empty() {
+                            self.turn
+                                .live
+                                .answer()
+                                .map(str::to_string)
+                                .unwrap_or_default()
+                        } else {
+                            content.clone()
+                        };
+                        agent_bridge::spawn_speak_reply(
+                            self.db_path.clone(),
+                            self.sink.clone(),
+                            session,
+                            spoken,
+                        );
+                    }
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
                     // Same as Done: the live line was this turn's, so it goes
                     // with it (#2718).
                     self.rail_live.remove(&session);
+                    // A failed turn is not spoken (#3044): there is no answer
+                    // to read aloud, and leaving the session flagged would make
+                    // the next typed turn answer in audio.
+                    self.voice_turns.remove(&session);
                     // A failure is still activity, so the row moves like a
                     // settled turn does (#2666).
                     self.refresh_rail(cx);
@@ -1673,6 +1836,11 @@ impl Dashboard {
                     }
                     // The turn is gone, so its rail spinner goes with it.
                     self.rail.clear(session);
+                    // A stopped turn says nothing, so it is not spoken either
+                    // (#3044). Same reason as a failure: the flag belongs to
+                    // the turn that started as a recording, and this one is
+                    // over.
+                    self.voice_turns.remove(&session);
                     // Unconditional (#2811): a card that just stopped has to
                     // paint its stop glyph once. It is static from here, so
                     // this is the only repaint it needs, and the animation
@@ -1727,6 +1895,17 @@ impl Dashboard {
                     }
                     self.refresh_rail(cx);
                     cx.notify();
+                }
+                // The spoken reply for a voice turn is on disk and its marker
+                // is in the assistant row (#3044). The `Done` that settled the
+                // turn has already reloaded without it, so this read is what
+                // puts the clip under the words it speaks.
+                agent_bridge::TurnEvent::VoiceReplySaved { session } => {
+                    if self.chat_state.session() == Some(session) {
+                        reload = Some(session);
+                    } else if self.pane_view(session).is_some() {
+                        self.reload_pane(session, cx);
+                    }
                 }
                 agent_bridge::TurnEvent::BackgroundTaskDone {
                     session_id,
@@ -2329,6 +2508,10 @@ impl Dashboard {
     /// asking twenty times a second bought nothing but four identical answers
     /// and four times the file reads. The answer is cached for the ticks in
     /// between, and a closed rail is not asked at all: it draws no badge.
+    ///
+    /// Only a live turn's spinner and a waiting plan's ring move (#2842). A
+    /// plan holding a task draws a still mark, so it is not a reason to tick
+    /// the rail's clock at all.
     fn rail_animating(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.rail_open && self.screen != Screen::Onboard {
             self.rail_anim_live = false;
@@ -2340,7 +2523,7 @@ impl Dashboard {
         let live = self
             .rail_activity_map(cx)
             .values()
-            .any(|row| row.badge.is_some() || row.ring);
+            .any(|row| row.badge == Some(crate::rail_activity::Badge::Live) || row.ring);
         self.rail_anim_live = live;
         live
     }

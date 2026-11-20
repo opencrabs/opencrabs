@@ -83,6 +83,9 @@ pub(crate) fn build_enqueue_callback(
                     rate_limit: wa_cfg.rate_limit.clone(),
                     is_owner: rl_owner,
                     interactive_buttons: wa_cfg.interactive_buttons,
+                    // Eager here (#2609): a background completion has no
+                    // other sign of life, so the clock covers the thinking.
+                    wait_for_first_tool: false,
                     posted: posted.clone(),
                 });
                 let outcome = run_flow_turn(

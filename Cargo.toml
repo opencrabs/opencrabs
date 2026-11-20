@@ -209,6 +209,11 @@ symphonia = { version = "0.5", features = ["ogg", "vorbis", "wav", "pcm"], optio
 symphonia-adapter-libopus = { version = "0.2", optional = true }
 opusic-sys = { version = "0.5", optional = true, default-features = false }
 
+# Microphone capture for the window's composer. `cpal` is already in the tree
+# as rodio's backend; declaring it directly is what lets the GUI open an input
+# device without needing `local-stt` (and its 40 MB whisper tree) compiled in.
+cpal = { version = "0.15", optional = true, default-features = false }
+
 # Browser Automation (CDP via chromey — fork of chromiumoxide)
 chromey = { version = "2.42", optional = true, default-features = false }
 
@@ -341,8 +346,8 @@ trello = []
 whatsapp = ["whatsapp-rust", "whatsapp-rust-tokio-transport", "whatsapp-rust-ureq-http-client", "wacore", "wacore-binary", "waproto", "dep:qrcode", "dep:rmp-serde"]
 discord = ["serenity"]
 slack = ["slack-morphism", "tokio-tungstenite", "rustls"]
-local-stt = ["rwhisper", "rodio", "hound", "rubato", "symphonia", "symphonia-adapter-libopus"]
-local-tts = ["opusic-sys", "rubato"]
+local-stt = ["rwhisper", "rodio", "hound", "rubato", "dep:symphonia", "dep:symphonia-adapter-libopus"]
+local-tts = ["dep:opusic-sys", "rubato"]
 # Plan-finished chime (#2255). `rodio` is already pulled in by `local-stt`,
 # so this feature only adds the WAV decoder for the one embedded chime.
 notification-sound = ["rodio", "rodio/wav"]
@@ -351,7 +356,23 @@ pdfium = ["dep:pdfium-render"]
 code-graph = ["tree-sitter", "tree-sitter-rust"]
 # Native desktop app. Off by default so a plain `cargo build` stays free of the
 # gpui dependency tree; the release build and CI enable it.
-gui = ["dep:gpui", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
+#
+# The audio entries are for voice messages (#3044, #3054): `opusic-sys` encodes
+# the recording into OGG/Opus, symphonia plus its libopus adapter decode the
+# samples and waveform, and rodio owns pause and seeking on the playback thread.
+# They are the same crates `local-tts` and `local-stt` already pull in, so a
+# build with those features pays nothing extra.
+gui = [
+    "dep:gpui",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-app-kit",
+    "dep:cpal",
+    "rodio",
+    "dep:symphonia",
+    "dep:symphonia-adapter-libopus",
+    "dep:opusic-sys",
+]
 [profile.dev]
 # Our own crate is optimised too: the GUI re-runs transcript layout on every
 # keystroke in the composer, and at opt-level 0 that work was slow enough to

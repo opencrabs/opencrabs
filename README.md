@@ -405,7 +405,7 @@ The one user-settable TTL is `cache_ttl` (default 300s, range 1-86400), which se
 |---------|-------------|
 | **Telegram Bot** | Full-featured Telegram bot — owner DMs share TUI session, groups get isolated per-group sessions (keyed by chat ID). Photo/voice support (STT transcribes incoming voice notes; TTS replies as OGG/Opus voice notes via `send_voice` when input was audio). Allowed user IDs, allowed chat/group IDs, per-group allow lists (`[channels.telegram.groups.<id>]`), `respond_to` filter (`all`/`dm_only`/`mention`/`auto`, global or per-group). Passive group message capture — all messages stored for context even when bot isn't mentioned |
 | **Telegram Userbot (experimental)** | Feature-gated, opt-in, receive-only MTProto companion. Experimental: merged from #1209 without a maintainer-side live login yet; expect rough edges. Local QR/code/2FA login; allowlisted text is passively stored under `telegram-userbot` for explicit retrieval through `channel_search`. An operator can also pull a document out on demand with `opencrabs channel userbot-download <peer> <msg_id|latest> [--outdir DIR]` (MTProto streams up to 2 GB where the Bot API caps at 20 MB), `--list` shows recent document messages, and the uploader's filename is reduced to its final component so a download cannot land outside `--outdir`. Empty `allowed_chats` is dry mode. It does not invoke the agent or send/edit/react as the user. |
-| **WhatsApp** | Pair by scanning a QR code from the TUI: first-run onboarding, or `/channels` then select WhatsApp. The QR is shown in the terminal. You run the bot AS whatever account you scan: your own number (talk via "Message Yourself") or any other number you own, including a WhatsApp Business account, to serve that account's incoming DMs. `response_policy` (`auto`/`owner_only`/`allowlist`/`open`) decides who it answers; the paired account's self-chat and `bot_owner` operator are always allowed. Streaming edits ONE living message in place rather than posting a chunk per step, and a finished multi-step turn is acknowledged with a reaction. Inbound: text, image, video, audio, document, sticker, location, contact card, reactions and poll votes (decrypted and resolved back to the option labels). Media whose CDN URL has expired is recovered through a server re-upload rather than reported as a failed download. Outbound audio goes out as a native voice note (`ptt`) with a recording indicator, pairing directly with built-in `local-tts`. Beyond messaging: block / unblock / list blocked contacts, disappearing messages (per message or channel-wide), pin and unpin chats, forward a message the session has seen, set the profile name and status, post status updates, discover followed newsletters, and create and assign labels. Every action that delivers a message is charged to an outbound send budget. Tool-approval prompts can optionally be sent as interactive buttons (`interactive_buttons`, off by default). Follow-up suggestion sets that exceed the native button cap render as a poll instead, and a vote selects the option (#1616). Per-phone sessions, session persists across restarts |
+| **WhatsApp** | Pair by scanning a QR code from the TUI: first-run onboarding, or `/channels` then select WhatsApp. The QR is shown in the terminal. You run the bot AS whatever account you scan: your own number (talk via "Message Yourself") or any other number you own, including a WhatsApp Business account, to serve that account's incoming DMs. `response_policy` (`auto`/`owner_only`/`allowlist`/`open`) decides who it answers; the paired account's self-chat and `bot_owner` operator are always allowed. Streaming edits ONE living message in place rather than posting a chunk per step, and a finished multi-step turn is acknowledged with a reaction. An ordinary turn can also grow one live tool block, a row per tool call, settled before the answer is sent (`live_tool_block`, off by default). Inbound: text, image, video, audio, document, sticker, location, contact card, reactions and poll votes (decrypted and resolved back to the option labels). Media whose CDN URL has expired is recovered through a server re-upload rather than reported as a failed download. Outbound audio goes out as a native voice note (`ptt`) with a recording indicator, pairing directly with built-in `local-tts`. Beyond messaging: block / unblock / list blocked contacts, disappearing messages (per message or channel-wide), pin and unpin chats, forward a message the session has seen, set the profile name and status, post status updates, discover followed newsletters, and create and assign labels. Every action that delivers a message is charged to an outbound send budget. Tool-approval prompts can optionally be sent as interactive buttons (`interactive_buttons`, off by default). Follow-up suggestion sets that exceed the native button cap render as a poll instead, and a vote selects the option (#1616). Per-phone sessions, session persists across restarts |
 | **Discord** | Full Discord bot — text + image + voice. Owner DMs share TUI session, guild channels get isolated per-channel sessions. Allowed user IDs, allowed channel IDs, `respond_to` filter. Tool calls render as ONE grouped message per turn, collapsed to a summary with an Expand/Collapse button, edited in place as tools run — Slack parity. Intermediate narration folds into the same bubble as dim subtext lines (`trace_narration`, default true). Reacting to a bot message becomes an agent turn (approval emoji = keep going with a silent react-back, stop emoji = pause and ask), and the agent reacts back via its `<<react:EMOJI>>` marker. Multiple generated files batch into one gallery-style message. Slash commands are native: `commands.toml` is projected onto Discord's command list per guild with argument hints (#1850, needs the `applications.commands` invite scope). Interactive components: select menus (`discord_send` with `action=select_menu`), modal forms (`action=modal`), component TTL with auto-cleanup, role-based access control, forum thread creation. Live reply tracing with auto-threading (tool turns stream into a linked thread; tables render as native Discord markdown tables) and double-post dedup on tool turns (#1603, #1608). Full proactive control via `discord_send` (17 actions): `send`, `reply`, `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, `create_thread`, `send_embed`, `get_messages`, `list_channels`, `add_role`, `remove_role`, `kick`, `ban`, `send_file`. Generated images sent as native Discord file attachments |
 | **Slack** | Full Slack bot via Socket Mode — owner DMs share TUI session, channels get isolated per-channel sessions. Text + image + voice (STT transcribes incoming audio attachments; TTS replies upload an OGG/Opus audio file via Slack's external upload flow — renders inline with waveform UI — when input was audio and `tts_enabled=true`). Allowed user IDs, allowed channel IDs, `respond_to` filter. Tool calls render as ONE grouped message per turn, collapsed to a summary with an Expand/Collapse button (Block Kit), edited in place as tools run — Telegram parity. Reacting to a bot message becomes an agent turn (approval emoji = keep going with a silent react-back, stop emoji = pause and ask), and the agent reacts back via its `<<react:EMOJI>>` marker. All file uploads (generated docs/images, TTS audio) use Slack's supported external upload flow (`files.getUploadURLExternal` + `completeUploadExternal`) with real MIME types. Full proactive control via `slack_send` (17 actions): `send`, `reply`, `react`, `unreact`, `edit`, `delete`, `pin`, `unpin`, `get_messages`, `get_channel`, `list_channels`, `get_user`, `list_members`, `kick_user`, `set_topic`, `send_blocks`, `send_file`. Generated images sent as native Slack file uploads. Bot token + app token from `api.slack.com/apps` (Socket Mode required). **Required Bot Token Scopes:** `chat:write`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `files:read`, `files:write`, `reactions:write`, `app_mentions:read` |
 | **Trello** | Tool-only by default — the AI acts on Trello only when explicitly asked via `trello_send`. Opt-in polling via `poll_interval_secs` in config; when enabled, only `@bot_username` mentions from allowed users trigger a response. Full card management via `trello_send` (22 actions): `add_comment`, `create_card`, `move_card`, `find_cards`, `list_boards`, `get_card`, `get_card_comments`, `update_card`, `archive_card`, `add_member_to_card`, `remove_member_from_card`, `add_label_to_card`, `remove_label_from_card`, `add_checklist`, `add_checklist_item`, `complete_checklist_item`, `list_lists`, `get_board_members`, `search`, `get_notifications`, `mark_notifications_read`, `add_attachment`. API Key + Token from `trello.com/power-ups/admin`, board IDs and member-ID allowlist configurable |
@@ -677,7 +677,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | `opencrabs run <prompt>` | Execute a single prompt non-interactively. Already unattended under the default `approval_policy`; `--auto-approve` / `--yolo` only when the policy is `ask`. `--quiet` suppresses UI chrome for machine-pure stdout. `--format text\|json\|markdown` |
 | `opencrabs agent` | Interactive CLI agent — multi-turn conversation in your terminal, no TUI. `-m <msg>` for single-message mode |
 | `opencrabs status` | System overview: version, provider, channels, database, brain, cron, dynamic tools |
-| `opencrabs doctor` | Full diagnostics: config, provider connectivity, database, brain, channels, CLI tools in PATH |
+| `opencrabs doctor` | Full diagnostics: config, provider connectivity, database, brain, channels, CLI tools in PATH, loaded service labels and profile lock owners (exits non-zero when two definitions or two pids claim one profile) |
 | `opencrabs init` | Initialize configuration (`--force` to overwrite) |
 | `opencrabs config` | Show current configuration (`--show-secrets` to reveal keys) |
 | `opencrabs onboard` | Run the onboarding setup wizard |
@@ -736,6 +736,16 @@ Both surfaces keep what you typed. The rules are the same in the terminal and in
 | **Switch panes** (TUI split, GUI split) | Each pane keeps its own draft, its own recall position and its own stashed draft. Moving focus moves all three with the pane |
 
 History is one list, shared in real time. The terminal and the window read and write the same `~/.opencrabs/history.txt` (500 entries, consecutive duplicates collapsed), and inside the window the single composer and every split pane walk one in-memory list, so a message sent in a pane is recalled in the window and the other way round. A restart keeps the list.
+
+#### Voice messages
+
+The microphone sits at the right end of the composer and records a real message, not a dictation draft: click it, or press `ctrl+alt+r`, or pick `start dictation` in Seeker, and one control takes over the row. While the microphone is open it counts the take, draws a wave of what the device is actually hearing, and turns its mark into the stop square, so the thing that started the recording is the thing that ends it. Escape stops it too, and a click on the square; every way out of a take goes through the same stop (#3044).
+
+A finished take is transcribed through whichever STT engine the profile is configured with, the same chain every channel uses, so nothing new to set up. The recording is encoded to OGG/Opus and written to `~/.opencrabs/voice/` as `voice-<milliseconds>.ogg`. The take then waits in its own preview above the input row instead of dropping words into the field: a play control with the clip's real length, the wave it was recorded with, and the transcript beneath both, so what the microphone thinks it heard can be read before it becomes a message. The ✕ throws the whole take away, and it never rides the next message: a sent take is spent, and switching conversations drops it with the draft. Enter is the one thing that puts it on the wire. The words then go to the agent with a `[voice note]` prefix, because a transcript handed over as ordinary prose gets an ordinary answer, and the clip rides along as `<<AUD:path>>`, which is how an image or a video already travels. The transcript strips the marker into a card that plays where it sits, with the clip's real length under the play glyph; while it plays the glyph becomes the stop square and the bars take the accent colour.
+
+When the answer settles, a turn that began as a recording is answered out loud. The reply goes through the same `synthesize` the channels call, the audio is saved beside the take as `reply-<milliseconds>.ogg`, and the marker goes on the answer row, so the same card plays the agent's voice back. Both are ordinary OGG/Opus files you can open from disk. Two things keep the loop honest: the reply and the take never share a name, so the player can tell them apart, and the marker is stripped before a stored row becomes model context, so the agent never reads a path it wrote itself.
+
+Speech needs a synthesis engine: with `tts_enabled` off or no TTS provider behind it, the answer arrives as text, exactly as a voice note does on Telegram. Transcription needs one too, and the built-in OpenCrabs provider transcribes out of the box.
 
 #### Theme modal
 
@@ -797,11 +807,13 @@ For direct assignment on the window, right-click a top-level session card and ch
 
 #### Seeker
 
-`Alt+Space` opens Seeker on both surfaces, and the window opens the same card with `cmd+k`. It is one field in the Spotlight style: type a few words, `enter` runs the row. It finds conversations, slash commands, screens, skills, the setup for a messaging channel, and the matching page on docs.opencrabs.com. `trello` surfaces the `/channels` row plus the channels docs page, `terminal voice` surfaces `/whisper`, `daemon trouble` surfaces the Troubleshooting page, `update` surfaces `/evolve`. A docs row opens the official page in your browser, and a channel that is not configured yet prints the steps it takes under the field before you commit.
+`Alt+Space` opens Seeker on both surfaces, and the window opens the same card with `cmd+k`. It is one field in the Spotlight style: type a few words, `enter` runs the row. It finds conversations, slash commands, screens, skills, the setup for a messaging channel, and the matching page on docs.opencrabs.com. `trello` surfaces the `/channels` row plus the channels docs page, `terminal voice` surfaces `/whisper`, `daemon trouble` surfaces the Troubleshooting page, `update` surfaces `/evolve`, and `mic` surfaces the window's own `start dictation` row, which opens the composer's microphone. The microphone words stay on that row rather than on `/whisper`: the command pastes a transcript into the field and has no device of its own, so a query aimed at talking would otherwise land on the clipboard flow (#3044). A docs row opens the official page in your browser, and a channel that is not configured yet prints the steps it takes under the field before you commit.
 
 Matching anchors on word starts and falls back to a full-token run, so `ção` still finds `Configuração` while stray letters never match a row they do not belong to. Three flows ride the same card: `create topic` arms the session list so the pick names a new topic under it, `favorite` pins the picked session through that same list, and a query that matches nothing offers to start a fresh session with your words as the request. While a pick is armed the field says what the pick is for. The window also lists `group topics`, which picks the session that holds the topics and then the sessions to attach under it, and both surfaces list `split | horizontal` and `split _ vertical`: the pick splits the pane the caret is on and leaves you on the sessions list to choose the new pane's session.
 
 Seeker also runs a deep search over stored message content, on the terminal and the window alike. Type a word that only appears inside a conversation and that conversation still surfaces, with the matching snippet in place of its date. The search waits for a pause in typing, only the newest query lands, and a repeated query rebuilds from cache without another read. Your query and caret stay put while the rows refresh.
+
+A field that is pure arithmetic is a calculator: `200/7.1` prints `= 28.1690140845` above every row, `enter` copies it, and the operators are `+ - * / % ^` with parentheses and decimals.
 
 ### Debug Logging
 
@@ -3180,6 +3192,17 @@ ephemeral_ttl = 0
 # only after you have seen a card with your own eyes.
 interactive_buttons = false
 
+# Live tool block on ordinary conversation turns (#2609). One message opens
+# with the turn's first tool call, gains a row per call and settles BEFORE the
+# answer is sent; a turn that calls no tools never opens one, so a one-line
+# reply stays one message. Defaults OFF: the block edits itself every 5s while
+# the turn runs, and that cadence on a personal chat is unverified against
+# WhatsApp's rate heuristics. On this channel the paired number IS the bot, so
+# a behaviour that can draw a ban is opt-in until a real phone has shown it is
+# quiet. Background completions keep their block either way (#2023): there it
+# is the only sign of life for a detached task.
+live_tool_block = false
+
 # Bounded per-chat history sync (#1525). List the normalized chat ids (the
 # JID strings, e.g. "+351..." style phones become 351...@s.whatsapp.net) whose
 # offline-sync and on-demand-recovered frames should be STORED rather than
@@ -4731,42 +4754,27 @@ journalctl --user -u opencrabs -f
 
 #### macOS (launchd)
 
-```bash
-cat > ~/Library/LaunchAgents/com.opencrabs.agent.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.opencrabs.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/opencrabs</string>
-        <string>daemon</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOU/.opencrabs/logs/daemon.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOU/.opencrabs/logs/daemon.err.log</string>
-</dict>
-</plist>
-EOF
+Let the binary write and load the LaunchAgent; it knows its own path, profile
+and log directory:
 
-launchctl load ~/Library/LaunchAgents/com.opencrabs.agent.plist
+```bash
+opencrabs service install   # write the managed plist
+opencrabs service start     # load it
 
 # Check status
+opencrabs service status
 launchctl list | grep opencrabs
 
 # Stop and unload
-launchctl unload ~/Library/LaunchAgents/com.opencrabs.agent.plist
+opencrabs service stop
 ```
 
-> Update the path in `ProgramArguments` to match your install. For cargo installs: `~/.cargo/bin/opencrabs`. For source builds: `/path/to/target/release/opencrabs`.
+The installer writes exactly one label per profile: `com.opencrabs.daemon` for
+the default profile, `com.opencrabs.daemon.<name>` for a named one. Onboarding
+and the GUI Start daemon chip use that same installer, and a machine still
+carrying the old `com.opencrabs.agent` plist has it retired the next time the
+managed definition is installed or the app starts, so two `KeepAlive` jobs
+never fight over one daemon.
 
 #### Windows (Task Scheduler)
 

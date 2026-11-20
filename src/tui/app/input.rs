@@ -744,8 +744,9 @@ impl App {
         )
     }
 
-    /// Copy text to system clipboard
-    fn copy_to_clipboard(text: &str) -> bool {
+    /// Copy text to system clipboard. Shared with the Seeker dispatch, which
+    /// hands the calculator's answer to the same backends a message copy uses.
+    pub(crate) fn copy_to_clipboard(text: &str) -> bool {
         #[cfg(windows)]
         use std::process::Command;
 

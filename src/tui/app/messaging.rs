@@ -2716,6 +2716,11 @@ impl App {
         if msg.role != "assistant"
             || (!msg.content.contains("<!-- tools")
                 && !msg.content.contains("<!-- reasoning -->")
+                // Same arm as the GUI gate: a blocked section is a marker the
+                // split folds, and a phantom row with no reasoning block and no
+                // tool ledger would otherwise skip the split and paint raw
+                // markers (#3052).
+                && !msg.content.contains(crate::tui::app::reasoning_split::BLOCKED_OPEN)
                 && !content_lower.contains("<antthinking")
                 && !content_lower.contains("<think")
                 && !content_lower.contains("<mm:think")

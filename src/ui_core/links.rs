@@ -159,7 +159,10 @@ fn has_uri_scheme(token: &str) -> bool {
         return false;
     };
     scheme.len() > 1
-        && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
         && scheme
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))

@@ -1293,7 +1293,8 @@ impl AgentService {
     ) -> std::path::PathBuf {
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.set_working_directory_for_session(session_id, canonical.clone());
-        self.set_project_directory(session_id, canonical.clone()).await;
+        self.set_project_directory(session_id, canonical.clone())
+            .await;
         canonical
     }
 

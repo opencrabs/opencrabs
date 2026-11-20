@@ -99,11 +99,6 @@ impl RowPlan {
     pub fn cells(&self) -> usize {
         self.rows.iter().sum()
     }
-
-    /// Whether there is anything to draw at all.
-    pub fn is_empty(&self) -> bool {
-        self.cells() == 0
-    }
 }
 
 /// Plan the row for `count` attachments inside `available_width` points.
@@ -236,7 +231,7 @@ mod tests {
     #[test]
     fn zero_attachments_plan_nothing() {
         let p = plan(0, WIDE);
-        assert!(p.is_empty());
+        assert_eq!(p.cells(), 0);
         assert_eq!(p.strip_height, 0.0);
         assert_eq!(p.folded, 0);
         assert!(p.rows.is_empty());

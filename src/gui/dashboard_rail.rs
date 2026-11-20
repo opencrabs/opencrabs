@@ -22,10 +22,7 @@ pub(crate) const RAIL_CHIPS_IDLE_FOLD: std::time::Duration = std::time::Duration
 /// one `now`, and so the threshold can be tested without a clock or a window.
 /// `saturating_duration_since` keeps a clock that moved backwards from folding
 /// a strip the reader just opened.
-pub(crate) fn chips_idle_fold_due(
-    opened: std::time::Instant,
-    now: std::time::Instant,
-) -> bool {
+pub(crate) fn chips_idle_fold_due(opened: std::time::Instant, now: std::time::Instant) -> bool {
     now.saturating_duration_since(opened) >= RAIL_CHIPS_IDLE_FOLD
 }
 
@@ -991,6 +988,70 @@ impl Dashboard {
     pub(crate) fn rail_toggle_automation(&mut self, cx: &mut Context<Self>) {
         self.sessions.rail_filter.show_automation = !self.sessions.rail_filter.show_automation;
         cx.notify();
+    }
+}
+
+/// Whether a rail preview refresh can actually change a line.
+///
+/// The first version asked `rail.streaming_count()`, which counts only
+/// sessions streaming with no pane of their own. A turn in the open
+/// conversation never joins that set (its progress is handled inline) and a
+/// parked turn returns from `fold_pane_progress` before the set is touched, so
+/// the count read zero for the whole of a normal turn: the badge spun while
+/// the preview line, the cost and the row order stayed frozen until `Done`.
+/// Ask about the work instead of the set.
+pub(crate) fn previews_can_move(busy: bool, stashed_live: bool, streaming: usize) -> bool {
+    busy || stashed_live || streaming > 0
+}
+
+/// Holds a rail preview read's in-flight slot, and gives it back on drop.
+///
+/// A detached task whose view has gone away still unwinds through this, so the
+/// slot can never be wedged by a cancelled read (#2817).
+pub(crate) struct PreviewSlot(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
+/// The rail's default width, and the floor it may be dragged to. At the
+/// floor the splitter closes the rail instead of leaving a sliver: a 3-rem
+/// column shows titles cut to nothing, which is worse than no column.
+pub(crate) const RAIL_DEFAULT_REM: f32 = 17.0;
+pub(crate) const RAIL_MIN_REM: f32 = 11.0;
+pub(crate) const RAIL_MAX_REM: f32 = 32.0;
+
+/// Apply sidebar visibility without letting a closed rail retain keyboard
+/// focus or a hidden filter. Width belongs to the window layout and is not
+/// part of this transition.
+///
+/// Opening is a request to walk the list, so the rail takes the keyboard on
+/// the way in and the cursor stands on the open conversation (#2665). It used
+/// to arrive unfocused, which left up and down dead until a Tab.
+pub(crate) fn set_rail_open_state(
+    open: bool,
+    rail_open: &mut bool,
+    rail_focused: &mut bool,
+    sessions: &mut sessions::SessionsState,
+) {
+    *rail_open = open;
+    if open {
+        *rail_focused = true;
+        sessions.cursor = sessions.cursor.or(sessions.selected);
+    } else {
+        *rail_focused = false;
+        sessions.filter.clear();
+        sessions.filter_active = false;
+        // The filter menu clears with the rail (#2719): a reopened rail
+        // starts from the default rule, never a stale chip from last time.
+        sessions.rail_filter = sessions::RailFilter::default();
+        // The open chip panel folds with the rail too (#2787).
+        sessions.rail_filter_open = false;
+        // The deep hits clear with the rail too (#2720): a reopened rail
+        // starts unsearched, never showing snippets from the last query.
+        sessions.content_matches.clear();
     }
 }
 
