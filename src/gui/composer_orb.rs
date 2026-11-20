@@ -153,10 +153,24 @@ const HOVER_RIM: f32 = 0.35;
 
 /// The player's on-screen size in points, and the multiple it is rasterised at.
 ///
-/// The frame is cached, so the cost is paid once per playhead step rather than
-/// once per repaint.
-const PLAYER_POINTS: (f32, f32) = (138.0, 30.0);
+/// Twice the strip it replaced, which is what the owner asked for: the old
+/// block was 138 by 30 points and its mark read as a speck (#3111). The frame
+/// is cached, so the cost is paid once per playhead step rather than once per
+/// repaint. The width is the block's preferred width: it gives way to a
+/// narrower bubble rather than painting past it.
+const PLAYER_POINTS: (f32, f32) = (276.0, 60.0);
 const PLAYER_SCALE: f32 = 2.5;
+
+/// The narrowest the block is drawn, however little room the row has.
+///
+/// Below this the mark and the track stop being a target, so a pane narrower
+/// than this scrolls the block instead of shrinking it further.
+const MIN_PLAYER_WIDTH: f32 = 120.0;
+
+/// The width to draw the block at, given the room the row has for it.
+fn player_width(max_width: f32) -> f32 {
+    PLAYER_POINTS.0.min(max_width).max(MIN_PLAYER_WIDTH)
+}
 
 /// The block's on-screen height in points.
 ///
@@ -390,8 +404,11 @@ pub(crate) struct PlayerBlock {
 impl PlayerBlock {
     /// Build a player for one take. `peaks` is whatever the decoder produced,
     /// at whatever length, and is pooled down to the meter's own width.
-    pub(crate) fn new(colour: u32, peaks: &[f32]) -> Self {
-        Self::at(pixels(PLAYER_POINTS, PLAYER_SCALE), colour, peaks)
+    ///
+    /// `width` is the block's on-screen width, so a row with less room than the
+    /// block asks for gets a smaller raster rather than a cropped one (#3111).
+    pub(crate) fn new(colour: u32, peaks: &[f32], width: f32) -> Self {
+        Self::at(pixels((width, PLAYER_POINTS.1), PLAYER_SCALE), colour, peaks)
     }
 
     /// The same player at an arbitrary raster size, so the tests can render a
@@ -901,6 +918,9 @@ struct Cached {
     block: PlayerBlock,
     peaks: Arc<Vec<f32>>,
     path: PathBuf,
+    /// The on-screen width the cached frame was drawn at, so a row that grows
+    /// or shrinks gets a new raster instead of the old one stretched (#3111).
+    width: f32,
     state: PlayerState,
     frame: Arc<RenderImage>,
 }
@@ -937,6 +957,7 @@ fn frame_for(
     path: &Path,
     peaks: &Arc<Vec<f32>>,
     colour: u32,
+    width: f32,
     state: PlayerState,
     cx: Option<&mut App>,
 ) -> Arc<RenderImage> {
@@ -948,6 +969,7 @@ fn frame_for(
         if let Some(cached) = players.get(id).filter(|_| !state.pending)
             && cached.path.as_path() == path
             && Arc::ptr_eq(&cached.peaks, peaks)
+            && cached.width == width
             && cached.state.progress == state.progress
             && cached.state.playing == state.playing
             && cached.state.hovered == state.hovered
@@ -959,15 +981,20 @@ fn frame_for(
             Some(old) => {
                 // The block carries the liquid's phase and energy, so it is
                 // kept across repaints and only rebuilt when the take itself
-                // changes. Rebuilding it would restart the seam mid-word.
-                let block = if old.path.as_path() == path && Arc::ptr_eq(&old.peaks, peaks) {
+                // changes. Rebuilding it would restart the seam mid-word. A new
+                // width is one of those changes: the slab is sized when the
+                // block is built (#3111).
+                let block = if old.path.as_path() == path
+                    && Arc::ptr_eq(&old.peaks, peaks)
+                    && old.width == width
+                {
                     old.block
                 } else {
-                    PlayerBlock::new(colour, peaks)
+                    PlayerBlock::new(colour, peaks, width)
                 };
                 (block, Some(old.frame))
             }
-            None => (PlayerBlock::new(colour, peaks), None),
+            None => (PlayerBlock::new(colour, peaks, width), None),
         };
         let frame = Arc::new(block.render(state));
         players.insert(
@@ -976,6 +1003,7 @@ fn frame_for(
                 block,
                 peaks: Arc::clone(peaks),
                 path: path.to_path_buf(),
+                width,
                 state,
                 frame: Arc::clone(&frame),
             },
@@ -1152,7 +1180,14 @@ pub(crate) fn player(
     fallback_levels: &[f32],
     cx: &mut App,
 ) -> impl IntoElement {
-    player_into(id, path, seconds, fallback_levels, Some(cx))
+    player_into(
+        id,
+        path,
+        seconds,
+        fallback_levels,
+        measured_width(),
+        Some(cx),
+    )
 }
 
 /// The same block for a surface with no `App` in reach, such as a stored row in
@@ -1163,13 +1198,18 @@ pub(crate) fn player(
 /// plain function with no context to pass, so the wrapper simply says so
 /// instead of the module growing a second player that drifts from this one
 /// (#3092).
+///
+/// `max_width` is the room the row has for the block. The composer measures
+/// itself, a chat row knows its content width, and both end up at the same
+/// clamp (#3111).
 pub(crate) fn player_plain(
     id: &str,
     path: &Path,
     seconds: Option<f32>,
     fallback_levels: &[f32],
+    max_width: f32,
 ) -> impl IntoElement {
-    player_into(id, path, seconds, fallback_levels, None)
+    player_into(id, path, seconds, fallback_levels, max_width, None)
 }
 
 fn player_into(
@@ -1177,8 +1217,10 @@ fn player_into(
     path: &Path,
     seconds: Option<f32>,
     fallback_levels: &[f32],
+    max_width: f32,
     cx: Option<&mut App>,
 ) -> impl IntoElement {
+    let width = player_width(max_width);
     let live = voice_play::state(path);
     let (position, total) = span_for(path, live, seconds);
     let fraction = total
@@ -1197,7 +1239,15 @@ fn player_into(
     let peaks = voice_media::visual(path)
         .map(|visual| Arc::clone(&visual.peaks))
         .unwrap_or_else(|| Arc::new(fallback_peaks(fallback_levels)));
-    let frame = frame_for(id, path, &peaks, palette::current().amber, state, cx);
+    let frame = frame_for(
+        id,
+        path,
+        &peaks,
+        palette::current().amber,
+        width,
+        state,
+        cx,
+    );
 
     let hover_id = id.to_string();
     let press_path = path.to_path_buf();
@@ -1211,7 +1261,7 @@ fn player_into(
         .id(SharedString::from(format!("voice-orb-{id}")))
         .relative()
         .flex_none()
-        .w(px(PLAYER_POINTS.0))
+        .w(px(width))
         .h(px(PLAYER_POINTS.1))
         .cursor_pointer()
         .on_mouse_down(
@@ -1269,11 +1319,12 @@ fn player_into(
 ///
 /// No press and no pointer: there is no audio to start, and a control that
 /// answers nothing teaches the reader to stop pressing blocks.
-pub(crate) fn pending(id: &str) -> impl IntoElement {
+pub(crate) fn pending(id: &str, max_width: f32) -> impl IntoElement {
     let state = PlayerState {
         pending: true,
         ..PlayerState::default()
     };
+    let width = player_width(max_width);
     // One `Arc` for every waiting block, so the frame cache keeps each block
     // across repaints: a fresh allocation would read as a different take and
     // restart the highlight from the left edge on every frame.
@@ -1282,6 +1333,7 @@ pub(crate) fn pending(id: &str) -> impl IntoElement {
         Path::new(""),
         &pending_peaks(),
         palette::current().amber,
+        width,
         state,
         None,
     );
@@ -1298,7 +1350,7 @@ pub(crate) fn pending(id: &str) -> impl IntoElement {
             div()
                 .relative()
                 .flex_none()
-                .w(px(PLAYER_POINTS.0))
+                .w(px(width))
                 .h(px(PLAYER_POINTS.1))
                 .child(img(frame).absolute().inset_0().size_full()),
         )
