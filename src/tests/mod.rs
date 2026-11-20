@@ -574,6 +574,7 @@ pub mod services_message_test;
 pub mod services_project_test;
 pub mod services_session_test;
 pub mod session_list_shows_last_activity_test;
+pub mod session_one_card_3110_test;
 pub mod session_project_autolink_test;
 pub mod session_search_completed_plan_test;
 pub mod session_search_empty_query_test;

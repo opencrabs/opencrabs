@@ -2366,14 +2366,15 @@ impl Render for Dashboard {
                 }
             }
         }
-        if let Some(bar) = topic_top {
-            // The topic bar is a row of the chat's own stack, so it takes the
-            // same measure as the text under it (#2590). It is drawn above the
-            // screen match, which is why the wrapper is a named function and
-            // not a closure: the same two values have to reach it here.
-            right = right.child(central(bar, centred_chat, chat_measure_px));
-        }
-        right = right.child(middle);
+        // The topic bar is a row of the chat's own stack, so it takes the same
+        // measure as the text under it (#2590). It is not attached here: the
+        // chat arm places it inside the session surface, above the history, so
+        // the whole session is one card (#3110). It is only ever built for the
+        // chat screen, which is why no other arm needs it.
+        // The conversation joins the column inside the arms below, not here:
+        // the chat puts it inside the session surface (#3110), which has to own
+        // the history, the strips and the composer together, and every other
+        // screen takes it as the plain body it always was.
         right = match self.screen {
             Screen::Chat => {
                 // The running checklist sits between the conversation and the
@@ -2397,12 +2398,75 @@ impl Render for Dashboard {
                     .overflow_hidden()
                     .gap_3();
                 let mut above_used = false;
-                // In a split every pane carries its own plan, queue and
-                // composer (#2530), so the window-level copies stand down:
-                // drawing both would give the chat two composers. An unsplit
-                // window keeps exactly the layout it has always had, measure
-                // wrapper included (#2594).
-                if !self.window_is_split() {
+                // A split already is one card per pane, and each pane's leaf
+                // box paints its own fill, its own radius and the clip that
+                // keeps a scrolled row off the corner (#2612). A second wrapper
+                // around the arrangement would round the whole thing and leave
+                // the panes square inside it, so a split keeps the panes bare.
+                if self.window_is_split() {
+                    col = col.child(middle);
+                } else {
+                    // The session is one surface (#3110). The history, the plan
+                    // card, the queue strip, the suggested options, the
+                    // running-task row, the bottom topic row and the composer all
+                    // live inside a single rounded card, so the lower half of the
+                    // window reads as one session instead of a stack of unrelated
+                    // strips parked under the chat. The cards inside it stay cards,
+                    // because they are still separate objects, but they sit on this
+                    // fill rather than beside it, and the composer stops floating
+                    // over the gap with a surface of its own.
+                    //
+                    // This element is also the corner's only owner, and that is the
+                    // other half of the fix. The transcript scrolls, so it cannot
+                    // clip its own arc: a later `overflow_hidden` would replace
+                    // `overflow_y_scroll` and stop the chat scrolling. That is why a
+                    // scrolled row painted square over the rounded corner, top and
+                    // bottom. The clip lives here now, one level up, and the rows
+                    // are cut by the curve instead of painted over it.
+                    //
+                    // The radius is the message bubbles' own, not `CARD_RADIUS`:
+                    // this is the box the bubbles live in, so a rounder corner than
+                    // theirs reads as two objects meeting at the edge. The fill is
+                    // the transcript's, so the two agree to the pixel where the
+                    // inner surface ends and no seam shows between them.
+                    //
+                    // Built here, before the strips, because it is the ground they
+                    // sit on: `middle` is its first child and everything that rides
+                    // between the history and the field is appended in the order it
+                    // stacks.
+                    let mut session = div()
+                        .flex()
+                        .flex_col()
+                        // The cards inside keep the spacing they had as siblings of
+                        // the history. What changes is the ground they sit on, not
+                        // the rhythm between them.
+                        .gap_3()
+                        // Height, not `flex_1`: the card is a child of a row
+                        // (see the wrapper below), and in a row `flex_1` grows
+                        // the width, which would cancel the measure it is
+                        // about to be given (#3110).
+                        .h_full()
+                        .min_h_0()
+                        // The conversation's own measure, not the pane's whole
+                        // width: the card holds the transcript, so it takes the
+                        // width the transcript draws at. In a narrow window the
+                        // two are the same and this is a no-op (#2586).
+                        .when(centred_chat, |d| d.w(px(chat_measure_px)))
+                        .rounded(px(transcript::MESSAGE_RADIUS))
+                        .bg(rgb(transcript::surface_fill(palette::current().bg)))
+                        .overflow_hidden();
+                    // The topic bar opens the card, then the history. Both are
+                    // rows of the session, so the strip stops floating over a
+                    // surface it does not belong to (#3110).
+                    if let Some(bar) = topic_top {
+                        session = session.child(central(bar, centred_chat, chat_measure_px));
+                    }
+                    session = session.child(middle);
+                    // In a split every pane carries its own plan, queue and
+                    // composer (#2530), so the window-level copies stand down:
+                    // drawing both would give the chat two composers. An unsplit
+                    // window keeps exactly the layout it has always had, measure
+                    // wrapper included (#2594).
                     let open = self.chat_session;
                     let actions = open.map(|session| self.plan_actions(session, cx));
                     self.plan.refresh();
@@ -2471,7 +2535,7 @@ impl Render for Dashboard {
                     // the composer does: the box goes in above the input, and
                     // an empty box adds no row at all.
                     if above_used {
-                        col = col.child(above);
+                        session = session.child(above);
                     }
                     // The unsplit chat uses the same composer swap as a split
                     // leaf (#2924). Without this arm the forward state changed
@@ -2481,7 +2545,7 @@ impl Render for Dashboard {
                     // the composer and the footer, because the footer now
                     // lives inside the same card as the composer.
                     if let Some(strip) = topic_bottom {
-                        col = col.child(central(strip, centred_chat, chat_measure_px));
+                        session = session.child(central(strip, centred_chat, chat_measure_px));
                     }
                     let composer_replacement =
                         if self.forward_pick.is_some() && self.forward_leaf.is_none() {
@@ -2506,7 +2570,7 @@ impl Render for Dashboard {
                         if self.topic_draft.is_none() {
                             let popup = self.composer.editor.read(cx).command_popup();
                             if let Some((names, selected)) = popup {
-                                col = col.child(central(
+                                session = session.child(central(
                                     command_popup_view(&names, selected).into_any_element(),
                                     centred_chat,
                                     chat_measure_px,
@@ -2514,7 +2578,7 @@ impl Render for Dashboard {
                             } else if let Some((items, selected)) =
                                 self.composer.editor.read(cx).emoji_popup()
                             {
-                                col = col.child(central(
+                                session = session.child(central(
                                     emoji_popup_view(&items, selected).into_any_element(),
                                     centred_chat,
                                     chat_measure_px,
@@ -2561,24 +2625,32 @@ impl Render for Dashboard {
                     if let Some(line) = self.task_card_line() {
                         shell = shell.child(hint_card(&line));
                     }
-                    col = col.child(central(
-                        shell
-                            .child(dock.child(footer.into_any_element()))
-                            .into_any_element(),
-                        centred_chat,
-                        chat_measure_px,
-                    ));
+                    // The composer closes the session, flush inside the same
+                    // clip: it is the last row of the card, not a separate one
+                    // flying under it (#3110).
+                    session = session.child(shell.child(dock.child(footer.into_any_element())));
+                    // The card takes the conversation's measure and centres as
+                    // a whole, so its own edges line up with the text instead
+                    // of the card being full width with the text inset (#2586).
+                    // `central` cannot do this job: its row is `flex_none`, so
+                    // a card that has to fill the height would collapse inside
+                    // it. This row grows, and the card is what it centres.
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .justify_center()
+                            .child(session.when(!centred_chat, |d| d.w_full())),
+                    );
                 }
                 col
             }
-            Screen::Usage => right.child(footer),
-            Screen::Files => right.child(footer),
-            Screen::Models => right.child(footer),
-            Screen::Skills => right.child(footer),
-            Screen::Projects => right.child(footer),
-            Screen::DirectoryPicker => right.child(footer),
-            Screen::Onboard => right.child(footer),
-            Screen::MissionControl => right.child(footer),
+            // Every other screen is the body and then its footer, unchanged:
+            // only the chat has a session surface to build (#3110).
+            _ => right.child(middle).child(footer),
         };
 
         let mut root = div()

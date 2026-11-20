@@ -2143,7 +2143,14 @@ fn message_max_width(content_width: f32) -> f32 {
 const FORWARD_BAR_WIDTH: f32 = 3.0;
 /// The gap between that bar and the forwarded text.
 const FORWARD_BAR_GAP: f32 = 12.0;
-const MESSAGE_RADIUS: f32 = 12.0;
+/// The curve the message bubbles, the session surface and the composer all
+/// share (#3110).
+///
+/// It is the chat history's own radius, not `CARD_RADIUS`: the session
+/// background is the box the bubbles live in, so it has to carry the same
+/// curve they do or the two read as separate objects at the corners. The
+/// session surface in `dashboard_render` reads this same constant.
+pub(crate) const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
 const PLAIN_TEXT_SIZE: f32 = 13.0;
 /// Tool calls and card lines: the `text_xs` size the pane draws them at, so a
@@ -5717,7 +5724,7 @@ fn transcript_content_width(outer_width: f32, rem_size: f32) -> f32 {
 /// screen and exact under a pixel read, so the next screenshot answers the
 /// question by itself, and the answer is what the witness lines cannot give:
 /// whether this element painted.
-fn surface_fill(bg: u32) -> u32 {
+pub(crate) fn surface_fill(bg: u32) -> u32 {
     let lift = |shift: u32| {
         let channel = (bg >> shift) & 0xff;
         ((channel + 3).min(0xff)) << shift
@@ -5953,12 +5960,15 @@ pub fn view(
         .track_scroll(scroll)
         .gap_2()
         .p_2()
-        // The chat surface carries the same corner the plan card and the
-        // suggested options carry, so inside a pane its fill follows the ring
-        // instead of painting a square box over the corner arc. No clip here:
-        // `overflow_y_scroll` above is this element's scroll, and a later
-        // `overflow_hidden` would replace it and stop the transcript scrolling.
-        .rounded(px(CARD_RADIUS))
+        // The chat history's own surface takes the message bubbles' curve, not
+        // the card's (#3110): it is the box the bubbles live in, so a rounder
+        // corner than theirs reads as two objects stacked at the edge instead
+        // of one surface. No clip here: `overflow_y_scroll` above is this
+        // element's scroll, and a later `overflow_hidden` would replace it and
+        // stop the transcript scrolling. The session surface around it owns the
+        // clip, which is why a scrolled row can no longer paint square over the
+        // arc.
+        .rounded(px(MESSAGE_RADIUS))
         .bg(rgb(surface_fill(palette::current().bg)));
     // The wheel is the reader's own hand on the transcript: the owning view
     // decides whether a tick releases its follow or gives it back (#2698).

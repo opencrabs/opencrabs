@@ -3818,3 +3818,19 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
         "a pane's own transcript is scrolled into view too"
     );
 }
+
+/// The composer's bottom corners land on the session card's (#3110).
+///
+/// The composer is the card's last row and it is flush, so the two curves meet
+/// at the same edge. A composer rounder than the card is cut by the card's clip
+/// and reads right; a composer tighter than the card leaves a sliver of the
+/// card's fill in the notch, which is the seam the issue is about. They are
+/// equal, which is the one value that cannot go wrong either way.
+#[test]
+fn the_composer_corner_agrees_with_the_card() {
+    assert_eq!(
+        crate::transcript::MESSAGE_RADIUS,
+        opencrabs::ui_core::card::COMPOSER_RADIUS,
+        "the composer and the session share one curve"
+    );
+}

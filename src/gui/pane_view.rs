@@ -25,7 +25,6 @@ use gpui::{
     rgb,
 };
 use opencrabs::brain::tools::suggest_options::SuggestionItem;
-use opencrabs::ui_core::card::CARD_RADIUS;
 use opencrabs::ui_core::pane_tree::{DropHalf, drop_half};
 use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::Layout;
@@ -899,8 +898,14 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
         // The pane paints its own fill and clips its children: the chat body
         // used to paint a square box over the ring's corner arc, so the chat
         // colour showed where the ring should curve.
+        //
+        // The curve is the message bubbles' own, the same one the single-pane
+        // session surface carries (#3110): a pane IS the session surface in a
+        // split, so a rounder corner here would make a split and an unsplit
+        // window disagree about how a conversation looks. It is also the clip,
+        // which is why a scrolled row cannot paint over it.
         .bg(rgb(palette::current().bg))
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(transcript::MESSAGE_RADIUS))
         .border_1()
         .border_color(rgb(focus_ring_color(focused)))
         .overflow_hidden()
