@@ -118,7 +118,7 @@ fn the_take_previews_above_the_row_with_its_own_shape() {
 
     let strip = editor("fn voice_strip(", "/// The keybindings the editor needs");
     assert!(
-        strip.contains("crate::voice_preview::player(")
+        strip.contains("crate::composer_orb::player(")
             && strip.contains("&draft.clip")
             && strip.contains("Some(draft.seconds)")
             && strip.contains("&draft.levels"),
@@ -296,8 +296,8 @@ fn only_an_audio_extension_draws_a_player() {
         "audio is separated from the square attachment plan"
     );
     assert!(
-        cards.contains("crate::voice_preview::player("),
-        "the stored clip uses the same seekable player as the composer"
+        cards.contains("crate::composer_orb::player_plain("),
+        "the stored clip uses the same glass block as the composer"
     );
 }
 

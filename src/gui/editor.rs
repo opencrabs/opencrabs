@@ -3407,6 +3407,13 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         &mut **cx,
     );
     let label = crate::composer_orb::label(&draft.clip, Some(draft.seconds));
+    // The block sits alone on its row with only the discard beside it, and the
+    // words go underneath on the block's own left edge. The old preview was
+    // built that way and it reads as one card: a wide element with its caption
+    // below. Pushing the text into a column to the right of the glass instead
+    // turned the block into a left gutter and forced the transcript to fake the
+    // alignment with a fixed indent, which drifted the moment the block's width
+    // changed (#3092).
     div()
         .flex()
         .flex_col()
@@ -3425,14 +3432,7 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                 .min_w_0()
                 .gap_2()
                 .child(player)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(11.0))
-                        .text_color(rgb(palette.text_muted))
-                        .child(SharedString::from(label)),
-                )
+                .child(div().flex_1())
                 .child(
                     div()
                         .id("voice-preview-discard")
@@ -3445,17 +3445,22 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                         .on_mouse_down(MouseButton::Left, discard),
                 ),
         )
-        // The recogniser's words stay a draft caption, aligned with the text
-        // column rather than the glass: the block's width plus the row's gap
-        // and padding, so the caption starts where the label above it does.
-        // Enter still sends the composer's actual field, exactly as before this
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(px(11.0))
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from(label)),
+        )
+        // The recogniser's words stay a draft caption under the block, on the
+        // same left margin, so the card has one edge instead of three. Enter
+        // still sends the composer's actual field, exactly as before this
         // visual change.
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .pl(px(150.0))
-                .pr(px(20.0))
                 .text_xs()
                 .text_color(rgb(palette.text_muted))
                 .child(SharedString::from(draft.text.clone())),

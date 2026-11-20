@@ -732,7 +732,7 @@ fn frame_for(
     peaks: &Arc<Vec<f32>>,
     colour: u32,
     state: PlayerState,
-    cx: &mut App,
+    cx: Option<&mut App>,
 ) -> Arc<RenderImage> {
     let (frame, retired) = PLAYERS.with(|players| {
         let mut players = players.borrow_mut();
@@ -774,7 +774,12 @@ fn frame_for(
         (frame, retired)
     });
     if let Some(retired) = retired {
-        cx.drop_image(retired, None);
+        // Only the composer has an `App` in reach. A transcript row is built
+        // from a plain function, so the retired texture is left to the
+        // allocator there instead of being handed back to the atlas (#3092).
+        if let Some(cx) = cx {
+            cx.drop_image(retired, None);
+        }
     }
     frame
 }
@@ -909,6 +914,22 @@ fn span(live: Option<ClipState>, seconds: Option<f32>) -> (Duration, Option<Dura
     (total.map_or(position, |total| position.min(total)), total)
 }
 
+/// The same span, for a clip whose length is not known from the draft.
+///
+/// A stored message carries no recorded duration, so the decoder is asked for
+/// it. Without that fallback a chat row paints the empty clock until the take
+/// is played once, which is the one moment the length should already be known
+/// (#3092).
+fn span_for(
+    path: &Path,
+    live: Option<ClipState>,
+    seconds: Option<f32>,
+) -> (Duration, Option<Duration>) {
+    let (position, total) = span(live, seconds);
+    let total = total.or_else(|| voice_media::duration(path).map(Duration::from_secs));
+    (total.map_or(position, |total| position.min(total)), total)
+}
+
 /// The take as a player: the block, its liquid, its track and its mark.
 ///
 /// Nothing else belongs inside it. The discard control stays outside the
@@ -922,8 +943,35 @@ pub(crate) fn player(
     fallback_levels: &[f32],
     cx: &mut App,
 ) -> impl IntoElement {
+    player_into(id, path, seconds, fallback_levels, Some(cx))
+}
+
+/// The same block for a surface with no `App` in reach, such as a stored row in
+/// the transcript.
+///
+/// One look, one behaviour, two entry points. The only thing the `App` buys is
+/// handing a retired texture back to the atlas, and a chat row is built by a
+/// plain function with no context to pass, so the wrapper simply says so
+/// instead of the module growing a second player that drifts from this one
+/// (#3092).
+pub(crate) fn player_plain(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+) -> impl IntoElement {
+    player_into(id, path, seconds, fallback_levels, None)
+}
+
+fn player_into(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+    cx: Option<&mut App>,
+) -> impl IntoElement {
     let live = voice_play::state(path);
-    let (position, total) = span(live, seconds);
+    let (position, total) = span_for(path, live, seconds);
     let fraction = total
         .filter(|total| !total.is_zero())
         .map(|total| (position.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0))
@@ -1010,7 +1058,7 @@ pub(crate) fn player(
 
 /// The take's position and length, for the caption beside the block.
 pub(crate) fn label(path: &Path, seconds: Option<f32>) -> String {
-    let (position, total) = span(voice_play::state(path), seconds);
+    let (position, total) = span_for(path, voice_play::state(path), seconds);
     let length = total
         .map(|total| clip_length(total.as_secs()))
         .unwrap_or_else(|| "--:--".to_string());

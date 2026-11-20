@@ -2970,9 +2970,34 @@ fn history_attachments(
         .pt_1();
     for (index, path) in audio.into_iter().enumerate() {
         let key = path.to_string_lossy();
-        strip = strip.child(div().w_full().max_w(px(420.0)).min_w_0().child(
-            crate::voice_preview::player(&format!("history-{key}-{index}"), path, None, &[]),
-        ));
+        // The same glass block the composer shows for a take, so a sent clip
+        // and the take that produced it are one element with one behaviour.
+        // The transcript builds its rows from plain functions with no `App` in
+        // reach, which is why this calls the context-free entry point (#3092).
+        //
+        // The block is a fixed size, so the row keeps the label underneath it
+        // instead of stretching the glass across the bubble. The caption is
+        // what carries the length, exactly as it does in the composer.
+        strip = strip.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .min_w_0()
+                .gap_1()
+                .child(crate::composer_orb::player_plain(
+                    &format!("history-{key}-{index}"),
+                    path,
+                    None,
+                    &[],
+                ))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(crate::composer_orb::label(path, None))),
+                ),
+        );
     }
     if files.is_empty() {
         return strip;
