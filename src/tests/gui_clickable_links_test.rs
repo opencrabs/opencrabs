@@ -9,7 +9,8 @@
 //! opening only after a copy found nothing) is read from source.
 
 use crate::ui_core::links::{
-    ClickTarget, target_at_byte_with, target_at_with, target_for_click, target_for_click_with,
+    ClickTarget, click_names_target, target_at_byte_with, target_at_with, target_for_click,
+    target_for_click_with, token_at_byte,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -280,6 +281,86 @@ fn open_target_lines_and_cells_carry_their_links() {
             .count(),
         2,
         "MdLine and MdCell both carry link ranges"
+    );
+}
+
+/// A miss has to name the token resolution tried. The log used to print the
+/// raw tail from the click offset, so a click on `brain-audit-2026-11-17.md`
+/// read as `26-11-17.md` and looked like a path truncated by word wrap.
+#[test]
+fn open_target_miss_names_the_whole_token() {
+    let text = "see brain-audit-2026-11-17.md now";
+    assert_eq!(
+        token_at_byte(text, 20).as_deref(),
+        Some("brain-audit-2026-11-17.md"),
+        "the middle of a name reports the whole name"
+    );
+    assert_eq!(
+        token_at_byte(text, 4).as_deref(),
+        Some("brain-audit-2026-11-17.md")
+    );
+    assert_eq!(token_at_byte(text, 0).as_deref(), Some("see"));
+}
+
+/// A click on prose never named a destination, so it is not a failed open and
+/// must not write a miss line. One line per click buried the real misses.
+#[test]
+fn open_target_miss_stays_quiet_on_prose() {
+    assert!(
+        !click_names_target("ini bisa dibaca", &[], 5),
+        "a plain word is not an open attempt"
+    );
+    assert!(
+        !click_names_target("", &[], 0),
+        "an empty press is not an open attempt"
+    );
+    assert!(
+        click_names_target("see notes.md", &[], 6),
+        "a dotted name is an open attempt"
+    );
+    assert!(
+        click_names_target("see https://x.dev", &[], 6),
+        "a url is an open attempt"
+    );
+}
+
+/// The miss line reads the resolved token and only fires for a real attempt.
+#[test]
+fn open_target_miss_line_uses_the_token_and_the_gate() {
+    let open = body_of(
+        TRANSCRIPT,
+        "pub fn open_clicked_target(&self, app: &mut App) -> bool",
+    );
+    assert!(
+        open.contains("let token = pending.token();") && !open.contains("pending.word()"),
+        "the line names the token resolution tried, not the tail from the click"
+    );
+    assert!(
+        open.contains("if pending.names_target() {"),
+        "a click on prose writes no miss line"
+    );
+    assert!(
+        open.contains("transcript link: nothing to open at"),
+        "a real miss still writes a line, so it can be told from a click that never arrived"
+    );
+}
+
+/// One intent is one click: the second press of a double click is dropped
+/// instead of opening the same document twice and logging the same miss twice.
+#[test]
+fn open_target_double_click_is_one_intent() {
+    let open = body_of(
+        TRANSCRIPT,
+        "pub fn open_clicked_target(&self, app: &mut App) -> bool",
+    );
+    assert!(
+        open.contains("if !self.first_press_on(&token) {"),
+        "a repeat press on the same token stops before resolving"
+    );
+    let fresh = body_of(TRANSCRIPT, "fn first_press_on(&self, token: &str)");
+    assert!(
+        fresh.contains("REPEAT_CLICK") && fresh.contains("previous.as_str() == token"),
+        "the window is keyed on the token, not on the pointer alone"
     );
 }
 
