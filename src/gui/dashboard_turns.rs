@@ -1940,10 +1940,23 @@ impl Dashboard {
                 // conversation off screen starts silent.
                 agent_bridge::TurnEvent::VoiceReplySaved { session, path } => {
                     if self.chat_state.session() == Some(session) {
-                        if crate::voice_play::sounding().is_none()
-                            && let Err(reason) = crate::voice_play::autoplay(&path)
-                        {
+                        // Every outcome leaves a line (#3092). The player
+                        // reports a clip that would not open and nothing else,
+                        // so a run that autoplayed and a run that skipped look
+                        // identical in the log, which is no way to answer "did
+                        // it play" after the sound is already gone.
+                        if let Some(other) = crate::voice_play::sounding() {
+                            logging::info(&format!(
+                                "voice reply autoplay: held back, {} is still sounding",
+                                other.display()
+                            ));
+                        } else if let Err(reason) = crate::voice_play::autoplay(&path) {
                             logging::error(&format!("voice reply autoplay: {reason}"));
+                        } else {
+                            logging::info(&format!(
+                                "voice reply autoplay: {}",
+                                path.display()
+                            ));
                         }
                         reload = Some(session);
                     } else if self.pane_view(session).is_some() {
