@@ -499,6 +499,11 @@ pub struct Editor {
     /// the words land, because the two threads in between are what make the
     /// intent outlive the press that carried it.
     voice_send_on_land: bool,
+    /// Whether the take now closing was abandoned rather than stopped
+    /// (#3092). Escape sets it, and it is spent the moment the recording comes
+    /// back: a cancelled take is never transcribed, never previewed and never
+    /// sent, so the flag has to outlive the same two threads the send does.
+    voice_cancel_on_land: bool,
     /// The transcription in flight, if any.
     voice_transcription: Option<voice_input::Transcription>,
     /// Whether the dictation loop is already ticking. Same one-shot shape as
@@ -610,12 +615,25 @@ pub(crate) enum TakeEnd {
     Park,
     /// Stop and send the words the moment they land.
     Send,
+    /// Stop and throw the take away: no preview, no words, no send (#3092).
+    ///
+    /// Escape is the only caller. Parking was the wrong answer for it: a
+    /// person pressing escape mid-sentence is abandoning what they were
+    /// saying, and leaving a transcript in the preview makes the key look
+    /// like it attached the take instead of cancelling it.
+    Cancel,
 }
 
 impl TakeEnd {
     /// Whether this press sends once the words land (#3092).
     fn sends(self) -> bool {
         matches!(self, Self::Send)
+    }
+
+    /// Whether this press throws the take away instead of keeping it
+    /// (#3092).
+    fn cancels(self) -> bool {
+        matches!(self, Self::Cancel)
     }
 }
 
@@ -684,6 +702,7 @@ impl Editor {
             voice_capture: None,
             voice_finishing: false,
             voice_send_on_land: false,
+            voice_cancel_on_land: false,
             voice_transcription: None,
             voice_looping: false,
             voice_secs: 0,
@@ -779,9 +798,9 @@ impl Editor {
     /// this match would let the row and the button drift apart.
     ///
     /// `end` is what the press means once the take closes (#3092). The chord
-    /// says send, every click and Esc say park, and the flag it leaves behind
-    /// is what makes the send survive the two worker threads between the press
-    /// and the words.
+    /// says send, every click says park, Esc says cancel, and the flag it
+    /// leaves behind is what makes that survive the two worker threads between
+    /// the press and the words.
     pub(crate) fn toggle_dictation(&mut self, end: TakeEnd, cx: &mut Context<Self>) {
         match self.voice_phase() {
             VoicePhase::Idle => {
@@ -803,6 +822,7 @@ impl Editor {
                 // press asked for was spent when its words landed, and a flag
                 // left standing here would send a take nobody asked to send.
                 self.voice_send_on_land = false;
+                self.voice_cancel_on_land = false;
                 self.voice_secs = 0;
                 self.voice_levels.clear();
                 // The block is the strip now (#3092): it opens with the
@@ -818,10 +838,18 @@ impl Editor {
                 // pool, and a flag set after the stop could lose the race to
                 // the transcript it was meant to send.
                 self.voice_send_on_land = end.sends();
+                self.voice_cancel_on_land = end.cancels();
                 if let Some(capture) = self.voice_capture.as_ref() {
                     capture.stop();
                 }
                 self.voice_finishing = true;
+                // A cancelled take says so at the press rather than when the
+                // device finishes (#3092): the block disappears a moment
+                // later, and a block that leaves in silence reads as a
+                // crash.
+                if end.cancels() {
+                    self.show_notice("Recording cancelled", cx);
+                }
             }
             VoicePhase::Finishing | VoicePhase::Transcribing => {
                 // A second press while the words are still being made is the
@@ -830,6 +858,12 @@ impl Editor {
                 // the person wanted it most, so it arms the send instead.
                 if end.sends() {
                     self.voice_send_on_land = true;
+                }
+                // An abandonment that arrives after the stop still wins
+                // (#3092): the words are dropped when they land instead of
+                // being previewed for a take nobody wants any more.
+                if end.cancels() {
+                    self.voice_cancel_on_land = true;
                 }
             }
         }
@@ -889,7 +923,12 @@ impl Editor {
                         block.dispose(cx);
                     }
                     changed = true;
+                    // The abandonment is spent the moment the recording is
+                    // back (#3092): a cancelled take is never transcribed, so
+                    // its words never exist to be previewed or sent.
+                    let cancelled = std::mem::take(&mut self.voice_cancel_on_land);
                     match answer {
+                        Ok(_) if cancelled => {}
                         Ok(recording) => {
                             self.voice_transcription =
                                 Some(voice_input::Transcription::start(recording));
@@ -900,6 +939,7 @@ impl Editor {
                             // arm the next take with a press the person made
                             // for this one.
                             self.voice_send_on_land = false;
+                            self.voice_cancel_on_land = false;
                             self.show_notice(message, cx)
                         }
                     }
@@ -921,12 +961,19 @@ impl Editor {
             // next take, and keeps the flag true only for the moment it is
             // spent.
             let send = std::mem::take(&mut self.voice_send_on_land);
-            match answer {
-                Ok(spoken) if spoken.text.trim().is_empty() => {
-                    self.show_notice("The microphone caught nothing.", cx);
+            // An escape pressed while the words were already being made
+            // (#3092): the transcript is dropped where it stands, because
+            // previewing it would be the attach the person cancelled.
+            if std::mem::take(&mut self.voice_cancel_on_land) {
+                self.voice_levels.clear();
+            } else {
+                match answer {
+                    Ok(spoken) if spoken.text.trim().is_empty() => {
+                        self.show_notice("The microphone caught nothing.", cx);
+                    }
+                    Ok(spoken) => self.land_voice(spoken, send, cx),
+                    Err(message) => self.show_notice(message, cx),
                 }
-                Ok(spoken) => self.land_voice(spoken, send, cx),
-                Err(message) => self.show_notice(message, cx),
             }
         }
         // The counter moves once a second; the glass moves on every tick.
@@ -1882,6 +1929,7 @@ impl Editor {
         // The intent dies with the message it was for (#3092): a flag left
         // standing here would send the next take the moment it lands.
         self.voice_send_on_land = false;
+        self.voice_cancel_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -1912,8 +1960,12 @@ impl Editor {
         // A press that meant to send into the old conversation must not send
         // into the new one (#3092): a take still being transcribed when the
         // person switched would otherwise land as a message in a room they
-        // never meant to speak in.
+        // never meant to speak in. An abandonment dies with it for the same
+        // reason, one step further: a cancel left standing would eat the
+        // next take's words in a conversation the person never cancelled
+        // anything in.
         self.voice_send_on_land = false;
+        self.voice_cancel_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2104,11 +2156,13 @@ impl Editor {
         // microphone is holding the device and the row is counting at the
         // person; escape mid-sentence means "stop this", never "close the
         // card behind it". Checked ahead of the composition and menu cases for
-        // that reason, and the click on the stop square takes the same path.
+        // that reason. The click on the stop square ends the take the same way
+        // but keeps it; escape throws it away (#3092), because a person
+        // abandoning a sentence is not asking to read a transcript of it.
         if ev.keystroke.key == "escape" && self.voice_phase() == VoicePhase::Recording {
             window.prevent_default();
             cx.stop_propagation();
-            self.toggle_dictation(TakeEnd::Park, cx);
+            self.toggle_dictation(TakeEnd::Cancel, cx);
             return;
         }
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {

@@ -19,7 +19,9 @@
 //!   offered back to the microphone;
 //! * the marker is a display cue, so it is stripped before a stored row becomes
 //!   context, or the model learns to emit markers of its own;
-//! * the control that started the recording becomes the thing that stops it.
+//! * the control that started the recording becomes the thing that stops it;
+//! * and the three ways out of a take stay distinct (#3092): the chord sends,
+//!   a click parks the words for reading, escape throws the take away.
 //!
 //! The window has no headless harness, so the drawing rules are read from
 //! source the way the other gui tests read them. The marker strip itself is
@@ -397,9 +399,10 @@ fn the_block_is_the_thing_that_stops_it() {
     );
 }
 
-/// Escape stops the recording before anything else reads the key, and a click
-/// on the control takes the same path: every way out of a take goes through the
-/// one stop.
+/// Escape throws the take away before anything else reads the key, and every
+/// other way out of a recording parks it: stop and abandon are two different
+/// decisions, and the key that ends a take mid-sentence is the one that means
+/// abandon.
 #[test]
 fn escape_ends_a_recording_before_anything_else() {
     let keys = editor("fn intercept_raw_key(", "fn line_count(");
@@ -420,8 +423,41 @@ fn escape_ends_a_recording_before_anything_else() {
         keys[recording..]
             .split("return;")
             .next()
-            .is_some_and(|arm| arm.contains("self.toggle_dictation(TakeEnd::Park, cx)")),
-        "the same toggle that started the recording ends it, and escape parks rather than sends"
+            .is_some_and(|arm| arm.contains("self.toggle_dictation(TakeEnd::Cancel, cx)")),
+        "the same toggle that started the recording ends it, and escape cancels rather than attaching"
+    );
+}
+
+/// A take thrown away leaves nothing behind, and that has to survive the two
+/// threads between the key and the words: the capture still has a WAV on the
+/// way, and a cancellation that only stopped the device would come back as the
+/// preview escape was pressed to avoid.
+#[test]
+fn a_cancelled_take_is_never_transcribed_or_previewed() {
+    let poll = editor("fn poll_voice(", "fn land_voice(");
+    assert!(
+        poll.contains("let cancelled = std::mem::take(&mut self.voice_cancel_on_land)"),
+        "the abandonment is spent when the recording comes back"
+    );
+    assert!(
+        poll.contains("Ok(_) if cancelled => {}"),
+        "a cancelled recording is dropped instead of being transcribed"
+    );
+    assert!(
+        poll.contains("if std::mem::take(&mut self.voice_cancel_on_land) {"),
+        "an escape that arrives while the words are being made still wins"
+    );
+    // The three gestures that keep the take all park, so escape stays the only
+    // way out of a recording that throws it away.
+    let block = editor("fn voice_block(", "fn voice_strip(");
+    assert!(
+        block.contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the block's click still parks: stopping is not abandoning"
+    );
+    let mic = editor("fn mic(", "fn voice_block(");
+    assert!(
+        mic.contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the microphone's click still parks, so only escape discards a take"
     );
 }
 
