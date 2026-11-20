@@ -799,6 +799,13 @@ impl Dashboard {
                 chips,
             });
         }
+        // A selected remote replaces the local list: the strip picked which
+        // crab, so the rail's job is that crab's sessions. The local rows are
+        // still resolved above and then dropped, one wasted pass while a
+        // remote is open, which keeps the two sources out of one loop.
+        if let Some(remote_rows) = self.remote_rail_rows() {
+            rows = remote_rows;
+        }
         // The channel chip (#2452): quiet notice plus the one action, drawn at
         // the end of the rail only while a configured channel has no live owner.
         // `Start daemon` runs the onboarding installer once; the probe loop
@@ -924,6 +931,24 @@ impl Dashboard {
         // The find field is a jump aid: picking a row is its exit, and the
         // keyboard goes back to the conversation.
         self.close_rail_filter(cx);
+        // While a remote is open the row names a session on THAT crab, so the
+        // pick is a fetch, not a local open: the same id would be a session
+        // this window has never seen.
+        if self.instance_remote_open() {
+            let title = self
+                .instance_remote
+                .as_ref()
+                .and_then(|r| match &r.state {
+                    dashboard_instances::RemoteState::Ready(list) => list
+                        .iter()
+                        .find(|s| uuid::Uuid::parse_str(&s.id).ok() == Some(id))
+                        .map(|s| s.title.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.open_remote_session(id.to_string(), title, cx);
+            return;
+        }
         // The pane holding the caret takes the pick (#2819).
         self.open_picked_in_focused_pane(id, true, cx);
     }

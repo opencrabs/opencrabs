@@ -702,6 +702,30 @@ pub(crate) struct Dashboard {
     /// The rail itself, drawn as a cached view so a repaint it has no stake in
     /// replays its last prepaint instead of rebuilding every row (#2933).
     pub(crate) rail_view: Entity<rail_view::RailView>,
+    /// The instance strip: the crabs this window can look at, and which one it
+    /// is looking at. Read once when the window opens and after a pairing; the
+    /// health of each one is the probe loop's business, not the render's.
+    pub(crate) instances: instances::Instances,
+    /// The strip drawn as a cached view, the same way the rail is (#2933): a
+    /// keystroke in the composer replays its last prepaint instead of
+    /// rebuilding every badge.
+    pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
+    /// The pairing form, and with it whether the form is open at all.
+    pub(crate) instance_pairing: Option<dashboard_instances::PairingForm>,
+    /// What the selected remote answered, or why it did not.
+    pub(crate) instance_remote: Option<dashboard_instances::RemoteView>,
+    /// The remote session being read, when one was opened. Its own field
+    /// rather than a variant of the view above, because the list and the
+    /// transcript arrive from two different calls.
+    pub(crate) remote_transcript: Option<dashboard_instances::RemoteTranscript>,
+    /// What the remote composer holds. Kept apart from the local draft: the
+    /// two go to different machines and must not leak into each other. A real
+    /// field, not a `String`, so the caret, the selection and the editing
+    /// chords behave the way they do in the topic prompt.
+    pub(crate) remote_draft: text_field::TextField,
+    /// The last instance error, said in one line at the bottom of the strip's
+    /// column. `None` is the normal state.
+    pub(crate) instance_error: Option<SharedString>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one

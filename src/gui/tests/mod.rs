@@ -6,6 +6,8 @@
 //! library, which cannot see the window at all.
 
 mod composer_orb_test;
+mod instances_test;
+mod instances_wiring_test;
 mod layout_guard_test;
 mod main_test;
 mod plan_strip_test;

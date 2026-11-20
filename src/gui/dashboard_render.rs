@@ -2933,6 +2933,11 @@ impl Render for Dashboard {
             .capture_any_mouse_up(cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
                 this.rail_swipe = None;
             }));
+        // The instance strip is the outermost of the three columns: it picks
+        // the crab, the rail lists that crab's sessions, the panel shows one of
+        // them. Added first so it sits on the far left, and drawn on every
+        // screen, because which crab you are talking to is not a chat-only fact.
+        root = root.child(self.instance_strip_element(cx));
         if self.rail_open {
             let width = self.rail_width;
             let grab = cx.listener(move |this, _ev: &MouseDownEvent, window, _cx| {
@@ -2953,6 +2958,14 @@ impl Render for Dashboard {
         // and the whole centring slack opened between the two. The strip and
         // the column are centred as one block instead, so the topics sit beside
         // the conversation they belong to and the slack falls outside both.
+        // A selected remote replaces the conversation column: same slot, same
+        // measure, different source. The strip picked the crab, so what sits
+        // here is that crab's transcript, not this window's.
+        let right = if self.instance_remote_open() && self.screen == Screen::Chat {
+            self.remote_panel_element(cx)
+        } else {
+            right.into_any_element()
+        };
         match topic_side {
             Some((edge, strip)) => {
                 // The column pads itself with `px_4` on each side, so its own

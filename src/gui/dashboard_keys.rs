@@ -887,6 +887,16 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // A remote crab owns the composer while it is open: its field is the
+        // only one on screen, so every printable key, editing chord and Enter
+        // is that crab's. This sits ahead of the editor gate (the local editor
+        // is not drawn and may still hold focus) and ahead of the Ctrl+C quit
+        // ladder, because with the caret in the remote field Ctrl+C is copy,
+        // not a request to close the window.
+        if self.screen == Screen::Chat && self.instance_remote_open() {
+            self.remote_key(&ev.keystroke, cx);
+            return;
+        }
         // Ctrl+C is the terminal's own ladder (#2308): scrolled up it gives
         // the bottom back, otherwise it throws the draft away and arms a three
         // second quit window, and the second press stops the turn in flight and
