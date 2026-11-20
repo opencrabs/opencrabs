@@ -44,13 +44,28 @@ jobs:
       # single binary is linked: the store, the wire client, the view model, the
       # window's wiring and the three A2A handlers behind them. One compile, one
       # filter per module, so a red test names the module it belongs to.
-      - name: Test the instance modules
+      #
+      # `src/gui/` is a SEPARATE BINARY (`path = "src/gui/main.rs"`), so a
+      # `--lib gui::…` filter matches nothing and exits 0: the step would report
+      # green while running zero tests. The window's own tests need `--bin
+      # opencrabs-gui`, and each filter is run against the target that can see
+      # it, which is the whole point of naming the module.
+      - name: Test the instance modules (library)
         run: |
           cargo test --locked --profile ci --lib remote::instance_store
           cargo test --locked --profile ci --lib remote::instance_client
-          cargo test --locked --profile ci --lib gui::instances
-          cargo test --locked --profile ci --lib gui::tests::instances
           cargo test --locked --profile ci --lib a2a::handler::sessions
+
+      # `--locked` stays on: the bin's test build must honour the same lockfile
+      # the released binary does, or the test proves a dependency graph nobody
+      # ships.
+      # `mod tests;` sits at the ROOT of the bin crate (`src/gui/main.rs`), so the
+      # test paths are `tests::instances_test::…`, not `gui::tests::…`. The filter
+      # below catches both `instances_test` and `instances_wiring_test`.
+      - name: Test the instance modules (window)
+        run: |
+          cargo test --locked --profile ci --features gui --bin opencrabs-gui \
+            tests::instances
 
       - name: Build daemon
         run: cargo build --locked --profile ci --bin opencrabs
