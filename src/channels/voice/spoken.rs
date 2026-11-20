@@ -384,6 +384,9 @@ mod tests {
         assert_eq!(without_prefix("[Voice note]: turn it up"), "turn it up");
         assert_eq!(without_prefix("turn it up"), "turn it up");
         // A message that only looks similar keeps every word it has.
-        assert_eq!(without_prefix("[voice notes] two takes"), "[voice notes] two takes");
+        assert_eq!(
+            without_prefix("[voice notes] two takes"),
+            "[voice notes] two takes"
+        );
     }
 }

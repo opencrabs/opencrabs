@@ -1953,10 +1953,7 @@ impl Dashboard {
                         } else if let Err(reason) = crate::voice_play::autoplay(&path) {
                             logging::error(&format!("voice reply autoplay: {reason}"));
                         } else {
-                            logging::info(&format!(
-                                "voice reply autoplay: {}",
-                                path.display()
-                            ));
+                            logging::info(&format!("voice reply autoplay: {}", path.display()));
                         }
                         reload = Some(session);
                     } else if self.pane_view(session).is_some() {

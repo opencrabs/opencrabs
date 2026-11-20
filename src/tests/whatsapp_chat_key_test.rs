@@ -80,9 +80,7 @@ fn the_stanza_twin_is_read_from_whichever_family_arrived() {
 async fn pn_outbound_and_lid_inbound_share_one_channel_chat_id() {
     let state = WhatsAppState::new();
 
-    let outbound = state
-        .canonical_chat_id(&pn_jid(), false, Some(LID))
-        .await;
+    let outbound = state.canonical_chat_id(&pn_jid(), false, Some(LID)).await;
     let inbound = state.canonical_chat_id(&lid_jid(), false, Some(PN)).await;
 
     assert_eq!(outbound, inbound);

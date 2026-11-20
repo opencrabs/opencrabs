@@ -103,7 +103,10 @@ fn the_window_opens_from_the_fitted_frame() {
 fn the_work_area_on_windows_comes_from_the_work_rect() {
     let module = include_str!("../gui/window_geometry.rs");
     assert!(module.contains("GetMonitorInfoW"));
-    assert!(module.contains("rc_work"), "the work rect, not the monitor rect");
+    assert!(
+        module.contains("rc_work"),
+        "the work rect, not the monitor rect"
+    );
     assert!(
         module.contains("MONITOR_DEFAULTTOPRIMARY"),
         "the primary monitor is asked for by flag, not by a window handle"
@@ -152,8 +155,14 @@ fn a_frame_from_a_detached_monitor_is_not_restored() {
     let gone = Bounds::new(point(px(2400.0), px(100.0)), size(px(900.0), px(700.0)));
     let behind = Bounds::new(point(px(-1400.0), px(100.0)), size(px(900.0), px(700.0)));
     assert!(is_on(work, here), "a frame on this screen is restored");
-    assert!(!is_on(work, gone), "a frame to the right of this screen is not");
-    assert!(!is_on(work, behind), "a frame to the left of this screen is not");
+    assert!(
+        !is_on(work, gone),
+        "a frame to the right of this screen is not"
+    );
+    assert!(
+        !is_on(work, behind),
+        "a frame to the left of this screen is not"
+    );
 }
 
 /// The frame is written where the window is in hand, and written once it

@@ -281,7 +281,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp home");
         let file = dir.path().join("gui_layout.json");
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
-        save(&file, Some(&split_tree(left, right)), None, Some(left), None);
+        save(
+            &file,
+            Some(&split_tree(left, right)),
+            None,
+            Some(left),
+            None,
+        );
         assert!(file.exists(), "a split writes the file");
         save(&file, Some(&PaneTree::leaf(left)), None, Some(left), None);
         assert!(!file.exists(), "back to one pane removes it");
@@ -499,7 +505,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp home");
         let file = dir.path().join("gui_layout.json");
         let (left, right) = (Uuid::new_v4(), Uuid::new_v4());
-        save(&file, Some(&split_tree(left, right)), None, Some(left), None);
+        save(
+            &file,
+            Some(&split_tree(left, right)),
+            None,
+            Some(left),
+            None,
+        );
         assert!(file.exists(), "a split writes the file");
         save(&file, None, None, None, None);
         assert!(!file.exists(), "nothing to remember removes it");

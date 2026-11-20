@@ -477,8 +477,7 @@ impl App {
         };
         let content_left = self.chat_area_x + 1;
         let col_in_line = col.saturating_sub(content_left) as usize;
-        let Some(target) =
-            super::clickable::target_at(line, col_in_line, &self.working_directory)
+        let Some(target) = super::clickable::target_at(line, col_in_line, &self.working_directory)
         else {
             return false;
         };

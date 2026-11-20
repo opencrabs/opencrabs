@@ -4786,17 +4786,17 @@ mod tests {
             strip_markers("olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"),
             "olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"
         );
-        assert_eq!(strip_markers("<<VID:/tmp/動画.mov>>já"), "<<VID:/tmp/動画.mov>>já");
+        assert_eq!(
+            strip_markers("<<VID:/tmp/動画.mov>>já"),
+            "<<VID:/tmp/動画.mov>>já"
+        );
         // An unknown marker is prose and stays whole, multibyte and all.
         assert_eq!(
             strip_markers("veja <<FILE:relatório-ção.pdf>> aqui"),
             "veja <<FILE:relatório-ção.pdf>> aqui"
         );
         // The message's own attachment is the tail, and that one does leave.
-        assert_eq!(
-            strip_markers("olá 🦀 <<IMG:/tmp/coração.png>>  "),
-            "olá 🦀"
-        );
+        assert_eq!(strip_markers("olá 🦀 <<IMG:/tmp/coração.png>>  "), "olá 🦀");
     }
 
     /// A reply that quotes a marker draws no player for it (#3092). The clip it
