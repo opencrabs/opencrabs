@@ -178,9 +178,10 @@ fn enter_stops_a_take_and_keeps_it() {
         "the phase is read first, so a take in flight never reaches the emoji list or the send"
     );
     assert!(
-        send[phase..]
-            .split("return;")
-            .next()
+        // `find` lands on a char boundary, so this cannot fail, but `get` keeps
+        // the slice off the panic path and the ratchet honest (#3096).
+        send.get(phase..)
+            .and_then(|rest| rest.split("return;").next())
             .is_some_and(|arm| arm.contains("self.toggle_dictation(TakeEnd::Park, cx)")),
         "the arm hands the key over and stops: a park that fell through would send an empty field"
     );
