@@ -17,7 +17,7 @@ use crate::palette;
 use crate::transcript::{
     ClickHandler, SMALL_TEXT_SIZE, SelectionContext, selectable_styled_text, small_style,
 };
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -141,6 +141,8 @@ impl PlanStripState {
                 .p_3()
                 .rounded(px(CARD_RADIUS))
                 .bg(glass_fill(palette::current().panel))
+                .border_1()
+                .border_color(session_edge(palette::current().panel_hi))
                 .child(
                     div()
                         .text_xs()
@@ -180,7 +182,9 @@ impl PlanStripState {
             .p_3()
             .min_w_0()
             .rounded(px(CARD_RADIUS))
-            .bg(glass_fill(palette::current().panel));
+            .bg(glass_fill(palette::current().panel))
+            .border_1()
+            .border_color(session_edge(palette::current().panel_hi));
         // A plan that already carries its checklist shows what is being
         // approved: the same `done/total`, the same bar and the same six-row
         // window the live card draws once it is running. A bare count hid the
@@ -256,6 +260,10 @@ impl PlanStripState {
             .min_w_0()
             .rounded(px(CARD_RADIUS))
             .bg(glass_fill(palette::current().panel))
+            // Same edge as the unsplit card (#3110): a pane paints the same
+            // session surface, so its card cannot be the one without a border.
+            .border_1()
+            .border_color(session_edge(palette::current().panel_hi))
             .cursor_pointer()
             .hover(|d| d.bg(rgb(palette::current().panel_hi)));
         for (index, (kind, line)) in pane_lines(plan, density, expanded).into_iter().enumerate() {
@@ -634,6 +642,8 @@ fn checklist(plan: &PlanDocument) -> Div {
         .min_w_0()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
+        .border_1()
+        .border_color(session_edge(palette::current().panel_hi))
         .child(progress_header_row(
             plan,
             format!("📋 {} · {done}/{total}", fit(&plan.title, 60)),

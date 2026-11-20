@@ -98,7 +98,7 @@ fn the_transcript_keeps_its_scroll_and_gives_up_the_clip() {
 #[test]
 fn the_composer_is_a_row_of_the_session() {
     assert!(
-        RENDER.contains("session = session.child(shell.child(dock.child(footer.into_any_element())));"),
+        RENDER.contains(".child(shell.child(dock.child(footer.into_any_element()))),"),
         "the composer joins the session surface"
     );
     assert!(
@@ -111,24 +111,92 @@ fn the_composer_is_a_row_of_the_session() {
     );
 }
 
-/// A split pane paints the same surface, with the same curve.
+/// Every card in the session is the size of a message (#3110).
 ///
-/// Each pane owns its own fill and its own clip in that arrangement, so the
-/// window-level surface stands down and the panes carry it. They have to agree
-/// with the unsplit card about the radius or the two layouts look like two
-/// different products.
+/// The owner's second pass: with the strips inside the session they took its
+/// whole width, so their left and right edges were the session's own edges and
+/// only the top and bottom of each card was visible. They have to be the size of
+/// the user and assistant cards, which sit half a rem inside the surface.
+///
+/// That half rem is `px_2`, the transcript's own padding step, and it is a rem
+/// rather than a pixel count, so the two agree at every zoom level. A literal
+/// eight would match at the default zoom and drift as soon as the reader zoomed,
+/// which is why the gutter is not a constant here.
 #[test]
-fn a_split_pane_carries_the_same_surface() {
+fn every_card_in_the_session_is_the_size_of_a_message() {
+    let row = RENDER
+        .find("fn session_row(view: AnyElement) -> AnyElement {")
+        .expect("the strips go through one helper");
+    let body = &RENDER[row..row + 400];
     assert!(
-        PANE.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "the pane's box takes the session's curve"
+        body.contains(".px_2()"),
+        "the strip keeps the transcript's own padding step: {body}"
     );
     assert!(
-        !PANE.contains("CARD_RADIUS"),
-        "the card's radius is the wrong token for a pane"
+        !body.contains("SESSION_GUTTER"),
+        "the gutter is a rem step, never a pixel literal: {body}"
+    );
+    // The transcript's rows are padded by that same step, which is what the
+    // strips are matching.
+    let scroll = TRANSCRIPT
+        .find(".track_scroll(scroll)")
+        .expect("the transcript scrolls");
+    let tail = &TRANSCRIPT[scroll..];
+    let pad = tail
+        .find(".p_2()")
+        .expect("the history pads its rows by the same step");
+    assert!(
+        pad < 400,
+        "the history's padding is its own step, not a literal: {tail:?}"
+    );
+    // The composer is a card of that size too, with the same step below it.
+    let composer = RENDER
+        .find(".child(shell.child(dock.child(footer.into_any_element()))),")
+        .expect("the composer is a row of the session");
+    let wrapper = &RENDER[composer.saturating_sub(700)..composer];
+    assert!(
+        wrapper.contains(".px_2()") && wrapper.contains(".pb_2()"),
+        "the composer keeps the messages' width and a bottom step: {wrapper}"
+    );
+}
+
+/// Every card in the session draws the same hairline (#3110).
+///
+/// The composer had a border and the plan card did not, so on the session fill
+/// one read as a card and the other as background: the owner's words were that
+/// the plan card "looks very much mixed with the background". The edge is one
+/// function in the shared card module, fed the theme's raised tone, so none of
+/// the cards can drift to a literal and none of them can disagree at a seam.
+#[test]
+fn every_card_in_the_session_draws_one_edge() {
+    const CARD: &str = include_str!("../ui_core/card.rs");
+    const PLAN: &str = include_str!("../gui/plan_strip.rs");
+    const COMPOSER: &str = include_str!("../gui/composer_view.rs");
+    assert!(
+        CARD.contains("pub fn session_edge(base: u32) -> Hsla {"),
+        "the edge is one token in the shared card module"
     );
     assert!(
-        RENDER.contains("if self.window_is_split() {\n                    col = col.child(middle);"),
-        "a split keeps the panes bare: they paint their own surface"
+        !PLAN.contains("0xffffff") && !COMPOSER.contains("0xffffff"),
+        "the edge is never a literal: it follows whichever theme the reader picked"
+    );
+    // Four plan surfaces: the seeded-less notice, the approval card, the live
+    // checklist, and the same checklist compressed inside a split pane.
+    assert_eq!(
+        PLAN.matches(".border_color(session_edge(palette::current().panel_hi))")
+            .count(),
+        4,
+        "the plan card's four shapes all carry the edge"
+    );
+    assert_eq!(
+        COMPOSER
+            .matches(".border_color(session_edge(palette::current().panel_hi))")
+            .count(),
+        1,
+        "the queue strip carries the edge"
+    );
+    assert!(
+        COMPOSER.contains(".border_color(session_edge(p.panel_hi))"),
+        "the suggested options carry the edge"
     );
 }

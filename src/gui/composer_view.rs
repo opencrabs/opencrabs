@@ -14,7 +14,7 @@
 use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
-use opencrabs::ui_core::card::{CARD_RADIUS, SEEKER_RADIUS, glass_fill, seeker_concentric_radius};
+use opencrabs::ui_core::card::{CARD_RADIUS, SEEKER_RADIUS, glass_fill, seeker_concentric_radius, session_edge};
 use opencrabs::ui_core::commands as slash;
 use opencrabs::ui_core::hints::{HintState, task_line};
 
@@ -43,6 +43,8 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
         .p_3()
         .rounded(px(CARD_RADIUS))
         .bg(glass_fill(palette::current().panel))
+        .border_1()
+        .border_color(session_edge(palette::current().panel_hi))
         .child(
             div()
                 .text_xs()
@@ -115,6 +117,8 @@ pub(crate) fn options_strip(
         .p_3()
         .rounded(px(SEEKER_RADIUS))
         .bg(glass_fill(p.panel))
+        .border_1()
+        .border_color(session_edge(p.panel_hi))
         .shadow_2xl();
     let mut buttons = div().flex().flex_row().flex_wrap().gap_1p5();
     for (i, (item, pick)) in rows.iter().enumerate() {
