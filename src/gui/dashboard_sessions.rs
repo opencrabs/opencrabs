@@ -55,6 +55,9 @@ impl Dashboard {
             session_id,
             context_text,
             Some(display_text.clone()),
+            // A turn the window mints for itself is text: an approved plan and
+            // a command's reply are read, never spoken (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -127,6 +130,9 @@ impl Dashboard {
             session_id,
             context_text,
             Some(display_text.clone()),
+            // A turn the window mints for itself is text: an approved plan and
+            // a command's reply are read, never spoken (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -273,6 +279,8 @@ impl Dashboard {
                 sid,
                 joined.context_text,
                 Some(joined.display_text),
+                // A flushed queue is typed text, like the window's own (#3096).
+                false,
                 self.sink.clone(),
                 cancel,
             );

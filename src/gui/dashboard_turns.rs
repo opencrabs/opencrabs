@@ -154,16 +154,14 @@ impl Dashboard {
         // Attachments are tracked against the pane's session, so the file
         // lands in that conversation's artifacts, exactly as the window's does.
         let attached = editor::marker_paths(&original);
-        // A turn that began as a recording is answered with speech when it
-        // settles (#3044), so the settle has to know which turns those are.
-        if voice.is_some() {
-            self.voice_turns.insert(session);
-        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             session,
             text,
             display,
+            // A turn that began as a recording is answered with speech when it
+            // settles (#3044), and the turn carries that fact itself (#3096).
+            voice.is_some(),
             self.sink.clone(),
             cancel,
         );
@@ -395,6 +393,10 @@ impl Dashboard {
             session,
             joined.context_text,
             Some(joined.display_text),
+            // A flushed queue is typed text: the take behind it was sent long
+            // before, and a queue that speaks would answer words nobody spoke
+            // (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -670,16 +672,14 @@ impl Dashboard {
         // does it (`FileService::get_or_create_file`), so the file lands in
         // the session's artifacts, not just in the message text.
         let attached = editor::marker_paths(&original);
-        // A turn that began as a recording is answered with speech when it
-        // settles (#3044).
-        if voice.is_some() {
-            self.voice_turns.insert(sid);
-        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             sid,
             text,
             display,
+            // Same rule as the pane path: the turn says whether it was spoken,
+            // and nothing outside it remembers (#3096).
+            voice.is_some(),
             self.sink.clone(),
             cancel,
         );
@@ -1529,6 +1529,7 @@ impl Dashboard {
                     content,
                     context_tokens,
                     tokens_per_second,
+                    voice,
                 } => {
                     // The card's live line belongs to this turn (#2718), so
                     // it retires with it: the preview under it is the ledger's
@@ -1564,8 +1565,10 @@ impl Dashboard {
                         // on the same rule the window's is: `spawn_speak_reply`
                         // runs `channels::voice::synthesize` on the answer the
                         // leaf just drew. Read before the settle finalizes the
-                        // card's stream.
-                        if self.voice_turns.remove(&session) {
+                        // card's stream. The flag is the turn's own (#3096), so
+                        // a settle that never arrived cannot leave the next
+                        // typed turn of this leaf speaking.
+                        if voice {
                             let spoken = if content.trim().is_empty() {
                                 self.pane_view(session)
                                     .and_then(|pane| {
@@ -1657,8 +1660,10 @@ impl Dashboard {
                     // so the transcript draws it under the words it speaks and
                     // keeps it across a restart. Off-thread on purpose: the
                     // answer is already on screen and synthesis is a network
-                    // call per chunk.
-                    if self.voice_turns.remove(&session) {
+                    // call per chunk. The flag travels on this event (#3096),
+                    // so a turn that never settled cannot hand its voice to
+                    // the typed question that follows it.
+                    if voice {
                         let spoken = if content.trim().is_empty() {
                             self.turn
                                 .live
@@ -1681,9 +1686,8 @@ impl Dashboard {
                     // with it (#2718).
                     self.rail_live.remove(&session);
                     // A failed turn is not spoken (#3044): there is no answer
-                    // to read aloud, and leaving the session flagged would make
-                    // the next typed turn answer in audio.
-                    self.voice_turns.remove(&session);
+                    // to read aloud. Nothing has to be cleared here either, the
+                    // flag lived on the turn that just failed (#3096).
                     // A failure is still activity, so the row moves like a
                     // settled turn does (#2666).
                     self.refresh_rail(cx);
@@ -1851,10 +1855,8 @@ impl Dashboard {
                     // The turn is gone, so its rail spinner goes with it.
                     self.rail.clear(session);
                     // A stopped turn says nothing, so it is not spoken either
-                    // (#3044). Same reason as a failure: the flag belongs to
-                    // the turn that started as a recording, and this one is
-                    // over.
-                    self.voice_turns.remove(&session);
+                    // (#3044). Nothing has to be cleared for that: the flag was
+                    // the stopped turn's own and it is over with it (#3096).
                     // Unconditional (#2811): a card that just stopped has to
                     // paint its stop glyph once. It is static from here, so
                     // this is the only repaint it needs, and the animation

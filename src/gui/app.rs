@@ -489,7 +489,6 @@ pub(crate) fn run() {
                         seeker_find_gen: 0,
                         seeker_scheduled_query: String::new(),
                         rail_chips_expanded: std::collections::HashMap::new(),
-                        voice_turns: std::collections::HashSet::new(),
                         voice_paint: voice_play::PaintState::default(),
                         rail_width: RAIL_DEFAULT_REM,
                         rail_open: true,

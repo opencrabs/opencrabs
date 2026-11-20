@@ -248,9 +248,12 @@ fn the_agent_reads_the_words_and_the_row_keeps_the_clip() {
         send.contains("editor::split_audio_marker(&original)"),
         "the send path asks the editor to split the marker off the draft"
     );
+    // The decision travels with the turn itself (#3096). A flag keyed by
+    // session outlived the turn that set it, and the next typed question in
+    // that conversation was answered in audio nobody asked for.
     assert!(
-        send.contains("self.voice_turns.insert(session)"),
-        "the turn is remembered as spoken, so the settle can answer out loud"
+        send.contains("voice.is_some(),"),
+        "the send hands the turn its own spoken flag"
     );
     // The agent cannot play the clip, so the words have to arrive labelled as
     // speech: a transcript handed over as ordinary prose gets an ordinary
@@ -265,7 +268,7 @@ fn the_agent_reads_the_words_and_the_row_keeps_the_clip() {
     );
     assert!(
         region_in(DASHBOARD_TURNS, "fn send_message_showing(", "fn ")
-            .contains("self.voice_turns.insert(sid)"),
+            .contains("voice.is_some(),"),
         "a message shown in a pane takes the same path"
     );
 }
@@ -501,9 +504,14 @@ fn a_cancelled_take_is_never_transcribed_or_previewed() {
 #[test]
 fn a_spoken_turn_is_answered_aloud() {
     let settle = DASHBOARD_TURNS;
+    assert_eq!(
+        settle.matches("if voice {").count(),
+        2,
+        "both settles speak for the turn's own flag, the leaf's and the window's"
+    );
     assert!(
-        settle.contains("self.voice_turns.remove(&session)"),
-        "the settle consumes the flag, so the next typed turn stays quiet"
+        !settle.contains("voice_turns"),
+        "no session keyed flag is left for a later turn to inherit"
     );
     let speak = region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}");
     assert!(

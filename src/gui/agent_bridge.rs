@@ -60,6 +60,12 @@ pub enum TurnEvent {
         /// the Telegram card prints. `None` when the provider or the CLI
         /// path could not measure it.
         tokens_per_second: Option<f64>,
+        /// Whether this turn's own input was a recording (#3096). The settle
+        /// reads it from the event, never from a set keyed by session: a
+        /// voice turn whose settle never arrived left its session flagged, so
+        /// the next TYPED turn of that conversation was answered aloud. A turn
+        /// can only speak for itself.
+        voice: bool,
     },
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
@@ -1207,6 +1213,9 @@ pub fn spawn_turn(
     session_id: Uuid,
     content: String,
     display: Option<String>,
+    // Whether this turn's input was a recording (#3096): the flag rides the
+    // turn, so nothing keyed by session can outlive it.
+    voice: bool,
     sink: EventSink,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -1260,11 +1269,23 @@ pub fn spawn_turn(
                 };
                 match outcome {
                     Ok(response) => {
+                        // A text turn never carries a spoken block (#3096). The
+                        // model is told to write one only when the message
+                        // begins with the voice note, and a model that drifts
+                        // must not print it into the card or hand it to any
+                        // later reader. Stripped here, before the settle draws
+                        // the answer and before anything can speak it.
+                        let content = if voice {
+                            response.content
+                        } else {
+                            opencrabs::channels::voice::spoken::visible(&response.content)
+                        };
                         let _ = sink.send(TurnEvent::Done {
                             session: session_id,
-                            content: response.content,
+                            content,
                             context_tokens: response.context_tokens,
                             tokens_per_second: response.tokens_per_second,
+                            voice,
                         });
                     }
                     Err(e) => {
@@ -1351,6 +1372,12 @@ fn spawn_resume(
                             content: response.content,
                             context_tokens: response.context_tokens,
                             tokens_per_second: response.tokens_per_second,
+                            // A resumed turn re-runs a prompt parked by a dead
+                            // process, and that prompt is the words only: the
+                            // recording it came from is not in hand here. It
+                            // answers in text rather than guessing at speech
+                            // (#3096).
+                            voice: false,
                         });
                     }
                     Err(e) => {

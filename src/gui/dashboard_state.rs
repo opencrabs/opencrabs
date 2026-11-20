@@ -231,12 +231,6 @@ pub(crate) struct Dashboard {
     /// a picker, not a setting, so it folds itself after a bounded idle period
     /// instead of staying open until the window restarts.
     pub(crate) rail_chips_expanded: std::collections::HashMap<Uuid, std::time::Instant>,
-    /// The conversations whose turn is running a voice message (#3044). A turn
-    /// started from a recording is answered with speech once it settles, the
-    /// way a channel answers a voice note, and this is how the settle knows
-    /// which turns those are: the transcript is ordinary text by the time it
-    /// reaches the bridge, and nothing downstream can tell it apart from typing.
-    pub(crate) voice_turns: std::collections::HashSet<Uuid>,
     /// The last voice state the window painted (#3054): active playback and
     /// waveform loads. The poll compares one snapshot, so position changes
     /// and completed background decodes both reach the visible previews.
