@@ -4065,6 +4065,21 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     stats_line(parts)
 }
 
+/// How one row draws, as opposed to what it holds.
+///
+/// The three flags travel together because every caller decides them together,
+/// and passing them as loose arguments pushed `block_view` past clippy's
+/// argument budget.
+#[derive(Clone, Copy)]
+struct RowMode<'a> {
+    /// Draw the body whole instead of folding it to `row_cap`.
+    full: bool,
+    /// The reader's handler for opening a folded body, when there is one.
+    open: Option<&'a ClickHandler>,
+    /// This row carries the clip of the turn that just settled (#3092).
+    voice_pending: bool,
+}
+
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
 /// only what it looks like.
 fn block_view(
@@ -4073,10 +4088,13 @@ fn block_view(
     row_cap: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
-    full: bool,
-    open: Option<&ClickHandler>,
-    voice_pending: bool,
+    mode: RowMode<'_>,
 ) -> Div {
+    let RowMode {
+        full,
+        open,
+        voice_pending,
+    } = mode;
     match block {
         Block::Msg {
             role,
@@ -4331,13 +4349,15 @@ fn live_block(
                 row_cap,
                 handlers,
                 Some(&selection),
-                true,
-                // A live row has no stored id yet, so there is no reader
-                // handler to open: it draws whole until it settles (#3064).
-                None,
-                // A live turn has no clip in flight: the reply is still being
-                // written (#3092).
-                false,
+                RowMode {
+                    full: true,
+                    // A live row has no stored id yet, so there is no reader
+                    // handler to open: it draws whole until it settles (#3064).
+                    open: None,
+                    // A live turn has no clip in flight: the reply is still
+                    // being written (#3092).
+                    voice_pending: false,
+                },
             ),
         )
         .into_any_element(),
@@ -4435,9 +4455,11 @@ fn live_row_body(
             row_cap,
             handlers,
             None,
-            true,
-            None,
-            false,
+            RowMode {
+                full: true,
+                open: None,
+                voice_pending: false,
+            },
         )
         .into_any_element(),
     }
@@ -4635,9 +4657,11 @@ fn live_view(
                     row_cap,
                     handlers,
                     None,
-                    true,
-                    None,
-                    false,
+                    RowMode {
+                        full: true,
+                        open: None,
+                        voice_pending: false,
+                    },
                 )
                 .into_any_element(),
             },
@@ -6016,10 +6040,12 @@ pub fn view(
             row_cap,
             &attachment_handlers,
             None,
-            true,
-            // A marker is not a message: it has no body to fold (#3064).
-            None,
-            false,
+            RowMode {
+                full: true,
+                // A marker is not a message: it has no body to fold (#3064).
+                open: None,
+                voice_pending: false,
+            },
         ));
     }
     // The turns past the drawn window wait behind their own marker (#2805),
@@ -6150,12 +6176,16 @@ pub fn view(
                             row_cap,
                             &attachment_handlers,
                             Some(&selection),
-                            full_body,
-                            open_click,
-                            // The clip belongs to the answer of the turn that
-                            // just settled, which is the newest one drawn
-                            // (#3092).
-                            voice_pending && ti == last && answer_at == Some(i),
+                            RowMode {
+                                full: full_body,
+                                open: open_click,
+                                // The clip belongs to the answer of the turn
+                                // that just settled, which is the newest one
+                                // drawn (#3092).
+                                voice_pending: voice_pending
+                                    && ti == last
+                                    && answer_at == Some(i),
+                            },
                         ),
                     }
                 }
@@ -6167,9 +6197,11 @@ pub fn view(
                         row_cap,
                         &attachment_handlers,
                         None,
-                        full_body,
-                        open_click,
-                        voice_pending && ti == last && answer_at == Some(i),
+                        RowMode {
+                            full: full_body,
+                            open: open_click,
+                            voice_pending: voice_pending && ti == last && answer_at == Some(i),
+                        },
                     ),
                 },
             };
