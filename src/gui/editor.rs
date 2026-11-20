@@ -756,6 +756,10 @@ impl Editor {
                     self.show_notice("Send or discard the voice message first", cx);
                     return;
                 }
+                // The speaker steps aside for the microphone (#3092): a reply
+                // still sounding would bleed into the take, so whatever is
+                // playing ends here rather than under the person's voice.
+                crate::voice_play::silence();
                 self.voice_capture = Some(voice_input::Capture::start());
                 self.voice_finishing = false;
                 self.voice_secs = 0;

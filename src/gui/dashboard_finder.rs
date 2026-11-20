@@ -358,6 +358,10 @@ impl Dashboard {
         match self.seeker_voice_phase() {
             SeekerVoicePhase::Idle => {
                 self.seeker_voice_error = None;
+                // Same rule as the composer's take (#3092): the microphone
+                // opening ends whatever was sounding, or the reply plays into
+                // the query.
+                crate::voice_play::silence();
                 self.seeker_capture = Some(voice_input::Capture::start());
                 self.seeker_voice_finishing = false;
                 self.seeker_voice_send = true;

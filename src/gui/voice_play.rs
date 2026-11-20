@@ -249,6 +249,29 @@ pub(crate) fn stop(path: &Path) {
     }
 }
 
+/// End whatever is sounding, whichever clip it is (#3092).
+///
+/// A microphone opening and a speaker feeding the same room do not belong
+/// together: the take would record the tail of a spoken reply. The slot holds
+/// one clip at a time, so taking it without asking about the path is the whole
+/// job, and it covers a reply, a draft preview and a transcript row alike.
+///
+/// This ends the clip rather than pausing it. Pausing would leave the reader
+/// with a half played reply and no obvious reason why, while a stop reads as
+/// what it is: the machine got out of the way of the microphone.
+pub(crate) fn silence() {
+    let previous = {
+        let mut active = match slot().lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        active.take()
+    };
+    if let Some(previous) = previous {
+        stop_worker(previous);
+    }
+}
+
 fn stop_worker(active: Active) {
     if active.commands.send(Command::Stop).is_err() {
         logging::debug("voice playback: the previous worker had already stopped");
