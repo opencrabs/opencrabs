@@ -2027,8 +2027,14 @@ impl Editor {
         if self.content.is_empty() {
             return 0;
         }
+        // Before the first prepaint there is no laid-out text to measure a
+        // press against, so the press must leave the caret where it is.
+        // Returning 0 parked it at the start of the field, and a caret at
+        // offset 0 with an empty selection makes backspace delete nothing at
+        // all: `previous_boundary(0)` is 0, so the delete removes zero bytes
+        // and keeps doing so until something else moves the caret (#3031).
         let Some(bounds) = self.last_bounds.as_ref() else {
-            return 0;
+            return self.cursor_offset();
         };
         let line_height = self.last_line_height;
         let rel_y = position.y - bounds.top();
