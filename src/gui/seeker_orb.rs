@@ -47,9 +47,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// narrower orb looked identical and cost the Fresnel rim its last two pixels,
 /// because the rim lives exactly where a tighter mask was fading out: the one
 /// bright thing in the material was being multiplied away by the silhouette.
-const ORB_RADIUS: f32 = 0.98;
+pub(crate) const ORB_RADIUS: f32 = 0.98;
 const SINE_STEPS: usize = 4096;
-const VOICE_SAMPLES: usize = super::voice_input::METER_BARS;
+pub(crate) const VOICE_SAMPLES: usize = super::voice_input::METER_BARS;
 
 /// The light budget, and the one number that decides whether this reads as
 /// glass or as paint.
@@ -404,12 +404,12 @@ const BAYER: [f32; 16] = [
 ];
 
 #[derive(Clone, Copy)]
-struct OrbInput {
-    recording: bool,
+pub(crate) struct OrbInput {
+    pub(crate) recording: bool,
     /// Recent microphone peaks, oldest first. Keeping the history instead of
     /// one scalar lets speech bend different parts of the liquid at once.
-    levels: [f32; VOICE_SAMPLES],
-    colour: u32,
+    pub(crate) levels: [f32; VOICE_SAMPLES],
+    pub(crate) colour: u32,
 }
 
 /// One live orb. The worker owns no GPUI state and ends when this is dropped.
@@ -534,16 +534,16 @@ fn microphone_history(levels: &[f32]) -> [f32; VOICE_SAMPLES] {
 }
 
 /// Screen-space measurements shared by every animation frame.
-struct Surface {
-    size: u32,
-    x: Vec<f32>,
-    y: Vec<f32>,
-    radius: Vec<f32>,
-    normal_z: Vec<f32>,
+pub(crate) struct Surface {
+    pub(crate) size: u32,
+    pub(crate) x: Vec<f32>,
+    pub(crate) y: Vec<f32>,
+    pub(crate) radius: Vec<f32>,
+    pub(crate) normal_z: Vec<f32>,
 }
 
 impl Surface {
-    fn new(size: u32) -> Self {
+    pub(crate) fn new(size: u32) -> Self {
         let count = (size * size) as usize;
         let mut surface = Self {
             size,
@@ -785,7 +785,7 @@ fn render(surface: &Surface, liquid_clock: f32, input: OrbInput, energy: f32) ->
 /// Low-pass the meter before it deforms the liquid. Individual meter bars
 /// remain visible to speech, but their sharp edges do not become sound-wave
 /// spikes in the glass.
-fn smooth_voice(levels: [f32; VOICE_SAMPLES]) -> [f32; VOICE_SAMPLES] {
+pub(crate) fn smooth_voice(levels: [f32; VOICE_SAMPLES]) -> [f32; VOICE_SAMPLES] {
     let mut smoothed = [0.0; VOICE_SAMPLES];
     for (index, output) in smoothed.iter_mut().enumerate() {
         let mut sum = 0.0;
@@ -799,7 +799,7 @@ fn smooth_voice(levels: [f32; VOICE_SAMPLES]) -> [f32; VOICE_SAMPLES] {
 }
 
 /// Sample the scrolling meter at a horizontal position inside the sphere.
-fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
+pub(crate) fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
     let position = position.clamp(0.0, 1.0) * (levels.len() - 1) as f32;
     let index = position as usize;
     let next = (index + 1).min(levels.len() - 1);
@@ -813,13 +813,13 @@ fn voice_at(levels: &[f32; VOICE_SAMPLES], position: f32) -> f32 {
 /// A linear falloff would end exactly at `width`, and a band whose value
 /// reaches zero at a fixed radius prints a faint ring of its own. A Gaussian
 /// has no edge to print.
-fn gaussian(value: f32, width: f32) -> f32 {
+pub(crate) fn gaussian(value: f32, width: f32) -> f32 {
     let scaled = value / width;
     (-scaled * scaled).exp()
 }
 
 /// Saturation for a given brightness, read off the reference.
-fn saturation_at(heat: f32) -> f32 {
+pub(crate) fn saturation_at(heat: f32) -> f32 {
     if heat <= HEAT_STOPS[0] {
         return SAT_STOPS[0];
     }
@@ -844,7 +844,7 @@ fn saturation_at(heat: f32) -> f32 {
 /// Scaling by luma is the whole trick: it lets brightness be decided once, by
 /// the light field, and colour be decided independently. Mixing the two is what
 /// made every theme's orb a solid gold ball.
-fn tinted(hue: f32, saturation: f32, heat: f32) -> (f32, f32, f32) {
+pub(crate) fn tinted(hue: f32, saturation: f32, heat: f32) -> (f32, f32, f32) {
     let base = hsv_rgb(hue, saturation, 1.0);
     let brightness = relative_luma(base.0, base.1, base.2);
     if brightness < 1e-4 {
@@ -859,12 +859,12 @@ fn tinted(hue: f32, saturation: f32, heat: f32) -> (f32, f32, f32) {
 }
 
 /// Rec. 709 relative luma, the weights the reference's own values assume.
-fn relative_luma(red: f32, green: f32, blue: f32) -> f32 {
+pub(crate) fn relative_luma(red: f32, green: f32, blue: f32) -> f32 {
     0.2126 * red + 0.7152 * green + 0.0722 * blue
 }
 
 /// Accent colour to HSV, so the warm side can lean towards the theme.
-fn rgb_hsv(colour: u32) -> (f32, f32, f32) {
+pub(crate) fn rgb_hsv(colour: u32) -> (f32, f32, f32) {
     let (red, green, blue) = rgb(colour);
     let high = red.max(green).max(blue);
     if high <= 0.0 {
@@ -886,7 +886,7 @@ fn rgb_hsv(colour: u32) -> (f32, f32, f32) {
 }
 
 /// HSV to RGB with the hue wrapped, the inverse of `rgb_hsv`.
-fn hsv_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
+pub(crate) fn hsv_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
     let position = hue.rem_euclid(1.0) * 6.0;
     let index = (position as usize).min(5);
     let fraction = position - index as f32;
@@ -910,22 +910,22 @@ fn hsv_rgb(hue: f32, saturation: f32, value: f32) -> (f32, f32, f32) {
 /// Ordered dither alone leaves a visible 4x4 lattice on a gradient this slow,
 /// and the hash noise breaks that lattice up without moving between frames of
 /// the same instant.
-fn hash_noise(index: usize) -> f32 {
+pub(crate) fn hash_noise(index: usize) -> f32 {
     let mut value = index.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff;
     value ^= value >> 13;
     (value & 0xffff) as f32 / 65_535.0
 }
 
-fn smooth(from: f32, to: f32, value: f32) -> f32 {
+pub(crate) fn smooth(from: f32, to: f32, value: f32) -> f32 {
     bell_helper(((value - from) / (to - from)).clamp(0.0, 1.0))
 }
 
-fn bell_helper(t: f32) -> f32 {
+pub(crate) fn bell_helper(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
 /// Interpolated sine table: continuous motion without millions of libm calls.
-fn sine(value: f32) -> f32 {
+pub(crate) fn sine(value: f32) -> f32 {
     static TABLE: OnceLock<Vec<f32>> = OnceLock::new();
     let table = TABLE.get_or_init(|| {
         (0..=SINE_STEPS)
@@ -942,7 +942,7 @@ fn sine(value: f32) -> f32 {
     table[from] * (1.0 - fraction) + table[to] * fraction
 }
 
-fn rgb(colour: u32) -> (f32, f32, f32) {
+pub(crate) fn rgb(colour: u32) -> (f32, f32, f32) {
     (
         ((colour >> 16) & 0xff) as f32 / 255.0,
         ((colour >> 8) & 0xff) as f32 / 255.0,
@@ -950,11 +950,11 @@ fn rgb(colour: u32) -> (f32, f32, f32) {
     )
 }
 
-fn bgra(red: f32, green: f32, blue: f32, alpha: f32) -> Rgba<u8> {
+pub(crate) fn bgra(red: f32, green: f32, blue: f32, alpha: f32) -> Rgba<u8> {
     Rgba([byte(blue), byte(green), byte(red), byte(alpha)])
 }
 
-fn byte(value: f32) -> u8 {
+pub(crate) fn byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
