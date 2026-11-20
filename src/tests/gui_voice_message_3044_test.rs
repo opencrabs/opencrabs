@@ -10,9 +10,9 @@
 //! * the stop control ends the recording and previews the take, because a stop
 //!   is not a decision to send;
 //!
-//! * the take is previewed above the row with its own wave and transcript, and
-//!   it is spent by the send that carries it, so a clip never rides the next
-//!   message;
+//! * the take is previewed above the row as glass, with its own shape and
+//!   transcript, and it is spent by the send that carries it, so a clip never
+//!   rides the next message;
 //! * the marker carries the words and the clip in one string, and the send path
 //!   splits them so the agent reads prose and never a path;
 //! * a recording is never mistaken for a reply, or a spoken answer would be
@@ -329,55 +329,60 @@ fn the_marker_never_comes_back_as_context() {
     );
 }
 
-/// The meter shows the recent past, not the whole take: a fixed window of the
-/// newest readings, folded to the range a bar can draw, with a floor so silence
-/// still looks like a live strip.
+/// The glass is the meter now (#3092): the take's own peaks reach the orb on
+/// every tick of the dictation loop, and the orb lives exactly as long as the
+/// microphone does. A worker that outlived its take would keep painting a
+/// recording that already closed.
 #[test]
-fn the_wave_is_a_fixed_window_of_the_recent_past() {
-    let wave = editor("fn waveform(", "/// The keybindings the editor needs");
+fn the_glass_is_fed_the_take_and_closes_with_it() {
+    let poll = editor("fn poll_voice(", "fn land_voice(");
     assert!(
-        wave.contains("levels.len().saturating_sub(WAVE_BARS)"),
-        "the window ends at the newest reading, so the wave moves under the voice"
+        poll.contains("orb.update(recording, &self.voice_levels, palette::current().red)"),
+        "the strip stopped handing the take to the orb"
     );
     assert!(
-        wave.contains("level.clamp(0.0, 1.0) * 12.0"),
-        "a sample louder than full scale must not draw past the strip"
+        poll.contains("self.voice_orb.take()") && poll.contains("orb.dispose(cx)"),
+        "the orb has to be retired when the capture ends, not on the next take"
     );
+    let start = editor("pub(crate) fn toggle_dictation(", "fn pump_voice(");
     assert!(
-        wave.contains("px(2.0 +"),
-        "every bar keeps a floor, or a quiet take reads as a dead microphone"
+        start.contains("OrbAnimation::start("),
+        "the orb opens with the microphone"
     );
+    // Assembled rather than written out, so the assertion cannot match its own
+    // text: a source scan that finds itself proves nothing.
+    let bar_strip = ["fn ", "wave", "form("].concat();
     assert!(
-        EDITOR.contains("const WAVE_BARS: usize = 34;"),
-        "the window has one size, shared by the drawing and the buffer"
+        !EDITOR.contains(&bar_strip),
+        "the bar strip was replaced by the glass, not stacked beside it"
     );
 }
 
 /// One control whose meaning follows the state, which is how every recorder
-/// works: while the microphone is open it counts, draws the wave, and offers
-/// the stop square in place of the microphone.
+/// works: while the microphone is open it counts, shows the take as glass, and
+/// the whole marble is what ends it.
 #[test]
 fn the_microphone_becomes_the_thing_that_stops_it() {
-    let mic = editor("fn mic(", "/// How many meter readings");
+    let mic = editor("fn mic(", "/// How large the recording glass is");
     assert!(
         mic.contains("\"editor-mic\""),
         "the control keeps the id the composer row and the tests look for"
     );
     assert!(
-        mic.contains("if phase == VoicePhase::Recording"),
-        "the recording strip only exists while the microphone is open"
-    );
-    assert!(
-        mic.contains("waveform(levels, palette.red)"),
-        "the strip shows what the device is hearing"
-    );
-    assert!(
-        mic.contains("crate::icon::stop_icon(colour, 1.05)"),
-        "the mark is the stop square, not a second button to find"
+        mic.contains("orb.frame(cx)"),
+        "the recording strip draws the orb, not a bar strip"
     );
     assert!(
         mic.contains("secs / 60") && mic.contains("secs % 60"),
         "the counter says how long, which a red mark alone never does"
+    );
+    assert!(
+        mic.contains("this.toggle_dictation(cx)"),
+        "a control that draws a stop and answers nothing is worse than none"
+    );
+    assert!(
+        mic.contains("crate::icon::stop_icon(colour, 1.05)"),
+        "a capture with no orb still needs a way to stop"
     );
 }
 

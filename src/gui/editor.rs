@@ -498,10 +498,14 @@ pub struct Editor {
     /// moved no digit leaves the frame alone.
     voice_secs: u64,
     /// The meter's window while recording, newest last (#3044). Copied out of
-    /// the capture on every tick: the waveform is the only part of the composer
-    /// that changes ten times a second, so it is also the only reason the row
-    /// repaints while the microphone is open.
+    /// the capture on every tick and handed straight to the orb, which is the
+    /// only part of the composer that changes ten times a second and therefore
+    /// the only reason the row repaints while the microphone is open.
     voice_levels: Vec<f32>,
+    /// The orb the composer listens through, if the microphone is open
+    /// (#3092). Its worker renders the glass; the composer only swaps the
+    /// texture, so a take costs the row one image and no per-pixel work.
+    voice_orb: Option<crate::seeker_orb::OrbAnimation>,
     /// The take that has been transcribed and is waiting to be sent (#3044).
     ///
     /// A recording is a message of its own, so it does not go through the caret:
@@ -646,6 +650,7 @@ impl Editor {
             voice_looping: false,
             voice_secs: 0,
             voice_levels: Vec::new(),
+            voice_orb: None,
             voice_draft: None,
         }
     }
@@ -746,6 +751,12 @@ impl Editor {
                 self.voice_finishing = false;
                 self.voice_secs = 0;
                 self.voice_levels.clear();
+                // The orb is the strip now (#3092): it opens with the
+                // microphone and closes with it, so its worker never outlives
+                // the take it was painting.
+                self.voice_orb = Some(crate::seeker_orb::OrbAnimation::start(
+                    palette::current().red,
+                ));
                 self.pump_voice(cx);
             }
             VoicePhase::Recording => {
@@ -802,9 +813,15 @@ impl Editor {
                     // with the device either way.
                     self.voice_capture = None;
                     self.voice_finishing = false;
-                    // The waveform belongs to a recording that is over: leaving
-                    // it up would paint a frozen strip beside the spinner.
+                    // The glass belongs to a recording that is over: leaving
+                    // it up would paint a frozen marble beside the spinner.
                     self.voice_levels.clear();
+                    // The glass closes with the microphone. Retiring it here
+                    // rather than on the next take keeps the worker and its
+                    // texture from outliving the recording they were painting.
+                    if let Some(orb) = self.voice_orb.take() {
+                        orb.dispose(cx);
+                    }
                     changed = true;
                     match answer {
                         Ok(recording) => {
@@ -833,7 +850,7 @@ impl Editor {
                 Err(message) => self.show_notice(message, cx),
             }
         }
-        // The counter moves once a second; the waveform moves on every tick.
+        // The counter moves once a second; the glass moves on every tick.
         // Both are read out of the capture before anything is assigned, so the
         // borrow of the handle does not overlap the writes to the fields it
         // feeds.
@@ -851,6 +868,15 @@ impl Editor {
                 changed = true;
             }
         }
+        // The glass is painted from the worker's newest texture, so the row has
+        // to ask for a frame even on a tick where nothing else moved: a
+        // recording that stops repainting is a recording that looks stopped
+        // (#3092).
+        if let Some(orb) = self.voice_orb.as_ref() {
+            let recording = self.voice_phase() == VoicePhase::Recording;
+            orb.update(recording, &self.voice_levels, palette::current().red);
+            changed = true;
+        }
         if changed {
             cx.notify();
         }
@@ -865,7 +891,7 @@ impl Editor {
     ///
     /// The words never enter the field. Stopping the microphone is not deciding
     /// to send, but it is also not deciding to write: the take gets its own
-    /// preview under the row, with the waveform it was recorded with and the
+    /// preview under the row, with the shape it was recorded with and the
     /// transcript beneath it, so a person can read what the microphone thought
     /// it heard while still holding the message. Enter is the one thing that
     /// puts a turn on the wire, and the clip rides out as a marker the row
@@ -2881,7 +2907,7 @@ impl Render for Editor {
                 .child(mic(
                     self.voice_phase(),
                     self.voice_secs,
-                    &self.voice_levels,
+                    self.voice_orb.as_ref(),
                     cx,
                 )),
         );
@@ -3257,17 +3283,23 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 }
 
 /// The microphone that closes the composer row (#3044): a themed mark in the
-/// paperclip's 1.8rem hit area, so the two ends of the field are one control
-/// line instead of a control and an afterthought.
+/// paperclip's 1.8rem hit area while it is idle, so the two ends of the field
+/// are one control line instead of a control and an afterthought.
 ///
 /// It carries the phase itself. Idle is the quiet grey the paperclip wears;
-/// recording turns it red, puts the elapsed time and a live waveform beside it,
-/// and swaps the microphone for a stop square, because a control that just
-/// started the microphone has to say so and has to say how to end it; a WAV
-/// being built keeps the red, and the transcription turns amber, the same
-/// "working" tone the rest of the window uses. Like the paperclip, the colour
-/// goes into the vector and the hover raises the control's opacity.
-fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -> impl IntoElement {
+/// recording opens the orb, the same glass the Seeker listens through, with the
+/// elapsed time beside it and the whole marble as the stop (#3092). A take in
+/// progress has to say that it is running, how long for, and how to end it,
+/// without asking the person to find a second control; a WAV being built keeps
+/// the glass but stops it moving, and the transcription turns the mark amber,
+/// the same "working" tone the rest of the window uses. Like the paperclip, the
+/// colour goes into the vector and the hover raises the control's opacity.
+fn mic(
+    phase: VoicePhase,
+    secs: u64,
+    orb: Option<&crate::seeker_orb::OrbAnimation>,
+    cx: &mut Context<Editor>,
+) -> impl IntoElement {
     let palette = palette::current();
     let colour = match phase {
         VoicePhase::Idle => palette.text_muted,
@@ -3287,37 +3319,47 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
         .opacity(if phase == VoicePhase::Idle { 0.8 } else { 1.0 })
         .hover(|d| d.opacity(1.0));
     // While the microphone is open the control becomes a recording strip: the
-    // counter says how long, the wave says it is hearing something, and the
-    // mark on the end is the stop square instead of the microphone. One control
-    // whose meaning changes with the state, which is how every recorder works
-    // and why there is no second button to find (#3044).
-    let mark: gpui::AnyElement = if phase == VoicePhase::Recording {
-        control = control
-            // The counter sits in the row, left of the wave: a red mark alone
-            // says "something is happening", never "for how long", and the one
-            // thing a person wants to know mid-sentence is that the thing is
-            // still running.
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(palette.red))
-                    .child(format!("{}:{:02}", secs / 60, secs % 60)),
-            )
-            .child(waveform(levels, palette.red));
-        crate::icon::stop_icon(colour, 1.05).into_any_element()
-    } else {
-        crate::icon::mic_icon(colour, 1.25).into_any_element()
+    // counter says how long and the glass says it is hearing something. One
+    // control whose meaning changes with the state, which is how every recorder
+    // works and why there is no second button to find (#3044).
+    let live = matches!(phase, VoicePhase::Recording | VoicePhase::Finishing);
+    if live {
+        // The counter sits in the row, left of the glass: a red mark alone says
+        // "something is happening", never "for how long", and the one thing a
+        // person wants to know mid-sentence is that the thing is still running.
+        control = control.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(palette.red))
+                .child(format!("{}:{:02}", secs / 60, secs % 60)),
+        );
+    }
+    let mark: gpui::AnyElement = match orb.filter(|_| live) {
+        // The marble is the strip and the stop at once: the worker has already
+        // painted the pixels, so the row only swaps the texture. It is sized in
+        // rems rather than the microphone's 1.8 so the liquid has room to bend
+        // without the field's line jumping when a take starts.
+        Some(orb) => div()
+            .relative()
+            .flex_none()
+            .size(gpui::rems(RECORDING_ORB))
+            .child(gpui::img(orb.frame(cx)).absolute().inset_0().size_full())
+            .into_any_element(),
+        None => div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(gpui::rems(1.8))
+            .child(if phase == VoicePhase::Recording {
+                crate::icon::stop_icon(colour, 1.05).into_any_element()
+            } else {
+                crate::icon::mic_icon(colour, 1.25).into_any_element()
+            })
+            .into_any_element(),
     };
     control
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .size(gpui::rems(1.8))
-                .child(mark),
-        )
+        .child(mark)
         // The hover names the key, the same sentence the Seeker's microphone
         // shows: two surfaces, one binding, one explanation (#3044).
         .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
@@ -3330,41 +3372,13 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
         )
 }
 
-/// How many meter readings the waveform draws.
+/// How large the recording glass is, in rems.
 ///
-/// The capture keeps ~1.1 s of readings; the strip shows the last two thirds of
-/// a second, which is about as far back as the eye reads a scroll, and keeps
-/// the control from growing into the field's text.
-const WAVE_BARS: usize = 34;
-
-/// The live meter beside the counter (#3044).
-///
-/// One bar per reading, oldest on the left, newest on the right, so the strip
-/// scrolls the way a waveform should and its right edge is always what the
-/// microphone heard a moment ago. A bar never drops below two pixels: an empty
-/// strip and a silent microphone have to look different, or a muted device
-/// reads as "still starting up" forever.
-fn waveform(levels: &[f32], colour: u32) -> impl IntoElement {
-    let shown = &levels[levels.len().saturating_sub(WAVE_BARS)..];
-    let mut row = div()
-        .flex()
-        .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(px(1.5))
-        .h(px(14.0));
-    for level in shown {
-        row = row.child(
-            div()
-                .flex_none()
-                .w(px(2.0))
-                .h(px(2.0 + level.clamp(0.0, 1.0) * 12.0))
-                .rounded(px(1.0))
-                .bg(rgb(colour)),
-        );
-    }
-    row
-}
+/// A step above the microphone's 1.8rem tile: the liquid has to be visible
+/// enough to read as a response to the voice, and the row is already the
+/// tallest thing in the composer while a take runs. Larger than this and the
+/// composer visibly jumps the moment the microphone opens.
+const RECORDING_ORB: f32 = 2.4;
 
 /// The take waiting to be sent, drawn above the input row (#3044).
 ///
@@ -5029,6 +5043,41 @@ mod tests {
         assert!(
             clip_at < input_at && input_at < mic_at,
             "the paperclip leads, the input holds the middle, the microphone ends the row"
+        );
+    }
+
+    /// The recording strip is the orb, and the orb is the stop (#3092).
+    ///
+    /// A take has to read as one object: the glass says the microphone is
+    /// hearing something, the counter says for how long, and the whole marble
+    /// ends it. The click listener is the part worth pinning, because a control
+    /// that draws a stop and answers nothing is worse than no stop at all.
+    #[test]
+    fn the_recording_strip_is_the_orb_and_the_orb_is_the_stop() {
+        let src = include_str!("editor.rs");
+        let body = src
+            .split("fn mic(")
+            .nth(1)
+            .and_then(|rest| rest.split("/// How large the recording glass is").next())
+            .expect("the composer's microphone");
+        assert!(
+            body.contains("RECORDING_ORB"),
+            "the recording strip stopped painting the orb"
+        );
+        assert!(
+            body.contains("orb.frame(cx)"),
+            "the orb is sized but its texture is never taken"
+        );
+        assert!(
+            body.contains("this.toggle_dictation(cx)"),
+            "the glass draws a stop it cannot honour"
+        );
+        // Assembled rather than written out, so the assertion cannot match
+        // itself: a source scan that finds its own text proves nothing.
+        let bar_strip = ["fn ", "wave", "form("].concat();
+        assert!(
+            !src.contains(&bar_strip),
+            "the bar strip is still there beside the glass"
         );
     }
 
