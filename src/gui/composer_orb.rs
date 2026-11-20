@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage, SharedString,
+    App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage, SharedString,
     Styled, canvas, div, img, prelude::*, px,
 };
 use image::{Frame, RgbaImage};
@@ -548,7 +548,7 @@ pub(crate) fn player(
     seconds: Option<f32>,
     fallback_levels: &[f32],
     cx: &mut App,
-) -> Div {
+) -> impl IntoElement {
     let live = voice_play::state(path);
     let (position, total) = span(live, seconds);
     let fraction = total
