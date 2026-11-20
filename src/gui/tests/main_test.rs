@@ -1675,6 +1675,61 @@ fn a_topic_chip_answers_the_split_pick() {
 }
 
 #[test]
+fn a_chat_topic_chip_answers_the_split_pick() {
+    // #3097: the rail's chips answered the pick (#2760) but the row at the top
+    // of the chat kept its own path, so a press opened the conversation in the
+    // chat leaf and left the waiting pane armed on a session nobody chose.
+    let src = DASHBOARD;
+    let tabs = fn_body(src, "topic_tabs");
+    assert!(
+        tabs.contains("if this.split_pick.is_some()"),
+        "the chat chip asks whether a pane is waiting"
+    );
+    assert!(
+        tabs.contains("this.choose_split(id, cx)"),
+        "and fills it instead of opening the topic"
+    );
+    assert!(
+        tabs.contains("this.chat_topics_expanded = false"),
+        "the row was expanded to pick with, so the pick folds it back"
+    );
+}
+
+#[test]
+fn the_split_pick_scrim_starts_below_the_topic_row() {
+    // #3097: the scrim is `.occlude()`, which blocks the mouse for everything
+    // behind its hitbox, and the row sits inside the band it covered. The row
+    // was therefore dead while a pick waited, and the only way to choose a
+    // topic was the sidebar.
+    let overlays = include_str!("../overlays.rs");
+    let scrim = fn_body(overlays, "split_pick_overlay");
+    assert!(
+        scrim.contains("band: Option<gpui::Pixels>"),
+        "the scrim is told the height of the row it has to leave alone"
+    );
+    assert!(
+        scrim.contains("scrim.top(band)"),
+        "a drawn row keeps its band bright"
+    );
+    assert!(
+        scrim.contains("None => scrim.top_0()"),
+        "with no row up there the chat dims whole"
+    );
+    // The render is what decides whether a row is drawn, and a band over a
+    // row that is not there is a bright stripe across the chat. A split draws
+    // no window row but a strip in every pane, so both cases reserve it.
+    let render = dashboard_render(DASHBOARD);
+    assert!(
+        render.contains("let top_strip = split_draws_its_own"),
+        "the band is read from the rows the render actually built"
+    );
+    assert!(
+        render.contains("split_pick_overlay(layout, rail_px, pick_band)"),
+        "and handed to the scrim"
+    );
+}
+
+#[test]
 fn the_seeker_and_the_filter_answer_the_split_pick() {
     // #2760: the Seeker's OpenSession arm and the rail filter's Enter both
     // opened directly, so a pick from either left the waiting pane armed.
@@ -1697,18 +1752,29 @@ fn a_split_keeps_the_topics_bar_on_the_pane_that_carries_it() {
     // topics repeated one bar per pane and each bar claimed topics that
     // belong to a different pane.
     let src = DASHBOARD;
-    // The rule reads `pane_topics`, where the strip is gated, so the scan
-    // takes that body instead of hoping the concat happens to spell the
-    // condition the way an older revision did (#3060).
-    let pane = fn_body(src, "pane_topics");
-    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The rule reads `pane_carries_topics`, where the strip is gated, so the
+    // scan takes that body instead of hoping the concat happens to spell the
+    // condition the way an older revision did (#3060). The predicate moved out
+    // of `pane_topics` so the split pick's scrim can ask the same question
+    // (#3097): a band left bright over a row that is not drawn is a stripe
+    // across the chat.
+    let carries = fn_body(src, "pane_carries_topics");
+    let flat: String = carries.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("let carries_topics = leaves.len() == 1 || pane_root == session;"),
         "only the pane carrying the topics draws the strip"
     );
     assert!(
-        flat.contains("if !carries_topics || !self.sessions.is_topic_enabled(pane_root)"),
+        flat.contains("carries_topics && self.sessions.is_topic_enabled(pane_root)"),
         "and the strip is gated on it"
+    );
+    assert!(
+        flat.contains("&& self.family_has_topics(pane_root)"),
+        "a family with no topics left carries no strip (#2863)"
+    );
+    assert!(
+        fn_body(src, "pane_topics").contains("if !self.pane_carries_topics(session)"),
+        "the strip itself asks the shared predicate"
     );
 }
 

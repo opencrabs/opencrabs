@@ -2262,6 +2262,21 @@ impl Render for Dashboard {
             );
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
+        // The band a split pick's scrim leaves bright (#3097). The row is the
+        // shortest way to the topic a split wants, and the scrim blocks the
+        // mouse for everything behind it, so a row under the scrim cannot
+        // answer the pick at all. A row on a side or at the bottom is not in
+        // this band, and no row at all means the chat dims whole.
+        //
+        // A split draws no window row (#2687), but every pane draws its own
+        // strip on the top edge, inside the pane's own border and under the
+        // same column padding, so the same band covers both.
+        let top_strip = split_draws_its_own
+            || topic_row
+                .as_ref()
+                .is_some_and(|(edge, _)| *edge == topic_tabs::Edge::Top);
+        let pick_band =
+            top_strip.then(|| px(topic_tabs::CELL_REMS * self.rem + 14.0));
         // The dock owns the chrome, so the field must not paint a second card
         // inside it. A split pane renders the same editor bare and keeps its own
         // card, which is why this is a flag on the field and not a deleted style
@@ -3145,10 +3160,11 @@ impl Render for Dashboard {
             root = root.child(topic_info_overlay(&info, close));
         }
         // While a split waits for its session the chat dims, and a card says what
-        // to do. The sidebar is left bright so its rows can be picked (#2438).
+        // to do. The sidebar is left bright so its rows can be picked (#2438),
+        // and so is the topic row on the top edge, for the same reason (#3097).
         if let Some(layout) = self.split_pick {
             let rail_px = px(self.visible_rail_width() * self.rem);
-            root = root.child(split_pick_overlay(layout, rail_px));
+            root = root.child(split_pick_overlay(layout, rail_px, pick_band));
         }
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).

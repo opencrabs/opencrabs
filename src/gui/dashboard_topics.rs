@@ -71,15 +71,13 @@ impl Dashboard {
         Some(sessions::menu_popover("chat-menu", items, at))
     }
 
-    /// One pane's topic strip (#2686, #2687), or none when that pane does not
-    /// carry the family. A pane builds this in its own render through the
-    /// window handle, and `panes_body` builds the chat leaf's through the same
-    /// function, so both wear one strip.
-    pub(crate) fn pane_topics(
-        &mut self,
-        session: Uuid,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// Whether one leaf draws a topic strip (#2686).
+    ///
+    /// Lifted out of `pane_topics` so the gate on the strip is one answer
+    /// (#3097). The split pick's scrim reserves the band a top row occupies,
+    /// and a band left bright over a row that is not drawn is a stripe across
+    /// the chat.
+    pub(crate) fn pane_carries_topics(&self, session: Uuid) -> bool {
         let leaves = self
             .panes
             .as_ref()
@@ -98,10 +96,21 @@ impl Dashboard {
         // The flag is not enough (#2863): a family whose topics were all
         // archived or folded still carried it, and the strip painted a bar
         // whose only chip was `All`.
-        if !carries_topics
-            || !self.sessions.is_topic_enabled(pane_root)
-            || !self.family_has_topics(pane_root)
-        {
+        carries_topics
+            && self.sessions.is_topic_enabled(pane_root)
+            && self.family_has_topics(pane_root)
+    }
+
+    /// One pane's topic strip (#2686, #2687), or none when that pane does not
+    /// carry the family. A pane builds this in its own render through the
+    /// window handle, and `panes_body` builds the chat leaf's through the same
+    /// function, so both wear one strip.
+    pub(crate) fn pane_topics(
+        &mut self,
+        session: Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.pane_carries_topics(session) {
             return None;
         }
         let pane_key = session.to_string();
@@ -201,6 +210,18 @@ impl Dashboard {
             let current = entry.is_open(root, open);
             let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                 cx.stop_propagation();
+                // A chip is a pick like any row: while a split waits for its
+                // second session the press fills that pane instead of opening
+                // the conversation in the chat leaf, which left the pick armed
+                // on a pane nobody chose (#3097, the chat row's half of
+                // #2760).
+                if this.split_pick.is_some() {
+                    // The row was expanded to pick with, so the pick folds it
+                    // back, the way a rail pick folds its card (#3020).
+                    this.chat_topics_expanded = false;
+                    this.choose_split(id, cx);
+                    return;
+                }
                 match pane {
                     Some(leaf) => this.open_topic_in_pane(leaf, id, cx),
                     None => this.open_session(id, cx),

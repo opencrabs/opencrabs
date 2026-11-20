@@ -124,7 +124,16 @@ pub(crate) fn update_prompt_overlay(
 /// The dim over the chat and the card in its bottom right while a split waits
 /// for its second session (#2438). The scrim starts past the sidebar, so the
 /// rows stay bright and clickable.
-pub(crate) fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl IntoElement {
+///
+/// `band` is the height the chat draws its topic row in, and the scrim starts
+/// below it when the row is there (#3097). The scrim blocks the mouse for
+/// everything behind it, so a row under it could not answer the pick, and that
+/// row is the shortest way to the topic the split wants.
+pub(crate) fn split_pick_overlay(
+    layout: Layout,
+    rail_px: gpui::Pixels,
+    band: Option<gpui::Pixels>,
+) -> impl IntoElement {
     let card = div()
         .absolute()
         .bottom(px(24.0))
@@ -152,16 +161,20 @@ pub(crate) fn split_pick_overlay(layout: Layout, rail_px: gpui::Pixels) -> impl 
                 .text_color(rgb(palette::current().text_faint))
                 .child("or press N for a new session · esc cancels"),
         );
-    div()
+    let scrim = div()
         .id("split-pick-scrim")
         .occlude()
         .absolute()
-        .top_0()
         .bottom_0()
         .right_0()
-        .left(rail_px)
-        .bg(rgba(0x0a0a0a88))
-        .child(card)
+        .left(rail_px);
+    // A row on the top edge keeps its band bright; with no row up there the
+    // whole chat dims, because there is no picker to leave alone (#3097).
+    let scrim = match band {
+        Some(band) => scrim.top(band),
+        None => scrim.top_0(),
+    };
+    scrim.bg(rgba(0x0a0a0a88)).child(card)
 }
 
 /// The icon a topic gets when none is picked (#2414, #2824).
