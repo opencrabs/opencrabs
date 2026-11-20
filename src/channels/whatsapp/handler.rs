@@ -2151,8 +2151,13 @@ pub(crate) async fn handle_message(
             // `reply_target` above.
             let reply_jid = reply_target.clone();
 
+            // A voice turn answers twice: the report in text, one short block
+            // for the ear (#3092). Splitting first keeps the block out of the
+            // message body.
+            let (answer, spoken) = crate::channels::voice::spoken::split(&response.content);
+
             // Extract <<IMG:path>> markers — send each as a real WhatsApp image message.
-            let (text_content, img_paths) = crate::utils::extract_img_markers(&response.content);
+            let (text_content, img_paths) = crate::utils::extract_img_markers(&answer);
             let text_content = crate::utils::sanitize::strip_llm_artifacts(&text_content);
             let text_content = redact_secrets(&text_content);
             let text_content = crate::utils::slack_fmt::markdown_to_mrkdwn(&text_content);
@@ -2363,6 +2368,15 @@ pub(crate) async fn handle_message(
 
             // If input was voice AND TTS is enabled, also send voice note after text
             if has_aud && voice_config.tts_enabled {
+                let speech = match spoken {
+                    Some(text) => text,
+                    None => {
+                        tracing::warn!(
+                            "WhatsApp: voice turn carried no spoken block, reading the first paragraph"
+                        );
+                        crate::channels::voice::spoken::first_paragraph(&answer)
+                    }
+                };
                 // Show "recording..." across synthesis and upload, the way a
                 // human preparing a voice note appears (#1486). Cleared on
                 // every exit path below, success or failure, so the chat is
@@ -2370,7 +2384,7 @@ pub(crate) async fn handle_message(
                 if let Err(e) = client.chatstate().send_recording(&reply_jid).await {
                     tracing::warn!(error = %e, "WhatsApp: recording indicator failed");
                 }
-                match crate::channels::voice::synthesize(&response.content, &voice_config).await {
+                match crate::channels::voice::synthesize(&speech, &voice_config).await {
                     Ok(audio_bytes) => {
                         // WhatsApp requires uploading media to its servers first,
                         // then sending the message with the returned URL + crypto keys.

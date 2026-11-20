@@ -2106,6 +2106,15 @@ pub(crate) async fn handle_message(
         text
     };
 
+    // The transcript reads like typing, so the only way the model can know it
+    // was spoken is this marker. It goes on at the edge, after every command
+    // path has had its look at the words (#3092).
+    let text = if is_voice && !text.trim().is_empty() {
+        crate::channels::voice::spoken::voice_prefix(&text)
+    } else {
+        text
+    };
+
     tracing::info!(
         "Telegram: reaching agent processing — text={:?}, is_voice={}, is_dm={}, chat={}",
         text,

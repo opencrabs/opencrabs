@@ -1707,6 +1707,14 @@ async fn handle_message(
         }
     }
 
+    // The transcript reads like typing, so the only way the model can know it
+    // was spoken is this marker. It goes on after the command block, so a
+    // transcript that happens to look like a command was already answered
+    // (#3092).
+    if is_voice {
+        content = crate::channels::voice::spoken::voice_prefix(&content);
+    }
+
     // Detect thread replies so the agent knows the message is in a thread context.
     // Also store the thread_ts so we reply in the same thread.
     let thread_ts = msg.origin.thread_ts.clone();
@@ -2185,13 +2193,17 @@ async fn handle_message(
 
     match result {
         Ok(response) => {
+            // A voice turn answers twice: the report in text, one short block
+            // for the ear (#3092). Splitting first keeps the block out of the
+            // posted text and the transcript row.
+            let (answer, spoken) = crate::channels::voice::spoken::split(&response.content);
             // Extract <<IMG:path>> and <<VID:path>> markers. IMG paths are
             // uploaded via files_upload below; VID paths are only stripped
             // (the agent already analyzed them via analyze_video — we don't
             // re-attach the source video to Slack). Stripping VID here so
             // the final hash matches the intermediate hash (which also
             // strips VID), preserving dedup.
-            let (text_only, img_paths) = crate::utils::extract_img_markers(&response.content);
+            let (text_only, img_paths) = crate::utils::extract_img_markers(&answer);
             let (text_only, _vid_paths) = crate::utils::extract_vid_markers(&text_only);
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             // React-back (#372): the marker used to leak into Slack text.
@@ -2497,11 +2509,20 @@ async fn handle_message(
             // audio files uploaded via files.upload play inline with a
             // waveform UI, which is the closest analogue.
             if is_voice && voice_config.tts_enabled {
+                let speech = match spoken {
+                    Some(text) => text,
+                    None => {
+                        tracing::warn!(
+                            "Slack: voice turn carried no spoken block, reading the first paragraph"
+                        );
+                        crate::channels::voice::spoken::first_paragraph(&answer)
+                    }
+                };
                 tracing::info!(
                     "Slack: TTS requested — synthesizing response text (len={})",
-                    response.content.len()
+                    speech.len()
                 );
-                match crate::channels::voice::synthesize(&response.content, &voice_config).await {
+                match crate::channels::voice::synthesize(&speech, &voice_config).await {
                     Ok(audio_bytes) => {
                         tracing::info!(
                             "Slack: TTS succeeded — {} bytes of audio, uploading to channel {}",

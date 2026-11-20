@@ -303,8 +303,13 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
         let Some(marker) = after.get(..end) else {
             break;
         };
-        let is_marker = marker.split_once(':').is_some_and(|(kind, path)| {
-            (kind == "IMG" || kind == "VID" || kind == "AUD") && !path.is_empty()
+        let is_marker = marker.split_once(':').is_some_and(|(kind, payload)| {
+            // `SPOKEN` is text meant for the ear, not a path, so it has no
+            // file behind it: it is dropped from the row all the same, because
+            // a reply reloaded from the ledger would otherwise print the whole
+            // block under the words it was summarizing.
+            (kind == "IMG" || kind == "VID" || kind == "AUD") && !payload.is_empty()
+                || kind.eq_ignore_ascii_case("SPOKEN")
         });
         if is_marker {
             if let Some(head) = rest.get(..start) {
@@ -540,7 +545,7 @@ pub(crate) struct VoiceDraft {
 /// know is that the words in front of it were spoken: that is what tells it to
 /// answer out loud with the voice tools it already has. It is added where the
 /// marker is taken off, so the note never reaches the screen.
-pub const VOICE_NOTE_PREFIX: &str = "[voice note]";
+pub const VOICE_NOTE_PREFIX: &str = opencrabs::channels::voice::spoken::VOICE_PREFIX;
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
 /// about a third of a laptop window: enough to read a paragraph back, never
