@@ -536,6 +536,38 @@ fn a_spoken_turn_is_answered_aloud() {
     );
 }
 
+/// A turn speaks only for the input that started it (#3096).
+///
+/// The speech decision used to live in a set keyed by session. A voice turn
+/// whose settle never arrived left that conversation flagged, so the next
+/// TYPED question in it came back as audio nobody asked for. The flag now
+/// rides the turn and returns on the event that settles it, and a text turn
+/// has nothing to inherit.
+#[test]
+fn a_text_turn_never_inherits_a_voice_answer() {
+    assert!(
+        !DASHBOARD_TURNS.contains("voice_turns"),
+        "no session keyed set survives for a later turn to inherit"
+    );
+    let done = region_in(AGENT_BRIDGE, "    Done {", "    /// The turn failed");
+    assert!(
+        done.contains("voice: bool"),
+        "the settle is told whether this turn's own input was a recording"
+    );
+    let spawn = region_in(AGENT_BRIDGE, "pub fn spawn_turn(", "let thread_sink");
+    assert!(
+        spawn.contains("voice: bool"),
+        "the turn takes the flag from the send that started it"
+    );
+    // A drifting model that writes a spoken block on a text turn is stripped
+    // here, before the settle draws the answer.
+    let settle = region_in(AGENT_BRIDGE, "match outcome {", "Err(e) =>");
+    assert!(
+        settle.contains("spoken::visible(&response.content)"),
+        "a reply on a text turn is drawn without its spoken block"
+    );
+}
+
 /// The take's colour is the glass itself, not a caption over it: the orb
 /// worker is handed amber while the device is open and green from the hand-off
 /// to the transcriber, which is what lets the bubble stay bare (#3044).
