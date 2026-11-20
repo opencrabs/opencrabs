@@ -40,8 +40,14 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
-      - name: Test instance store
-        run: cargo test --locked --profile ci --lib remote::instance_store
+      # The three modules of the instance rail are pure enough to be tested
+      # before a single binary is linked: the store, the wire client and the
+      # view model. One compile, three filters, so a red test names its module.
+      - name: Test the instance modules
+        run: |
+          cargo test --locked --profile ci --lib remote::instance_store
+          cargo test --locked --profile ci --lib remote::instance_client
+          cargo test --locked --profile ci --lib gui::instances
 
       - name: Build daemon
         run: cargo build --locked --profile ci --bin opencrabs
