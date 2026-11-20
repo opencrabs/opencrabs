@@ -20,6 +20,8 @@
 //! refit there reaches both surfaces. The per-pixel maths has to differ,
 //! because the dynamics differ.
 
+use std::path::Path;
+
 use gpui::RenderImage;
 use image::{Frame, RgbaImage};
 
@@ -34,6 +36,7 @@ use super::seeker_orb::{
     WALL_EDGE, WALL_FULL, WARM_FOLLOW, bgra, gaussian, hash_noise, relative_luma, rgb_hsv,
     saturation_at, sine, smooth, smooth_voice, tinted, voice_at,
 };
+use super::voice_play;
 
 /// How far the silhouette moves, in orb units, at full amplitude.
 ///
@@ -105,6 +108,44 @@ impl PlayerOrb {
             surface: Surface::new(size),
             levels: smooth_voice(resample(peaks)),
             colour,
+        }
+    }
+
+    /// Play or pause the take this orb stands for.
+    ///
+    /// The audio lives in `voice_play`, which owns the output stream, the seek
+    /// and the position. The composer asks the orb, the orb asks the player, so
+    /// nothing outside this module has to know how a clip is started.
+    pub(crate) fn activate(path: &Path) -> Result<(), String> {
+        voice_play::toggle(path)
+    }
+
+    /// Move the playhead to `fraction` of the take, clamped to the track.
+    pub(crate) fn scrub(path: &Path, fraction: f32) -> Result<(), String> {
+        voice_play::seek(path, fraction.clamp(0.0, 1.0))
+    }
+
+    /// The state for this instant: position and pause from the player, pointer
+    /// and clock from the composer.
+    pub(crate) fn state(path: &Path, hovered: bool, clock: f32) -> PlayerState {
+        let live = voice_play::state(path);
+        let (progress, playing) = match live {
+            Some(clip) => {
+                let total = clip.duration.as_secs_f32();
+                let progress = if total > 0.0 {
+                    (clip.position.as_secs_f32() / total).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (progress, clip.playing)
+            }
+            None => (0.0, false),
+        };
+        PlayerState {
+            progress,
+            playing,
+            hovered,
+            clock,
         }
     }
 
