@@ -2615,13 +2615,14 @@ fn bubble_has_surface(role: &str) -> bool {
 /// roles so a folded history holds one rhythm, and only the user message
 /// carries a surface behind them. That surface takes `MESSAGE_RADIUS`, so the
 /// message corners stay tighter than the cards around them (#2571).
-// A render call: the nine arguments are the row's shape and its content, so a
-// bundle would only move the same state one call away (#2972).
+// A render call: the arguments are the row's shape and its content, so a bundle
+// would only move the same state one call away (#2972).
 #[allow(clippy::too_many_arguments)]
 fn bubble(
     role: &str,
     content: &str,
     time: &str,
+    message_id: Option<uuid::Uuid>,
     content_width: f32,
     row_cap: f32,
     handlers: &HashMap<String, ClickHandler>,
@@ -2717,6 +2718,32 @@ fn bubble(
                 .child(SharedString::from(time.to_string())),
         );
     }
+    // A voice note is a take the microphone heard (#3111): the clip is the
+    // message and the words are its reference, so the row draws the player
+    // first and keeps the transcription one click away. Every other row keeps
+    // its order, with the words leading and the files under them.
+    let voice = if role == "user" {
+        voice_note(&content)
+    } else {
+        None
+    };
+    // The fold exists only when there are words to fold away: a take the
+    // microphone heard with nothing transcribed is a player and nothing else,
+    // and a toggle that opens onto an empty line is a control that does nothing.
+    // The text is already stripped of every marker, so a body that carried only
+    // the clip reads as empty here.
+    let transcript = (voice.is_some() && !text.trim().is_empty())
+        .then(|| transcript_key(message_id, time, &content));
+    let transcript_open = transcript
+        .as_ref()
+        .is_some_and(|key| transcript_is_open(key));
+    // The player goes first, because it is the thing the row is about.
+    if voice.is_some() && !paths.is_empty() {
+        col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    if let Some(key) = &transcript {
+        col = col.child(transcript_toggle(key, transcript_open));
+    }
     // A user row that quotes other rows draws the quote above the reply
     // (#2827). The marker lines are part of the text, so the store keeps them
     // and the copy path carries them without a second field.
@@ -2725,10 +2752,12 @@ fn bubble(
     } else {
         (Vec::new(), text.as_ref())
     };
-    if !quote.is_empty() {
+    // A folded transcript keeps its quote with the words it belongs to: the
+    // quote is part of what the reader wrote, not a second message.
+    if (voice.is_none() || transcript_open) && !quote.is_empty() {
         col = col.child(quote_block(&quote, selection));
     }
-    if !text.trim().is_empty() {
+    if !text.trim().is_empty() && (voice.is_none() || transcript_open) {
         // Every role that carries prose is parsed the same way. The user row
         // renders at its own 16px with `Verbatim`, so a heading typed by hand
         // is a heading and a single Enter is still a line break. The harness
@@ -2754,10 +2783,16 @@ fn bubble(
     // is the control itself: one click opens the whole message in the reader
     // (#3064). A cut with no visible way back to the text is what #904 warns
     // about, and the row's own click is invisible, so the card carries it.
-    if let Some(fold) = &folded {
+    //
+    // A folded transcript keeps its card behind the same fold as its words
+    // (#3111): the card IS the words, so a row whose words are folded away
+    // draws neither.
+    if let Some(fold) = &folded
+        && (voice.is_none() || transcript_open)
+    {
         col = col.child(folded_document_cell(fold, open));
     }
-    if !paths.is_empty() {
+    if voice.is_none() && !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
     }
     // The clip for this answer is still being made (#3092), so the row holds the
@@ -2770,9 +2805,10 @@ fn bubble(
     // its clip has nothing to wait for, and a second block would sit under a
     // player that is already there.
     if voice_pending && role == "assistant" && !paths.iter().any(|path| audio_path(path)) {
-        col = col.child(crate::composer_orb::pending(&format!(
-            "voice-pending-{time}"
-        )));
+        col = col.child(crate::composer_orb::pending(
+            &format!("voice-pending-{time}"),
+            attachment_width,
+        ));
     }
     if hidden > 0 {
         // Only a working-out body reaches this line now (#3053): every message
@@ -2979,6 +3015,109 @@ fn audio_path(path: &std::path::Path) -> bool {
     Attachment::for_display(path.to_path_buf()).is_audio()
 }
 
+/// The clip a message carries when the message is a voice note (#3111).
+///
+/// A voice note is not any audio file: it is a take the microphone heard, and
+/// the send path writes an `<<AUD:...>>` marker whose path sits in the profile's
+/// voice folder under the recording prefix. `voice_input::is_recording` is that
+/// rule, and it is the same one the turn list uses to decide a turn began as
+/// one, so the row and the send path cannot disagree about what a voice note is.
+///
+/// Returns only the clip: whether there are words to fold away is a question
+/// about the row's text, which the caller already has stripped of every marker.
+/// `None` is every other row, including a message that merely attaches a picked
+/// audio file: that one keeps its words in front and its player under them.
+pub(crate) fn voice_note(content: &str) -> Option<PathBuf> {
+    let mut rest = content;
+    while let Some(start) = rest.find("<<") {
+        let after = rest.get(start + 2..)?;
+        let end = after.find(">>")?;
+        let marker = after.get(..end)?;
+        if let Some((kind, path)) = marker.split_once(':')
+            && kind == "AUD"
+            && !path.is_empty()
+            && crate::voice_input::is_recording(Path::new(path))
+        {
+            return Some(PathBuf::from(path));
+        }
+        rest = after.get(end + 2..).unwrap_or_default();
+    }
+    None
+}
+
+thread_local! {
+    /// Which transcripts the reader has opened, keyed by row (#3111).
+    ///
+    /// Paint-time UI state, not model: `bubble` is a plain function with no
+    /// dashboard handle, and this module already keeps exactly this kind of
+    /// state in thread locals. Collapsed is the default every launch, so
+    /// nothing here is persisted.
+    static OPEN_TRANSCRIPTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// The key one row's fold is remembered under (#3111).
+///
+/// A stored row is keyed by its message id, so a repaint, a scroll and a
+/// restart all find the same fold. A live row has no id yet, so it falls back
+/// to its clock reading plus a hash of the words: stable for as long as that
+/// row exists, which is all a fold needs.
+fn transcript_key(message_id: Option<uuid::Uuid>, time: &str, content: &str) -> String {
+    match message_id {
+        Some(id) => id.to_string(),
+        None => {
+            // FNV-1a: a short, stable digest of the words, and nothing that has
+            // to survive the process.
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in content.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!("{time}-{hash:016x}")
+        }
+    }
+}
+
+/// Whether this row's transcript is open right now.
+fn transcript_is_open(key: &str) -> bool {
+    OPEN_TRANSCRIPTS.with(|open| open.borrow().contains(key))
+}
+
+/// The control that folds a voice note's words away (#3111).
+///
+/// A text row, not a chevron on the player: the block stays a pure player, so a
+/// press anywhere on it plays, and the one control that means something else is
+/// a line of its own with a word on it. The press is stopped on the way down so
+/// it never reaches the row's select or its menu.
+fn transcript_toggle(key: &str, open: bool) -> impl IntoElement {
+    let palette = palette::current();
+    let label = if open {
+        "\u{25be} Transcript"
+    } else {
+        "\u{25b8} Transcript"
+    };
+    let pressed = key.to_string();
+    div()
+        .id(SharedString::from(format!("transcript-toggle-{key}")))
+        .flex_none()
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(rgb(palette.text_muted))
+        .hover(|style| style.text_color(rgb(palette.accent)))
+        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |_event, window, _cx| {
+            OPEN_TRANSCRIPTS.with(|open| {
+                let mut open = open.borrow_mut();
+                if !open.remove(&pressed) {
+                    open.insert(pressed.clone());
+                }
+            });
+            window.refresh();
+        })
+        .child(SharedString::from(label))
+}
+
 fn history_attachments(
     paths: &[std::path::PathBuf],
     content_width: f32,
@@ -3022,6 +3161,7 @@ fn history_attachments(
                     path,
                     None,
                     &[],
+                    content_width,
                 ))
                 .child(
                     div()
@@ -4125,11 +4265,13 @@ fn block_view(
             role,
             content,
             time,
+            message_id,
             ..
         } => bubble(
             role,
             content,
             time,
+            *message_id,
             content_width,
             row_cap,
             handlers,
