@@ -70,6 +70,7 @@ pub(crate) fn view(
     frame: &RemotePanelFrame,
     draft: &SharedString,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let p = palette::current();
     let dot = match frame.health {
@@ -123,7 +124,25 @@ pub(crate) fn view(
                     .text_color(rgb(p.text_faint))
                     .child(SharedString::from("· escolhe uma sessão na rail")),
             )
-        });
+        })
+        // The only way out of the store from the window: the badge is the pick,
+        // so removing the crab you are reading belongs here, beside the URL that
+        // names it, and not on the badge a stray click would select.
+        .child(div().flex_1())
+        .child(
+            div()
+                .id("remote-disconnect")
+                .flex_none()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(rems(0.6875))
+                .text_color(rgb(p.text_faint))
+                .hover(|d| d.text_color(rgb(p.red)))
+                .on_click(on_remove)
+                .child(SharedString::from("desligar")),
+        );
 
     let mut body: Vec<AnyElement> = Vec::with_capacity(frame.rows.len() + 1);
     if let Some(notice) = &frame.notice {

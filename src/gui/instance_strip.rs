@@ -20,8 +20,6 @@
 //! 2. **Health never moves a crab.** Order is the store's, so the badge under
 //!    the pointer cannot slide away between the press and the release.
 
-use std::time::Duration;
-
 use gpui::{
     AnyElement, ClickEvent, Context, Div, IntoElement, Render, SharedString, StyleRefinement,
     WeakEntity, Window, div, prelude::*, rems, rgb,
@@ -322,20 +320,3 @@ pub(crate) fn strip_root_style() -> StyleRefinement {
         .min_h_0();
     boxed.style().clone()
 }
-
-/// The width the window reserves for the strip, in rems.
-pub(crate) fn strip_width_rem() -> f32 {
-    STRIP_REM
-}
-
-/// How often a health probe may run. The window polls at 20 Hz, so the strip
-/// asks for a probe every `PROBE_EVERY_TICKS` ticks rather than every frame.
-pub(crate) const PROBE_EVERY_TICKS: u64 = 100;
-
-/// Is it time to probe? Split out so the cadence is testable without a window.
-pub(crate) fn probe_due(tick: u64) -> bool {
-    tick != 0 && tick % PROBE_EVERY_TICKS == 0
-}
-
-/// The probe's timeout, kept beside the cadence it has to fit inside.
-pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);

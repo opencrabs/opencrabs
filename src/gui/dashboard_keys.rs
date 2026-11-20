@@ -893,6 +893,25 @@ impl Dashboard {
             cx.notify();
             return;
         }
+        // The strip is the outermost column and holds no focus of its own, so
+        // its step chord is global: Ctrl+Alt+Up/Down walks the crabs and
+        // fetches the one it lands on, the same fetch a click on the badge
+        // does. Without it the strip is mouse-only, which for a column that
+        // picks "who am I talking to" is a hole.
+        if self.screen == Screen::Chat
+            && ev.keystroke.modifiers.control
+            && ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.platform
+            && matches!(ev.keystroke.key.as_str(), "up" | "down")
+        {
+            let delta = if ev.keystroke.key == "up" { -1 } else { 1 };
+            if let Some(host_id) = self.instances.select_step(delta).map(str::to_string) {
+                self.remote_transcript = None;
+                self.instance_fetch_remote(host_id, cx);
+                cx.notify();
+            }
+            return;
+        }
         // A remote crab owns the composer while it is open: its field is the
         // only one on screen, so every printable key, editing chord and Enter
         // is that crab's. This sits ahead of the editor gate (the local editor

@@ -13,7 +13,8 @@
 //!   read on every frame is how a rail refresh turns into a stall.
 //! - **Probes run on the background executor and only the result comes back.**
 //!   A remote that accepts the connection and then never answers must not be
-//!   able to freeze a window, so every probe carries [`PROBE_TIMEOUT`].
+//!   able to freeze a window, so every probe carries
+//!   [`instance_client::PROBE_TIMEOUT`].
 
 use super::*;
 use crate::instance_strip::{self, StripFrame};
@@ -22,9 +23,9 @@ use crate::remote_panel::{self, RemotePanelFrame, RemoteRow};
 use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_store::{InstanceStore, KnownInstance, now};
 
-/// How often the probe loop wakes. The strip's own cadence
-/// ([`instance_strip::PROBE_EVERY_TICKS`]) is the paint side; this is the wall
-/// clock, and five seconds is the same cadence the channel chip already pays.
+/// How often the probe loop wakes. Five seconds is the same cadence the
+/// channel chip already pays, and it is the only clock the strip has: the
+/// paint never asks for a probe, it only draws what the last one recorded.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Dashboard {
@@ -476,10 +477,26 @@ impl Dashboard {
         let send = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.send_remote(cx);
         });
+        let remove = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            let Some(host_id) = this
+                .instance_remote
+                .as_ref()
+                .map(|r| r.host_id.clone())
+                .or_else(|| this.instances.selected_host_id().map(str::to_string))
+            else {
+                return;
+            };
+            this.instance_remove(&host_id, cx);
+        });
         // `text()` borrows the field, and the frame outlives this method: the
         // copy is what makes the draft's bytes the frame's own.
         let draft = SharedString::from(self.remote_draft.text().to_string());
-        remote_panel::view(&frame, &draft, move |ev, window, app| send(ev, window, app))
+        remote_panel::view(
+            &frame,
+            &draft,
+            move |ev, window, app| send(ev, window, app),
+            move |ev, window, app| remove(ev, window, app),
+        )
     }
 
     /// Send the composer's text to the selected crab as a task.
