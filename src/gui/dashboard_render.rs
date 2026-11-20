@@ -2258,10 +2258,11 @@ impl Render for Dashboard {
             .min_w_0()
             .min_h_0()
             .gap_3()
-            // Less top and bottom room than the old 24px on every side: the
-            // header lines up with the sessions title, and the input is not
-            // floating in empty space above the window edge.
-            .px_6()
+            // Less room on every side than the old 24px: the header lines up
+            // with the sessions title, the input is not floating in empty
+            // space above the window edge, and the sides drop to 16px so the
+            // gutter stops reading as a band beside the rail (#3001).
+            .px_4()
             .pt_3()
             .pb_4();
         // The chat screen draws no title row (#2596). The conversation's
@@ -2679,10 +2680,10 @@ impl Render for Dashboard {
         // the conversation they belong to and the slack falls outside both.
         match topic_side {
             Some((edge, strip)) => {
-                // The column pads itself with `px_6` on each side, so its own
-                // width is the measure plus 3rem. Capping it there puts its
+                // The column pads itself with `px_4` on each side, so its own
+                // width is the measure plus 2rem. Capping it there puts its
                 // children back on the axis they always centred on.
-                let pane_px = chat_measure_px + 3.0 * self.rem;
+                let pane_px = chat_measure_px + 2.0 * self.rem;
                 let pane = div()
                     .flex()
                     .flex_col()

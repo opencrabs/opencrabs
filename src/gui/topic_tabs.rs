@@ -192,7 +192,7 @@ mod tests {
         assert!(src.matches("topic_tabs::separator_color()").count() >= 2);
         // One negative gutter is left: the topic strip. The chat title row
         // carried the other until it was removed (#2596).
-        assert_eq!(src.matches(".mx(rems(-1.5))").count(), 1);
+        assert_eq!(src.matches(".mx(rems(-1.0))").count(), 1);
         assert!(
             !src.contains("let mut header = div()"),
             "the chat screen draws no title row (#2596)"

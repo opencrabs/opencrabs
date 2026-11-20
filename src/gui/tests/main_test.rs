@@ -3501,11 +3501,11 @@ fn a_side_strip_centres_with_the_pane_it_belongs_to() {
         !side.contains("root = root.child(strip)"),
         "the strip is never a root sibling of the pane again"
     );
-    // The column pads itself with `px_6` a side, so its own width is the
-    // measure plus 3rem. Capping it there puts its children back on the
+    // The column pads itself with `px_4` a side, so its own width is the
+    // measure plus 2rem. Capping it there puts its children back on the
     // axis they always centred on.
     assert!(
-        side.contains("chat_measure_px + 3.0 * self.rem"),
+        side.contains("chat_measure_px + 2.0 * self.rem"),
         "the cap is the measure plus the column's own padding"
     );
     assert!(
