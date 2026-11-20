@@ -14,7 +14,7 @@
 use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
-use opencrabs::ui_core::card::{CARD_RADIUS, SEEKER_RADIUS, glass_fill, seeker_concentric_radius, session_edge};
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::commands as slash;
 use opencrabs::ui_core::hints::{HintState, task_line};
 
@@ -124,8 +124,14 @@ pub(crate) fn options_strip(
         .items_start()
         .gap_2()
         .p_3()
-        .rounded(px(SEEKER_RADIUS))
-        .bg(glass_fill(p.panel))
+        // The card wears the message bubble's curve and fill (#3114), not the
+        // Seeker's 32 and the raised panel: it sits in the same column as the
+        // messages above it, so a rounder, lighter card read as a panel from a
+        // different window dropped into the conversation. The shadow stays,
+        // because this one floats over the session ground rather than lying in
+        // it, and the fill alone would not lift it off that ground.
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .bg(glass_fill(transcript::message_card_surface()))
         .border_1()
         .border_color(session_edge(p.panel_hi))
         .shadow_2xl();
@@ -156,7 +162,9 @@ pub(crate) fn options_strip(
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                .rounded(px(seeker_concentric_radius(12.0)))
+                // One step inside the card's own 12, so a row's corner never
+                // crosses the curve it sits in (#3114).
+                .rounded(px(transcript::MESSAGE_RADIUS - 4.0))
                 .border_1()
                 .border_color(if on {
                     rgba((ink << 8) | 0x88)

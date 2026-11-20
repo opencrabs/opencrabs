@@ -1821,6 +1821,21 @@ fn message_surface(role: &str) -> u32 {
     message_surface_for(&palette::current(), role)
 }
 
+/// The fill a message card paints, for the strips that share its column
+/// (#3114).
+///
+/// Only the user's bubble carries a surface: the assistant's words sit on the
+/// history's own fill. So there is one message tone in the window, and the
+/// cards that stand in the conversation's column (the suggested options, the
+/// plan waiting on approval, the checklist once it runs, the finished plan in
+/// the transcript) read it from here instead of picking their own tone off the
+/// raised panel. Two tones that close together read as two families of card,
+/// and the owner saw exactly that: the plan card "looks very much mixed with
+/// the background" while the bubbles beside it did not.
+pub(crate) fn message_card_surface() -> u32 {
+    message_surface("user")
+}
+
 fn body_style(size: f32) -> TextStyle {
     TextStyle {
         font_family: crate::fonts::current_ui().into(),

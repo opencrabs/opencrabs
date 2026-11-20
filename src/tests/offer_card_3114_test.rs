@@ -276,3 +276,53 @@ fn the_offer_buttons_fit_their_labels() {
         "and each chip keeps its own width instead of growing: {chip}"
     );
 }
+
+/// The cards in the conversation's column wear the message card's curve and
+/// fill (#3114).
+///
+/// The offered options were a 32-radius panel and the plan card a 24-radius
+/// one, both painted with the raised panel tone, while the bubbles above them
+/// sat at 12 on the message surface. Three curves and two tones in one column
+/// read as three families of card, and the owner called the plan card out as
+/// "mixed with the background" beside bubbles that were not. One radius and one
+/// fill, read from the transcript, so the strips cannot drift back.
+#[test]
+fn the_cards_share_the_message_curve_and_fill() {
+    let strip = region(
+        COMPOSER_VIEW,
+        "pub(crate) fn options_strip(",
+        "/// Whether a speech-to-text engine is configured",
+    );
+    assert!(
+        strip.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "the options card takes the bubble's curve: {strip}"
+    );
+    assert!(
+        strip.contains(".bg(glass_fill(transcript::message_card_surface()))"),
+        "and the fill the bubbles paint"
+    );
+    assert!(
+        !strip.contains("SEEKER_RADIUS"),
+        "the Seeker's 32 belongs to the command palette, not here"
+    );
+    assert_eq!(
+        PLAN_STRIP.matches(".rounded(px(MESSAGE_RADIUS))").count(),
+        4,
+        "every plan card: the unseeded row, the approval card, the live \
+         checklist and the finished one in the transcript"
+    );
+    assert_eq!(
+        PLAN_STRIP
+            .matches(".bg(glass_fill(message_card_surface()))")
+            .count(),
+        4,
+        "and all four take the message fill"
+    );
+    // The pane's own ring is the pane's, and the chips inside a card are
+    // controls rather than cards: both keep the larger curve.
+    assert_eq!(
+        PLAN_STRIP.matches(".rounded(px(CARD_RADIUS))").count(),
+        2,
+        "the pane ring and the action chip keep their own curve"
+    );
+}

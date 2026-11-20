@@ -15,7 +15,8 @@
 use super::icon::disclosure_icon;
 use crate::palette;
 use crate::transcript::{
-    ClickHandler, SMALL_TEXT_SIZE, SelectionContext, selectable_styled_text, small_style,
+    ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
+    selectable_styled_text, small_style,
 };
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
@@ -139,8 +140,12 @@ impl PlanStripState {
                 .flex_row()
                 .gap_2()
                 .p_3()
-                .rounded(px(CARD_RADIUS))
-                .bg(glass_fill(palette::current().panel))
+                // The message card's curve and fill (#3114): the strips above
+                // the composer stand in the conversation's column, so they are
+                // one family with the bubbles rather than a second set of
+                // panels.
+                .rounded(px(MESSAGE_RADIUS))
+                .bg(glass_fill(message_card_surface()))
                 .border_1()
                 .border_color(session_edge(palette::current().panel_hi))
                 .child(
@@ -181,8 +186,9 @@ impl PlanStripState {
             .gap_1()
             .p_3()
             .min_w_0()
-            .rounded(px(CARD_RADIUS))
-            .bg(glass_fill(palette::current().panel))
+            // The same curve and fill as the messages around it (#3114).
+            .rounded(px(MESSAGE_RADIUS))
+            .bg(glass_fill(message_card_surface()))
             .border_1()
             .border_color(session_edge(palette::current().panel_hi));
         // A plan that already carries its checklist shows what is being
@@ -640,8 +646,10 @@ fn checklist(plan: &PlanDocument) -> Div {
         .gap_1()
         .p_3()
         .min_w_0()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
+        // The message card's curve and fill (#3114), so the card does not change
+        // family when the plan stops waiting and starts running.
+        .rounded(px(MESSAGE_RADIUS))
+        .bg(glass_fill(message_card_surface()))
         .border_1()
         .border_color(session_edge(palette::current().panel_hi))
         .child(progress_header_row(
@@ -665,8 +673,11 @@ pub fn completed_plan_card(
         .flex_col()
         .gap_1()
         .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
+        // A row of the transcript takes the message card's curve and fill
+        // (#3114): it is drawn between two bubbles, so anything else reads as a
+        // card from another window wedged into the history.
+        .rounded(px(MESSAGE_RADIUS))
+        .bg(glass_fill(message_card_surface()))
         .child(selectable_styled_text(
             format!("\u{2611} {}", plan.header()),
             small_style(SMALL_TEXT_SIZE, palette::current().teal),
