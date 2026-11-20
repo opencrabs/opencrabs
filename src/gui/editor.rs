@@ -216,15 +216,20 @@ fn message_with_markers(text: &str, attachments: &[Attachment]) -> String {
     payload
 }
 
-/// Where the message's own attachment markers begin, if it has any (#3092).
+/// Where the attachment markers at the end of this text begin, if it has any
+/// (#3092).
 ///
-/// A marker is an attachment only when it is the message's TAIL: the send path
-/// appends them after the words, so `words <<IMG:..>> <<IMG:..>>` is two files
-/// and `I quoted <<AUD:/x.ogg>> in this sentence` is none. Reading every marker
+/// A marker is an attachment only where the send path put it: appended after
+/// the words. `words <<IMG:..>> <<IMG:..>>` is two files and
+/// `I quoted <<AUD:/x.ogg>> in this sentence` is none. Reading every marker
 /// anywhere in the body made a reply that quoted one draw a player for a clip it
 /// never sent, and a quote shortened with an ellipsis then opened nothing when
 /// pressed. The tail is read from the end, so a run of markers is found without
 /// knowing how many there are.
+///
+/// The tail is taken per LINE rather than per body: see `attachment_spans`, which
+/// is what callers use. A queued message is spliced onto the one before it with a
+/// newline, and its markers end its own line rather than the whole body (#3099).
 fn trailing_markers(text: &str) -> Option<usize> {
     let trimmed = text.trim_end();
     let mut start = trimmed.len();
@@ -253,35 +258,61 @@ fn trailing_markers(text: &str) -> Option<usize> {
     (start < trimmed.len()).then_some(start)
 }
 
+/// Where each line's own attachment markers begin, as byte offsets into `text`.
+///
+/// A body is not always one authored line. A message typed while a turn is
+/// running is spliced onto the one before it with a newline
+/// (`QueuedUserMessage::join`), and a background task's notice is appended the
+/// same way, so a stored body reads `words <<AUD:..>>\n🔧 notice`. Every one of
+/// those entries still ends with its own markers, but only the last entry is the
+/// end of the BODY, and reading the body's tail left every earlier marker in
+/// place: the bubble printed a raw `<<AUD:...>>` for a clip whose player was
+/// drawn beside it, once per joined message (#3099).
+///
+/// Reading line by line keeps #3092 whole: a marker quoted inside a sentence has
+/// words after it on its own line, so it is still not an attachment.
+fn attachment_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if let Some(start) = trailing_markers(line) {
+            // `trim_end` drops the line's newline (and a `\r` before it), which
+            // is exactly where the run stops counting as the line's tail.
+            spans.push(offset + start..offset + line.trim_end().len());
+        }
+        offset += line.len();
+    }
+    spans
+}
+
 /// The paths carried by `<<IMG:...>>` / `<<VID:...>>` / `<<AUD:...>>` markers in
 /// a message.
 /// Pure string work so it is testable without a window, and shared with the
 /// send path that tracks each attachment against the session.
 pub fn marker_paths(text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let Some(tail) = trailing_markers(text) else {
-        return paths;
-    };
-    let Some(mut rest) = text.get(tail..) else {
-        return paths;
-    };
-    while let Some(start) = rest.find("<<") {
-        let Some(after) = rest.get(start + 2..) else {
-            break;
+    for span in attachment_spans(text) {
+        let Some(mut rest) = text.get(span) else {
+            continue;
         };
-        let Some(end) = after.find(">>") else {
-            break;
-        };
-        let Some(marker) = after.get(..end) else {
-            break;
-        };
-        if let Some((kind, path)) = marker.split_once(':')
-            && (kind == "IMG" || kind == "VID" || kind == "AUD")
-            && !path.is_empty()
-        {
-            paths.push(PathBuf::from(path));
+        while let Some(start) = rest.find("<<") {
+            let Some(after) = rest.get(start + 2..) else {
+                break;
+            };
+            let Some(end) = after.find(">>") else {
+                break;
+            };
+            let Some(marker) = after.get(..end) else {
+                break;
+            };
+            if let Some((kind, path)) = marker.split_once(':')
+                && (kind == "IMG" || kind == "VID" || kind == "AUD")
+                && !path.is_empty()
+            {
+                paths.push(PathBuf::from(path));
+            }
+            rest = after.get(end + 2..).unwrap_or_default();
         }
-        rest = after.get(end + 2..).unwrap_or_default();
     }
     paths
 }
@@ -336,13 +367,13 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
         return Cow::Borrowed(text.trim());
     }
     // A path marker is dropped only where it counts as an attachment, which is
-    // the message's tail (`trailing_markers`). One quoted inside a sentence is
-    // part of what the reader wrote, so it stays where it was typed (#3092).
+    // the end of its own line (`attachment_spans`). One quoted inside a sentence
+    // is part of what the reader wrote, so it stays where it was typed (#3092).
     // A `SPOKEN` block is text meant for the ear rather than a path, so it has
     // no file behind it and is dropped wherever it sits: a reply reloaded from
     // the ledger would otherwise print the whole block under the words it
     // summarizes.
-    let tail = trailing_markers(text).unwrap_or(text.len());
+    let spans = attachment_spans(text);
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0usize;
     while let Some(found) = text.get(cursor..).and_then(|rest| rest.find("<<")) {
@@ -359,7 +390,7 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
             kind.eq_ignore_ascii_case("SPOKEN")
                 || ((kind == "IMG" || kind == "VID" || kind == "AUD")
                     && !payload.is_empty()
-                    && start >= tail)
+                    && spans.iter().any(|span| span.contains(&start)))
         });
         if let Some(head) = text.get(cursor..start) {
             out.push_str(head);
@@ -4745,9 +4776,13 @@ mod tests {
 
     #[test]
     fn strip_markers_removes_only_attachments() {
+        // Only the marker that ends the line is the message's own file. The
+        // first one here has words after it, so it is a quotation and stays
+        // (#3092). This expectation predates that rule and asserted both were
+        // dropped; it was left behind when the tail rule landed.
         assert_eq!(
             strip_markers("look <<IMG:/tmp/a.png>> here <<VID:/tmp/b.mov>>"),
-            "look  here"
+            "look <<IMG:/tmp/a.png>> here"
         );
         assert_eq!(strip_markers("<<IMG:/tmp/a.png>>"), "");
         // An unknown marker is ordinary text and stays put.
@@ -4759,14 +4794,69 @@ mod tests {
         assert_eq!(strip_markers("<<IMG:>>"), "<<IMG:>>");
     }
 
+    /// A queued message ends with its own markers, and the queue splices it onto
+    /// the one before it with a newline (#3099).
+    ///
+    /// Reading the tail of the whole body found only the last entry's markers, so
+    /// every earlier recording printed its raw `<<AUD:...>>` in the bubble while
+    /// the player for it was drawn beside the text.
+    #[test]
+    fn a_marker_at_the_end_of_its_line_is_an_attachment() {
+        // The shape that leaked: a voice note, then a background task's notice
+        // appended after it.
+        let with_notice = "We can aggregate to the push. <<AUD:/tmp/voice-1.ogg>>\n\
+                           🔧 background task failed: mkdir -p ~/.opencrabs/tmp/gate";
+        assert_eq!(
+            marker_paths(with_notice),
+            vec![PathBuf::from("/tmp/voice-1.ogg")],
+            "the clip the words carry is still the row's attachment"
+        );
+        assert_eq!(
+            strip_markers(with_notice),
+            "We can aggregate to the push. \n\
+             🔧 background task failed: mkdir -p ~/.opencrabs/tmp/gate",
+            "the marker leaves and the notice stays"
+        );
+
+        // Two voice notes queued together: each ends its own line, so both are
+        // attachments and neither marker is printed.
+        let two_clips = "I mean the issue. <<AUD:/tmp/voice-2.ogg>>\n\
+                         I know. <<AUD:/tmp/voice-3.ogg>>";
+        assert_eq!(
+            marker_paths(two_clips),
+            vec![
+                PathBuf::from("/tmp/voice-2.ogg"),
+                PathBuf::from("/tmp/voice-3.ogg")
+            ]
+        );
+        assert_eq!(strip_markers(two_clips), "I mean the issue. \nI know.");
+
+        // A marker quoted in the middle of a line is still a quotation, so the
+        // #3092 case is untouched by reading line by line.
+        assert!(
+            marker_paths("I quoted <<AUD:/tmp/x.ogg>> in this sentence").is_empty(),
+            "words after the marker on its own line keep it as text"
+        );
+        assert_eq!(
+            strip_markers("I quoted <<AUD:/tmp/x.ogg>> in this sentence"),
+            "I quoted <<AUD:/tmp/x.ogg>> in this sentence"
+        );
+    }
+
     /// #2298: these helpers walk the text by byte offset, so a marker sitting
     /// next to a character wider than one byte has to be read without slicing
-    /// that character. Accents, an emoji and CJK stand on both sides of the
-    /// markers here, because a session title or a file name carries all three.
+    /// that character. Accents, an emoji and CJK stand in front of the markers
+    /// and inside their paths here, because a session title or a file name
+    /// carries all three.
+    ///
+    /// The markers end the line, which is what makes them the message's own
+    /// files (#3092). This test was written before that rule and kept them
+    /// mid-sentence, so it asserted two paths for text the rule reads as a
+    /// quotation; it was left behind when the rule landed.
     #[test]
     fn marker_paths_read_multibyte_text_around_the_markers() {
         let text =
-            "olá ção 🦀 <<IMG:/fixtures/coração-ção.png>> 中文 <<VID:/fixtures/動画-🦀.mov>> fim é";
+            "olá ção 🦀 中文 <<IMG:/fixtures/coração-ção.png>> <<VID:/fixtures/動画-🦀.mov>>";
         assert_eq!(
             marker_paths(text),
             vec![
@@ -4774,6 +4864,12 @@ mod tests {
                 PathBuf::from("/fixtures/動画-🦀.mov"),
             ]
         );
+        // Multibyte words after the markers make them a quotation, and reading
+        // that line's tail must not cut a character either.
+        let quoted =
+            "olá ção 🦀 <<IMG:/fixtures/coração-ção.png>> 中文 <<VID:/fixtures/動画-🦀.mov>> fim é";
+        assert!(marker_paths(quoted).is_empty());
+        assert_eq!(strip_markers(quoted), quoted);
     }
 
     /// A marker the user is still typing, or one the model cut short, ends the

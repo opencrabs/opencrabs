@@ -696,18 +696,27 @@ fn the_note_that_tells_the_model_reaches_no_card() {
     );
 }
 
-/// A marker is the message's own attachment only at its tail (#3092).
+/// A marker is the message's own attachment only at the tail of its line (#3092).
 ///
 /// The send path appends markers after the words. Reading every marker anywhere
-/// in a body made a reply that quoted one draw a player for a clip it never
-/// sent, and a quote shortened with an ellipsis opened nothing when pressed.
+/// in a body made a reply that quoted one draw a player for a clip it never sent,
+/// and a quote shortened with an ellipsis opened nothing when pressed.
+///
+/// The tail is read per line rather than per body, because a queued message is
+/// spliced onto the one before it with a newline and its markers end its own line
+/// (#3099). Both readers below take their spans from that one place, so the text
+/// and the tiles cannot disagree about which markers are attachments.
 #[test]
 fn a_quoted_marker_draws_no_player() {
     let markers = editor("fn trailing_markers(", "pub fn split_audio_marker(");
     assert!(
         markers.contains("pub fn marker_paths(text: &str) -> Vec<PathBuf>")
-            && markers.contains("let Some(tail) = trailing_markers(text)"),
-        "the paths a row draws come from the tail, never from the whole body"
+            && markers.contains("for span in attachment_spans(text)"),
+        "the paths a row draws come from the line tails, never from the whole body"
+    );
+    assert!(
+        markers.contains("for line in text.split_inclusive('\\n')"),
+        "the body is read line by line, so a joined message keeps its own tail"
     );
     assert!(
         markers.contains("head.rfind(\"<<\")"),
