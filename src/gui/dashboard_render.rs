@@ -2600,41 +2600,42 @@ impl Render for Dashboard {
                         );
                     // The task card rides on top of the composer, flush, as a
                     // thin strip of the same surface (#3102). It is not a box
-                    // of its own: the shell below owns the one border and the
-                    // one radius, so the card cannot float over the gap or
-                    // leave a notch where the two meet. It says what the screen
-                    // is asking for, which is why it disappears when there is
-                    // nothing to ask.
+                    // of its own: the shell below owns the one hairline, so the
+                    // card cannot float over the gap or leave a notch where the
+                    // two meet. It says what the screen is asking for, which is
+                    // why it disappears when there is nothing to ask.
+                    //
+                    // The footer is flat (#3112). It used to round its own four
+                    // corners and carry a full border, which made it one more
+                    // card floating at the bottom of the session. It is not a
+                    // card: it is the last row of the session surface, it takes
+                    // the full width, and the surface's own clip rounds the two
+                    // bottom corners for it. That is the whole distinction the
+                    // owner asked for: the messages sit ON the ground, the
+                    // composer IS the ground's bottom edge.
                     let mut shell = div()
                         .flex()
                         .flex_col()
                         .gap_0()
                         .w_full()
+                        .min_w_0()
                         .bg(glass_fill(palette::current().panel))
-                        .border_1()
+                        .border_t(px(1.))
                         .border_color(rgb(palette::current().panel_hi))
-                        .rounded(px(COMPOSER_RADIUS))
                         .overflow_hidden();
                     if let Some(line) = self.task_card_line() {
                         shell = shell.child(hint_card(&line));
                     }
                     // The composer closes the session as its last row, inside
-                    // the same clip, on the bubbles' column (#3110). `px_2` is
-                    // the transcript's own padding step and `pb_2` is the same
-                    // step below: flush to three of the card's edges, the
-                    // composer's corners were the card's corners, so the two read
-                    // as one shape and the composer's own border only showed
-                    // along the top. With the gutter on all four sides it is
-                    // visibly a card of the messages' own size sitting in the
-                    // session.
-                    session = session.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .px_2()
-                            .pb_2()
-                            .child(shell.child(dock.child(footer.into_any_element()))),
-                    );
+                    // the same clip, edge to edge (#3110, #3112). It used to
+                    // keep a `px_2`/`pb_2` gutter so it read as a card of the
+                    // messages' own size; the owner then called that out as
+                    // wrong for the composer specifically, because a card that
+                    // sits flush on three edges is a card whose sides you
+                    // cannot see. Flat is the answer: no gutter, no radius of
+                    // its own, and the session's clip supplies the two bottom
+                    // corners.
+                    session = session.child(shell.child(dock.child(footer.into_any_element())));
                     // The card takes the conversation's measure and centres as
                     // a whole, so its own edges line up with the text instead
                     // of the card being full width with the text inset (#2586).

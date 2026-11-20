@@ -98,7 +98,9 @@ fn the_transcript_keeps_its_scroll_and_gives_up_the_clip() {
 #[test]
 fn the_composer_is_a_row_of_the_session() {
     assert!(
-        RENDER.contains(".child(shell.child(dock.child(footer.into_any_element()))),"),
+        RENDER.contains(
+            "session = session.child(shell.child(dock.child(footer.into_any_element())));"
+        ),
         "the composer joins the session surface"
     );
     assert!(
@@ -111,7 +113,8 @@ fn the_composer_is_a_row_of_the_session() {
     );
 }
 
-/// Every card in the session is the size of a message (#3110).
+/// Every card in the session is the size of a message (#3110), except the
+/// composer, which is the session's own bottom edge (#3112).
 ///
 /// The owner's second pass: with the strips inside the session they took its
 /// whole width, so their left and right edges were the session's own edges and
@@ -122,6 +125,12 @@ fn the_composer_is_a_row_of_the_session() {
 /// rather than a pixel count, so the two agree at every zoom level. A literal
 /// eight would match at the default zoom and drift as soon as the reader zoomed,
 /// which is why the gutter is not a constant here.
+///
+/// The composer is the exception, on the owner's next pass: a card that sits
+/// flush on three of the surface's edges is a card whose sides cannot be seen,
+/// so the field takes the full width and the surface's clip rounds its two
+/// bottom corners. The gutter belongs to the cards that float ON the surface,
+/// never to the surface's own edge.
 #[test]
 fn every_card_in_the_session_is_the_size_of_a_message() {
     let row = RENDER
@@ -149,14 +158,20 @@ fn every_card_in_the_session_is_the_size_of_a_message() {
         pad < 400,
         "the history's padding is its own step, not a literal: {tail:?}"
     );
-    // The composer is a card of that size too, with the same step below it.
+    // The composer is the one row that is NOT message-sized (#3112): the owner
+    // called the gutter out as wrong for the field specifically, because a card
+    // that sits flush on three edges is a card whose sides you cannot see. It
+    // spans the surface now and the clip rounds its bottom corners.
     let composer = RENDER
-        .find(".child(shell.child(dock.child(footer.into_any_element()))),")
+        .find("session = session.child(shell.child(dock.child(footer.into_any_element())));")
         .expect("the composer is a row of the session");
-    let wrapper = &RENDER[composer.saturating_sub(700)..composer];
+    let shell = RENDER
+        .find("let mut shell = div()")
+        .expect("the composer still builds a shell");
+    let tail = &RENDER[shell..composer];
     assert!(
-        wrapper.contains(".px_2()") && wrapper.contains(".pb_2()"),
-        "the composer keeps the messages' width and a bottom step: {wrapper}"
+        !tail.contains(".px_2()") && !tail.contains(".pb_2()"),
+        "the composer is full-bleed, not a message-sized card: {tail}"
     );
 }
 

@@ -17,7 +17,6 @@ use gpui::{
     AnyElement, App, ClickEvent, CursorStyle, IntoElement, MouseButton, MouseDownEvent,
     SharedString, Window, div, prelude::*, px, relative, rgb, rgba,
 };
-use opencrabs::ui_core::card;
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
 use opencrabs::ui_core::pane_tree::DropHalf;
 use opencrabs::ui_core::split;
@@ -126,11 +125,13 @@ pub(crate) fn pane_composer_dim(
         .line_height(px(22.))
         .min_h(px(44.))
         .p_3()
-        // Same box, same height, same radius as the focused dock: the dim
+        // Same box, same height, same flat shape as the focused dock: the dim
         // row must not change shape when the keyboard leaves the pane (#2987).
-        .rounded(px(card::COMPOSER_RADIUS))
+        // The composer is a footer, not a card (#3112), so the dim state is a
+        // footer too: the hairline on top is the seam, and there is no radius
+        // to share because there is no radius at all.
         .bg(glass_fill(palette::current().panel))
-        .border_1()
+        .border_t(px(1.))
         .border_color(rgb(palette::current().panel_hi))
         .opacity(0.55)
         .cursor(CursorStyle::IBeam)

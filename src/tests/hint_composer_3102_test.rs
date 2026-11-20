@@ -275,9 +275,9 @@ fn the_card_does_not_rotate() {
 
 /// The card rides on top of the composer on both surfaces.
 ///
-/// In the window it is a thin strip flush against the composer card, rounded on
-/// the top corners only, so the pair reads as one surface. In the terminal it
-/// takes the row directly above the input box.
+/// In the window it is a thin strip flush against the composer, separated by a
+/// single hairline, so the pair reads as one surface. In the terminal it takes
+/// the row directly above the input box.
 #[test]
 fn the_card_sits_on_top_of_the_composer() {
     let render = include_str!("../gui/dashboard_render.rs");
@@ -291,21 +291,31 @@ fn the_card_sits_on_top_of_the_composer() {
         stack < dock,
         "the card is added to the stack before the composer"
     );
-    // One surface, one radius, and the shell clips it: two boxes stacked flush
-    // would each round their own corners and notch where they meet.
+    // One surface, and the shell clips it. The pair used to share one radius
+    // (#3102); the composer is a flat footer now (#3112), so the shell owns a
+    // hairline on top instead of a curve and the clip stays, because the card
+    // must not paint past the surface it rides on.
     let shell_body = render
         .get(stack..)
         .expect("the shell starts on a char boundary")
-        .split("col = col.child(central(")
+        // The shell ends where the card joins the column. The marker used to
+        // name `central`, which the session surface replaced (#3110), and a
+        // stale marker made this slice run to the end of the file: the
+        // assertion below would then have been reading every other card.
+        .split("col = col.child(")
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        shell_body.contains(".rounded(px(COMPOSER_RADIUS))"),
-        "the shell owns the one radius the pair shares"
+        shell_body.contains(".border_t(px(1.))"),
+        "the shell owns the one seam the pair shares"
+    );
+    assert!(
+        !shell_body.contains(".rounded("),
+        "the composer is flat, so the shell carries no curve: {shell_body}"
     );
     assert!(
         shell_body.contains(".overflow_hidden()"),
-        "and clips to it, so nothing paints outside the curve"
+        "and clips, so nothing paints past the surface"
     );
 
     // The terminal lays the card out before the input, in that order.

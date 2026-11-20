@@ -2007,12 +2007,25 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         render.contains(".gap_0()"),
         "the card and the composer stack with nothing between them"
     );
-    // The shell owns the single border and the single radius. Two boxes stacked
-    // flush would each round their own corners and leave a notch where they
-    // meet, which is exactly what the card floating above the composer did.
+    // The shell owns the single seam. It used to own the single radius too
+    // (#3102); the composer is a flat footer now (#3112), so the seam is a
+    // hairline along the top and there is no curve left to share. Two boxes
+    // stacked flush would each round their own corners and leave a notch where
+    // they meet, which is exactly what the card floating above the composer did.
     assert!(
-        render.contains(".rounded(px(COMPOSER_RADIUS))"),
-        "one radius for the pair, so it reads as a single surface"
+        render.contains(".border_t(px(1.))"),
+        "one seam for the pair, so it reads as a single surface"
+    );
+    let shell = &render[render
+        .find("let mut shell = div()")
+        .expect("the card and the composer share one shell")..];
+    let shell = shell
+        .split("col = col.child(")
+        .next()
+        .expect("the shell ends where it joins the column");
+    assert!(
+        !shell.contains(".rounded("),
+        "the composer is a flat footer, so the shell carries no curve: {shell}"
     );
     assert!(
         render.contains("shell = shell.child(hint_card(&line));"),
@@ -3819,18 +3832,30 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
     );
 }
 
-/// The composer's bottom corners land on the session card's (#3110).
+/// The composer is flat, so its bottom corners are the session card's (#3112).
 ///
-/// The composer is the card's last row and it is flush, so the two curves meet
-/// at the same edge. A composer rounder than the card is cut by the card's clip
-/// and reads right; a composer tighter than the card leaves a sliver of the
-/// card's fill in the notch, which is the seam the issue is about. They are
-/// equal, which is the one value that cannot go wrong either way.
+/// It used to round its own corners to the card's radius (#3110) and the two
+/// curves met at the same edge. The owner then called the composer out as the
+/// one surface that should not be a card at all: it takes the full width, ends
+/// on the session's bottom edge, and the surface's clip supplies the only two
+/// corners it has. There is no composer radius left to agree with anything.
 #[test]
-fn the_composer_corner_agrees_with_the_card() {
-    assert_eq!(
-        crate::transcript::MESSAGE_RADIUS,
-        opencrabs::ui_core::card::COMPOSER_RADIUS,
-        "the composer and the session share one curve"
+fn the_composer_is_flat_and_the_card_rounds_it() {
+    let render = include_str!("../dashboard_render.rs");
+    let shell = &render[render
+        .find("let mut shell = div()")
+        .expect("the composer still builds a shell")..];
+    let shell = shell
+        .split("col = col.child(")
+        .next()
+        .expect("the shell ends where it joins the column");
+    assert!(
+        !shell.contains(".rounded("),
+        "the composer is flat end to end: {shell}"
+    );
+    // The session surface is what rounds it, so that half has to still hold.
+    assert!(
+        render.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "the session card rounds the composer's bottom corners for it"
     );
 }

@@ -15,18 +15,6 @@ use gpui::{Background, Hsla, linear_color_stop, linear_gradient, rgba};
 /// cannot resize every chat card with it (#2532).
 pub const CARD_RADIUS: f32 = 24.0;
 
-/// The composer dock, in px: the single-session card that holds the input
-/// and the key hints as one surface.
-///
-/// A composer box is 44 px tall at its smallest, so any radius past 22 px is
-/// clamped to half the height and both ends come out as full semicircles:
-/// that is the flying pill the owner called out. 12 px is half the box's own
-/// padding step (`p_3`), so the corners read as a text field docked to the
-/// footer instead of a capsule floating over it. The dim composer an
-/// unfocused pane draws shares the token, because it is the same box at the
-/// same height and must not change shape when the keyboard leaves (#2987).
-pub const COMPOSER_RADIUS: f32 = 12.0;
-
 /// The Seeker results card, in px. Its rows derive their nesting curve from
 /// this token rather than the chat card radius (#2532).
 pub const SEEKER_RADIUS: f32 = 32.0;

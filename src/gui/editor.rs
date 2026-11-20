@@ -13,7 +13,7 @@
 use crate::palette;
 use crate::topic_icons::CRAB_ICONS;
 use crate::voice_input;
-use opencrabs::ui_core::card::{COMPOSER_RADIUS, glass_fill};
+use opencrabs::ui_core::card::glass_fill;
 use opencrabs::ui_core::commands::gui_completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
@@ -3261,22 +3261,27 @@ impl Render for Editor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            // The composer owns its own card by default: a focused split pane
+            // The composer owns its own surface by default: a focused split pane
             // renders this element directly (`pane_view.rs`), with nothing
-            // around it, so the surface, the hairline border and the radius
-            // have to live here or a focused pane loses its box while its
-            // keyboard-less siblings keep theirs.
+            // around it, so the fill and the hairline have to live here or a
+            // focused pane loses its footer while its keyboard-less siblings
+            // keep theirs.
             //
             // The single-session chat is the one caller that wraps the editor
             // in a dock shared with the key hints (#2987). That wrapper sets
-            // `docked`, which suppresses this chrome, because two cards would
+            // `docked`, which suppresses this chrome, because two fills would
             // paint the old floating pill inside the new one.
+            //
+            // Flat, like the docked one (#3112). The footer takes the pane's
+            // full width and closes it, so a radius would only ever round the
+            // bottom corners into the pane's own corner, and a full border
+            // would draw a box around something that is already an edge. The
+            // hairline on top is the one seam it needs. The shadow goes with
+            // the radius: a footer does not float.
             .when(!self.docked, |d| {
                 d.bg(glass_fill(palette::current().panel))
-                    .shadow_sm()
-                    .border_1()
+                    .border_t(px(1.))
                     .border_color(rgb(palette::current().panel_hi))
-                    .rounded(px(COMPOSER_RADIUS))
             })
             .p_3()
             .line_height(px(22.))
@@ -3669,7 +3674,11 @@ fn voice_block(
         .flex_none()
         .w_full()
         .h(px(crate::composer_orb::BLOCK_HEIGHT))
-        .rounded(px(COMPOSER_RADIUS))
+        // Flat, like the composer it replaces (#3112). The block is the
+        // composer's own box while the microphone is open, so it inherits the
+        // composer's shape: full width, square corners, closed at the bottom by
+        // the session's clip. A rounded slab inside a square footer read as a
+        // second card floating in the field.
         .overflow_hidden()
         .cursor_pointer()
         .on_hover(|over: &bool, window, _cx| {
