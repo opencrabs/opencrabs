@@ -460,7 +460,12 @@ impl Dashboard {
             )),
         };
         let frame = RemotePanelFrame {
-            label: SharedString::from(entry.map(|e| e.label()).unwrap_or("crab")),
+            // `label()` borrows the entry; `SharedString` only takes `'static`, so
+            // the copy happens here and the frame owns its own bytes.
+            label: match entry {
+                Some(e) => SharedString::from(e.label().to_string()),
+                None => SharedString::from("crab"),
+            },
             url: SharedString::from(remote.url.clone()),
             health: entry.map(|e| e.health),
             session_title: transcript.map(|t| t.title.clone()),
@@ -732,6 +737,7 @@ impl Dashboard {
                             code: String::new(),
                             label,
                             busy: false,
+                            field: 0,
                         });
                     }
                 }

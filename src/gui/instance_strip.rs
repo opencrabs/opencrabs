@@ -94,7 +94,7 @@ pub(crate) struct InstanceStrip {
 }
 
 impl InstanceStrip {
-    pub(crate) fn new(dashboard: WeakEntity<crate::Dashboard>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(dashboard: WeakEntity<crate::Dashboard>, _cx: &mut Context<Self>) -> Self {
         Self {
             dashboard,
             frame: StripFrame::default(),
