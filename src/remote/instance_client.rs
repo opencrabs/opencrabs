@@ -89,6 +89,10 @@ fn call_error(failure: Failure, message: impl Into<String>) -> anyhow::Error {
 }
 
 /// One remote conversation, as the rail paints it.
+///
+/// Every field here is a field `session/list` sends; see
+/// `a2a::handler::sessions::handle_list_sessions` for the emitter. A field
+/// added on one side and not the other is how the rail ends up painting 1970.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteSession {
     pub id: String,
@@ -97,8 +101,6 @@ pub struct RemoteSession {
     pub updated_at: i64,
     pub created_at: i64,
     pub model: Option<String>,
-    pub cost: f64,
-    pub preview: String,
 }
 
 /// One row of a remote conversation.
@@ -270,6 +272,29 @@ pub async fn task(target: &Target<'_>, task_id: &str) -> Result<TaskSnapshot> {
 }
 
 // ─── Pure parsers: the wire shapes, tested without a socket ──────────────
+//
+// These read what `a2a::handler::sessions` actually writes, not a sketch of it.
+// The host emits snake_case keys and RFC 3339 timestamps, which is the same
+// shape the rest of the A2A surface uses; a camelCase fixture here would pass
+// while every stamp in the window read 1970, and did.
+
+/// A wire timestamp as unix seconds.
+///
+/// RFC 3339 is what the host writes. A bare integer is accepted as well so a
+/// fixture, or an older peer, cannot silently become the epoch.
+fn unix_seconds(value: Option<&serde_json::Value>) -> i64 {
+    let Some(value) = value else {
+        return 0;
+    };
+    if let Some(n) = value.as_i64() {
+        return n;
+    }
+    value
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}
 
 pub fn parse_sessions(value: &serde_json::Value) -> Result<Vec<RemoteSession>> {
     let list = value
@@ -289,15 +314,9 @@ pub fn parse_sessions(value: &serde_json::Value) -> Result<Vec<RemoteSession>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("untitled")
                 .to_string(),
-            updated_at: s.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0),
-            created_at: s.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+            updated_at: unix_seconds(s.get("updatedAt")),
+            created_at: unix_seconds(s.get("createdAt")),
             model: s.get("model").and_then(|v| v.as_str()).map(str::to_string),
-            cost: s.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            preview: s
-                .get("preview")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
         })
         .collect())
 }
@@ -335,7 +354,7 @@ pub fn parse_transcript(value: &serde_json::Value) -> Result<(String, Vec<Remote
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            created_at: m.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+            created_at: unix_seconds(m.get("createdAt")),
         })
         .collect();
     Ok((title, messages))
@@ -363,7 +382,7 @@ pub fn parse_tasks(value: &serde_json::Value) -> Result<Vec<RemoteTask>> {
                 .get("contextId")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
-            updated_at: t.get("updatedAt").and_then(|v| v.as_i64()).unwrap_or(0),
+            updated_at: unix_seconds(t.get("timestamp")),
         })
         .collect())
 }
@@ -428,21 +447,73 @@ mod tests {
         assert_eq!(body["params"]["limit"], 5);
     }
 
+    /// The fixture is the host's own output, copied from
+    /// `handle_list_sessions`: snake_case keys, RFC 3339 stamps. A camelCase
+    /// fixture here is what let the rail paint 1970 for a whole afternoon
+    /// while every test stayed green.
     #[test]
-    fn sessions_parse_with_defaults_never_panic() {
+    fn sessions_parse_the_shape_the_host_writes() {
         let value = serde_json::json!({
             "sessions": [
-                {"id": "a", "title": "plan the rail", "updatedAt": 10, "createdAt": 5,
-                 "model": "deepseek-v4.1-flash", "cost": 1.5, "preview": "hello"},
+                {
+                    "id": "a",
+                    "title": "plan the rail",
+                    "model": "deepseek-v4.1-flash",
+                    "provider": "opencrabs",
+                    "updatedAt": "2026-11-20T14:03:11.512+00:00",
+                    "createdAt": "2026-11-20T12:00:00+00:00",
+                    "archived": false,
+                    "workingDirectory": "/home/loonix/x",
+                    "tokenCount": 42
+                },
                 {"id": "b"}
             ]
         });
         let rows = parse_sessions(&value).expect("array present");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].title, "plan the rail");
-        assert_eq!(rows[0].cost, 1.5);
+        assert_eq!(
+            rows[0].updated_at, 1_795_183_391,
+            "an RFC 3339 stamp is unix seconds, not the epoch"
+        );
+        assert_eq!(rows[0].created_at, 1_795_176_000);
         assert_eq!(rows[1].title, "untitled", "a missing title has a name");
         assert_eq!(rows[1].updated_at, 0);
+    }
+
+    /// The parsers above read what the handler writes. Nothing in the type
+    /// system ties the two together, and the last time they drifted the window
+    /// painted every stamp as 1970 with every test green. This reads the
+    /// handler's source and fails the moment a key it emits is renamed.
+    #[test]
+    fn the_host_and_the_parser_agree_on_the_keys() {
+        let host = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/a2a/handler/sessions.rs"
+        ))
+        .expect("the handler's source is in the tree");
+        for key in [
+            "\"updatedAt\"",
+            "\"createdAt\"",
+            "\"contextId\"",
+            "\"timestamp\"",
+            "\"title\"",
+        ] {
+            assert!(
+                host.contains(key),
+                "session/list, session/transcript or tasks/list stopped emitting {key}; \
+                 the parser in this file reads it, so one of the two has to move"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_integer_stamp_still_reads_as_seconds() {
+        let value = serde_json::json!({
+            "sessions": [{"id": "a", "updatedAt": 1_700_000_000}]
+        });
+        let rows = parse_sessions(&value).unwrap();
+        assert_eq!(rows[0].updated_at, 1_700_000_000);
     }
 
     #[test]
@@ -453,27 +524,42 @@ mod tests {
 
     #[test]
     fn transcript_keeps_order_and_roles() {
+        // `handle_transcript`'s payload, verbatim: snake_case, RFC 3339, and a
+        // `sequence` the panel does not draw but the host does send.
         let value = serde_json::json!({
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000",
             "title": "remote chat",
             "messages": [
-                {"id": "1", "role": "user", "content": "oi", "createdAt": 1},
-                {"id": "2", "role": "assistant", "content": "ola", "createdAt": 2}
+                {"id": "1", "role": "user", "content": "oi",
+                 "sequence": 1, "createdAt": "2026-11-20T14:00:00+00:00"},
+                {"id": "2", "role": "assistant", "content": "ola",
+                 "sequence": 2, "createdAt": "2026-11-20T14:01:00+00:00"}
             ]
         });
         let (title, rows) = parse_transcript(&value).unwrap();
         assert_eq!(title, "remote chat");
         assert_eq!(rows[0].role, "user");
         assert_eq!(rows[1].content, "ola");
+        assert_eq!(rows[1].created_at, 1_795_183_260);
     }
 
     #[test]
-    fn tasks_parse_with_the_camel_case_context() {
+    fn tasks_parse_the_shape_the_host_writes() {
+        // `handle_list_tasks` emits snake_case and a `timestamp` string. The
+        // camelCase version this test used to assert is the A2A *task* schema
+        // from `tasks/get`, which is a different method with a different shape.
         let value = serde_json::json!({
-            "tasks": [{"id": "t1", "state": "working", "contextId": "c1", "updatedAt": 7}]
+            "tasks": [{
+                "id": "t1",
+                "contextId": "c1",
+                "state": "Working",
+                "timestamp": "2026-11-20T14:00:00+00:00"
+            }]
         });
         let tasks = parse_tasks(&value).unwrap();
         assert_eq!(tasks[0].context_id.as_deref(), Some("c1"));
-        assert_eq!(tasks[0].state, "working");
+        assert_eq!(tasks[0].state, "Working");
+        assert_eq!(tasks[0].updated_at, 1_795_183_200);
     }
 
     #[test]

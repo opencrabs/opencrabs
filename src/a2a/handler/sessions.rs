@@ -28,7 +28,7 @@ fn clamp_limit(requested: Option<usize>, default: usize) -> usize {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct ListSessionsParams {
     limit: Option<usize>,
     offset: Option<usize>,
@@ -38,6 +38,7 @@ struct ListSessionsParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TranscriptParams {
     session_id: String,
     limit: Option<usize>,
@@ -46,7 +47,7 @@ struct TranscriptParams {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct ListTasksParams {
     limit: Option<usize>,
     /// Only tasks created for this A2A context.
@@ -97,11 +98,11 @@ pub async fn handle_list_sessions(
                         "title": s.title.clone().unwrap_or_default(),
                         "model": s.model,
                         "provider": s.provider_name,
-                        "updated_at": s.updated_at.to_rfc3339(),
-                        "created_at": s.created_at.to_rfc3339(),
+                        "updatedAt": s.updated_at.to_rfc3339(),
+                        "createdAt": s.created_at.to_rfc3339(),
                         "archived": s.archived_at.is_some(),
-                        "working_directory": s.working_directory,
-                        "token_count": s.token_count,
+                        "workingDirectory": s.working_directory,
+                        "tokenCount": s.token_count,
                     })
                 })
                 .collect();
@@ -156,8 +157,8 @@ pub async fn handle_transcript(
     let known = SessionService::new(service_context)
         .get_session(session_id)
         .await;
-    match known {
-        Ok(Some(_)) => {}
+    let session_title = match known {
+        Ok(Some(session)) => session.title.clone().unwrap_or_default(),
         Ok(None) => {
             return JsonRpcResponse::error(
                 id,
@@ -172,7 +173,7 @@ pub async fn handle_transcript(
                 format!("Could not read session: {e}"),
             );
         }
-    }
+    };
 
     let rows = match p.before_sequence {
         Some(before) => {
@@ -197,14 +198,19 @@ pub async fn handle_transcript(
                         "role": m.role,
                         "content": m.content,
                         "sequence": m.sequence,
-                        "created_at": m.created_at.to_rfc3339(),
+                        "createdAt": m.created_at.to_rfc3339(),
                     })
                 })
                 .collect();
             JsonRpcResponse::success(
                 id,
+                // `title` rides along because the panel's banner names the
+                // conversation it is reading, and the client cannot invent it:
+                // the rail's title is the list's, which may be stale by a
+                // rename. The reader copies the host's answer.
                 serde_json::json!({
-                    "session_id": p.session_id,
+                    "sessionId": p.session_id,
+                    "title": session_title,
                     "messages": items,
                 }),
             )
@@ -261,7 +267,7 @@ pub async fn handle_list_tasks(
         .map(|t| {
             serde_json::json!({
                 "id": t.id,
-                "context_id": t.context_id,
+                "contextId": t.context_id,
                 "state": format!("{:?}", t.status.state),
                 "timestamp": t.status.timestamp,
             })
@@ -285,8 +291,10 @@ mod tests {
 
     #[test]
     fn transcript_params_require_a_session_id() {
+        // camelCase on the wire, snake_case in the struct: the rename is what
+        // the client's `sessionId` depends on, so it is asserted here.
         let ok: Result<TranscriptParams, _> = serde_json::from_value(serde_json::json!({
-            "session_id": "3f1a2b3c-0000-4000-8000-000000000000"
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000"
         }));
         assert!(ok.is_ok());
         let missing: Result<TranscriptParams, _> = serde_json::from_value(serde_json::json!({}));
@@ -305,7 +313,7 @@ mod tests {
     #[test]
     fn list_tasks_params_accept_a_context_filter() {
         let p: ListTasksParams =
-            serde_json::from_value(serde_json::json!({ "context_id": "abc", "limit": 5 })).unwrap();
+            serde_json::from_value(serde_json::json!({ "contextId": "abc", "limit": 5 })).unwrap();
         assert_eq!(p.context_id.as_deref(), Some("abc"));
         assert_eq!(p.limit, Some(5));
     }

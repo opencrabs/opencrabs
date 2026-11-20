@@ -183,8 +183,14 @@ impl Dashboard {
                     return;
                 }
                 match result {
-                    Ok((_, messages)) => {
+                    Ok((title, messages)) => {
                         if let Some(transcript) = this.remote_transcript.as_mut() {
+                            // The host's title wins over the rail's: the list
+                            // may be a minute old, and a rename in between is
+                            // exactly what the banner would get wrong.
+                            if !title.is_empty() {
+                                transcript.title = SharedString::from(title);
+                            }
                             transcript.rows =
                                 messages.iter().map(RemoteRow::from_message).collect();
                             transcript.notice = None;
