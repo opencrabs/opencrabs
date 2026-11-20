@@ -4807,13 +4807,17 @@ mod tests {
         let quoted = "Row 998 carries `<<AUD:…voice-1795192403080.ogg>>` and no prefix.";
         assert!(marker_paths(quoted).is_empty());
         // The send path appends them, so a real attachment is still found, and
-        // more than one at a time.
-        let sent = "look at these <<IMG:/tmp/a.png>> <<IMG:/tmp/b.png>>";
-        assert_eq!(
-            marker_paths(sent),
-            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
+        // more than one at a time. The directory comes from the platform rather
+        // than a POSIX literal, so the fixture is a real path on Windows too.
+        let dir = std::env::temp_dir();
+        let (first, second) = (dir.join("a.png"), dir.join("b.png"));
+        let sent = format!(
+            "look at these <<IMG:{}>> <<IMG:{}>>",
+            first.display(),
+            second.display()
         );
-        assert_eq!(strip_markers(sent), "look at these");
+        assert_eq!(marker_paths(&sent), vec![first, second]);
+        assert_eq!(strip_markers(&sent), "look at these");
     }
 
     #[test]
