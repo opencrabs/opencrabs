@@ -2085,6 +2085,12 @@ fn the_card_says_what_the_screen_is_asking_for() {
         offered.contains('↑') && offered.contains("enter sends"),
         "the card says how to reach the offer: {offered}"
     );
+    // The card holds the keyboard while it is focused, so it has to name the
+    // way back out or the reader is stuck with Esc and a guess (#3114).
+    assert!(
+        offered.contains("esc back to the field"),
+        "and how to leave it: {offered}"
+    );
 
     let many = crate::composer_view::task_line_for(&HintState {
         offers: 3,
@@ -2094,6 +2100,10 @@ fn the_card_says_what_the_screen_is_asking_for() {
     assert!(
         many.contains('↓') && many.contains('3'),
         "a list is walked both ways and says how long it is: {many}"
+    );
+    assert!(
+        many.contains("past the last") && many.contains("esc back to the field"),
+        "the end of the list is a door, and the card says so: {many}"
     );
 
     // The rail holds the keyboard, so the card names its keys and nothing the

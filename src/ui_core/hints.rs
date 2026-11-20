@@ -133,9 +133,12 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if state.offers > 0 {
         hints.push(Hint {
             text: if state.offers == 1 {
-                "↑ picks the option · enter sends".to_string()
+                "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
             } else {
-                "↑↓ pick an option · enter sends".to_string()
+                format!(
+                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
+                    state.offers
+                )
             },
             command: "",
         });
@@ -218,12 +221,19 @@ pub fn task_line(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<
     }
     // An offer waiting is the most actionable thing on screen, and the arrows
     // reach it instead of the composer history, so the card has to say so or
-    // the keys stay a secret (#3101).
+    // the keys stay a secret (#3101). It also has to say how to LEAVE: the
+    // card holds the keyboard while it is focused, and a typed character is
+    // dropped rather than sent, so a reader who followed the line into the
+    // card was told nothing about getting back out (#3114). Down past the last
+    // row and Esc both return the caret to the field.
     if state.offers > 0 && !state.processing {
         return Some(if state.offers == 1 {
-            "↑ picks the suggested option · enter sends".to_string()
+            "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
         } else {
-            format!("↑↓ walk the {} suggested options · enter sends", state.offers)
+            format!(
+                "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
+                state.offers
+            )
         });
     }
     // A queue is the only rung that is also true while a turn runs.

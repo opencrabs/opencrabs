@@ -78,9 +78,12 @@ fn a_waiting_offer_names_the_arrows() {
         single.contains('↑') && single.contains("enter sends"),
         "the card says how to reach the offer: {single}"
     );
+    // Down past the only row is the way out, so the line names it (#3114).
+    // The card holds the keyboard while it is focused, and nothing used to say
+    // how to leave it.
     assert!(
-        !single.contains('↓'),
-        "one offer has nothing to walk down to: {single}"
+        single.contains('↓') && single.contains("back to the field"),
+        "one offer still has a way out, and the line names it: {single}"
     );
 
     let many = line(&HintState {
@@ -91,6 +94,10 @@ fn a_waiting_offer_names_the_arrows() {
     assert!(
         many.contains('↓') && many.contains('3'),
         "a list is walked both ways and says how long it is: {many}"
+    );
+    assert!(
+        many.contains("past the last") && many.contains("esc"),
+        "a list that ends has to say what the end does: {many}"
     );
 }
 

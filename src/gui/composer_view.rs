@@ -86,9 +86,11 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
 ///
 /// Drawn as a card from the Seeker's family (#3101): its radius, its glass
 /// fill, and its shadow, so an offer reads as the same kind of floating
-/// surface as the command card rather than a bare list of words. The buttons
-/// wrap, because a card that grows wider than the composer would push the
-/// conversation around.
+/// surface as the command card rather than a bare list of words. The rows
+/// stack one above the other instead of wrapping side by side (#3114): a card
+/// wider than the composer pushes the conversation around, and a label sharing
+/// its line with a neighbour is truncated while there is room to read it on a
+/// row of its own.
 ///
 /// `focused` is the row the keyboard stands on, `None` while the field has the
 /// caret. Up from the composer hands the keyboard here instead of walking
@@ -107,9 +109,9 @@ pub(crate) fn options_strip(
     // repeating "suggested" said what the buttons already say, it cost a line
     // of height directly above the composer, and its text sat tight against
     // the card's own curve. The keys went with it and lost nothing:
-    // `ui_core::hints` already prints "↑ picks the option · enter sends" on the
-    // hint row above the composer whenever an offer is waiting, so the legend
-    // was being drawn twice.
+    // `ui_core::hints` already prints the arrows, enter and the way back out on
+    // the hint row above the composer whenever an offer is waiting, so the
+    // legend was being drawn twice.
     let col = div()
         .flex()
         .flex_col()
@@ -120,7 +122,12 @@ pub(crate) fn options_strip(
         .border_1()
         .border_color(session_edge(p.panel_hi))
         .shadow_2xl();
-    let mut buttons = div().flex().flex_row().flex_wrap().gap_1p5();
+    // One offer per row (#3114). They used to wrap side by side, so two
+    // labels split the card's width and a long one was cut while a row of its
+    // own had room for all of it. The column also makes the keyboard's walk
+    // read the way it behaves: the arrows move down a list, not across a
+    // paragraph.
+    let mut buttons = div().flex().flex_col().gap_1();
     for (i, (item, pick)) in rows.iter().enumerate() {
         let (ink, wash) = match item.style {
             SuggestionStyle::Primary => (p.accent, rgba((p.accent << 8) | 0x1c)),

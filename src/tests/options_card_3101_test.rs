@@ -54,17 +54,28 @@ fn an_offer_waiting_is_the_first_thing_the_row_says() {
 #[test]
 fn one_offer_and_many_offers_do_not_read_the_same() {
     // One option needs no walk: saying "walk them" over a single button would
-    // send the reader looking for arrows that do nothing.
+    // send the reader looking for arrows that do nothing. Both lines still
+    // name the way out, because Down past the only row is the exit (#3114).
     let single = tui(&with_offer(1)).expect("one offer");
     let many = tui(&with_offer(3)).expect("three offers");
     assert!(
-        !single.text.contains('↓'),
+        !single.text.contains("walk"),
         "nothing to walk down: {}",
+        single.text
+    );
+    assert!(
+        single.text.contains("back to the field"),
+        "the only row is also the exit, and the line says so: {}",
         single.text
     );
     assert!(
         many.text.contains('↓'),
         "a list is walked both ways: {}",
+        many.text
+    );
+    assert!(
+        many.text.contains("past the last") && many.text.contains("back to the field"),
+        "the end of a list has to say what the end does: {}",
         many.text
     );
 }

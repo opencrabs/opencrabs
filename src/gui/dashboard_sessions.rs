@@ -261,8 +261,10 @@ impl Dashboard {
 
     /// One key while the offer holds the keyboard: the arrows walk it, Enter
     /// sends the row the ring stands on, Esc hands the keys back to the field
-    /// without sending anything. Any other key hands them back too, because it
-    /// means the user went back to typing and the field is where typing lands.
+    /// without sending anything, and so does Down past the last row, because a
+    /// list whose bottom is a wall has no exit the screen ever names (#3114).
+    /// Any other key hands them back too, because it means the user went back
+    /// to typing and the field is where typing lands.
     pub(crate) fn options_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let Some((session, at)) = self.options_focus else {
             return;
@@ -278,7 +280,17 @@ impl Dashboard {
         }
         match ks.key.as_str() {
             "up" => self.options_focus = Some((session, at.saturating_sub(1))),
-            "down" => self.options_focus = Some((session, (at + 1).min(offers.len() - 1))),
+            // Down walks the list and then walks out of it (#3114). The last
+            // row used to be a wall: the ring stayed on the card, and only Esc
+            // or a key that meant "back to typing" got the caret back, so a
+            // reader who followed the hint down had no way out that the screen
+            // ever named. Up from the field reaches the card, so Down from its
+            // last row hands the keys back the same way.
+            "down" if at + 1 >= offers.len() => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+            "down" => self.options_focus = Some((session, at + 1)),
             "enter" => {
                 let Some(item) = offers.get(at) else {
                     self.options_focus = None;
