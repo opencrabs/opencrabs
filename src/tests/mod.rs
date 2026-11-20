@@ -417,6 +417,7 @@ pub mod gui_transcript_excerpt_2805_test;
 pub mod gui_two_agents_migrations_2297_test;
 pub mod gui_user_message_full_3053_test;
 pub mod gui_voice_message_3044_test;
+pub mod gui_voice_note_row_test;
 pub mod gui_voice_preview_3054_test;
 pub mod gui_window_controls_2813_test;
 pub mod gui_window_geometry_3082_test;

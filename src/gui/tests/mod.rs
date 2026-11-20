@@ -9,4 +9,5 @@ mod layout_guard_test;
 mod main_test;
 mod prompt_files_test;
 mod sidebar_action_test;
+mod voice_note_row_test;
 mod window_test;
