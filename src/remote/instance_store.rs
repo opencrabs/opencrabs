@@ -112,18 +112,46 @@ impl InstanceStore {
         }
     }
 
-    /// Insert or replace one entry, keyed by `host_id`. Pairing twice with the
-    /// same host is a token rotation, not a second row.
+    /// Insert one entry, or rotate the token of an existing one, keyed by
+    /// `host_id`. Pairing twice with the same host at the same URL is a token
+    /// rotation, not a second row.
+    ///
+    /// The `host_id` comes from the remote's own announcement, so a remote can
+    /// claim any id. A row is therefore only replaced when the URL also matches
+    /// the one the owner paired with: a collision at a different URL is refused
+    /// with [`HostIdCollision`], and the caller must ask the owner before calling
+    /// [`Self::replace_confirmed`]. Otherwise one paired crab could announce
+    /// another's id and silently take over its row and its credential.
     pub fn upsert(&self, instance: KnownInstance) -> Result<()> {
+        validate_host_id(&instance.host_id)?;
         self.with_locked_store(|st| {
             match st
                 .instances
                 .iter_mut()
                 .find(|i| i.host_id == instance.host_id)
             {
-                Some(existing) => *existing = instance,
+                Some(existing) if same_origin(&existing.url, &instance.url) => *existing = instance,
+                Some(existing) => {
+                    return Err(anyhow::Error::new(HostIdCollision {
+                        host_id: instance.host_id.clone(),
+                        stored_url: existing.url.clone(),
+                        new_url: instance.url.clone(),
+                    }));
+                }
                 None => st.instances.push(instance),
             }
+            Ok(())
+        })
+    }
+
+    /// Replace the row for `instance.host_id` even when its URL changed. Only
+    /// for the path where the owner has seen the [`HostIdCollision`] and said
+    /// yes (a tunnel that came back at a new URL is the honest case).
+    pub fn replace_confirmed(&self, instance: KnownInstance) -> Result<()> {
+        validate_host_id(&instance.host_id)?;
+        self.with_locked_store(|st| {
+            st.instances.retain(|i| i.host_id != instance.host_id);
+            st.instances.push(instance);
             Ok(())
         })
     }
@@ -165,8 +193,7 @@ impl InstanceStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        let _lock =
-            super::state_lock::exclusive_wait(&self.lock_path(), super::state_lock::WAIT)?;
+        let _lock = super::state_lock::exclusive_wait(&self.lock_path(), super::state_lock::WAIT)?;
         let mut store = self.load()?;
         if store.version == 0 {
             store.version = INSTANCES_VERSION;
@@ -176,30 +203,119 @@ impl InstanceStore {
         Ok(out)
     }
 
-    /// Atomic write: temp file → 0600 → fsync → rename over the target. A
-    /// reader never observes a partial file.
+    /// Atomic write: temp file created 0600 → fsync → rename over the target.
+    /// A reader never observes a partial file, and the token is never on disk
+    /// under wider permissions, not even between create and chmod.
+    ///
+    /// Runs under the exclusive state lock, so a leftover `.tmp` can only be
+    /// from a crashed writer: it is removed, then the temp is created with
+    /// `create_new` (O_EXCL), which also refuses to follow a planted symlink.
     fn save(&self, store: &InstanceFile) -> Result<()> {
         let json = serde_json::to_vec_pretty(store).context("serialize instance store")?;
         let tmp = PathBuf::from(format!("{}.tmp", self.path.display()));
-        {
-            let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("remove stale {}", tmp.display()));
+            }
+        }
+        let written = (|| -> Result<()> {
+            let mut f =
+                owner_only_create_new(&tmp).with_context(|| format!("create {}", tmp.display()))?;
             f.write_all(&json)?;
             f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, &self.path)
+                .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .context("chmod 0600 instance store")?;
-        }
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
-        Ok(())
+        written
     }
 
     fn lock_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.lock", self.path.display()))
     }
+}
+
+/// Create `path` exclusively, owner read/write only from the first byte.
+fn owner_only_create_new(path: &Path) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+/// A remote announced a `host_id` we already hold, but from a different URL
+/// than the one the owner paired with. Never resolved silently.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostIdCollision {
+    pub host_id: String,
+    pub stored_url: String,
+    pub new_url: String,
+}
+
+impl std::fmt::Display for HostIdCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "host id {} is already paired at {}, but {} announced it; confirm before replacing",
+            self.host_id, self.stored_url, self.new_url
+        )
+    }
+}
+
+impl std::error::Error for HostIdCollision {}
+
+/// Longest `host_id` accepted from the wire.
+pub const HOST_ID_MAX_LEN: usize = 64;
+
+/// The `url:` prefix is reserved for ids this client derives itself
+/// ([`derived_host_id`]); everything else must be what a remote may announce.
+const DERIVED_PREFIX: &str = "url:";
+
+/// A `host_id` is either one we derived (`url:` + host[:port]) or an announced
+/// id of 1..=64 chars from `[A-Za-z0-9_-]`.
+pub fn validate_host_id(id: &str) -> Result<()> {
+    if let Some(host) = id.strip_prefix(DERIVED_PREFIX) {
+        let ok = !host.is_empty()
+            && host.len() <= 255
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+        anyhow::ensure!(ok, "invalid derived host id {id:?}");
+        return Ok(());
+    }
+    validate_announced_host_id(id)
+}
+
+/// What a remote is allowed to announce: never the reserved `url:` form, so a
+/// remote cannot impersonate a host we keyed by its URL.
+fn validate_announced_host_id(id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !id.is_empty()
+            && id.len() <= HOST_ID_MAX_LEN
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "remote announced an invalid host id {id:?} (expected 1-{HOST_ID_MAX_LEN} chars of [A-Za-z0-9_-])"
+    );
+    Ok(())
+}
+
+/// Same scheme + host + port, ignoring a trailing slash and ASCII case.
+fn same_origin(a: &str, b: &str) -> bool {
+    fn norm(u: &str) -> String {
+        u.trim().trim_end_matches('/').to_ascii_lowercase()
+    }
+    norm(a) == norm(b)
 }
 
 /// What a successful pairing leaves us with.
@@ -251,10 +367,7 @@ pub async fn pair(base_url: &str, code: &str, label: &str) -> Result<Paired> {
         .filter(|t| !t.is_empty())
         .ok_or_else(|| anyhow::anyhow!("pairing response carried no token"))?
         .to_string();
-    let expires_at = body
-        .get("expires_at")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let expires_at = body.get("expires_at").and_then(|v| v.as_u64()).unwrap_or(0);
 
     let announcement = announce(base, &token).await?;
     Ok(Paired {
@@ -324,6 +437,10 @@ async fn announce(base: &str, token: &str) -> Result<(String, Vec<(String, Strin
     };
     if host_id.is_empty() {
         host_id = derived_host_id(base);
+    } else {
+        // An announced id is remote-controlled input: refuse the pairing
+        // rather than store a malformed or `url:`-impersonating key.
+        validate_announced_host_id(&host_id)?;
     }
     Ok((host_id, routes, name))
 }
@@ -332,16 +449,15 @@ async fn announce(base: &str, token: &str) -> Result<(String, Vec<(String, Strin
 /// Derived, and named so in the file, rather than inventing a random id that
 /// would duplicate the row on every pairing.
 fn derived_host_id(base: &str) -> String {
-    let without_scheme = base
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(base);
+    let without_scheme = base.split_once("://").map(|(_, rest)| rest).unwrap_or(base);
     let host = without_scheme.split('/').next().unwrap_or(without_scheme);
     format!("url:{host}")
 }
 
 /// What `/a2a/routes` said, for the caller that wants to seed the route store.
-pub fn routes_from_announcement(body: &serde_json::Value) -> (Option<String>, Vec<(String, String)>) {
+pub fn routes_from_announcement(
+    body: &serde_json::Value,
+) -> (Option<String>, Vec<(String, String)>) {
     let host_id = body
         .get("host_id")
         .and_then(|v| v.as_str())
@@ -417,7 +533,10 @@ mod tests {
         let store = temp_store("remove");
         store.upsert(known("h1", "a", "t")).unwrap();
         assert!(store.remove("h1").unwrap());
-        assert!(!store.remove("h1").unwrap(), "second remove removes nothing");
+        assert!(
+            !store.remove("h1").unwrap(),
+            "second remove removes nothing"
+        );
         assert!(store.load().unwrap().instances.is_empty());
     }
 
@@ -443,6 +562,82 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "a token on disk is 0600 or it is a leak");
+    }
+
+    #[test]
+    fn a_host_id_announced_from_another_url_does_not_take_over_the_row() {
+        let store = temp_store("collision");
+        store
+            .upsert(known("h1", "server i7", "ocpair_real"))
+            .unwrap();
+        let mut impostor = known("h1", "evil", "ocpair_evil");
+        impostor.url = "http://10.0.0.66:8080".to_string();
+        let err = store
+            .upsert(impostor.clone())
+            .expect_err("collision must be refused");
+        let c = err
+            .downcast_ref::<HostIdCollision>()
+            .expect("typed collision");
+        assert_eq!(c.stored_url, "http://h1:8080");
+        assert_eq!(c.new_url, "http://10.0.0.66:8080");
+        let kept = store.find("h1").unwrap().unwrap();
+        assert_eq!(
+            kept.token, "ocpair_real",
+            "the stored credential is untouched"
+        );
+
+        // Only the explicit, owner-confirmed path replaces it.
+        store.replace_confirmed(impostor).unwrap();
+        let file = store.load().unwrap();
+        assert_eq!(file.instances.len(), 1);
+        assert_eq!(file.instances[0].url, "http://10.0.0.66:8080");
+    }
+
+    #[test]
+    fn the_same_url_with_a_trailing_slash_is_still_a_rotation() {
+        let store = temp_store("slash");
+        store.upsert(known("h1", "a", "t1")).unwrap();
+        let mut again = known("h1", "a", "t2");
+        again.url.push('/');
+        store.upsert(again).unwrap();
+        assert_eq!(store.find("h1").unwrap().unwrap().token, "t2");
+    }
+
+    #[test]
+    fn announced_host_ids_are_validated_and_cannot_claim_the_derived_form() {
+        assert!(validate_announced_host_id("abc-123_X").is_ok());
+        assert!(validate_announced_host_id("").is_err());
+        assert!(validate_announced_host_id("url:192.168.1.7:8080").is_err());
+        assert!(validate_announced_host_id("../etc").is_err());
+        assert!(validate_announced_host_id(&"a".repeat(HOST_ID_MAX_LEN + 1)).is_err());
+        // The derived form is still a valid stored key.
+        assert!(validate_host_id(&derived_host_id("http://192.168.1.7:8080/")).is_ok());
+        assert!(validate_host_id("url:").is_err());
+    }
+
+    #[test]
+    fn upsert_rejects_a_malformed_host_id() {
+        let store = temp_store("malformed");
+        assert!(store.upsert(known("bad id!", "a", "t")).is_err());
+        assert!(store.load().unwrap().instances.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_temp_file_is_replaced_not_reused() {
+        use std::os::unix::fs::PermissionsExt;
+        let store = temp_store("stale");
+        let tmp = PathBuf::from(format!("{}.tmp", store.path().display()));
+        std::fs::write(&tmp, b"leftover").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.upsert(known("h1", "a", "ocpair_secret")).unwrap();
+        assert!(!tmp.exists(), "the temp is renamed away");
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "a 0644 leftover must not leak its mode");
     }
 
     #[test]
