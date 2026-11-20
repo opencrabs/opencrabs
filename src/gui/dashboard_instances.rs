@@ -123,7 +123,11 @@ impl Dashboard {
                             flash: false,
                             running: None,
                             cost: 0.0,
-                            stamp_at: s.updated_at,
+                            // The remote speaks unix seconds, the rail paints
+                            // `DateTime<Utc>`, and a stamp of zero is a session
+                            // the remote never dated: epoch, not a panic.
+                            stamp_at: chrono::DateTime::from_timestamp(s.updated_at, 0)
+                                .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
                             icon: None,
                         },
                         chips: None,
@@ -165,7 +169,7 @@ impl Dashboard {
                 .background_executor()
                 .spawn(async move {
                     let target = Target::new(&fetch_url, Some(&token));
-                    instance_client::transcript(&target, &fetch_id, 40, None).await
+                    instance_client::transcript(&target, &fetch_id, 40).await
                 })
                 .await;
 
@@ -268,6 +272,178 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// The pairing form's keyboard: three fields, Tab between them, Enter to
+    /// submit, Esc to give up. Returns whether the key was consumed.
+    pub(crate) fn pair_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let Some(form) = self.instance_pairing.as_mut() else {
+            return false;
+        };
+        if form.busy {
+            // A submit in flight owns nothing: the answer comes back in the
+            // form itself, and typing into a request already sent would lie.
+            return true;
+        }
+        match ks.key.as_str() {
+            "escape" => {
+                self.instance_pairing = None;
+                self.instance_error = None;
+                cx.notify();
+            }
+            "enter" => self.instance_pair_submit(cx),
+            "tab" => {
+                let back = ks.modifiers.shift;
+                form.field = if back {
+                    (form.field + 2) % 3
+                } else {
+                    (form.field + 1) % 3
+                };
+                cx.notify();
+            }
+            "backspace" => {
+                form.pop();
+                cx.notify();
+            }
+            _ => {
+                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    return true;
+                }
+                let typed = if ks.key == "space" {
+                    Some(' ')
+                } else {
+                    ks.key_char.as_ref().and_then(|s| s.chars().next())
+                };
+                if let Some(ch) = typed {
+                    form.push(ch);
+                    cx.notify();
+                }
+            }
+        }
+        true
+    }
+
+    /// The pairing modal: the URL the other crab announces, the code it printed
+    /// and a name for the strip. Nothing touches the network until Enter.
+    pub(crate) fn instance_pair_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.instance_pairing.clone() else {
+            return div().into_any_element();
+        };
+        let shown = palette::current();
+        let mut body: Vec<AnyElement> = Vec::new();
+        for (index, (label, value)) in form.fields().iter().enumerate() {
+            let here = form.field == index;
+            body.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(if here {
+                                shown.text_normal
+                            } else {
+                                shown.text_faint
+                            }))
+                            .child(SharedString::from(*label)),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(shown.panel))
+                            .border_1()
+                            .border_color(rgb(if here { shown.accent } else { shown.track }))
+                            .text_size(rems(0.8125))
+                            .text_color(rgb(if value.is_empty() {
+                                shown.text_faint
+                            } else {
+                                shown.text
+                            }))
+                            .child(SharedString::from(if value.is_empty() {
+                                if here {
+                                    "a escrever…".to_string()
+                                } else {
+                                    String::new()
+                                }
+                            } else {
+                                value.to_string()
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some(err) = &self.instance_error {
+            body.push(
+                div()
+                    .text_size(rems(0.75))
+                    .text_color(rgb(shown.warn))
+                    .child(err.clone())
+                    .into_any_element(),
+            );
+        }
+        let submit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_pair_submit(cx);
+        });
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .when(form.busy, |d| d.opacity(0.6))
+                .child(
+                    div()
+                        .id("instance-pair-submit")
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .when(!form.busy, |d| d.cursor_pointer())
+                        .bg(rgb(shown.accent))
+                        .text_size(rems(0.75))
+                        .text_color(rgb(shown.bg))
+                        .child(SharedString::from(if form.busy {
+                            "a emparelhar…"
+                        } else {
+                            "emparelhar"
+                        }))
+                        .on_click(submit),
+                )
+                .into_any_element(),
+        );
+
+        let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_pairing = None;
+            this.instance_error = None;
+            cx.notify();
+        });
+        modal_shell::render(
+            modal_shell::ModalView {
+                id: "instance-pair-modal",
+                title: "Emparelhar um crab".to_string(),
+                subtitle: "o outro crab mostra o URL e um código de uso único".to_string(),
+                actions: None,
+                header_close: true,
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(body)
+                    .into_any_element(),
+                footer: Some(
+                    modal_shell::footer("tab campos · enter emparelha · esc fecha".to_string())
+                        .into_any_element(),
+                ),
+                width: 26.0 * f32::from(self.rem),
+                max_height: 26.0 * f32::from(self.rem),
+            },
+            dismiss,
+        )
+        .into_any_element()
+    }
+
     /// The panel column: the banner, the transcript and the remote composer.
     pub(crate) fn remote_panel_element(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(remote) = self.instance_remote.as_ref() else {
@@ -295,7 +471,9 @@ impl Dashboard {
         let send = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.send_remote(cx);
         });
-        let draft = SharedString::from(self.remote_draft.text());
+        // `text()` borrows the field, and the frame outlives this method: the
+        // copy is what makes the draft's bytes the frame's own.
+        let draft = SharedString::from(self.remote_draft.text().to_string());
         remote_panel::view(&frame, &draft, move |ev, window, app| send(ev, window, app))
     }
 
@@ -606,12 +784,48 @@ pub(crate) struct PairingForm {
     pub(crate) label: String,
     /// A submit is in flight; the button says so and refuses a second one.
     pub(crate) busy: bool,
+    /// Which field the keyboard is in: 0 url, 1 code, 2 label.
+    pub(crate) field: usize,
 }
 
 impl PairingForm {
     pub(crate) fn busy(mut self) -> Self {
         self.busy = true;
         self
+    }
+
+    /// The three fields, in the order Tab walks them.
+    pub(crate) fn fields(&self) -> [(&'static str, &str); 3] {
+        [
+            ("URL do crab", self.url.as_str()),
+            ("código de emparelhamento", self.code.as_str()),
+            ("nome (opcional)", self.label.as_str()),
+        ]
+    }
+
+    /// Where a typed character goes. One writer, so the field the keyboard is
+    /// in and the field the paint highlights cannot disagree.
+    pub(crate) fn push(&mut self, ch: char) {
+        match self.field {
+            0 => self.url.push(ch),
+            1 => self.code.push(ch),
+            _ => self.label.push(ch),
+        }
+    }
+
+    /// Backspace in the focused field.
+    pub(crate) fn pop(&mut self) {
+        match self.field {
+            0 => {
+                self.url.pop();
+            }
+            1 => {
+                self.code.pop();
+            }
+            _ => {
+                self.label.pop();
+            }
+        }
     }
 }
 

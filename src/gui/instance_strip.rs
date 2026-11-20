@@ -23,8 +23,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, IntoElement, MouseButton, Render, SharedString, Stateful,
-    StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
+    AnyElement, ClickEvent, Context, Div, IntoElement, Render, SharedString, StyleRefinement,
+    WeakEntity, Window, div, prelude::*, rems, rgb,
 };
 
 use crate::instances::{Health, InstanceEntry, badge_title, health_mark};
@@ -164,6 +164,13 @@ impl InstanceStrip {
         });
 
         let mut cell = div()
+            // A click needs an element id in this gpui: `on_click` lives on
+            // `StatefulInteractiveElement`, which is only reachable through
+            // `.id()`. The badge's own host id keeps it stable across frames.
+            .id(SharedString::from(format!(
+                "instance-badge-{}",
+                badge.host_id
+            )))
             .relative()
             .flex()
             .flex_row()
@@ -237,6 +244,7 @@ impl InstanceStrip {
         let p = palette::current();
         let click = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.add(cx));
         div()
+            .id("instance-strip-add")
             .flex()
             .flex_row()
             .items_center()

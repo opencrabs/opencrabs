@@ -62,6 +62,12 @@ impl Dashboard {
             self.preview_key(ev, window, cx);
             return;
         }
+        // The pairing modal owns every key while it is open: three fields and
+        // a submit, so nothing it does not use may reach the composer under it.
+        if self.instance_pairing.is_some() {
+            self.pair_key(&ev.keystroke, cx);
+            return;
+        }
         // The settings modal owns every key while it is open, on every screen
         // (#2878): an armed credential edit must not leak a typed character
         // into the composer, and the rows' arrows belong to the modal alone.

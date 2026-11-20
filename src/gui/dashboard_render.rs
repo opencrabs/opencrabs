@@ -3722,6 +3722,12 @@ impl Render for Dashboard {
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
+        // The pairing form is a modal for the same reason every other one is:
+        // it takes a code and a URL, and a half-typed code must not fall into
+        // whatever composer is underneath it.
+        if self.instance_pairing.is_some() {
+            root = root.child(self.instance_pair_modal(cx));
+        }
         // The settings modal follows the same rule (#2878).
         if self.settings_open {
             root = root.child(self.settings_modal(cx));

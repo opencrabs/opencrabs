@@ -14,8 +14,7 @@
 //! panel does.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, IntoElement, SharedString, Window, div, prelude::*, rems,
-    rgb,
+    AnyElement, App, ClickEvent, IntoElement, SharedString, Window, div, prelude::*, rems, rgb,
 };
 
 use crate::instances::Health;
@@ -213,6 +212,7 @@ pub(crate) fn view(
         )
         .child(
             div()
+                .id("remote-send")
                 .px_3()
                 .py_1()
                 .rounded_md()
