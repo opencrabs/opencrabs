@@ -63,6 +63,31 @@ pub fn voice_prefix(text: &str) -> String {
     }
 }
 
+/// The words a marked message carries, without the note in front of them.
+///
+/// The twin of [`voice_prefix`], for the surfaces that DRAW a message instead
+/// of sending it (#3092). The note exists so a model can tell a transcript from
+/// typing; the person who spoke the words already knows, so every rendered
+/// surface strips it. A resumed turn is where this matters: the ledger row a
+/// channel wrote carries the note in its content, and the card draws that row.
+///
+/// Borrowed, so a paint path that asks on every frame copies nothing.
+pub fn without_prefix(text: &str) -> &str {
+    let marked = text
+        .get(..VOICE_PREFIX.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(VOICE_PREFIX));
+    if !marked {
+        return text;
+    }
+    let rest = text
+        .get(VOICE_PREFIX.len()..)
+        .unwrap_or_default()
+        .trim_start();
+    // The Telegram path writes `[voice note]: words`, so the separator belongs
+    // to the note rather than to the sentence.
+    rest.strip_prefix(':').unwrap_or(rest).trim_start()
+}
+
 /// Split a reply into what is read and what is spoken.
 ///
 /// Returns the visible answer with the block removed and its blank lines
@@ -348,9 +373,15 @@ mod tests {
             voice_prefix("[voice note] turn it up"),
             "[voice note] turn it up"
         );
-        assert_eq!(
-            voice_prefix("[Voice note]: turn it up"),
-            "[Voice note]: turn it up"
-        );
+    /// The note comes off wherever a message is drawn (#3092). A reader who
+    /// spoke the words never needs to be told they were spoken, and a card that
+    /// printed the note was the leak this test pins.
+    #[test]
+    fn a_drawn_message_loses_its_note() {
+        assert_eq!(without_prefix("[voice note] turn it up"), "turn it up");
+        assert_eq!(without_prefix("[Voice note]: turn it up"), "turn it up");
+        assert_eq!(without_prefix("turn it up"), "turn it up");
+        // A message that only looks similar keeps every word it has.
+        assert_eq!(without_prefix("[voice notes] two takes"), "[voice notes] two takes");
     }
 }

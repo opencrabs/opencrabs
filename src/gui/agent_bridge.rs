@@ -1500,6 +1500,26 @@ fn boot_plan(requests: &[opencrabs::db::PendingRequest]) -> BootPlan {
     plan
 }
 
+/// The newest question the ledger holds for a session, marker and all (#3092).
+///
+/// A resumed turn's parked prompt is what was sent, and a voice turn's prompt is
+/// the transcript with the note in front of it: no marker, so a card drawing it
+/// showed `[voice note]` and no player. The row written before the process died
+/// carries both halves, so the card draws that instead.
+///
+/// `None` when the read fails or the session holds no question yet, which leaves
+/// the parked prompt as the only thing left to draw.
+async fn ledger_question(
+    messages: &opencrabs::db::repository::MessageRepository,
+    session: Uuid,
+) -> Option<String> {
+    let rows = messages.find_recent_by_session(session, 8).await.ok()?;
+    rows.into_iter()
+        .rev()
+        .find(|row| row.role == "user")
+        .map(|row| row.content)
+}
+
 /// The scan half of [`spawn_boot_resume`], on the caller's runtime.
 async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
     use opencrabs::brain::agent::service::boot_report;
@@ -1533,6 +1553,7 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         crate::logging::warn(&format!("boot resume: clearing the ledger failed: {e:#}"));
     }
 
+    let messages = opencrabs::db::repository::MessageRepository::new(pool.clone());
     let sessions = opencrabs::db::SessionRepository::new(pool);
     // What the scan decided, decided once and testable on its own: the async
     // half below only carries it out.
@@ -1625,6 +1646,16 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
                 service.set_session_only_working_directory(session_id, path);
             }
         }
+        // The card draws the question the ledger holds, not the parked prompt
+        // (#3092). A voice turn's prompt is the transcript with the note in
+        // front of it and no marker, so drawing it put `[voice note]` on the
+        // card and left the clip with no player. The row written before the
+        // process died carries both halves: the note the model needs and the
+        // marker the player reads.
+        let user_message = match ledger_question(&messages, session_id).await {
+            Some(question) => question,
+            None => user_message,
+        };
         let cancel = tokio_util::sync::CancellationToken::new();
         // The card first: the window has to know this conversation is busy
         // before the first chunk arrives, or the turn paints into a window

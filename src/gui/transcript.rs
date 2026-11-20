@@ -39,6 +39,7 @@ use gpui::{
     Window, div, point, prelude::*, px, rems, rgb, rgba,
 };
 
+use opencrabs::channels::voice::spoken;
 use opencrabs::db::Database;
 use opencrabs::db::models::Message;
 use opencrabs::db::repository::message::MessageRepository;
@@ -585,7 +586,10 @@ impl LiveTurn {
     /// outlive the failure it described.
     pub fn begin(&mut self, user: String) {
         self.clear();
-        self.user = Some(user);
+        // A card draws the question the reader asked, never the note that told
+        // the model it was spoken (#3092). Stripping here covers both ways a
+        // turn starts, because `resume` is this call plus the ledger flag.
+        self.user = Some(spoken::without_prefix(&user).to_string());
         self.started = Some(std::time::Instant::now());
         self.sent_at = Some(chrono::Local::now());
     }
@@ -1653,7 +1657,7 @@ pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
     else {
         return false;
     };
-    if role != "user" || content.trim() != question {
+    if role != "user" || spoken::without_prefix(content).trim() != question {
         return false;
     }
     let Some(sent) = live.sent_at else {
@@ -3548,7 +3552,7 @@ pub fn live_slot_sequence(live: &LiveTurn, rows: &[Message], slot: LiveSlot) -> 
     let text = text.trim();
     rows.iter()
         .rev()
-        .find(|row| row.role == "user" && row.content.trim() == text)
+        .find(|row| row.role == "user" && spoken::without_prefix(&row.content).trim() == text)
         .map(|row| row.sequence)
 }
 
