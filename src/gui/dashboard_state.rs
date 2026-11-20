@@ -320,6 +320,13 @@ pub(crate) struct Dashboard {
     pub(crate) pane_drop: Option<(Uuid, DropHalf)>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     pub(crate) split_pick: Option<Layout>,
+    /// Whether the pick is what opened the sidebar (#3104).
+    ///
+    /// The pick needs the rail up to name a session, so a closed rail opens for
+    /// it. Only that opening is undone when the pick lands: a rail the user
+    /// opened themselves, or one a row menu and the Seeker split into, stays
+    /// open because closing it would take away something they asked for.
+    pub(crate) split_opened_rail: bool,
     /// A split's new session is being created, so the created row fills the pane.
     pub(crate) split_creating: bool,
     /// The row whose message menu is open (#2613). One at a time, like the

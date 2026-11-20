@@ -63,3 +63,18 @@ fn the_boot_helper_prefers_the_chat_then_the_caret_then_any_survivor() {
         "then the first leaf the ledger still holds"
     );
 }
+
+/// The split pick puts the rail back the way it found it (#3104). It opens the
+/// rail to name a session, and used to leave it standing afterwards.
+#[test]
+fn the_split_pick_closes_the_rail_it_opened() {
+    let panes = include_str!("../gui/dashboard_panes.rs");
+    assert!(
+        panes.contains("self.split_opened_rail = true;"),
+        "the pick records that it is what opened the rail"
+    );
+    assert!(
+        panes.contains("if std::mem::take(&mut self.split_opened_rail) {"),
+        "and only that opening is undone, so a rail the user opened stays"
+    );
+}

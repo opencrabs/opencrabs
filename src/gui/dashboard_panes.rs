@@ -37,6 +37,9 @@ impl Dashboard {
         };
         if !self.rail_open {
             self.toggle_rail(cx);
+            // The pick is what opened it, so the pick is what closes it
+            // (#3104). A rail the user opened before the chord stays theirs.
+            self.split_opened_rail = true;
         }
         self.split_pick = Some(layout);
         self.split_target = Some(target);
@@ -96,11 +99,30 @@ impl Dashboard {
 
     /// Esc during the pick: the split is dropped and the chat keeps focus.
     pub(crate) fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
-        self.split_pick = None;
-        self.split_target = None;
         self.rail_focused = false;
+        self.end_split_pick(cx);
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// End the pick and put the rail back the way it was found (#3104).
+    ///
+    /// The pick opens the rail when it was closed, because naming a session
+    /// needs the list. Once the pick lands or is cancelled, that opening is
+    /// undone: a rail left standing was never asked for. A rail the user
+    /// opened themselves, or one a row menu and the Seeker split into, is left
+    /// exactly as it is, so the flag says who opened it rather than whether it
+    /// is up.
+    ///
+    /// The callers keep their own `rail_focused` hand-back: letting the rail go
+    /// before focus is derived is the rule every pick door follows, and it
+    /// reads at the call site.
+    fn end_split_pick(&mut self, cx: &mut Context<Self>) {
+        self.split_pick = None;
+        self.split_target = None;
+        if std::mem::take(&mut self.split_opened_rail) {
+            self.set_rail_open(false, cx);
+        }
     }
 
     /// The session holding the caret: the chat's own session when no pane
@@ -706,7 +728,7 @@ impl Dashboard {
             return;
         };
         let Some(target) = self.split_target else {
-            self.split_pick = None;
+            self.end_split_pick(cx);
             return;
         };
         if self.chat_session == Some(id)
@@ -719,9 +741,10 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        self.split_pick = None;
-        self.split_target = None;
+        // The pick is answered, so the rail goes back to how it was found
+        // before the split grew from it (#3104).
         self.rail_focused = false;
+        self.end_split_pick(cx);
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = Some(id);

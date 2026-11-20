@@ -521,6 +521,7 @@ pub(crate) fn run() {
                         pane_drop: None,
                         copy_drag,
                         split_pick: None,
+                        split_opened_rail: false,
                         split_creating: false,
                         msg_menu: None,
                         msg_menu_row: None,
