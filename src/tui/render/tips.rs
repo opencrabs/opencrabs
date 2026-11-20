@@ -1,19 +1,29 @@
-//! The hint row: one line between the input box and the status bar (#2279).
+//! The hint row: one line above the input box, under the conversation (#2279,
+//! #3102).
+//!
+//! It used to sit between the input box and the status bar, which put it below
+//! the thing it describes. It reads as part of the conversation now: directly
+//! under the last message, directly above the field it is about, which is where
+//! the eye already is when it wonders what to do next.
 //!
 //! The row is always there, even when it has nothing to say. A row that appears
 //! only when it has a hint moves the whole transcript up and down as the
 //! conversation crosses a threshold, and the one thing nobody wants moving
 //! while they read is the text they are reading.
 //!
-//! What it prints comes from [`crate::ui_core::hints`], which the desktop
-//! app draws too. This module only turns the answer into cells and reads the
+//! What it prints has an intent (#3102): one line naming what the screen is
+//! asking for at this moment, not a rotation. The keys that act on the field
+//! itself are painted in the field, where the caret is.
+//!
+//! What it prints comes from [`crate::ui_core::hints`], which the desktop app
+//! draws too. This module only turns the answer into cells and reads the
 //! terminal's own state into the shape that function expects.
 
-use crate::ui_core::hints::{CONTEXT_TIGHT, HintState, hint};
+use crate::ui_core::hints::{CONTEXT_TIGHT, HintState, task_line};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -48,11 +58,39 @@ fn state_of(app: &App) -> HintState {
         // already walks it with the arrows (#596), so the row only has to say
         // that it is there.
         offers: app.followup_suggestions.len(),
+        // The terminal queues a message typed while a turn runs, the same as
+        // the window does, so the row names the same keys (#3102).
+        queued: queued_count(app),
+        // The terminal has no rail holding the keyboard: its session list is a
+        // screen of its own, and the composer is not drawn behind it.
+        rail_focused: false,
+        rail_split: false,
     }
 }
 
-/// Paint the row, or leave it blank when there is nothing to suggest.
-pub(crate) fn render_hint(f: &mut Frame, app: &App, area: Rect) {
+/// How many messages wait on the session on screen.
+///
+/// The map is shared with every channel, so the guard is taken and dropped
+/// before anything is drawn: holding it across render work would let a
+/// background send block the frame (#2244).
+fn queued_count(app: &App) -> usize {
+    let Some(session) = &app.current_session else {
+        return 0;
+    };
+    app.queued_messages
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&session.id).map(Vec::len))
+        .unwrap_or(0)
+}
+
+/// Paint the card, or leave it blank when the work has nothing to say.
+///
+/// One line, chosen by what the screen is asking for right now (#3102): the
+/// rail holding the keyboard, an offer waiting above the field, a queue on its
+/// way out, or a rung of the ladder. It used to cycle through all of them on a
+/// timer, and a line that changes on its own reads as noise.
+pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
     // The terminal dispatches the whole shared table, so a name the table
     // knows is a name it answers. `support` is the window's narrower list, and
     // asking it here would hide a command this surface runs fine. A command the
@@ -68,53 +106,24 @@ pub(crate) fn render_hint(f: &mut Frame, app: &App, area: Rect) {
     if state.context_percent() >= CONTEXT_TIGHT {
         state.clear_base = u64::from(app.agent_service.base_context_tokens_raw());
     }
-    let Some(hint) = hint(&state, |command| {
+    let Some(line) = task_line(&state, |command| {
         crate::ui_core::commands::lookup(command).is_some()
     }) else {
         return;
     };
-    // A command in the text is the actionable part, so it is the part that is
-    // emphasised. Splitting on the command keeps the styling honest: the whole
-    // line bright would read as an error, and none of it bright reads as
-    // chrome nobody notices. The pieces are taken owned first so the split's
-    // borrow of the text ends before the text is handed to a span.
-    let command = hint.command;
-    // A hint with no command names keys instead (the offer rung), and there is
-    // nothing to emphasise inside it: splitting on an empty needle would mark
-    // the whole line as the actionable part.
-    if command.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint.text.clone(), muted())))
-                .style(Style::default().bg(theme::background().unwrap_or_default())),
-            area,
-        );
-        return;
-    }
-    let (before, after) = match hint.text.split_once(command) {
-        Some((before, after)) => (before.to_string(), after.to_string()),
-        None => (hint.text.clone(), String::new()),
-    };
-    let mut spans = Vec::new();
-    if !before.is_empty() {
-        spans.push(Span::styled(before, muted()));
-    }
-    spans.push(Span::styled(
-        command,
-        Style::default()
-            .fg(theme::role(Role::Accent))
-            .add_modifier(Modifier::BOLD),
-    ));
-    if !after.is_empty() {
-        spans.push(Span::styled(after, muted()));
-    }
+    // The whole line is the accent, not the muted chrome the status bar uses.
+    // The row exists to be noticed by someone who does not yet know the keys,
+    // and the quiet ink that makes the footer recede is exactly the wrong
+    // colour for that (#3102). The accent comes from the theme, so it follows
+    // whichever palette the reader picked.
     f.render_widget(
-        Paragraph::new(Line::from(spans))
+        Paragraph::new(Line::from(Span::styled(line, accent())))
             .style(Style::default().bg(theme::background().unwrap_or_default())),
         area,
     );
 }
 
-/// The chrome colour: present, never competing with the transcript.
-fn muted() -> Style {
-    Style::default().fg(theme::role(Role::TextMuted))
+/// The theme's accent: present, and impossible to mistake for the transcript.
+fn accent() -> Style {
+    Style::default().fg(theme::role(Role::Accent))
 }

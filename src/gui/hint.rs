@@ -29,7 +29,10 @@ pub(crate) fn mic_line() -> SharedString {
     if composer_view::voice_ready() {
         SharedString::from("ctrl+alt+r · record a message, same key to send")
     } else {
-        SharedString::from("/voice sets up the microphone")
+        // The settings screen, named as settings (#3102). It configures STT and
+        // TTS; it does not turn a microphone on, and a reader sent there
+        // expecting a live mic would be looking for the wrong thing.
+        SharedString::from("/voice opens the voice settings")
     }
 }
 

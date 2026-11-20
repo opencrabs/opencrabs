@@ -314,8 +314,7 @@ impl Dashboard {
         }
         // The draft is gone, so the hint that describes an empty field is the
         // one that belongs under it now (#2308).
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
+        self.sync_composer_hint(cx);
         cx.notify();
     }
 

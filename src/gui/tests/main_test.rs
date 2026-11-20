@@ -8,6 +8,7 @@ use crate::status::help_rows;
 use crate::topic_bar_view::topic_label;
 use crate::window_input::{QUIT_WINDOW, WHEEL_LINE_PX};
 use opencrabs::brain::mission_control::McAnalytics;
+use opencrabs::ui_core::hints::HintState;
 
 /// A leaf is its own view now (#2805): its state and the transcript it
 /// draws are scanned here, not in the crate root.
@@ -1983,90 +1984,220 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
     );
 }
 
-/// The composer's hint names the keys that work in the state on screen, so
-/// the queue's instructions sit under the caret instead of in the card
-/// (#2630).
+/// The field keeps the two keys that act on it, and the card above carries the
+/// work instead (#3102).
+///
+/// These two never merge. Esc stops the turn being written into the field and
+/// the chord records a message into it, so they belong where the caret is. The
+/// card has an intent of its own: what the screen is asking for right now.
 #[test]
-fn the_composer_hint_names_the_queue_while_a_turn_runs() {
-    assert_eq!(
-        composer_hint_for(false, 0, false).as_ref(),
-        "Talk to the crab… · /voice sets up the mic",
-        "an idle composer without an engine points at the command that sets one up"
-    );
-    let running = composer_hint_for(true, 0, false);
+fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
+    let render = include_str!("../dashboard_render.rs");
     assert!(
-        running.contains("esc") && running.contains("queues"),
-        "a running turn says Esc stops it and Enter queues: {running}"
+        render.contains("fn hint_card(line: &SharedString) -> Div"),
+        "the card is a strip of its own, painted from its own line"
     );
-    let queued = composer_hint_for(true, 2, false);
+    // Flush on top of the composer, not floating in the gap above it: one
+    // column, no gap, card first and the dock under it.
     assert!(
-        queued.contains("queued 2"),
-        "the count is on screen: {queued}"
+        render.contains("let mut shell = div()"),
+        "the card and the composer share one shell"
     );
     assert!(
-        queued.contains('↑') && queued.contains("esc"),
-        "Up edits a queued message and Esc flushes it: {queued}"
+        render.contains(".gap_0()"),
+        "the card and the composer stack with nothing between them"
+    );
+    // The shell owns the single border and the single radius. Two boxes stacked
+    // flush would each round their own corners and leave a notch where they
+    // meet, which is exactly what the card floating above the composer did.
+    assert!(
+        render.contains(".rounded(px(COMPOSER_RADIUS))"),
+        "one radius for the pair, so it reads as a single surface"
+    );
+    assert!(
+        render.contains("shell = shell.child(hint_card(&line));"),
+        "the card is a child of that shell, not a sibling floating over it"
+    );
+    // The dock lost the surface it used to paint (#2987): the shell above owns
+    // it now, so there is exactly one card on screen.
+    let dock = render
+        .split("let dock = div()")
+        .nth(1)
+        .expect("the composer dock is still built");
+    let dock = dock
+        .split(".child(composer)")
+        .next()
+        .expect("the dock still starts with the field");
+    assert!(
+        !dock.contains("glass_fill"),
+        "the dock paints no surface of its own: the shell above owns it"
+    );
+    assert!(
+        !dock.contains(".rounded("),
+        "and no radius of its own, or the two corners would fight"
+    );
+    // The field's own hint still reaches every composer, panes included.
+    assert!(
+        include_str!("../editor.rs").contains("fn set_placeholder("),
+        "the field still paints its own hint"
+    );
+    assert!(
+        include_str!("../chat_leaf.rs").contains("fn sync_composer_hint("),
+        "and the window still paints it on the field and every pane"
+    );
+    // The card never repeats them: a line already on screen does not need a
+    // second home.
+    let quiet = crate::composer_view::task_line_for(&HintState::default());
+    assert!(
+        quiet.is_none(),
+        "a quiet conversation paints no card at all: {quiet:?}"
     );
 }
 
-/// The idle hint offers the microphone the composer can actually serve
-/// (#3044): the chord once an engine is configured, the setup command when
-/// there is none, and never both at the same time.
+/// The card has an intent: one line naming what the screen is asking for, and
+/// nothing else (#3102).
+///
+/// It is not a rotation. A line that changes on its own reads as noise, because
+/// the reader cannot tell a new fact from the same fact coming round again.
 #[test]
-fn the_composer_hint_offers_the_microphone_only_when_it_works() {
-    let ready = composer_hint_for(false, 0, true);
+fn the_card_says_what_the_screen_is_asking_for() {
+    // An offer waiting is the most actionable thing on screen, and the arrows
+    // reach it instead of the composer history.
+    let offered = crate::composer_view::task_line_for(&HintState {
+        offers: 1,
+        ..HintState::default()
+    })
+    .expect("an offer on screen earns the card");
+    assert!(
+        offered.contains('↑') && offered.contains("enter sends"),
+        "the card says how to reach the offer: {offered}"
+    );
+
+    let many = crate::composer_view::task_line_for(&HintState {
+        offers: 3,
+        ..HintState::default()
+    })
+    .expect("three offers");
+    assert!(
+        many.contains('↓') && many.contains('3'),
+        "a list is walked both ways and says how long it is: {many}"
+    );
+
+    // The rail holds the keyboard, so the card names its keys and nothing the
+    // composer would never receive.
+    let rail = crate::composer_view::task_line_for(&HintState {
+        rail_focused: true,
+        offers: 2,
+        ..HintState::default()
+    })
+    .expect("the rail always has something to say");
     assert_eq!(
-        ready, "Talk to the crab… · ctrl+alt+r to record, same key to send",
-        "a configured window names the chord and what it does"
+        rail, "type to filter · enter opens · esc back",
+        "the list outranks the offer, because it owns the keys"
     );
-    assert!(
-        ready.contains("same key to send"),
-        "the one key starts the take and puts it on the wire: {ready}"
+
+    // A split pick reads the same keys for a different promise.
+    let split = crate::composer_view::task_line_for(&HintState {
+        rail_focused: true,
+        rail_split: true,
+        ..HintState::default()
+    })
+    .expect("a split pick");
+    assert_eq!(
+        split, "type to find · enter splits · esc cancels",
+        "one word apart is the difference between a shortcut and a surprise"
     );
+
+    // A queue is the only rung also true while a turn runs.
+    let queued = crate::composer_view::task_line_for(&HintState {
+        processing: true,
+        queued: 2,
+        ..HintState::default()
+    })
+    .expect("a queue on a running turn");
     assert!(
-        !ready.contains("/voice"),
-        "a working microphone never points the reader at setup: {ready}"
+        queued.contains("2 queued"),
+        "the count is the first thing worth knowing: {queued}"
+    );
+
+    // Nothing is suggested while the answer is still being written: the field
+    // already says Esc stops it.
+    let busy = crate::composer_view::task_line_for(&HintState {
+        processing: true,
+        ..HintState::default()
+    });
+    assert!(
+        busy.is_none(),
+        "a running turn leaves the card to the field, which says Esc stops: {busy:?}"
+    );
+}
+
+/// The card never repeats what the field already says, so the two keys that
+/// act on the field appear in exactly one place (#3102).
+#[test]
+fn the_card_never_repeats_the_fields_own_keys() {
+    let states = [
+        HintState::default(),
+        HintState {
+            processing: true,
+            ..HintState::default()
+        },
+        HintState {
+            processing: true,
+            queued: 1,
+            ..HintState::default()
+        },
+        HintState {
+            offers: 2,
+            ..HintState::default()
+        },
+        HintState {
+            rail_focused: true,
+            ..HintState::default()
+        },
+        HintState {
+            turns: 40,
+            update_version: Some("0.7.0".to_string()),
+            ..HintState::default()
+        },
+    ];
+    for state in &states {
+        let Some(line) = crate::composer_view::task_line_for(state) else {
+            continue;
+        };
+        assert!(
+            !line.contains("ctrl+alt+r"),
+            "the recording chord lives in the field, not on the card: {line}"
+        );
+        assert!(
+            !line.contains("esc stops"),
+            "so does Esc stopping the turn: {line}"
+        );
+    }
+}
+
+/// The field's own hint still names both keys, and the microphone it offers is
+/// the one the window can actually serve (#3044, #3102).
+#[test]
+fn the_field_hint_names_the_two_keys_that_act_on_it() {
+    let busy = composer_hint_for(true, 0, true);
+    assert!(
+        busy.contains("esc stops") && busy.contains("typing queues"),
+        "a running turn says Esc stops it and that typing is not lost: {busy}"
+    );
+    let ready = composer_hint_for(false, 0, true);
+    assert!(
+        ready.contains("ctrl+alt+r") && ready.contains("same key sends"),
+        "a configured window names the chord and what it does: {ready}"
     );
     let cold = composer_hint_for(false, 0, false);
-    assert_eq!(
-        cold, "Talk to the crab… · /voice sets up the mic",
-        "an unconfigured window names the only command that helps"
+    assert!(
+        cold.contains("/voice") && cold.contains("settings"),
+        "an unconfigured window names the settings screen for what it is: {cold}"
     );
     assert!(
         !cold.contains("ctrl+alt+r"),
         "a chord that would only print an error is not offered: {cold}"
-    );
-    for hint in [ready, cold] {
-        assert!(
-            hint.starts_with("Talk to the crab…"),
-            "the product's own prompt still leads the line: {hint}"
-        );
-    }
-    // A running turn keeps its keys: the microphone waits for the field.
-    assert_eq!(
-        composer_hint_for(true, 0, true),
-        composer_hint_for(true, 0, false),
-        "a busy composer says how to stop, not how to dictate"
-    );
-}
-
-/// A hint is a placeholder, never a control: with anything typed the field
-/// shows the draft and the hint is gone (#2630).
-#[test]
-fn the_hint_never_survives_a_draft() {
-    let editor = include_str!("../editor.rs");
-    assert!(
-        editor.contains("let display = if empty { placeholder } else { content };"),
-        "the field paints the placeholder only while it is empty"
-    );
-    assert!(
-        editor.contains("hsla_from(palette::current().text_faint)"),
-        "the hint is the faint colour, not the text colour"
-    );
-    assert_eq!(
-        composer_hint_for(false, 0, false).as_ref(),
-        "Talk to the crab… · /voice sets up the mic",
-        "an empty idle field keeps the product's own prompt, then the way to the mic"
     );
 }
 

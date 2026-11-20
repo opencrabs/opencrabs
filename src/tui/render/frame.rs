@@ -195,9 +195,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // panel, so the window-level bar yields its row instead of spanning the
     // split (#2575).
     let status_height = u16::from(!app.pane_manager.is_split());
-    // The hint row (#2279) follows the status bar's rule: in split view each
-    // pane already carries its own footer, so a window-level hint row would be
-    // a dead line under two sessions.
+    // The hint row (#2279, #3102) follows the status bar's rule: in split view
+    // each pane already carries its own footer, so a window-level hint row
+    // would be a dead line under two sessions.
     let hint_height = u16::from(!app.pane_manager.is_split()) * tips::HINT_ROW;
 
     let chunks = Layout::default()
@@ -206,8 +206,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Constraint::Min(CHAT_FLOOR),       // [0] Chat messages
             Constraint::Length(plan_height),   // [1] Plan checklist (0 when no plan)
             Constraint::Length(queue_height),  // [2] Queue preview (0 when no queue)
-            Constraint::Length(input_height),  // [3] Input (dynamic)
-            Constraint::Length(hint_height),   // [4] Hint row (0 in split view)
+            Constraint::Length(hint_height),   // [3] Hint row (0 in split view)
+            Constraint::Length(input_height),  // [4] Input (dynamic)
             Constraint::Length(status_height), // [5] Status bar (0 in split view)
         ])
         .split(f.area());
@@ -218,7 +218,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
         x: chunks[0].x,
         y: chunks[0].y,
         width: chunks[0].width,
-        height: chunks[0].height + chunks[1].height + chunks[2].height + chunks[3].height,
+        // Chat, plan, queue, hint and input: everything above the status bar,
+        // which is what a full-screen mode replaces (#3102 reordered these so
+        // the hint sits over the input).
+        height: chunks[0].height
+            + chunks[1].height
+            + chunks[2].height
+            + chunks[3].height
+            + chunks[4].height,
     };
 
     match app.mode {
@@ -382,7 +389,12 @@ fn render_chat_surface(
         if queue_height > 0 {
             render_queue(f, app, chunks[2]);
         }
-        (chunks[3], render_input(f, app, chunks[3]))
+        // The hint sits above the field it describes, under the conversation
+        // (#3102): below the input it read as part of the status bar.
+        if chunks[3].height > 0 {
+            tips::render_hint(f, app, chunks[3]);
+        }
+        (chunks[4], render_input(f, app, chunks[4]))
     };
     // Store input area coordinates for mouse event mapping. In split mode
     // this is the focused pane's own input box, not the zeroed window slot.
@@ -394,11 +406,6 @@ fn render_chat_surface(
     // click and drag map the row the user sees, not the row the buffer
     // starts at.
     app.input_scroll_y = scroll_y;
-    // Only when the row was actually reserved: in split view the panes own
-    // their footers and `hint_height` is 0, so there is no cell to paint into.
-    if chunks[4].height > 0 {
-        tips::render_hint(f, app, chunks[4]);
-    }
     render_status_bar(f, app, chunks[5]);
     input_rect
 }

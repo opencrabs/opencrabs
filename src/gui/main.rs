@@ -131,9 +131,7 @@ mod window_controls;
 mod window_geometry;
 mod window_input;
 
-use crate::composer_view::{
-    command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
-};
+use crate::composer_view::{command_popup_view, emoji_popup_view, options_strip, queue_strip};
 use crate::dashboard_panes::{DividerDrag, PaneDrag, PaneGhost, splitter};
 use crate::dashboard_rail::{RAIL_DEFAULT_REM, RAIL_MAX_REM, RAIL_MIN_REM};
 use crate::dashboard_state::{Dashboard, FooterPlace, Screen, SendOrigin};

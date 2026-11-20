@@ -108,19 +108,13 @@ fn the_ladder_is_ordered_by_how_much_it_matters() {
     state.turns = LONG_SESSION_TURNS;
     state.update_version = Some("0.6.1".to_string());
     state.context_used = 190_000;
-    let order: Vec<&str> = candidates(&state)
-        .iter()
-        .map(|hint| hint.command)
-        .collect();
+    let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
     assert_eq!(order, vec!["/clear", "/evolve"]);
 
     // With room left the clean-slate line comes back, still under the update:
     // a release waiting is news, a long session is only an option.
     state.context_used = 4_000;
-    let order: Vec<&str> = candidates(&state)
-        .iter()
-        .map(|hint| hint.command)
-        .collect();
+    let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
     assert_eq!(order, vec!["/evolve", "/new"]);
 }
 

@@ -11,7 +11,7 @@
 
 use crate::ui_core::commands::{lookup, support_gui};
 use crate::ui_core::hints::{
-    CONTEXT_TIGHT, CONTEXT_ROOMY, HintState, LONG_SESSION_TURNS, candidates, gui_hint, hint,
+    CONTEXT_ROOMY, CONTEXT_TIGHT, HintState, LONG_SESSION_TURNS, candidates, gui_hint, hint,
 };
 
 /// A conversation with one turn behind it and nothing else to say: no update,
@@ -35,7 +35,10 @@ fn tui(state: &HintState) -> Option<crate::ui_core::hints::Hint> {
 #[test]
 fn an_offer_waiting_is_the_first_thing_the_row_says() {
     let hint = tui(&with_offer(1)).expect("an offer on screen earns a line");
-    assert!(hint.command.is_empty(), "the offer names keys, not a command");
+    assert!(
+        hint.command.is_empty(),
+        "the offer names keys, not a command"
+    );
     assert!(
         hint.text.contains('↑'),
         "the row has to say the arrow reaches it, or the keys stay a secret: {}",
@@ -54,8 +57,16 @@ fn one_offer_and_many_offers_do_not_read_the_same() {
     // send the reader looking for arrows that do nothing.
     let single = tui(&with_offer(1)).expect("one offer");
     let many = tui(&with_offer(3)).expect("three offers");
-    assert!(!single.text.contains('↓'), "nothing to walk down: {}", single.text);
-    assert!(many.text.contains('↓'), "a list is walked both ways: {}", many.text);
+    assert!(
+        !single.text.contains('↓'),
+        "nothing to walk down: {}",
+        single.text
+    );
+    assert!(
+        many.text.contains('↓'),
+        "a list is walked both ways: {}",
+        many.text
+    );
 }
 
 #[test]
@@ -66,10 +77,7 @@ fn an_offer_outranks_every_other_hint() {
     state.turns = LONG_SESSION_TURNS;
     state.update_version = Some("0.7.0".to_string());
     state.context_used = 190_000;
-    let order: Vec<&str> = candidates(&state)
-        .iter()
-        .map(|hint| hint.command)
-        .collect();
+    let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
     assert_eq!(order, vec!["", "/clear", "/evolve"]);
     assert_eq!(tui(&state).map(|h| h.command), Some(""));
 }
@@ -136,5 +144,8 @@ fn the_desktop_app_and_the_terminal_agree_about_the_offer() {
         assert!(terminal.is_some());
     }
     // And the desktop's own support list has not started refusing keys.
-    assert_eq!(support_gui("/clear"), crate::ui_core::commands::Support::Runs);
+    assert_eq!(
+        support_gui("/clear"),
+        crate::ui_core::commands::Support::Runs
+    );
 }

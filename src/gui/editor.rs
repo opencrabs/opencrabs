@@ -1647,9 +1647,13 @@ impl Editor {
         self.session = session;
     }
 
-    /// The hint an empty field shows. It belongs to the window's state, not to
-    /// the field's: what the composer can do depends on whether a turn runs and
-    /// what is queued, and the editor sees neither (#2630).
+    /// The hint an empty field shows: the two keys that act on the field
+    /// itself (#3102).
+    ///
+    /// These stay in the field because they are about the field: Esc stops the
+    /// turn that is being written into it, and the chord records a message into
+    /// it. The task-related hints have a card of their own above the composer,
+    /// where they do not compete with the caret.
     pub fn set_placeholder(&mut self, hint: SharedString, cx: &mut Context<Self>) {
         if self.placeholder != hint {
             self.placeholder = hint;

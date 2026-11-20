@@ -1,19 +1,27 @@
-//! The one line under the composer that says what to do next (#2279).
+//! The hint card on top of the composer (#2279, #3102).
 //!
-//! The terminal draws it between its input box and its status bar; the desktop
-//! app draws it between the composer and the footer. Both read this function,
-//! so the two surfaces cannot recommend different things about the same
-//! conversation, which is the drift the shared command table already exists to
-//! prevent.
+//! It sits flush against the composer, under the conversation: the terminal
+//! gives it the row directly above its input box, and the desktop app stacks a
+//! thin strip on top of the composer card. Both read these functions, so the
+//! two surfaces cannot recommend different things about the same conversation,
+//! which is the drift the shared command table already exists to prevent.
+//!
+//! The card has an intent. It names what the screen is asking for at this
+//! moment, one line, and nothing else: the rail holding the keyboard, an offer
+//! waiting above the field, a queue on its way out, or a rung of the ladder. It
+//! does not rotate. A line that changes on a timer reads as noise, because the
+//! reader cannot tell a new fact from the same fact coming round again.
+//!
+//! The keys that act on the field itself are not here. Esc stops the turn and
+//! the chord records a message, and both are painted inside the field where the
+//! caret is, so repeating them on a card directly above it would be the same
+//! sentence twice. The card speaks about the work; the field speaks about
+//! itself.
 //!
 //! Nothing here knows what a terminal or a window is. A surface passes the
 //! facts it already holds, and filters the answer through the commands it can
 //! actually run: a hint naming a command that surface does not answer is worse
 //! than no hint at all, because it teaches a habit that bounces.
-//!
-//! The row is reserved whether or not it has something to say. A row that
-//! appears and disappears moves everything above it, and the transcript is
-//! exactly the thing nobody wants moving under their eyes while they read.
 
 use crate::ui_core::commands::{Support, support_gui};
 
@@ -63,6 +71,24 @@ pub struct HintState {
     /// the reader needs to know there is more than one to walk. Zero means the
     /// turn offered nothing, which is the common case.
     pub offers: usize,
+    /// Messages waiting on the running turn.
+    ///
+    /// A queue changes what the keys do: while one is waiting, Up takes the
+    /// message back instead of the offer, and once the turn is over the queue
+    /// is what sends next. Zero means nothing is waiting.
+    pub queued: usize,
+    /// The session list holds the keyboard.
+    ///
+    /// While it does, the composer is not where a typed character lands: the
+    /// character filters the list and Enter opens the row it stands on, so the
+    /// line names those keys instead of the field's own (#3102).
+    pub rail_focused: bool,
+    /// The list is open to choose the session to split with, not to browse.
+    ///
+    /// The same keys, a different promise: Enter splits the layout rather than
+    /// opening the conversation, and Esc answers the dialog's N. One word apart
+    /// is the difference between a shortcut and a surprise (#3102).
+    pub rail_split: bool,
 }
 
 impl HintState {
@@ -160,6 +186,51 @@ pub fn hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<Hint>
 /// support list (#2878).
 pub fn gui_hint(state: &HintState) -> Option<Hint> {
     hint(state, |command| support_gui(command) == Support::Runs)
+}
+
+/// The task-related line the card above the composer paints right now (#3102).
+///
+/// The card has an intent: it names what the screen is asking for at this
+/// moment, and nothing else. The keys that act on the field itself, Esc
+/// stopping the turn and the chord that records a message, are painted inside
+/// the field where the caret is, so this line only speaks when the work has
+/// earned something.
+///
+/// One line, not a rotation. The card used to cycle through everything true on
+/// a timer, and a line that changes on its own reads as noise: the reader
+/// cannot tell a new fact from the same fact coming round again. It changes
+/// when the situation changes, which is what makes it worth reading at all.
+pub fn task_line(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<String> {
+    // The rail outranks everything, because while it holds the keyboard the
+    // composer receives nothing at all and the arrows walk the list, not the
+    // field: naming a command here would teach a habit that bounces.
+    if state.rail_split {
+        return Some("type to find · enter splits · esc cancels".to_string());
+    }
+    if state.rail_focused {
+        return Some("type to filter · enter opens · esc back".to_string());
+    }
+    // An offer waiting is the most actionable thing on screen, and the arrows
+    // reach it instead of the composer history, so the card has to say so or
+    // the keys stay a secret (#3101).
+    if state.offers > 0 && !state.processing {
+        return Some(if state.offers == 1 {
+            "↑ picks the suggested option · enter sends".to_string()
+        } else {
+            format!("↑↓ walk the {} suggested options · enter sends", state.offers)
+        });
+    }
+    // A queue is the only rung that is also true while a turn runs.
+    if state.queued > 0 {
+        return Some(if state.processing {
+            format!("{} queued · sent when the turn ends", state.queued)
+        } else {
+            format!("{} queued · sending now", state.queued)
+        });
+    }
+    // Nothing is suggested while the answer is still being written: the reader
+    // is waiting, not choosing, and the field already says Esc stops it.
+    hint(state, supported).map(|hint| hint.text)
 }
 
 /// A token count the way a person reads it: `840`, `104.4k`, `1.2M`.

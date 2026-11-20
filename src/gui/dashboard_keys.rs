@@ -788,8 +788,7 @@ impl Dashboard {
                     .push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }

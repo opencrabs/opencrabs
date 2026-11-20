@@ -45,8 +45,6 @@ impl Dashboard {
         self.chat_state.transcript.live_expanded = false;
         self.turn.settle.begin(self.chat_state.row_total());
         self.turn.busy = true;
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
@@ -145,16 +143,40 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// What the composer says about the state it is in: nothing running, a turn
-    /// running, a queue waiting on it, or a queue already on its way. The words
-    /// live under the caret because that is where the user is typing, and the
-    /// queue card is a list, not an instruction manual (#2630).
+    /// The hint the empty field shows: the two keys that act on the field
+    /// itself (#3102).
+    ///
+    /// These did not move to the card above the composer. Esc stops the turn
+    /// being written into the field, the chord records a message into it, and
+    /// both read best where the caret already is.
     pub(crate) fn composer_hint(&self) -> SharedString {
-        composer_hint_for(
+        crate::composer_view::composer_hint_for(
             self.turn.busy,
             self.queued_for_strip().len(),
             crate::composer_view::voice_ready(),
         )
+    }
+
+    /// Paint the field's hint on the window's composer and every split pane's.
+    ///
+    /// A no-op when the line did not change, so a tick cannot repaint every
+    /// field in the window for nothing (#2630).
+    pub(crate) fn sync_composer_hint(&mut self, cx: &mut Context<Self>) {
+        let hint = self.composer_hint();
+        let panes = self.pane_editors(cx);
+        self.composer.sync_composer_hint(hint, &panes, cx);
+    }
+
+    /// The line the card above the composer paints right now (#3102).
+    ///
+    /// It has an intent: it names what the screen is asking for at this moment,
+    /// and nothing else. The keys that act on the field itself stay inside the
+    /// field, so the two never compete for the same glance.
+    ///
+    /// `None` when the work has nothing to say, which paints no card at all
+    /// rather than an empty one.
+    pub(crate) fn task_card_line(&self) -> Option<SharedString> {
+        crate::composer_view::task_line_for(&self.hint_state())
     }
 
     /// Every split pane's own composer. The window's field lives on the chat
@@ -336,8 +358,6 @@ impl Dashboard {
             self.chat_state.transcript.live_expanded = false;
             self.turn.settle.begin(self.chat_state.row_total());
             self.turn.busy = true;
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
             let cancel = tokio_util::sync::CancellationToken::new();
             self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);

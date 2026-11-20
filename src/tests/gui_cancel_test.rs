@@ -62,7 +62,7 @@ fn cancelled_arm() -> &'static str {
         .expect("the settle arm ends before the revert arm")
 }
 
-/// `ctrl_c_press`, from its signature to the hint sync that closes it.
+/// `ctrl_c_press`, from its signature to the repaint that closes it.
 fn ctrl_c_press_body() -> &'static str {
     let start = DASHBOARD_NAV
         .find("fn ctrl_c_press(")
@@ -70,9 +70,11 @@ fn ctrl_c_press_body() -> &'static str {
     DASHBOARD_NAV
         .get(start..)
         .expect("the handler starts on a char boundary")
-        .split("sync_composer_hint")
+        // The handler ends on the repaint it asks for (#3102): the hint row is
+        // decided from live state now, so the notify is all the field needs.
+        .split("cx.notify();")
         .next()
-        .expect("the handler ends where the hint sync starts")
+        .expect("the handler ends where the repaint starts")
 }
 
 /// The Ctrl+C interceptor's judgement of the press, up to the point it

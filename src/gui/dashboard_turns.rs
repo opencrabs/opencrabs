@@ -633,8 +633,7 @@ impl Dashboard {
             self.finish_recall(&sent_from, cx);
             // The composer now says a message is waiting on the turn, the
             // moment it is queued rather than on the next turn event (#2630).
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -644,8 +643,7 @@ impl Dashboard {
             self.composer
                 .unsent
                 .push(Self::pending_message(text, display.clone()));
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         };
@@ -675,8 +673,7 @@ impl Dashboard {
         // (#2637).
         self.finish_recall(&sent_from, cx);
         self.turn.busy = true;
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
@@ -1134,8 +1131,7 @@ impl Dashboard {
                     if self.chat_state.session().is_none() {
                         self.new_session(cx);
                     }
-                    let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-                    self.composer.sync_composer_hint(hint, &panes, cx);
+                    self.sync_composer_hint(cx);
                     self.drain_pending(cx);
                 }
                 agent_bridge::TurnEvent::SessionCreated(id) => {
@@ -2012,14 +2008,15 @@ impl Dashboard {
         }
         // A finished turn is the moment the queue drains: before this it only
         // drained on `Ready`, so a message typed while busy never went out.
-        // The hint follows the turn and the queue, including a report that
-        // landed mid-turn, so it is repainted on every event batch (#2630).
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
+        // The row above the composer reads the turn and the queue from this
+        // same state, so the repaint below is what shows the drain (#3102).
         if !self.turn.busy {
             self.turn.cancel = None;
             self.drain_pending(cx);
         }
+        // The turn and the queue both just moved, and the field's hint is
+        // decided from them (#2630, #3102).
+        self.sync_composer_hint(cx);
         self.follow_chat();
         cx.notify();
     }

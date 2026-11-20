@@ -16,6 +16,7 @@ use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb,
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
 use opencrabs::ui_core::card::{CARD_RADIUS, SEEKER_RADIUS, glass_fill, seeker_concentric_radius};
 use opencrabs::ui_core::commands as slash;
+use opencrabs::ui_core::hints::{HintState, task_line};
 
 use std::ops::Range;
 
@@ -107,7 +108,7 @@ pub(crate) fn options_strip(
     // `ui_core::hints` already prints "↑ picks the option · enter sends" on the
     // hint row above the composer whenever an offer is waiting, so the legend
     // was being drawn twice.
-    let mut col = div()
+    let col = div()
         .flex()
         .flex_col()
         .gap_2()
@@ -191,14 +192,16 @@ pub(crate) fn voice_ready() -> bool {
         .stt_enabled
 }
 
-/// The composer's hint line for a state. Grey and quiet, it names the keys
-/// that work right now: stopping the turn, recalling a queued message, and
-/// queueing another (#2630).
+/// What the empty field says: the product's prompt plus the keys that act on
+/// the field itself (#3102).
 ///
-/// An idle field also says how to reach the microphone (#3044): the chord that
-/// records when an engine is configured, and the one command that configures it
-/// when there is none. A promise the window cannot keep is worse than silence,
-/// so the two never show at once.
+/// These stay in the field rather than moving to the card above the composer,
+/// because they are about the field: Esc stops the turn being written into it,
+/// the chord records a message into it. The card speaks about the work.
+///
+/// `/voice` is the STT/TTS settings screen, not a switch that turns a mic on,
+/// so the cold line names it as setup rather than as the way to record
+/// (#3102). Recording itself has two doors, the chord and the mic button.
 pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> SharedString {
     match (busy, queued) {
         (true, 0) => SharedString::from("esc stops · typing queues"),
@@ -206,9 +209,21 @@ pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> Share
         (false, 0) if voice => {
             SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to send")
         }
-        (false, 0) => SharedString::from("Talk to the crab… · /voice sets up the mic"),
+        (false, 0) => SharedString::from("Talk to the crab… · /voice opens the voice settings"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),
     }
+}
+
+/// The task line the card above the composer paints right now, if any (#3102).
+///
+/// The card is about the work, so it is filtered through the commands the
+/// desktop app actually answers: a line naming a command this surface does not
+/// run is worse than no line at all.
+pub(crate) fn task_line_for(state: &HintState) -> Option<SharedString> {
+    task_line(state, |command| {
+        slash::support_gui(command) == slash::Support::Runs
+    })
+    .map(SharedString::from)
 }
 
 /// How many queued messages stay on screen. Two, until the user opens the

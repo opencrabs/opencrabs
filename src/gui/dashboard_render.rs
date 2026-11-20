@@ -5,7 +5,7 @@
 //! earlier (#2690).
 
 use super::*;
-use opencrabs::ui_core::hints::{CONTEXT_TIGHT, HintState, gui_hint};
+use opencrabs::ui_core::hints::{CONTEXT_TIGHT, HintState};
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2523,22 +2523,17 @@ impl Render for Dashboard {
                         }
                         self.composer.editor.clone().into_any_element()
                     };
-                    // The dock owns the composer: surface, border, radius and
-                    // the hairline above the key hints. The composer itself
-                    // paints none of them any more, so a single session reads
-                    // as one card instead of a floating pill parked above a
-                    // separate footer row (#2987). The column has no gap: the only
-                    // separation inside the card is the 1px hairline.
-                    let mut dock = div()
+                    // The dock is the composer's column: the field, the
+                    // hairline, and the key hints under it. The surface, border
+                    // and radius live on the shell around it, because the task
+                    // card is attached to the same surface (#3102): two boxes
+                    // stacked flush would each round their own corners and
+                    // leave a notch where they meet.
+                    let dock = div()
                         .id("composer-dock")
                         .flex()
                         .flex_col()
                         .gap_0()
-                        .bg(glass_fill(palette::current().panel))
-                        .border_1()
-                        .border_color(rgb(palette::current().panel_hi))
-                        .rounded(px(COMPOSER_RADIUS))
-                        .overflow_hidden()
                         .child(composer)
                         .child(
                             div()
@@ -2546,16 +2541,30 @@ impl Render for Dashboard {
                                 .h(px(1.))
                                 .bg(rgb(palette::current().panel_hi)),
                         );
-                    // The hint row (#2279) sits inside the card, between the
-                    // hairline and the key hints: the card is what the reader
-                    // is looking at when they wonder what to do next, and a
-                    // suggestion parked outside it reads as a different
-                    // widget's footer.
-                    if let Some(hint) = hint_row(&self.hint_state()) {
-                        dock = dock.child(hint);
+                    // The task card rides on top of the composer, flush, as a
+                    // thin strip of the same surface (#3102). It is not a box
+                    // of its own: the shell below owns the one border and the
+                    // one radius, so the card cannot float over the gap or
+                    // leave a notch where the two meet. It says what the screen
+                    // is asking for, which is why it disappears when there is
+                    // nothing to ask.
+                    let mut shell = div()
+                        .flex()
+                        .flex_col()
+                        .gap_0()
+                        .w_full()
+                        .bg(glass_fill(palette::current().panel))
+                        .border_1()
+                        .border_color(rgb(palette::current().panel_hi))
+                        .rounded(px(COMPOSER_RADIUS))
+                        .overflow_hidden();
+                    if let Some(line) = self.task_card_line() {
+                        shell = shell.child(hint_card(&line));
                     }
                     col = col.child(central(
-                        dock.child(footer.into_any_element()).into_any_element(),
+                        shell
+                            .child(dock.child(footer.into_any_element()))
+                            .into_any_element(),
                         centred_chat,
                         chat_measure_px,
                     ));
@@ -3592,6 +3601,17 @@ impl Dashboard {
                 .chat_session
                 .map(|sid| agent_bridge::options_snapshot(sid).len())
                 .unwrap_or(0),
+            // What the keys do while a turn runs, which is not what they do
+            // when the field is idle (#3102).
+            queued: self.queued_for_strip().len(),
+            // The rail holding the keyboard changes what a typed character
+            // does, so the row says so instead of naming commands the field
+            // will never receive.
+            rail_focused: self.rail_open && self.rail_focused,
+            // A split waiting for its second session reads the same keys for a
+            // different promise, and one word apart is the difference between a
+            // shortcut and a surprise (#3102).
+            rail_split: self.split_target.is_some(),
         };
         // What a `/clear` leaves behind is the system prompt and the tool
         // schemas. Counting it tokenises every tool schema, so it is measured
@@ -3606,52 +3626,45 @@ impl Dashboard {
     }
 }
 
-/// The hint row (#2279): one line inside the composer card, under the hairline
-/// and above the key hints.
+/// The thin strip across the top of the composer (#3102).
 ///
-/// The same `ui_core::hints` answer the terminal draws, filtered through the
-/// commands the desktop app answers, so the two surfaces cannot recommend
-/// different things about the same conversation. `None` when there is nothing
-/// worth saying: unlike the terminal, the card does not reserve the row, so an
-/// empty answer costs no space at all.
-fn hint_row(state: &HintState) -> Option<AnyElement> {
-    let hint = gui_hint(state)?;
+/// It carries one line about the work: what the screen is asking for right now.
+/// The keys that act on the field itself stay inside the field, where the caret
+/// is, so the two never compete for the same glance.
+///
+/// It paints no surface of its own. The shell around the composer owns the one
+/// border and the one radius, and this strip only adds a hairline under itself,
+/// so the pair reads as a single card with a header rather than two boxes
+/// stacked flush.
+///
+/// The accent comes from the live palette, so it follows whichever theme the
+/// reader picked and is never a literal.
+fn hint_card(line: &SharedString) -> Div {
     let shown = palette::current();
-    // A hint with no command names keys instead (the offer rung), and splitting
-    // on an empty needle would colour the whole line as the actionable half.
-    let (before, after) = if hint.command.is_empty() {
-        (hint.text.clone(), String::new())
-    } else {
-        hint.text
-            .split_once(hint.command)
-            .map(|(b, a)| (b.to_string(), a.to_string()))
-            .unwrap_or((hint.text.clone(), String::new()))
-    };
-    let mut line = div().flex().flex_row().items_center().px_1();
-    if !before.is_empty() {
-        line = line.child(text(before, Size::Xs, shown.text_muted));
-    }
-    if !hint.command.is_empty() {
-        line = line.child(text(hint.command, Size::Xs, shown.accent));
-    }
-    if !after.is_empty() {
-        line = line.child(text(after, Size::Xs, shown.text_muted));
-    }
-    // Two insets, not one (#3100): the key hints below pad their row by 12
-    // (`px_3`) and their first item is the hover pill, padded another 4
-    // (`px_1`), so their first glyph starts at 16. This row carried only the
-    // 12, which left it 4px short of them and read as a line nudged off the
-    // card's text column rather than as a second row of the same card. Both
-    // numbers are expressed in rems, like the footer's, so a window with a
-    // different rem size moves the two rows together instead of apart.
-    let row = div()
+    div()
         .flex()
         .flex_row()
         .items_center()
         .w_full()
+        // Two insets, not one (#3100): the key hints below pad their row by 12
+        // (`px_3`) and their first item is the hover pill, padded another 4
+        // (`px_1`), so their first glyph starts at 16. This strip carries both,
+        // so its text sits on the same column as everything else in the card.
         .px_3()
-        .pb(px(4.))
-        .overflow_hidden()
-        .child(line);
-    Some(row.into_any_element())
+        .py_1()
+        .border_b(px(1.))
+        .border_color(rgb(shown.panel_hi))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px_1()
+                .overflow_hidden()
+                .text_xs()
+                .text_color(rgb(shown.accent))
+                .child(line.clone()),
+        )
 }
+
+
