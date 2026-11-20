@@ -228,10 +228,7 @@ fn message_with_markers(text: &str, attachments: &[Attachment]) -> String {
 fn trailing_markers(text: &str) -> Option<usize> {
     let trimmed = text.trim_end();
     let mut start = trimmed.len();
-    loop {
-        let Some(head) = trimmed.get(..start) else {
-            break;
-        };
+    while let Some(head) = trimmed.get(..start) {
         let head = head.trim_end();
         if !head.ends_with(">>") {
             break;
@@ -367,10 +364,10 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
         if let Some(head) = text.get(cursor..start) {
             out.push_str(head);
         }
-        if !drop {
-            if let Some(keep) = text.get(start..closer) {
-                out.push_str(keep);
-            }
+        if !drop
+            && let Some(keep) = text.get(start..closer)
+        {
+            out.push_str(keep);
         }
         cursor = closer;
     }
@@ -3687,7 +3684,7 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         &draft.clip,
         Some(draft.seconds),
         &draft.levels,
-        &mut **cx,
+        cx,
     );
     let label = crate::composer_orb::label(&draft.clip, Some(draft.seconds));
     // The block sits alone on its row with only the discard beside it, and the
