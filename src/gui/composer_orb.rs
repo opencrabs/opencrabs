@@ -1,9 +1,10 @@
 //! The composer's voice player, poured from the Seeker orb's material (#3092).
 //!
 //! A finished take is an object, not a row of controls. The glass holds it: the
-//! take's own peaks lift the liquid sitting inside the block, the surface of
-//! that liquid is the band of light the material has always carried across its
-//! seam, and the whole block is the play button.
+//! horizon sits still in the middle of the block, the warm bowl below it and the
+//! cool dome above it do not move, and the band of light on that seam is the
+//! only thing that travels. A syllable lifts the band where the sound is, tips
+//! it, swells it and brightens it, and the whole block is the play button.
 //!
 //! The shape is a block, not a marble. The first cut of this module reused the
 //! recording orb's sphere, which drew a circle in a row where every other
@@ -21,8 +22,10 @@
 //!   it is dropped, which is right for a microphone and wrong for a player that
 //!   sits paused for most of its life. The player renders on demand and keeps
 //!   its frame;
-//! - the liquid is bottom-anchored, so a take reads as something poured into
-//!   the block rather than a waveform hung in the middle of it;
+//! - the seam is still. The recording orb lets a syllable bend the whole
+//!   horizon; here the bowl and the dome are pinned and only the band moves,
+//!   because a block read at a glance has to keep its shape while the light
+//!   inside it works;
 //! - the body is thinner than the recording orb's, because a player is
 //!   something you read a message through, not something you look at alone;
 //! - the mark sits in its own lane at the left end, where the round play button
@@ -46,13 +49,14 @@ use gpui::{
 use image::{Frame, RgbaImage};
 
 use super::seeker_orb::{
-    AMBER_HUE, AMBIENT, BAND_GAIN, BAND_REACH, BAND_SIGMA, BAND_WALL, BAYER, BOWL_ALPHA, BOWL_HUE,
-    BREATHE, COOL_HUE, DISPERSION, DOME_ALPHA, EDGE_CAUSTIC, EDGE_COOL, EDGE_DEPTH, EDGE_SPREAD,
-    EDGE_WARM, GLOW_GAIN, GLOW_SIGMA, MAX_LIFT, RIM_BASE, RIM_FALL_GAIN, RIM_FALL_SIGMA, RIM_GAIN,
+    AMBER_HUE, AMBIENT, BAND_ARCH, BAND_GAIN, BAND_PULSE, BAND_REACH, BAND_SIGMA, BAND_WALL, BAYER,
+    BOW_BOWL, BOWL_ALPHA, BOWL_HUE, BOWL_LIFT, BREATHE, COOL_HUE, DISPERSION, DOME_ALPHA,
+    EDGE_CAUSTIC, EDGE_COOL, EDGE_DEPTH, EDGE_SPREAD, EDGE_WARM, FAR_LIFT, FAR_WALL, GLOW_GAIN,
+    GLOW_SIGMA, HORIZON, LIFT, MAX_LIFT, RIM_BASE, RIM_FALL_GAIN, RIM_FALL_SIGMA, RIM_GAIN,
     RIM_SILVER, RIM_TILT_X, RIM_TILT_Y, RIM_TOP_EDGE, RIM_TOP_FULL, RIM_TOP_GAIN, SCRIM_LUMA,
-    SIDE_BIAS, VOICE_SAMPLES, WALL_ALPHA, WALL_EDGE, WALL_FULL, WARM_FOLLOW, bgra, gaussian,
-    hash_noise, microphone_history, relative_luma, rgb_hsv, saturation_at, sine, smooth,
-    smooth_voice, tinted, voice_at,
+    SHIMMER, SIDE_BIAS, SLOSH, SLOSH_SPEED, SWELL, SWELL_REACH, SWELL_SPEED, VOICE_SAMPLES,
+    WALL_ALPHA, WALL_EDGE, WALL_FULL, WARM_FOLLOW, bgra, gaussian, hash_noise, microphone_history,
+    relative_luma, rgb_hsv, saturation_at, sine, smooth, smooth_voice, tinted, voice_at,
 };
 use super::voice_play::{self, ClipState};
 use super::voice_preview::{clip_length, fallback_peaks};
@@ -73,43 +77,36 @@ const FEATHER_PX: f32 = 1.2;
 /// through the glass while the take is held.
 const BODY_TRANSMISSION: f32 = 0.62;
 
-// The liquid ---------------------------------------------------------------
+// The seam -----------------------------------------------------------------
 
-/// Where the liquid's floor sits, in units of half the height.
-const LIQUID_FLOOR: f32 = 0.84;
+/// How much of the width the track leaves to the wall at either end.
+const TRACK_PAD: f32 = 0.10;
 
-/// How far a full-amplitude column rises off that floor.
-///
-/// The floor is at 0.84 and the rise is 1.34, so the loudest column reaches
-/// -0.50: half the block is liquid at full scale and the top half stays clear
-/// glass, which is where the cool dome and the rim live.
-const LIQUID_RISE: f32 = 1.34;
-
-/// How much of the width the liquid leaves to the wall at either end.
-const LIQUID_PAD: f32 = 0.10;
-
-/// The liquid's brightness at its own floor, and the extra it gains at the
-/// surface. Light comes from above, so the surface is the lit part.
-const LIQUID_BASE: f32 = 0.10;
-const LIQUID_LIFT: f32 = 0.34;
-
-/// How quickly the liquid dims with depth below its own surface.
-const LIQUID_FALL: f32 = 2.6;
-
-/// The swell that travels along the surface while the take is moving.
-const SLOSH: f32 = 0.055;
-const SLOSH_SPEED: f32 = 2.10;
-const SLOSH_WAVES: f32 = 1.60;
+// Everything else about the seam is fitted, and it is fitted against the
+// recording orb's own pixels: the horizon's bow, the arch the band takes as it
+// wraps towards the wall, the tip and the swell that travel along it, the lift
+// a syllable puts under the light, the pulse that thickens it, the shimmer that
+// brightens it. Those live in `seeker_orb` and are imported rather than copied,
+// so a refit reaches the microphone and the player in the same edit.
+//
+// The one thing this module adds is stillness. The block's top and bottom do
+// not move at all: the warm bowl below the horizon and the cool dome above it
+// are pinned where they are, and the only thing that travels is the band. That
+// is what the recording orb already looked like, and the first cut of this
+// module lost it by letting every column's peak lift its own surface, which
+// turned a single lens flare into a row of sound bars.
 
 // The track ----------------------------------------------------------------
 
 /// How bright the part of the take that has not been played is, against the
 /// part that has. It is a rail, not a hole: a person has to see the shape of
 /// what is still coming.
+///
+/// A take at rest is not dimmed by this at all. The recording orb is the
+/// reference for how the material should look, and it has no track: halving
+/// the band on a paused take would have made the block a darker object than
+/// the microphone that recorded it.
 const TRACK_AHEAD: f32 = 0.18;
-
-/// The brightness when nothing is playing: a calm, even take.
-const TRACK_REST: f32 = 0.42;
 
 /// How soft the playhead's edge is along the track, in track units.
 const BAND_SOFT: f32 = 0.012;
@@ -165,6 +162,22 @@ const PLAYER_SCALE: f32 = 2.5;
 pub(crate) const RECORDER_WIDTH: f32 = 78.0;
 pub(crate) const RECORDER_HEIGHT: f32 = 30.0;
 const RECORDER_SCALE: f32 = 2.0;
+
+/// The liquid's own clock, and the loudness that drives it.
+///
+/// These are the recording orb's worker values, kept here rather than fitted
+/// again: the seam has to move at the same rate in both shapes or the take
+/// changes tempo the moment it is stopped. Energy climbs fast on a syllable and
+/// falls slowly between words, and the phase crawls at rest and sprints under
+/// speech.
+const ENERGY_ATTACK: f32 = 0.58;
+const ENERGY_RELEASE: f32 = 0.16;
+const PHASE_CRAWL: f32 = 0.16;
+const PHASE_SPRINT: f32 = 1.25;
+
+/// The longest gap the clock will integrate, so a stalled window does not
+/// teleport the seam across the block when it wakes up.
+const LONGEST_STEP: f32 = 0.10;
 
 /// How many steps of the track the playhead takes before the frame is redrawn.
 ///
@@ -262,8 +275,6 @@ pub(crate) struct PlayerState {
     pub(crate) recording: bool,
     /// Whether the pointer is over the block.
     pub(crate) hovered: bool,
-    /// Seconds since the block appeared, for the idle breath and the swell.
-    pub(crate) clock: f32,
 }
 
 impl PlayerState {
@@ -284,12 +295,39 @@ impl PlayerState {
     }
 }
 
+/// Advance the liquid by the time that has passed since the last frame.
+///
+/// One curve for both shapes: the player and the microphone read the same
+/// reading of the take, so a take does not change tempo when it is stopped.
+fn advance(phase: &mut f32, energy: &mut f32, last: &mut Instant, target: f32) {
+    let now = Instant::now();
+    let elapsed = now.duration_since(*last).as_secs_f32().min(LONGEST_STEP);
+    *last = now;
+    let target = target.clamp(0.0, 1.0);
+    let rate = if target > *energy {
+        ENERGY_ATTACK
+    } else {
+        ENERGY_RELEASE
+    };
+    *energy += (target - *energy) * rate;
+    *phase += elapsed * (PHASE_CRAWL + *energy * PHASE_SPRINT);
+}
+
 /// A finished take drawn as the block. Owns the geometry, which is the
 /// expensive part, and renders one frame per call.
 pub(crate) struct PlayerBlock {
     slab: Slab,
     levels: [f32; VOICE_SAMPLES],
     colour: u32,
+    /// Liquid seconds. Not wall time: the seam runs at a base crawl that
+    /// speech accelerates, so a quiet take drifts and a loud one moves.
+    phase: f32,
+    /// How loud the take is where the playhead sits, smoothed on the way up
+    /// fast and on the way down slow, exactly as the recording orb does it.
+    energy: f32,
+    /// When the last frame was drawn, so the phase advances by the time that
+    /// actually passed instead of by an assumed frame interval.
+    last: Instant,
 }
 
 impl PlayerBlock {
@@ -306,7 +344,29 @@ impl PlayerBlock {
             slab: Slab::new(size.0, size.1),
             levels: smooth_voice(resample(peaks)),
             colour,
+            phase: 0.0,
+            energy: 0.0,
+            last: Instant::now(),
         }
+    }
+
+    /// Advance the liquid to now, and report the phase and energy to draw with.
+    ///
+    /// The block owns this rather than the caller, because the two numbers are
+    /// a running integral: energy follows the take with a fast attack and a
+    /// slow release, and the phase advances at a rate that energy sets. Both
+    /// have to survive between frames, and a block already lives as long as the
+    /// take it holds.
+    fn tick(&mut self, state: PlayerState) -> (f32, f32) {
+        // The take's loudness where the playhead sits, so a loud passage moves
+        // the seam further than a quiet one and a pause lets it settle.
+        let target = if state.playing {
+            voice_at(&self.levels, state.progress.clamp(0.0, 1.0))
+        } else {
+            0.0
+        };
+        advance(&mut self.phase, &mut self.energy, &mut self.last, target);
+        (self.phase, self.energy)
     }
 
     /// Play or pause the take this block stands for.
@@ -324,8 +384,9 @@ impl PlayerBlock {
     }
 
     /// Render one frame. Straight alpha BGRA, the layout GPUI's atlas expects.
-    pub(crate) fn render(&self, state: PlayerState) -> RenderImage {
-        paint(&self.slab, &self.levels, self.colour, state)
+    pub(crate) fn render(&mut self, state: PlayerState) -> RenderImage {
+        let (phase, energy) = self.tick(state);
+        paint(&self.slab, &self.levels, self.colour, state, phase, energy)
     }
 }
 
@@ -340,7 +401,11 @@ pub(crate) struct LiveSlab {
     slab: Slab,
     levels: [f32; VOICE_SAMPLES],
     colour: u32,
-    started: Instant,
+    /// Liquid seconds and the loudness driving them, carried between ticks the
+    /// same way the player carries them between frames.
+    phase: f32,
+    energy: f32,
+    last: Instant,
     frame: Arc<RenderImage>,
 }
 
@@ -354,14 +419,15 @@ impl LiveSlab {
             playing: true,
             recording: true,
             hovered: false,
-            clock: 0.0,
         };
-        let frame = Arc::new(paint(&slab, &levels, colour, state));
+        let frame = Arc::new(paint(&slab, &levels, colour, state, 0.0, 0.0));
         Self {
             slab,
             levels,
             colour,
-            started: Instant::now(),
+            phase: 0.0,
+            energy: 0.0,
+            last: Instant::now(),
             frame,
         }
     }
@@ -374,16 +440,28 @@ impl LiveSlab {
     pub(crate) fn update(&mut self, recording: bool, levels: &[f32], colour: u32, cx: &mut App) {
         self.levels = microphone_history(levels);
         self.colour = colour;
+        let target = if recording {
+            self.levels[VOICE_SAMPLES - 1]
+        } else {
+            0.0
+        };
+        advance(&mut self.phase, &mut self.energy, &mut self.last, target);
         let state = PlayerState {
             progress: 1.0,
             playing: recording,
             recording,
             hovered: false,
-            clock: self.started.elapsed().as_secs_f32(),
         };
         // Painted from the field rather than the argument, so the block always
         // redraws in the colour it is currently wearing.
-        let next = Arc::new(paint(&self.slab, &self.levels, self.colour, state));
+        let next = Arc::new(paint(
+            &self.slab,
+            &self.levels,
+            self.colour,
+            state,
+            self.phase,
+            self.energy,
+        ));
         let previous = std::mem::replace(&mut self.frame, next);
         cx.drop_image(previous, None);
     }
@@ -420,54 +498,63 @@ fn warm_hue_for(accent_hue: f32) -> f32 {
 }
 
 /// Draw one frame of the block.
+///
+/// `phase` is the liquid's own clock and `level` is how loud the take is where
+/// the playhead sits. Both are integrated by the caller, so this function is
+/// pure: the same numbers always draw the same frame, which is what lets the
+/// tests name a row and assert on it.
 fn paint(
     slab: &Slab,
     levels: &[f32; VOICE_SAMPLES],
     colour: u32,
     state: PlayerState,
+    phase: f32,
+    level: f32,
 ) -> RenderImage {
     let width = slab.width;
     let height = slab.height;
     let aspect = slab.aspect;
     let mut pixels = RgbaImage::new(width, height);
     let accent_hue = rgb_hsv(colour).0;
+    let level = level.clamp(0.0, 1.0);
     let moving = state.moving();
-    let breathe = if moving {
-        BREATHE * (sine(state.clock * 0.70) - 0.5)
-    } else {
-        0.0
-    };
+    // Frame-wide, not per-pixel: the horizon rolls and breathes as one body.
+    // Everything below is the recording orb's own motion, unchanged.
+    let breathe = BREATHE * sine(phase * 0.70);
+    let slosh = SLOSH * level * sine(phase * SLOSH_SPEED);
     let hover = if state.hovered { HOVER_RIM } else { 0.0 };
     let feather = FEATHER_PX / (height as f32 * 0.5);
     let mark = state.mark();
     let mark_x = -aspect + MARK_INSET;
-    let travel = (aspect - LIQUID_PAD).max(0.01);
-    let head_x = -aspect + LIQUID_PAD + state.progress.clamp(0.0, 1.0) * 2.0 * travel;
+    let travel = (aspect - TRACK_PAD).max(0.01);
+    let head_x = -aspect + TRACK_PAD + state.progress.clamp(0.0, 1.0) * 2.0 * travel;
 
     // Everything that depends on the column and not the row is worked out once
-    // per column instead of once per pixel: the liquid's height, how lit this
-    // stretch of track is, and how far the band reaches across the block.
-    let mut surfaces = vec![0.0_f32; width as usize];
-    let mut tracks = vec![0.0_f32; width as usize];
+    // per column instead of once per pixel: how far the band reaches, how lit
+    // this stretch of track is, and the two terms that lift and swell the seam
+    // where the sound is.
     let mut laterals = vec![0.0_f32; width as usize];
+    let mut tracks = vec![0.0_f32; width as usize];
+    let mut lifts = vec![0.0_f32; width as usize];
+    let mut swells = vec![0.0_f32; width as usize];
+    let mut voices = vec![0.0_f32; width as usize];
     for column in 0..width as usize {
         let x = slab.x[column];
-        let along = ((x + aspect - LIQUID_PAD) / (2.0 * travel)).clamp(0.0, 1.0);
-        let level = voice_at(levels, along);
-        let swell = if moving {
-            SLOSH * sine(state.clock * SLOSH_SPEED + along * SLOSH_WAVES * std::f32::consts::TAU)
-        } else {
-            0.0
-        };
-        surfaces[column] = LIQUID_FLOOR - level * LIQUID_RISE + swell + breathe;
+        let nx = (x / aspect).clamp(-1.0, 1.0);
+        let along = ((x + aspect - TRACK_PAD) / (2.0 * travel)).clamp(0.0, 1.0);
         let played = smooth(-BAND_SOFT, BAND_SOFT, state.progress - along);
         tracks[column] = if moving {
             TRACK_AHEAD + (1.0 - TRACK_AHEAD) * played
         } else {
-            TRACK_REST
+            1.0
         };
-        laterals[column] =
-            BAND_WALL + (1.0 - BAND_WALL) * gaussian((along - 0.5) * 2.0, BAND_REACH);
+        laterals[column] = BAND_WALL + (1.0 - BAND_WALL) * gaussian(nx, BAND_REACH);
+        // Sampled in screen space, not through the lens: the light bends where
+        // the sound is, and the lens rotates underneath it on its own.
+        let voice = voice_at(levels, (nx * 0.5 + 0.5).clamp(0.0, 1.0));
+        voices[column] = voice;
+        lifts[column] = LIFT * level * voice;
+        swells[column] = SWELL * level * sine(nx * SWELL_REACH - phase * SWELL_SPEED) * nx * nx;
     }
 
     for (index, pixel) in pixels.pixels_mut().enumerate() {
@@ -481,24 +568,42 @@ fn paint(
         let y = slab.y[index];
         let nz = slab.normal_z[index];
         let depth = (inside / SLAB_BEVEL).clamp(0.0, 1.0);
-        let across = x / aspect;
-        let surface = surfaces[column as usize];
-        let track = tracks[column as usize];
+        let nx = (x / aspect).clamp(-1.0, 1.0);
         let lateral = laterals[column as usize];
+        let track = tracks[column as usize];
+        let voice = voices[column as usize];
 
-        // The liquid: everything below its own surface. That surface is the
-        // seam the material has always had, so the band of light that used to
-        // ride the equator now rides the top of the take.
-        let submerge = smooth(surface - feather, surface + feather, y);
-        let dome = 1.0 - submerge;
-        let meniscus = gaussian(y - surface, BAND_SIGMA);
-        let below = (y - surface).max(0.0);
-        let liquid = submerge * (LIQUID_BASE + LIQUID_LIFT * (-below * LIQUID_FALL).exp());
-        let glow = gaussian(y - surface, GLOW_SIGMA) * (1.0 + SIDE_BIAS * -across) * lateral;
+        // The horizon: the seam between the cool dome and the warm bowl. It sits
+        // in the middle of the block, it bows towards the rolled ends through
+        // the same lens the marble's does, and it breathes and tips with the
+        // take. Nothing below it or above it moves on its own.
+        let horizon =
+            HORIZON + BOW_BOWL * (1.0 - nz) + breathe + slosh * nx + swells[column as usize];
+        // The band rides a slightly different seam from the bowl's: it is the
+        // horizon reflected off the inside of the glass, so it arches towards
+        // the wall while the bowl's own boundary falls away. The take's own
+        // history lifts it where the sound is, which is what turns a line into
+        // a surface.
+        let seam = horizon - BAND_ARCH * (1.0 - nz) - lifts[column as usize];
+        let offset = y - seam;
+
+        // The band answers the microphone: it thickens where the sample is loud,
+        // so the light swells instead of only travelling, and it brightens on
+        // the same peak, so a syllable lands as a pulse.
+        let shimmer = 1.0 + SHIMMER * voice * level;
+        let band_width = BAND_SIGMA * (1.0 + BAND_PULSE * voice * level);
+        let band = gaussian(offset, band_width) * lateral * shimmer;
+        let glow = gaussian(offset, GLOW_SIGMA) * (1.0 + SIDE_BIAS * -nx) * lateral;
+        // The two regions the material splits into. `dome` is the colour mix:
+        // cool above the seam, warm below it, crossfaded in light space so the
+        // core of the band cannot go green. `bowl` is the low lift that gives
+        // the warm half depth instead of black showing through.
+        let bowl = smooth(horizon, horizon + 0.60, y);
+        let dome = smooth(-0.04, 0.04, -y);
 
         // The mark: a play triangle while paused, two bars while playing, a
         // stop square while the microphone is open. It sits at the left end and
-        // punches through the light, so the liquid frames it instead of washing
+        // punches through the light, so the seam frames it instead of washing
         // it out.
         let glyph = match mark {
             Mark::Play => play_mark(x - mark_x, y, feather),
@@ -508,13 +613,13 @@ fn paint(
 
         // The wall caustic: the narrow chromatic band just inside the rim, cool
         // above the seam and warm below.
-        let edge_band = gaussian(inside - (1.0 - EDGE_DEPTH), EDGE_SPREAD) * across * across;
+        let edge_band = gaussian(inside - (1.0 - EDGE_DEPTH), EDGE_SPREAD) * nx * nx;
         let edge_gain = EDGE_WARM + (EDGE_COOL - EDGE_WARM) * dome;
         let caustic = edge_band * edge_gain;
 
         // The border, placed by distance from the edge so the ring follows the
         // bevel on every side rather than a fixed circle.
-        let rim_key = (0.5 - 0.5 * (across * RIM_TILT_X + y * RIM_TILT_Y)).max(0.0);
+        let rim_key = (0.5 - 0.5 * (nx * RIM_TILT_X + y * RIM_TILT_Y)).max(0.0);
         let rim_ring = gaussian(depth - RIM_BAND, RIM_BAND_SIGMA);
         let rim_arc = smooth(RIM_TOP_EDGE, RIM_TOP_FULL, y);
         let rim_top = gaussian(depth - RIM_TOP_BAND, RIM_TOP_SIGMA) * rim_arc;
@@ -531,12 +636,13 @@ fn paint(
         // by the brightest thing in the material.
         let lit = 1.0 - glyph;
         let heat = (AMBIENT
-            + BAND_GAIN * meniscus * lateral * track * lit
+            + BAND_GAIN * band * track * lit
             + GLOW_GAIN * glow * track * lit
-            + liquid * track
+            + BOWL_LIFT * bowl
             + RIM_FALL_GAIN * (-inside / RIM_FALL_SIGMA).exp()
             + RIM_GAIN * rim_ring * (RIM_BASE + (1.0 - RIM_BASE) * rim_key) * (1.0 + hover)
             + RIM_TOP_GAIN * rim_top
+            + FAR_WALL * gaussian(y - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
             + caustic
             + head
             + GLYPH_GAIN * glyph)
@@ -545,14 +651,14 @@ fn paint(
         let base_saturation = saturation_at(heat);
         let saturation = base_saturation + (EDGE_CAUSTIC - base_saturation) * edge_band.min(1.0);
         // The material splits its hues through the thickest part of the glass,
-        // so the block gets the same fringe: warm in the liquid, cool above it.
+        // so the block gets the same fringe: warm in the bowl, cool in the dome.
         let fringe = DISPERSION * inside.clamp(0.0, 1.0).powi(6);
         let warm_hue = warm_hue_for(accent_hue);
         let warm = tinted(warm_hue - fringe, saturation, heat);
         let cool = tinted(COOL_HUE + fringe, saturation, heat);
-        let mut red = warm.0 * submerge + cool.0 * dome;
-        let mut green = warm.1 * submerge + cool.1 * dome;
-        let mut blue = warm.2 * submerge + cool.2 * dome;
+        let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
+        let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
+        let mut blue = warm.2 * (1.0 - dome) + cool.2 * dome;
         // The mark and the overhead catch lose their hue: a play button is
         // white, not a lit cyan shape.
         let silver = (RIM_SILVER * rim_top + glyph).clamp(0.0, 1.0);
@@ -563,9 +669,10 @@ fn paint(
         // Density from geometry, thinner than the recording orb's. The mark is
         // the one part of the block that is solid, so it stays legible over
         // whatever the glass is sitting on.
-        let deep = BOWL_ALPHA + (DOME_ALPHA - BOWL_ALPHA) * dome;
+        let region = smooth(-0.15, 0.25, -y);
+        let deep = BOWL_ALPHA + (DOME_ALPHA - BOWL_ALPHA) * region;
         let chord = 0.55 + 0.45 * nz;
-        let wall = across * across * smooth(WALL_FULL, WALL_EDGE, 1.0 - depth);
+        let wall = nx * nx * smooth(WALL_FULL, WALL_EDGE, 1.0 - depth);
         let density = ((deep * chord * (1.0 - wall) + WALL_ALPHA * wall) * BODY_TRANSMISSION)
             .max(glyph * 0.88)
             .clamp(0.0, 1.0);
@@ -602,7 +709,6 @@ struct Cached {
     peaks: Arc<Vec<f32>>,
     path: PathBuf,
     state: PlayerState,
-    started: Instant,
     frame: Arc<RenderImage>,
 }
 
@@ -640,19 +746,21 @@ fn frame_for(
             return (Arc::clone(&cached.frame), None);
         }
         let previous = players.remove(id);
-        let (block, started, retired) = match previous {
+        let (mut block, retired) = match previous {
             Some(old) => {
+                // The block carries the liquid's phase and energy, so it is
+                // kept across repaints and only rebuilt when the take itself
+                // changes. Rebuilding it would restart the seam mid-word.
                 let block = if old.path.as_path() == path && Arc::ptr_eq(&old.peaks, peaks) {
                     old.block
                 } else {
                     PlayerBlock::new(colour, peaks)
                 };
-                (block, old.started, Some(old.frame))
+                (block, Some(old.frame))
             }
-            None => (PlayerBlock::new(colour, peaks), Instant::now(), None),
+            None => (PlayerBlock::new(colour, peaks), None),
         };
-        let clock = started.elapsed().as_secs_f32();
-        let frame = Arc::new(block.render(PlayerState { clock, ..state }));
+        let frame = Arc::new(block.render(state));
         players.insert(
             id.to_string(),
             Cached {
@@ -660,7 +768,6 @@ fn frame_for(
                 peaks: Arc::clone(peaks),
                 path: path.to_path_buf(),
                 state,
-                started,
                 frame: Arc::clone(&frame),
             },
         );
@@ -828,7 +935,6 @@ pub(crate) fn player(
         playing: live.is_some_and(|state| state.playing),
         recording: false,
         hovered: hovering(id),
-        clock: 0.0,
     };
     let peaks = voice_media::visual(path)
         .map(|visual| Arc::clone(&visual.peaks))
@@ -979,13 +1085,28 @@ mod tests {
         0.2126 * colour.0 + 0.7152 * colour.1 + 0.0722 * colour.2
     }
 
-    /// One frame of a take whose peaks are all `peak`, so the liquid stands at
-    /// the same height in every column and an assertion can name one row.
-    fn frame_at(size: (u32, u32), peak: f32, state: PlayerState) -> (Slab, Vec<u8>) {
-        let block = PlayerBlock::at(size, 0xffbf47, &[peak; 112]);
-        let image = block.render(state);
+    /// One frame of a take whose peaks are all `peak`, drawn at a phase and an
+    /// energy the test chooses.
+    ///
+    /// `paint` is called directly rather than through `PlayerBlock::render`
+    /// because the block integrates its own clock, and a test that has to wait
+    /// for real time to pass is a test that will flake on a loaded machine.
+    fn frame_with(
+        size: (u32, u32),
+        peak: f32,
+        state: PlayerState,
+        phase: f32,
+        level: f32,
+    ) -> (Slab, Vec<u8>) {
         let slab = Slab::new(size.0, size.1);
+        let levels = smooth_voice(resample(&[peak; 112]));
+        let image = paint(&slab, &levels, 0xffbf47, state, phase, level);
         (slab, image.as_bytes(0).expect("one frame").to_vec())
+    }
+
+    /// The same at rest: the take is not moving, so nothing in the glass is.
+    fn frame_at(size: (u32, u32), peak: f32, state: PlayerState) -> (Slab, Vec<u8>) {
+        frame_with(size, peak, state, 0.0, 0.0)
     }
 
     fn small() -> (u32, u32) {
@@ -1022,17 +1143,33 @@ mod tests {
     }
 
     #[test]
-    fn the_liquid_rises_with_the_take() {
+    fn the_seam_moves_while_the_bowl_and_the_dome_hold_still() {
         let size = small();
         let (slab, quiet) = frame_at(size, 0.0, PlayerState::default());
-        let (_, loud) = frame_at(size, 1.0, PlayerState::default());
-        // A row that is clear air over a silent take and deep liquid under a
-        // full one. The liquid is warmer and brighter than the glass above it.
-        let dry = luma(sample(&quiet, &slab, 0.0, 0.20));
-        let wet = luma(sample(&loud, &slab, 0.0, 0.20));
+        let (_, loud) = frame_with(size, 0.9, PlayerState::default(), 0.0, 0.9);
+        // Just above the horizon, where the band's shoulder sits. A loud take
+        // lifts the band onto this row, which is the whole motion: the light
+        // travels and the glass around it does not.
+        let still = luma(sample(&quiet, &slab, 0.0, -0.10));
+        let lifted = luma(sample(&loud, &slab, 0.0, -0.10));
         assert!(
-            wet > dry + 20.0,
-            "the liquid did not rise with the take: {dry} then {wet}"
+            lifted > still + 20.0,
+            "the seam did not move with the take: {still} then {lifted}"
+        );
+        // A row well inside the dome and one well inside the bowl. Both are
+        // pinned: a block that churns from top to bottom reads as a waveform,
+        // which is exactly what this material must not do.
+        let dome_before = luma(sample(&quiet, &slab, 0.0, -0.62));
+        let dome_after = luma(sample(&loud, &slab, 0.0, -0.62));
+        let bowl_before = luma(sample(&quiet, &slab, 0.0, 0.62));
+        let bowl_after = luma(sample(&loud, &slab, 0.0, 0.62));
+        assert!(
+            (dome_after - dome_before).abs() < 6.0,
+            "the dome moved with the take: {dome_before} then {dome_after}"
+        );
+        assert!(
+            (bowl_after - bowl_before).abs() < 6.0,
+            "the bowl moved with the take: {bowl_before} then {bowl_after}"
         );
     }
 
@@ -1052,13 +1189,13 @@ mod tests {
         let (slab, before) = frame_at(size, 0.4, early);
         let (_, after) = frame_at(size, 0.4, late);
         // The right end of the track is ahead of the playhead at 0.3 and behind
-        // it at 0.95, so it has to brighten.
-        let dim = luma(sample(&before, &slab, slab.aspect * 0.55, 0.55));
-        let lit = luma(sample(&after, &slab, slab.aspect * 0.55, 0.55));
+        // it at 0.95, so the seam has to brighten there.
+        let dim = luma(sample(&before, &slab, slab.aspect * 0.55, 0.0));
+        let lit = luma(sample(&after, &slab, slab.aspect * 0.55, 0.0));
         assert!(lit > dim + 12.0, "the track did not fill: {dim} then {lit}");
         // The left end is behind the playhead in both frames and must not move.
-        let steady_before = luma(sample(&before, &slab, -slab.aspect * 0.55, 0.55));
-        let steady_after = luma(sample(&after, &slab, -slab.aspect * 0.55, 0.55));
+        let steady_before = luma(sample(&before, &slab, -slab.aspect * 0.55, 0.0));
+        let steady_after = luma(sample(&after, &slab, -slab.aspect * 0.55, 0.0));
         assert!(
             (steady_after - steady_before).abs() < 6.0,
             "the played part changed: {steady_before} then {steady_after}"
@@ -1109,9 +1246,9 @@ mod tests {
     #[test]
     fn the_band_is_the_brightest_event_in_the_body() {
         let (slab, bytes) = frame_at(small(), 0.5, PlayerState::default());
-        // The liquid stands at 0.84 - 0.67, so the band is the row at 0.17 and
-        // the body is the row well below it.
-        let band = luma(sample(&bytes, &slab, 0.0, 0.17));
+        // The band sits on the horizon, in the middle of the block, and the
+        // body is the row well below it.
+        let band = luma(sample(&bytes, &slab, 0.0, 0.0));
         let body = luma(sample(&bytes, &slab, 0.0, 0.55));
         assert!(
             band > body + 40.0,
@@ -1133,7 +1270,7 @@ mod tests {
         );
         // And the pixels agree with the hue: deep in the liquid of a red take
         // the warm channel leads, which a green block could not do.
-        let block = PlayerBlock::at(small(), red, &[0.9; 112]);
+        let mut block = PlayerBlock::at(small(), red, &[0.9; 112]);
         let image = block.render(PlayerState {
             recording: true,
             playing: true,

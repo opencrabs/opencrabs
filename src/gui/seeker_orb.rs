@@ -219,8 +219,8 @@ pub(crate) const BREATHE: f32 = 0.010;
 /// liquid's own rate, so a syllable moved the seam by about a pixel and the
 /// whole term read as frozen. A slosh has to complete a swing inside a word,
 /// not inside a sentence.
-const SLOSH: f32 = 0.150;
-const SLOSH_SPEED: f32 = 2.40;
+pub(crate) const SLOSH: f32 = 0.150;
+pub(crate) const SLOSH_SPEED: f32 = 2.40;
 
 /// The swell that travels outwards along the seam, as a fraction of the radius.
 ///
@@ -230,9 +230,9 @@ const SLOSH_SPEED: f32 = 2.40;
 /// which is what water under a bright surface does. `SWELL_REACH` puts about a
 /// wavelength across the strip, so a crest is visible at each end rather than a
 /// single slow bulge across the middle.
-const SWELL: f32 = 0.090;
-const SWELL_SPEED: f32 = 2.60;
-const SWELL_REACH: f32 = 4.40;
+pub(crate) const SWELL: f32 = 0.090;
+pub(crate) const SWELL_SPEED: f32 = 2.60;
+pub(crate) const SWELL_REACH: f32 = 4.40;
 
 /// How far the loudest recent sample lifts the strip above it, as a fraction of
 /// the radius.
@@ -244,7 +244,7 @@ const SWELL_REACH: f32 = 4.40;
 /// the right, so a syllable enters there and travels left as the history
 /// shifts, which is a wave moving through the light rather than a pulse painted
 /// on top of it.
-const LIFT: f32 = 0.075;
+pub(crate) const LIFT: f32 = 0.075;
 
 /// How much the strip thickens over a loud sample, as a fraction of its own
 /// width.
@@ -252,7 +252,7 @@ const LIFT: f32 = 0.075;
 /// A band that only moves is a line being dragged. Letting it swell where the
 /// microphone is loud makes the light itself change volume, which is the
 /// difference between a surface moving under a lamp and a surface catching it.
-const BAND_PULSE: f32 = 0.30;
+pub(crate) const BAND_PULSE: f32 = 0.30;
 
 /// How much the band brightens on a voice peak, as a fraction of its own gain.
 ///
@@ -260,7 +260,7 @@ const BAND_PULSE: f32 = 0.30;
 /// the same smoothed history the lens bends with, so the bright part of the
 /// band lifts where the loudest sample sits: a syllable lands as a pulse
 /// instead of the whole strip sliding through one slow swell.
-const SHIMMER: f32 = 0.55;
+pub(crate) const SHIMMER: f32 = 0.55;
 
 /// The two temperatures the seam splits the body into, as hues.
 ///
