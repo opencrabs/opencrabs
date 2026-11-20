@@ -1375,7 +1375,7 @@ fn stop_mark(nx: f32, ny: f32, feather: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::seeker_orb::{BOWL_HUE, rgb_hsv};
+    use super::super::seeker_orb::{BOWL_HUE, rgb_hsv};
     use super::*;
 
     /// Read one pixel at a point on the block, in units of half the height, and
