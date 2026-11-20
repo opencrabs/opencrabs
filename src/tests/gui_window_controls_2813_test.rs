@@ -138,10 +138,16 @@ fn a_client_report_passes_through_with_its_tiling() {
 /// in the same corner, with no click path of its own.
 #[test]
 fn a_window_that_keeps_its_frame_has_a_caption_on_every_platform() {
-    assert!(
-        !TITLEBAR_APPEARS_TRANSPARENT,
-        "the GUI creates an opaque title bar; flipping this needs a Windows click path (#3083)"
-    );
+    // A compile-time pin, not a runtime one: the constant is what every
+    // Windows user sees, so flipping it has to fail the build and not just a
+    // test run. It also keeps the assertion honest for clippy, which refuses
+    // a runtime `assert!` on a value it can fold.
+    const {
+        assert!(
+            !TITLEBAR_APPEARS_TRANSPARENT,
+            "the GUI creates an opaque title bar; flipping this needs a Windows click path (#3083)"
+        )
+    };
     assert!(platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT));
     let decorations = effective_decorations(
         Decorations::Server,
