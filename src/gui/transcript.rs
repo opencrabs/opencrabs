@@ -4586,9 +4586,29 @@ impl PendingClick {
         links::target_for_click(&self.text, &self.links, self.offset)
     }
 
-    /// The word the pointer was on, for the log line a miss writes. Clipped by
-    /// characters, never by bytes (#2271).
-    fn word(&self) -> String {
+    /// Whether this press was an attempt to open something at all, as opposed
+    /// to a click on prose. A click that never named a destination is not a
+    /// failed open, and logging every one of them buried the misses that
+    /// matter under one line per click.
+    fn names_target(&self) -> bool {
+        links::click_names_target(&self.text, &self.links, self.offset)
+    }
+
+    /// The token the press was on, for the log line a miss writes.
+    ///
+    /// This is the string resolution tried, not the tail from the click
+    /// offset: printing the tail made a click on `brain-audit-2026-11-17.md`
+    /// read as `26-11-17.md`, which looks exactly like a path truncated by
+    /// word wrap and sent a diagnosis chasing a bug that did not exist. Falls
+    /// back to the tail when the press landed on whitespace, so the line
+    /// still says where the click fell.
+    fn token(&self) -> String {
+        links::token_at_byte(&self.text, self.offset).unwrap_or_else(|| self.tail())
+    }
+
+    /// The raw tail from the click offset, clipped by characters, never by
+    /// bytes (#2271). Only the fallback for a press that named no token.
+    fn tail(&self) -> String {
         let start = self.offset.min(self.text.len());
         let tail = self.text.get(start..).unwrap_or_default();
         tail.chars()
@@ -4615,6 +4635,11 @@ pub struct CopyDrag {
     /// each used to run the whole release again: one click logged three times
     /// and refreshed the window three times (#2805).
     released: Cell<bool>,
+    /// The last press this pane acted on, so the second press of a double
+    /// click does not repeat it. One intent gets one log line and, once a
+    /// click opens, one window: a document opened twice reads as a bug even
+    /// when each press was real.
+    last_click: RefCell<Option<(std::time::Instant, String)>>,
     /// Fired once a release or a copy chord actually put text on the
     /// clipboard, so the composer can say so (#2587). Empty until the view
     /// that owns the composer hands one over.
@@ -4666,6 +4691,23 @@ impl CopyDrag {
         true
     }
 
+    /// One line for a release that did something.
+    ///
+    /// A plain click copies nothing, and it is the common case: at info level
+    /// this wrote a line for every click on the transcript, and a double click
+    /// wrote two. A gesture that copied or selected keeps its line, and the
+    /// rest go to debug.
+    fn log_release(&self, held: usize, copied: bool) {
+        let line = format!(
+            "transcript release: selected_chars={held} copied={copied}"
+        );
+        if copied || held > 0 {
+            crate::logging::info(&line);
+        } else {
+            crate::logging::debug(&line);
+        }
+    }
+
     /// The one release path for a drag: end it, copy what it holds, and tell
     /// the owner so the composer can confirm. Every element that can start a
     /// drag also ends it here, because the row under the pointer is the only
@@ -4683,9 +4725,7 @@ impl CopyDrag {
         self.dragging.set(false);
         let held = self.copied_text().map_or(0, |text| text.chars().count());
         let copied = self.finish_copy(app);
-        crate::logging::info(&format!(
-            "transcript release: selected_chars={held} copied={copied}"
-        ));
+        self.log_release(held, copied);
         if copied {
             self.announce_copied(app);
         } else {
@@ -4706,14 +4746,21 @@ impl CopyDrag {
         let Some(pending) = self.pending_click.borrow_mut().take() else {
             return false;
         };
+        // One intent, one click. A second press on the same token within
+        // `REPEAT_CLICK` is the other half of a double click, and repeating
+        // the work opened one document twice and logged one miss twice.
+        let token = pending.token();
+        if !self.first_press_on(&token) {
+            return false;
+        }
         let Some(target) = pending.target() else {
-            // A click that found nothing still gets a line, so "I clicked and
-            // nothing happened" can be told apart from a click that never
-            // arrived instead of guessed at.
-            crate::logging::info(&format!(
-                "transcript link: nothing to open at {:?}",
-                pending.word()
-            ));
+            // A click that named something and found nothing gets a line, so
+            // "I clicked and nothing happened" can be told apart from a click
+            // that never arrived. A click on prose named nothing to open and
+            // stays quiet: it was never a miss.
+            if pending.names_target() {
+                crate::logging::info(&format!("transcript link: nothing to open at {token:?}"));
+            }
             return false;
         };
         crate::logging::info(&format!("transcript link: open {}", target.label()));
@@ -4723,6 +4770,21 @@ impl CopyDrag {
         };
         listener(target, app);
         true
+    }
+
+    /// Whether this press is a fresh intent rather than the second half of a
+    /// double click on the same token. Records the press either way.
+    fn first_press_on(&self, token: &str) -> bool {
+        // Two presses inside this window are one double click, the same
+        // window Windows uses.
+        const REPEAT_CLICK: std::time::Duration = std::time::Duration::from_millis(500);
+        let now = std::time::Instant::now();
+        let mut last = self.last_click.borrow_mut();
+        let repeat = last.as_ref().is_some_and(|(at, previous)| {
+            previous.as_str() == token && now.duration_since(*at) < REPEAT_CLICK
+        });
+        *last = Some((now, token.to_string()));
+        !repeat
     }
 
     fn points(&self) -> Option<(TextPoint, TextPoint)> {
