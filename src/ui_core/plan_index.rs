@@ -66,12 +66,21 @@ impl PlanIndex {
         match plan_state(doc, &path)? {
             // A design draft or a seeded checklist is written and waits for
             // the owner: the row rings until it is opened. Nothing executes
-            // yet, so no spinner.
-            PlanStatus::Editing => Some(PlanEvidence {
-                ready: true,
-                running: false,
-                stamp,
-            }),
+            // yet, so no spinner. The ring has the same freshness rule as the
+            // running badge below (#3106): a draft nobody opened for weeks is
+            // not waiting for the owner any more, and an unconditional ring
+            // pinned its topic into a folded strip for as long as the file
+            // lived.
+            PlanStatus::Editing => {
+                let fresh = SystemTime::now()
+                    .duration_since(stamp)
+                    .is_ok_and(|age| age < FRESH_WINDOW);
+                (live || fresh).then_some(PlanEvidence {
+                    ready: true,
+                    running: false,
+                    stamp,
+                })
+            }
             PlanStatus::Active => {
                 let running_task = doc
                     .tasks
@@ -206,6 +215,43 @@ mod tests {
             .expect("a plan waiting for approval is evidence");
         assert!(evidence.ready);
         assert!(!evidence.running);
+    }
+
+    /// Push a file's mtime into the past by `by`.
+    fn age_file(path: &Path, by: Duration) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open plan");
+        let when = SystemTime::now().checked_sub(by).expect("clock");
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("set mtime");
+    }
+
+    #[test]
+    fn plan_index_a_stale_editing_plan_is_not_evidence() {
+        // #3106: a draft nobody opened for weeks is not waiting for the owner,
+        // so it must not ring the row or keep its topic in a folded strip. A
+        // live turn still rings: the owner has that session open right now.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = sid(14);
+        let path = seed_plan(
+            tmp.path(),
+            session,
+            PlanStatus::Editing,
+            Some(TaskStatus::Pending),
+            true,
+        );
+        age_file(&path, FRESH_WINDOW * 2);
+        let mut index = PlanIndex::with_roots(vec![tmp.path().to_path_buf()]);
+        assert!(
+            index.evidence(session, false, Instant::now()).is_none(),
+            "an abandoned draft is not waiting for approval"
+        );
+        assert!(
+            index.evidence(session, true, Instant::now()).is_some(),
+            "a live turn outranks the freshness window"
+        );
     }
 
     #[test]

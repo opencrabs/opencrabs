@@ -164,14 +164,16 @@ pub(crate) struct RailTopic {
     pub(crate) plan: Option<(usize, usize)>,
 }
 
-/// Whether a chip says work is still going in that topic (#3020).
+/// Whether a chip says work is still going in that topic (#3020, #3106).
 ///
-/// A running turn or a running plan is a badge, a plan waiting for approval is
-/// a ring, and a plan with tasks still open is a progress fill. All three are
-/// reasons the reader may need the chip, so all three keep it visible when the
-/// strip folds.
+/// A running turn is a badge and a plan waiting for approval is a ring, so both
+/// keep the chip visible when the strip folds. A plan progress bar is neither:
+/// it is state, not work in flight, and it has no freshness gate, so counting
+/// it here pinned every topic with an abandoned plan file into the folded strip
+/// for as long as that file lived. A plan that is actually running already sets
+/// the badge, so nothing live is lost by dropping the bar.
 pub(crate) fn chip_in_flight(kid: &RailTopic) -> bool {
-    kid.mark.badge.is_some() || kid.mark.ring || kid.plan.is_some()
+    kid.mark.badge.is_some() || kid.mark.ring
 }
 
 /// Which chips a folded strip paints (#3020).
@@ -789,9 +791,10 @@ mod tests {
     }
 
     #[test]
-    fn a_folded_strip_keeps_every_busy_chip_and_folds_idle_ones() {
-        // #3020: four topics with work in flight all stay visible, and the
-        // idle chips on either side are what the "+N" pill hides.
+    fn a_folded_strip_keeps_every_live_chip_and_folds_idle_ones() {
+        // #3020: topics with work in flight all stay visible, and the idle
+        // chips on either side are what the "+N" pill hides. A plan bar alone
+        // is not work in flight (#3106), so it folds with the idle ones.
         let kids = vec![
             kid(0, false, false, false),
             kid(1, true, false, false),
@@ -800,21 +803,22 @@ mod tests {
             kid(4, true, false, false),
             kid(5, false, false, false),
         ];
-        assert_eq!(shown(&folded_mask(&kids)), vec![1, 2, 3, 4]);
+        assert_eq!(shown(&folded_mask(&kids)), vec![1, 2, 4]);
     }
 
     #[test]
-    fn every_in_flight_signal_keeps_a_chip() {
-        // #3020: a spinner, a plan waiting for approval and an active plan are
-        // three different reasons the reader may need the chip.
+    fn every_live_signal_keeps_a_chip_and_a_plan_bar_does_not() {
+        // #3020: a spinner and a plan waiting for approval are the two reasons
+        // the reader may need the chip. #3106: a progress bar is state, not
+        // work in flight, so on its own it never keeps a chip.
         assert!(chip_in_flight(&kid(0, true, false, false)), "a live turn");
         assert!(
             chip_in_flight(&kid(1, false, true, false)),
             "a waiting plan"
         );
         assert!(
-            chip_in_flight(&kid(2, false, false, true)),
-            "a running plan"
+            !chip_in_flight(&kid(2, false, false, true)),
+            "a plan bar alone is not work in flight"
         );
         assert!(
             !chip_in_flight(&kid(3, false, false, false)),
