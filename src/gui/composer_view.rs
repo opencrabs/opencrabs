@@ -100,6 +100,13 @@ pub(crate) fn options_strip(
     focused: Option<usize>,
 ) -> Div {
     let p = palette::current();
+    // The card is the buttons alone, with no title row (#3103). A heading
+    // repeating "suggested" said what the buttons already say, it cost a line
+    // of height directly above the composer, and its text sat tight against
+    // the card's own curve. The keys went with it and lost nothing:
+    // `ui_core::hints` already prints "↑ picks the option · enter sends" on the
+    // hint row above the composer whenever an offer is waiting, so the legend
+    // was being drawn twice.
     let mut col = div()
         .flex()
         .flex_col()
@@ -107,31 +114,7 @@ pub(crate) fn options_strip(
         .p_3()
         .rounded(px(SEEKER_RADIUS))
         .bg(glass_fill(p.panel))
-        .shadow_2xl()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.text_muted))
-                        .child(SharedString::from("suggested")),
-                )
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.text_faint))
-                        .child(SharedString::from(if rows.len() > 1 {
-                            "↑↓ walk · enter sends"
-                        } else {
-                            "↑ picks · enter sends"
-                        })),
-                ),
-        );
+        .shadow_2xl();
     let mut buttons = div().flex().flex_row().flex_wrap().gap_1p5();
     for (i, (item, pick)) in rows.iter().enumerate() {
         let (ink, wash) = match item.style {
