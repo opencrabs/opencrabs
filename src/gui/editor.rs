@@ -364,9 +364,7 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
         if let Some(head) = text.get(cursor..start) {
             out.push_str(head);
         }
-        if !drop
-            && let Some(keep) = text.get(start..closer)
-        {
+        if !drop && let Some(keep) = text.get(start..closer) {
             out.push_str(keep);
         }
         cursor = closer;

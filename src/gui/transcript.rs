@@ -6182,9 +6182,7 @@ pub fn view(
                                 // The clip belongs to the answer of the turn
                                 // that just settled, which is the newest one
                                 // drawn (#3092).
-                                voice_pending: voice_pending
-                                    && ti == last
-                                    && answer_at == Some(i),
+                                voice_pending: voice_pending && ti == last && answer_at == Some(i),
                             },
                         ),
                     }

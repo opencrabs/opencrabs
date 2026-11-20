@@ -268,8 +268,7 @@ fn the_agent_reads_the_words_and_the_row_keeps_the_clip() {
         "the note goes to the agent only: the row shows the words and the clip"
     );
     assert!(
-        region_in(DASHBOARD_TURNS, "fn send_message_showing(", "fn ")
-            .contains("voice.is_some(),"),
+        region_in(DASHBOARD_TURNS, "fn send_message_showing(", "fn ").contains("voice.is_some(),"),
         "a message shown in a pane takes the same path"
     );
 }
