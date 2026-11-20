@@ -633,6 +633,12 @@ pub(crate) enum CliMessage {
         is_error: bool,
         result: Option<String>,
     },
+    /// Any `type` this build does not know yet (`command_lifecycle` since CLI
+    /// 2.1.325, #3088). The CLI adds event types over time; an unknown one is
+    /// forward-compatible noise, not a parse failure. The raw line is already
+    /// logged at debug before the parse, so nothing is lost by dropping it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Classify a CLI `system` message's task-lifecycle payload (#1776).
@@ -1548,6 +1554,10 @@ impl Provider for ClaudeCliProvider {
                         if tx.send(Ok(StreamEvent::Ping)).await.is_err() {
                             break;
                         }
+                    }
+
+                    CliMessage::Unknown => {
+                        tracing::debug!("CLI → unknown event type, ignored (#3088)");
                     }
                 }
             }

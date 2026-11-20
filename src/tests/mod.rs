@@ -198,6 +198,7 @@ pub mod chunk_hash_cache_test;
 pub mod claude_cli_context_anchor_test;
 pub mod claude_cli_model_test;
 pub mod claude_cli_task_events_test;
+pub mod claude_cli_unknown_event_test;
 pub mod clear_context_test;
 pub mod clear_snapshot_test;
 pub mod cli_agent_session_resume_test;
