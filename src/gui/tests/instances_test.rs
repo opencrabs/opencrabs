@@ -99,8 +99,13 @@ fn strip_label_collapses_and_cuts_on_char_boundaries() {
     assert_eq!(strip_label("server i7"), "server i7");
     assert_eq!(strip_label("  server   i7  "), "server i7");
     assert_eq!(strip_label("portátil do norte"), "portátil …");
-    // Multi-byte throughout: the cut must not split a code point.
-    assert_eq!(strip_label("açãoçãoçãoção"), "açãoçãoç…");
+    // Multi-byte throughout: the cut must not split a code point, and the
+    // result must still fit the strip (MAX chars including the ellipsis).
+    assert_eq!(strip_label("açãoçãoçãoção"), "açãoçãoçã…");
+    assert_eq!(
+        strip_label("açãoçãoçãoção").chars().count(),
+        STRIP_LABEL_MAX
+    );
     assert_eq!(strip_label(""), "");
 }
 
