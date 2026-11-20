@@ -721,7 +721,15 @@ impl Render for Dashboard {
                             // on the card's rounded bottom edge. The split
                             // arm above yields an empty row, so a pane footer
                             // keeps the chrome it already had.
-                            .px_3()
+                            //
+                            // The row pads the column minus the hover pill's
+                            // inset, and each label pads the rest, so every
+                            // first glyph starts on `CONVERSATION_INSET_REM`
+                            // (#3114). That is the column the field's own pad
+                            // and the transcript's gutter + bubble put their
+                            // words on, and this row read as one notch left of
+                            // both while it padded a flat 12.
+                            .px(transcript::conversation_row_inset())
                             .py_2()
                             // The Seeker opens with a chord nothing on
                             // screen named (#2747). The hint is permanent and
@@ -737,7 +745,7 @@ impl Render for Dashboard {
                                     .items_center()
                                     .gap_1()
                                     .rounded_sm()
-                                    .px_1()
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
                                     .cursor_pointer()
@@ -754,6 +762,9 @@ impl Render for Dashboard {
                             )
                             .child(
                                 div()
+                                    // The pill's own 4, so the label lands on
+                                    // the row's 24 column (#3114).
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
                                     .child("ctrl+s · sidebar"),
@@ -763,6 +774,11 @@ impl Render for Dashboard {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
+                                    // Same 4 as the row's other labels: the
+                                    // truncated text starts and ends on the
+                                    // composer's column, not on the raw pad
+                                    // (#3114).
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_faint))
                                     .child(SharedString::from(identity)),
@@ -2403,7 +2419,10 @@ impl Render for Dashboard {
                     .flex_shrink()
                     .min_h_0()
                     .overflow_hidden()
-                    .gap_3();
+                    // The same 8 the session uses (#3114): the strips between
+                    // the history and the field are steps of one stack, not a
+                    // second, tighter grid parked inside it.
+                    .gap_2();
                 let mut above_used = false;
                 // A split already is one card per pane, and each pane's leaf
                 // box paints its own fill, its own radius and the clip that
@@ -2446,10 +2465,15 @@ impl Render for Dashboard {
                     let mut session = div()
                         .flex()
                         .flex_col()
-                        // The cards inside keep the spacing they had as siblings of
-                        // the history. What changes is the ground they sit on, not
-                        // the rhythm between them.
-                        .gap_3()
+                        // One rhythm for the whole lower half (#3114): 8, the
+                        // step the transcript already gives between two of its
+                        // own rows. It was 12 here on top of the transcript's
+                        // own bottom 8, so the gap under the last card came to
+                        // 20 against 8 between the cards above it, and the
+                        // conversation closed on a band twice as wide as the
+                        // conversation. The cards inside still keep their own
+                        // shape; only the step between them changed.
+                        .gap_2()
                         // Height, not `flex_1`: the card is a child of a row
                         // (see the wrapper below), and in a row `flex_1` grows
                         // the width, which would cancel the measure it is
@@ -3776,15 +3800,14 @@ fn hint_card(line: &SharedString) -> Div {
         .flex_row()
         .items_center()
         .w_full()
-        // Two insets, not one (#3100): the strip carries the row's own step and
-        // the hover pill's, 20 (`px_5`) plus 4 (`px_1`), so its first glyph
-        // starts at 24. That is the column the field pads to and the column a
-        // message bubble's text lands on, so the strip, the field and the
-        // transcript share one left edge (#3115). It used to lean on the
-        // composer shell's own gutter for 8 of those pixels, and when the
-        // footer went edge to edge (#3112) the strip slid 8 left of everything
-        // it was meant to line up with.
-        .px_5()
+        // The strip starts on the conversation's column (#3114), and it gets
+        // there the same way the footer does: the row pads the column minus
+        // the hover pill's inset, and the label inside pads the rest. The pill
+        // needs its own 4 or the hover fill would start on the glyph. It used
+        // to lean on the composer shell's gutter for 8 of those pixels, and
+        // when the footer went edge to edge (#3112) the strip slid 8 left of
+        // everything it was meant to line up with.
+        .px(transcript::conversation_row_inset())
         .py_1()
         .border_b(px(1.))
         .border_color(rgb(shown.panel_hi))
@@ -3793,7 +3816,7 @@ fn hint_card(line: &SharedString) -> Div {
                 .flex()
                 .flex_row()
                 .items_center()
-                .px_1()
+                .px(transcript::hover_pill_inset())
                 .overflow_hidden()
                 .text_xs()
                 .text_color(rgb(shown.accent))

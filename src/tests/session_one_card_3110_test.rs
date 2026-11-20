@@ -168,7 +168,7 @@ fn every_card_in_the_session_is_the_size_of_a_message() {
         .expect("the transcript scrolls");
     let tail = &TRANSCRIPT[scroll..];
     let pad = tail
-        .find(".p_2()")
+        .find(".px_2()")
         .expect("the history pads its rows by the same step");
     assert!(
         pad < 400,

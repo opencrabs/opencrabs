@@ -298,25 +298,25 @@ fn every_row_fills_the_transcript() {
     );
 }
 
-/// The planned width is the transcript's outer measure, but its root spends
-/// half a rem on each horizontal side. The bubble must inherit the remaining
-/// inner width or right alignment pushes that rem of excess off the left
-/// (#2947).
+/// The planned width is the transcript's outer measure, but its root spends a
+/// half rem on each horizontal side. The bubble must inherit the remaining
+/// inner width or right alignment pushes that excess off the left (#2947,
+/// #3114).
 #[test]
-fn the_pixel_cap_excludes_the_transcript_padding() {
+fn the_width_cap_excludes_the_transcript_padding() {
     let view = body_after(TRANSCRIPT, "pub fn view(");
     assert!(
         view.contains("let content_width = transcript_content_width(content_width, rem_size);"),
         "the rows use the inner width, not the transcript's outer measure"
     );
     assert!(
-        view.contains(".p_2()"),
+        view.contains(".px_2()"),
         "this subtraction belongs to the root's actual horizontal padding"
     );
     let helper = body_after(TRANSCRIPT, "fn transcript_content_width(");
     assert!(
         helper.contains("(outer_width - rem_size).max(0.0)"),
-        "two p_2 sides consume one rem total, clamped at zero"
+        "one rem of gutter, split across both sides, clamped at zero"
     );
 }
 

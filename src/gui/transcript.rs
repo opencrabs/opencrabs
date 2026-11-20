@@ -2108,6 +2108,50 @@ const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 const MESSAGE_PAD_X: f32 = 16.0;
 const MESSAGE_PAD_Y: f32 = 12.0;
 
+/// The conversation's left column, in rem steps (#3114).
+///
+/// Every row that carries words in this window starts here: a message's text
+/// (the transcript's half-rem gutter plus the bubble's 16), the field the
+/// reader types in, its paperclip and mic, the task strip above it, the key
+/// hints under it and the footer under those. It is one number because it
+/// drifted five times when it was five arithmetic guesses: `p_3` at 12, then
+/// 16, then a gutter that the flat footer took away without telling the rows
+/// that had shared it.
+///
+/// It is rem, not pixels, because the gutter it is built from is a rem step:
+/// the whole column has to scale with the reader's zoom, or the composer would
+/// hold still while the conversation moved under it.
+pub(crate) const CONVERSATION_INSET_REM: f32 = 1.5;
+
+/// The padding a hover pill adds inside a row, in rem steps (#3114).
+///
+/// The task strip and the footer are both rows of clickable labels: the label
+/// sits on the conversation's column, and the clickable box reaches the row's
+/// own padding. So the row pads `CONVERSATION_INSET_REM - HOVER_PILL_INSET_REM`
+/// and each label pads `HOVER_PILL_INSET_REM`.
+pub(crate) const HOVER_PILL_INSET_REM: f32 = 0.25;
+
+/// The conversation's column, resolved for a style call (#3114).
+///
+/// The constants above are the numbers; these are how a call site reads them.
+/// `.px(rems(a - b))` written out at every row was the same subtraction in six
+/// places, and a reader checking whether two rows line up had to do arithmetic
+/// across two files to answer.
+pub(crate) fn conversation_inset() -> Pixels {
+    rems(CONVERSATION_INSET_REM)
+}
+
+/// The inset of a row that carries clickable labels, which reach out to the
+/// column by the pill's own padding (#3114).
+pub(crate) fn conversation_row_inset() -> Pixels {
+    rems(CONVERSATION_INSET_REM - HOVER_PILL_INSET_REM)
+}
+
+/// The padding a hover pill adds inside such a row (#3114).
+pub(crate) fn hover_pill_inset() -> Pixels {
+    rems(HOVER_PILL_INSET_REM)
+}
+
 /// The shortest the conversation is ever allowed to be (#2980).
 ///
 /// Every strip between the transcript and the input takes its own height: the
@@ -5848,7 +5892,7 @@ pub struct ViewHooks {
     pub following: bool,
 }
 
-/// The callers measure the transcript's outer box. Its `.p_2()` consumes half
+/// The callers measure the transcript's outer box. Its `.px_2()` spends half
 /// a rem on each horizontal side, so rows and attachment plans get one rem
 /// less. Without this conversion a right-aligned bubble is capped to the outer
 /// box and its excess escapes through the left edge (#2947).
@@ -6101,7 +6145,18 @@ pub fn view(
         .overflow_y_scroll()
         .track_scroll(scroll)
         .gap_2()
-        .p_2()
+        // Sides on the rem scale, like every other gutter in this window
+        // (#3114): the composer's rows are built from the same step, so a zoom
+        // moves the whole column together instead of sliding the field off the
+        // conversation.
+        //
+        // No bottom padding (#3114): the session's own 8 is the whole gap
+        // under the last row. This box used to add 8 of its own on top of the
+        // session's 12, so the last card sat 20 from the composer and 8 from
+        // the card above it, and the bottom of the conversation read as a
+        // wider, looser band than the conversation itself.
+        .px_2()
+        .pt_2()
         // The chat history's own surface takes the message bubbles' curve, not
         // the card's (#3110): it is the box the bubbles live in, so a rounder
         // corner than theirs reads as two objects stacked at the edge instead
@@ -6806,7 +6861,7 @@ mod tests {
         (mix(16) << 16) | (mix(8) << 8) | mix(0)
     }
 
-    /// #2947: `.p_2()` spends half a rem at each side, at every UI scale.
+    /// #2947: `.px_2()` spends half a rem at each side, at every UI scale.
     #[test]
     fn transcript_width_excludes_both_horizontal_padding_sides() {
         assert_eq!(transcript_content_width(660.0, 16.0), 644.0);

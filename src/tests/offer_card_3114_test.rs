@@ -17,6 +17,7 @@ const DASHBOARD_SESSIONS: &str = include_str!("../gui/dashboard_sessions.rs");
 const EDITOR: &str = include_str!("../gui/editor.rs");
 const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
 const DASHBOARD_RENDER: &str = include_str!("../gui/dashboard_render.rs");
+const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 
 /// The slice of a file between two anchors, so a pin cannot match a string
 /// somewhere else in the same file by accident.
@@ -132,14 +133,15 @@ fn the_offer_line_names_the_way_back_to_the_field() {
 }
 
 /// The composer's own inset matches the column the conversation sits on
-/// (#3115).
+/// (#3114).
 ///
 /// A message bubble's text lands 24 from the session edge: its row pads 8 and
 /// the bubble pads 16. The footer runs edge to edge since #3112, so every row
-/// inside it carries the whole 24 itself. A uniform `p_3` on the field left
-/// its text, its paperclip and its mic at 12, and the task strip leaned on a
-/// gutter that no longer exists and sat at 16, so three rows of one surface
-/// started on three different columns.
+/// inside it carries the whole column itself, and `CONVERSATION_INSET_REM` is
+/// the one place that number lives. A uniform `p_3` on the field left its text, its
+/// paperclip and its mic at 12, and the task strip leaned on a gutter that no
+/// longer exists and sat at 16, so three rows of one surface started on three
+/// different columns.
 #[test]
 fn the_field_pads_the_same_sides_as_the_card_around_it() {
     let field = region(
@@ -148,8 +150,8 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         ".line_height(px(22.))",
     );
     assert!(
-        field.contains(".px(px(24.))"),
-        "the field's sides take the conversation's 24"
+        field.contains(".px(transcript::conversation_inset())"),
+        "the field's sides take the conversation's column"
     );
     assert!(
         field.contains(".py_3()"),
@@ -162,7 +164,7 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
     // The dim row in a split keeps the same shape, or a draft jumps sideways
     // the moment the keyboard leaves the pane.
     assert!(
-        PANE_CHROME.contains(".px(px(24.))\n        .py_3()"),
+        PANE_CHROME.contains(".px(transcript::conversation_inset())\n        .py_3()"),
         "the unfocused pane's composer matches the focused one"
     );
     assert!(
@@ -170,14 +172,68 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         "and keeps no uniform inset of its own"
     );
     // The task strip is the top row of the same footer, so it lands on the same
-    // column: its own 20 plus the hover pill's 4.
+    // column: the row pads the column minus the hover pill, and the label pads
+    // the pill's own 4.
     let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
     assert!(
-        strip.contains(".px_5()") && strip.contains(".px_1()"),
-        "the strip's two insets add up to the field's 24"
+        strip.contains(".px(transcript::conversation_row_inset())")
+            && strip.contains(".px(transcript::hover_pill_inset())"),
+        "the strip's two insets add up to the field's column"
     );
     assert!(
         !strip.contains(".px_3()"),
         "the 16 it inherited from the shell's old gutter is gone"
+    );
+    // The footer row under the hairline is the last of those rows, and it
+    // padded a flat 12 while everything above it moved (#3114).
+    let footer = region(DASHBOARD_RENDER, ".justify_between()", ".into_any_element()");
+    assert!(
+        footer.contains(".px(transcript::conversation_row_inset())"),
+        "the footer row pads the column minus the pill"
+    );
+    assert_eq!(
+        footer.matches(".px(transcript::hover_pill_inset())").count(),
+        3,
+        "and all three of its labels pad the pill, so every glyph starts on the column"
+    );
+}
+
+/// The space under the last card is the space between two cards (#3114).
+///
+/// Two boxes were each minding their own rhythm: the session stepped 12 between
+/// its rows, and the transcript added its own 8 of bottom padding on top of
+/// that, so the conversation closed on a band of 20 while the cards above it
+/// were 8 apart. The owner read it as the composer being pushed away from the
+/// history. The transcript now owns no bottom padding at all, so the session's
+/// single step is the whole gap, and the strips above the composer use that
+/// same step instead of a second, tighter grid.
+#[test]
+fn the_gap_under_the_last_card_is_the_gap_between_cards() {
+    let root = region(TRANSCRIPT, ".track_scroll(scroll)", ".rounded(px(MESSAGE_RADIUS))");
+    assert!(
+        root.contains(".px_2()\n        .pt_2()"),
+        "the transcript pads its top and sides, never its bottom: {root}"
+    );
+    assert!(
+        !root.contains(".pb_"),
+        "a bottom pad here stacks on the session's own step"
+    );
+    assert!(
+        root.contains(".gap_2()"),
+        "and its rows step by the same 8 the session uses"
+    );
+    let session = region(DASHBOARD_RENDER, "let mut session = div()", "// Height, not `flex_1`");
+    assert!(
+        session.contains(".gap_2()"),
+        "the session steps 8, the transcript's own row rhythm: {session}"
+    );
+    let above = region(
+        DASHBOARD_RENDER,
+        ".overflow_hidden()\n                    // The same 8 the session uses",
+        "let mut above_used = false;",
+    );
+    assert!(
+        above.contains(".gap_2()"),
+        "and the strips between history and field take that step too: {above}"
     );
 }
