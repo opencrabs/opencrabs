@@ -373,6 +373,8 @@ mod tests {
             voice_prefix("[voice note] turn it up"),
             "[voice note] turn it up"
         );
+    }
+
     /// The note comes off wherever a message is drawn (#3092). A reader who
     /// spoke the words never needs to be told they were spoken, and a card that
     /// printed the note was the leak this test pins.
