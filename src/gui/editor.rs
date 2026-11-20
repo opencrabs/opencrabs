@@ -563,9 +563,12 @@ pub const NOTICE_TTL: Duration = Duration::from_secs(2);
 const CARET_BLINK_MS: u64 = 530;
 
 /// How often the dictation loop drains the microphone and the transcription
-/// (#3044). Ten ticks a second is fine grain for a counter that reads whole
-/// seconds, and it lands a finished transcript without a second timer.
-const VOICE_TICK: Duration = Duration::from_millis(100);
+/// (#3044). The Seeker's own number (#3092): the strip is glass now, and the
+/// worker behind it renders at thirty frames a second, so a slower tick would
+/// paint every third frame and read as a slideshow. Draining the capture this
+/// often costs nothing, and it lands a finished transcript without a second
+/// timer.
+const VOICE_TICK: Duration = Duration::from_millis(33);
 
 /// What the composer's microphone is doing (#3044). The row paints from this,
 /// never from the threads' state: one of them can be mid-handoff on a frame,
