@@ -1,13 +1,17 @@
 use crate::remote::scopes::*;
 
 /// The complete dispatched method surface at time of writing:
-/// dispatch.rs (message/send, tasks/get, tasks/cancel, session/notify,
-/// session/notify-status) + server.rs SSE (message/stream).
+/// dispatch.rs (message/send, tasks/get, tasks/list, tasks/cancel,
+/// session/list, session/transcript, session/notify, session/notify-status)
+/// + server.rs SSE (message/stream).
 const KNOWN_METHODS: &[&str] = &[
     "message/send",
     "message/stream",
     "tasks/get",
+    "tasks/list",
     "tasks/cancel",
+    "session/list",
+    "session/transcript",
     "session/notify",
     "session/notify-status",
 ];
@@ -33,6 +37,9 @@ fn unknown_methods_are_not_gated_here() {
 fn scope_assignment_matrix() {
     assert_eq!(scope_for_method("tasks/get"), Some(SCOPE_READ));
     assert_eq!(scope_for_method("session/notify-status"), Some(SCOPE_READ));
+    assert_eq!(scope_for_method("tasks/list"), Some(SCOPE_READ));
+    assert_eq!(scope_for_method("session/list"), Some(SCOPE_READ));
+    assert_eq!(scope_for_method("session/transcript"), Some(SCOPE_READ));
     assert_eq!(scope_for_method("message/send"), Some(SCOPE_SEND));
     assert_eq!(scope_for_method("message/stream"), Some(SCOPE_SEND));
     assert_eq!(scope_for_method("tasks/cancel"), Some(SCOPE_SEND));

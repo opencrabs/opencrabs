@@ -5,6 +5,9 @@
 //! - `session/notify` → post a notification into a live session's queue (#23)
 //! - `tasks/get`      → retrieve task by ID
 //! - `tasks/cancel`   → cancel a running task
+//! - `session/list`   → list this host's sessions (instance rail)
+//! - `session/transcript` → one session's messages, read-only
+//! - `tasks/list`     → list A2A tasks, newest first
 //!
 //! [`dispatch`] routes, [`stores`] holds the shared task maps, and each
 //! method has its own module. This file is declarations only — no function
@@ -13,6 +16,7 @@
 mod dispatch;
 pub(crate) mod notify;
 mod send;
+mod sessions;
 mod stores;
 pub mod stream;
 pub(crate) mod tasks;

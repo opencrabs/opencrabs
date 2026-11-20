@@ -152,9 +152,7 @@ pub fn rpc_body(method: &str, params: serde_json::Value) -> serde_json::Value {
 /// `GET /a2a/health`, timed. `Ok(ms)` when it answered 2xx.
 pub async fn probe(target: &Target<'_>) -> Result<u64> {
     let client = reqwest::Client::new();
-    let mut req = client
-        .get(target.url("/a2a/health"))
-        .timeout(PROBE_TIMEOUT);
+    let mut req = client.get(target.url("/a2a/health")).timeout(PROBE_TIMEOUT);
     if let Some(token) = target.token {
         req = req.bearer_auth(token);
     }
@@ -214,7 +212,12 @@ pub async fn call(
 
 /// The remote's conversations, newest first, as it reports them.
 pub async fn list_sessions(target: &Target<'_>, limit: usize) -> Result<Vec<RemoteSession>> {
-    let result = call(target, "session/list", serde_json::json!({ "limit": limit })).await?;
+    let result = call(
+        target,
+        "session/list",
+        serde_json::json!({ "limit": limit }),
+    )
+    .await?;
     parse_sessions(&result)
 }
 
@@ -308,7 +311,12 @@ pub fn parse_transcript(value: &serde_json::Value) -> Result<(String, Vec<Remote
     let list = value
         .get("messages")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| call_error(Failure::Other, "session/transcript carried no messages array"))?;
+        .ok_or_else(|| {
+            call_error(
+                Failure::Other,
+                "session/transcript carried no messages array",
+            )
+        })?;
     let messages = list
         .iter()
         .map(|m| RemoteMessage {
