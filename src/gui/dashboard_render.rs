@@ -3772,7 +3772,9 @@ impl Render for Dashboard {
         self.schedule_middle_scroll_frame(window, cx);
         root
     }
+}
 
+impl Dashboard {
     /// One line saying where the open session's work stands, or `None` when it
     /// has nothing to report.
     ///
@@ -3790,7 +3792,7 @@ impl Render for Dashboard {
 /// `flex_none` so it never takes room from the conversation, and the same
 /// panel colour the rail's chips use, so "work in flight" reads the same
 /// wherever it is drawn. It is only ever built when there is a line to show.
-fn work_bar(line: SharedString) -> Div {
+fn work_bar(line: SharedString) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -3804,6 +3806,7 @@ fn work_bar(line: SharedString) -> Div {
         .text_xs()
         .text_color(rgb(palette::current().teal))
         .child(line)
+        .into_any_element()
 }
 
 /// The facts the hint row is decided from, read off state the app already
