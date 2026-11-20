@@ -63,6 +63,7 @@ mod help_view;
 mod hint;
 mod hint_dismiss;
 mod icon;
+mod instances;
 mod launch;
 mod layout_store;
 mod live_fold;
