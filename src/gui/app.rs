@@ -232,7 +232,11 @@ pub(crate) fn run() {
                 window_min_size: Some(size(px(480.0), px(320.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("OpenCrabs".into()),
-                    appears_transparent: false,
+                    // One constant, shared with the frame that decides who
+                    // draws the min, max and close buttons (#3083): a window
+                    // created with one answer and drawn with the other ends up
+                    // with two sets of buttons or none.
+                    appears_transparent: TITLEBAR_APPEARS_TRANSPARENT,
                     traffic_light_position: None,
                 }),
                 // The root paints every surface at the matching opacity. The

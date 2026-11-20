@@ -3369,13 +3369,16 @@ impl Render for Dashboard {
         // The window controls are the frame's, not a screen's (#2813): drawn
         // over the top-right corner so no screen's layout owns them, and before
         // the menus and modals below so a scrim that owns the pointer also owns
-        // the buttons. Windows has no caption to inherit, so the same cluster
-        // is drawn there and the platform runs its clicks (#2966).
-        let decorations =
-            effective_decorations(window.window_decorations(), PLATFORM_DRAWS_CAPTION);
-        #[cfg(target_os = "windows")]
-        let on_control: Option<window_controls::Handler> = None;
-        #[cfg(not(target_os = "windows"))]
+        // the buttons. Where the platform draws a caption, the cluster is not
+        // drawn at all: a second set of buttons in the same corner is exactly
+        // the bug #3083 reports, and the app's set was the one that went dead.
+        let decorations = effective_decorations(
+            window.window_decorations(),
+            platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT),
+        );
+        // Whichever platform draws the cluster also runs it. Only Windows has a
+        // path where the platform runs the buttons instead, and that is the
+        // path where the cluster is not drawn (see `platform_draws_caption`).
         let on_control: Option<window_controls::Handler> =
             Some(Rc::new(|control, _ev, window, cx| match control {
                 window_controls::Control::Minimize => window.minimize_window(),

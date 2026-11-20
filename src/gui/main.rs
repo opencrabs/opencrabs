@@ -240,7 +240,9 @@ use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
 use opencrabs::ui_core::usage::loader::usage_view;
 use opencrabs::ui_core::usage::view_model::UsageViewModel;
-use opencrabs::ui_core::window_controls::{PLATFORM_DRAWS_CAPTION, effective_decorations};
+use opencrabs::ui_core::window_controls::{
+    TITLEBAR_APPEARS_TRANSPARENT, effective_decorations, platform_draws_caption,
+};
 
 fn main() {
     app::run();

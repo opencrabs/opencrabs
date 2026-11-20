@@ -1,18 +1,22 @@
 //! The controls a window draws itself when the platform draws none (#2813,
-//! #2966).
+//! #2966, #3083).
 //!
 //! Two platforms arrive here from opposite directions. On Wayland with a
 //! compositor that does not implement `zxdg_decoration_manager_v1` the window
 //! opened with no title bar and no minimise, maximise or close button (#2813).
-//! On Windows gpui creates every window without `WS_CAPTION`, so the OS draws
-//! no title bar and the app is asked for one that does not exist (#2966). The
-//! decision of which controls to draw is executed here; the drawing that needs
-//! a window lives in `src/gui/window_controls.rs`.
+//! On Windows the question turned out to be about the title bar, not the
+//! platform: gpui leaves the frame to the OS unless the window asks for a
+//! transparent title bar, so a window created with `appears_transparent:
+//! false` carries the native caption and drawing the cluster on top of it put
+//! two sets of buttons in the same corner (#2966, #3083). The decision of
+//! which controls to draw is executed here; the drawing that needs a window
+//! lives in `src/gui/window_controls.rs`.
 
 #![cfg(feature = "gui")]
 
 use crate::ui_core::window_controls::{
-    Control, HandlePress, controls, effective_decorations, glyph, handle_press,
+    Control, HandlePress, TITLEBAR_APPEARS_TRANSPARENT, controls, effective_decorations, glyph,
+    handle_press, platform_draws_caption,
 };
 use gpui::{Decorations, Tiling, WindowControlArea};
 
@@ -83,9 +87,9 @@ fn close_is_always_last() {
 }
 
 /// A platform that draws no caption of its own answers `Server` for a title bar
-/// that does not exist, which is what Windows does. Read as the client
-/// decoration it really is, the window draws all three controls and can be
-/// closed from inside it (#2966).
+/// that does not exist, as a Wayland compositor without a decoration manager
+/// does. Read as the client decoration it really is, the window draws all three
+/// controls and can be closed from inside it (#2813, #2966).
 #[test]
 fn a_captionless_platform_draws_all_three_from_a_server_report() {
     let decorations = effective_decorations(Decorations::Server, false);
@@ -125,6 +129,59 @@ fn a_client_report_passes_through_with_its_tiling() {
     assert_eq!(
         controls(effective_decorations(tiled, false)),
         &[Control::Minimize, Control::Close]
+    );
+}
+
+/// #3083: the window the GUI creates asks for a title bar it does not paint,
+/// so the platform draws the caption. On Windows that is the case gpui keeps
+/// the frame for, and a cluster drawn on top of it is a second set of buttons
+/// in the same corner, with no click path of its own.
+#[test]
+fn a_window_that_keeps_its_frame_has_a_caption_on_every_platform() {
+    assert!(
+        !TITLEBAR_APPEARS_TRANSPARENT,
+        "the GUI creates an opaque title bar; flipping this needs a Windows click path (#3083)"
+    );
+    assert!(platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT));
+    let decorations = effective_decorations(
+        Decorations::Server,
+        platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT),
+    );
+    assert_eq!(decorations, Decorations::Server);
+    assert_eq!(controls(decorations), &[], "no second set of buttons");
+}
+
+/// #3083: a transparent title bar is the only case where Windows strips the
+/// frame, and then the app has to draw the three controls itself.
+#[test]
+fn a_transparent_title_bar_leaves_windows_without_a_caption() {
+    assert_eq!(
+        platform_draws_caption(true),
+        !cfg!(target_os = "windows"),
+        "only Windows loses its caption when the title bar is transparent"
+    );
+    if cfg!(target_os = "windows") {
+        let decorations = effective_decorations(Decorations::Server, platform_draws_caption(true));
+        assert_eq!(
+            controls(decorations),
+            &[Control::Minimize, Control::Maximize, Control::Close]
+        );
+    }
+}
+
+/// #3083: the window's creation and the frame's decision have to read the same
+/// answer, or the window gets two sets of buttons (as it did) or none.
+#[test]
+fn the_window_and_the_frame_read_the_same_titlebar_answer() {
+    let app = include_str!("../gui/app.rs");
+    assert!(
+        app.contains("appears_transparent: TITLEBAR_APPEARS_TRANSPARENT"),
+        "the window is created from the shared constant"
+    );
+    let frame = include_str!("../gui/dashboard_render.rs");
+    assert!(
+        frame.contains("platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT)"),
+        "the frame decides from the shared constant"
     );
 }
 
