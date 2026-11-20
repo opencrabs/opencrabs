@@ -3609,20 +3609,29 @@ fn hint_row(state: &HintState) -> Option<AnyElement> {
         .split_once(hint.command)
         .map(|(b, a)| (b.to_string(), a.to_string()))
         .unwrap_or((hint.text.clone(), String::new()));
-    let mut row = div()
+    let mut line = div().flex().flex_row().items_center().px_1();
+    if !before.is_empty() {
+        line = line.child(text(before, Size::Xs, shown.text_muted));
+    }
+    line = line.child(text(hint.command, Size::Xs, shown.accent));
+    if !after.is_empty() {
+        line = line.child(text(after, Size::Xs, shown.text_muted));
+    }
+    // Two insets, not one (#3100): the key hints below pad their row by 12
+    // (`px_3`) and their first item is the hover pill, padded another 4
+    // (`px_1`), so their first glyph starts at 16. This row carried only the
+    // 12, which left it 4px short of them and read as a line nudged off the
+    // card's text column rather than as a second row of the same card. Both
+    // numbers are expressed in rems, like the footer's, so a window with a
+    // different rem size moves the two rows together instead of apart.
+    let row = div()
         .flex()
         .flex_row()
         .items_center()
         .w_full()
-        .px(px(12.))
+        .px_3()
         .pb(px(4.))
-        .overflow_hidden();
-    if !before.is_empty() {
-        row = row.child(text(before, Size::Xs, shown.text_muted));
-    }
-    row = row.child(text(hint.command, Size::Xs, shown.accent));
-    if !after.is_empty() {
-        row = row.child(text(after, Size::Xs, shown.text_muted));
-    }
+        .overflow_hidden()
+        .child(line);
     Some(row.into_any_element())
 }
