@@ -92,13 +92,16 @@ fn the_composer_closes_on_a_hairline() {
     );
 }
 
-/// The session surface is what rounds the footer's bottom corners.
+/// Nothing rounds the footer, because nothing rounds the ground either.
 ///
-/// This is the whole trade: the field gives up its own curve and the surface's
-/// clip supplies it, so the two bottom corners are the card's, not the field's,
-/// and no sliver of fill can show in a notch that is not there.
+/// The first version of this fix left the curve to the session surface: the
+/// field dropped its own radius and the surface's clip supplied the two bottom
+/// corners. The owner took that one step further in the same pass. The surface
+/// is the whole shot now, edge to edge and top to bottom, so there is no corner
+/// to inherit: the field ends on the screen's own bottom edge and no curve
+/// appears anywhere along it.
 #[test]
-fn the_session_surface_rounds_the_footer() {
+fn the_session_surface_is_square_so_nothing_rounds_the_footer() {
     let start = RENDER
         .find("let mut session = div()")
         .expect("the chat builds a session surface");
@@ -107,12 +110,16 @@ fn the_session_surface_rounds_the_footer() {
     let end = tail.find(clip).expect("the surface clips") + clip.len();
     let surface = tail.get(..end).expect("the surface ends on a char boundary");
     assert!(
-        surface.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "the footer's bottom corners are the surface's own curve: {surface}"
+        !surface.contains(".rounded("),
+        "the ground carries no corner, so the footer inherits none: {surface}"
+    );
+    assert!(
+        surface.contains(".w_full()") && surface.contains(".h_full()"),
+        "and it fills the pane, so the field ends on the screen's own edge: {surface}"
     );
     assert!(
         surface.contains(".overflow_hidden()"),
-        "and the clip is what cuts them, so the field needs no radius of its own"
+        "the clip stays: it is the only element above the transcript"
     );
 }
 

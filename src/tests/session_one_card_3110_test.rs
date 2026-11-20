@@ -37,31 +37,40 @@ fn session_block() -> &'static str {
     &rest[..end + ".overflow_hidden();".len()]
 }
 
-/// The session surface is rounded with the bubbles' own radius, filled with the
-/// transcript's own fill, and clipped.
+/// The session surface is the shot: edge to edge, square, and clipped.
 ///
-/// All three have to be true for the corner to disappear. A different radius
-/// leaves the two surfaces reading as separate objects at the edge, a different
-/// fill leaves a seam where the inner surface ends, and no clip lets a scrolled
-/// row paint over the arc.
+/// It started as a rounded card the width of the conversation's measure
+/// (#3110), which is what made the chat read as one object instead of a stack
+/// of strips. The owner then took it one step further: the ground is not a card
+/// either. It takes the full height and the full width of the pane with no
+/// radius, so no band of empty background shows above the first row or below
+/// the field. What keeps a measure is the CONTENT: the transcript caps itself,
+/// and every strip goes through `session_row`, which caps and centres too.
+///
+/// The clip stays. It is the only element above the transcript, and the
+/// transcript scrolls, so a clip there would replace the scroll.
 #[test]
-fn the_session_surface_matches_the_bubbles_it_holds() {
+fn the_session_surface_is_the_whole_shot() {
     let block = session_block();
     assert!(
-        block.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "the surface takes the message bubbles' curve, not the card's: {block}"
+        !block.contains(".rounded("),
+        "the ground carries no corner of its own: {block}"
     );
     assert!(
         block.contains(".bg(rgb(transcript::surface_fill(palette::current().bg)))"),
         "the surface takes the transcript's fill, so no seam shows: {block}"
     );
     assert!(
-        block.contains(".overflow_hidden()"),
-        "the surface owns the clip that keeps a row off the corner: {block}"
+        block.contains(".w_full()"),
+        "the ground spans the pane, not the text measure: {block}"
     );
     assert!(
-        !block.contains("CARD_RADIUS"),
-        "the card's radius is the wrong token here: {block}"
+        block.contains(".h_full()"),
+        "and it spans the height, or the background stops above the field: {block}"
+    );
+    assert!(
+        block.contains(".overflow_hidden()"),
+        "the surface owns the clip that keeps a row off the edge: {block}"
     );
 }
 
@@ -104,8 +113,8 @@ fn the_composer_is_a_row_of_the_session() {
         "the composer joins the session surface"
     );
     assert!(
-        RENDER.contains(".child(session.when(!centred_chat, |d| d.w_full()))"),
-        "the card is centred as a whole, at the conversation's measure"
+        RENDER.contains("                            .child(session),"),
+        "the ground fills the row it is handed, so the wrapper only grows"
     );
     assert!(
         !RENDER.contains("col = col.child(session);"),
@@ -119,27 +128,34 @@ fn the_composer_is_a_row_of_the_session() {
 /// The owner's second pass: with the strips inside the session they took its
 /// whole width, so their left and right edges were the session's own edges and
 /// only the top and bottom of each card was visible. They have to be the size of
-/// the user and assistant cards, which sit half a rem inside the surface.
+/// the user and assistant cards, which sit half a rem inside the content column.
 ///
 /// That half rem is `px_2`, the transcript's own padding step, and it is a rem
 /// rather than a pixel count, so the two agree at every zoom level. A literal
 /// eight would match at the default zoom and drift as soon as the reader zoomed,
 /// which is why the gutter is not a constant here.
 ///
+/// The ground itself went edge to edge afterwards (#3112), so the helper cannot
+/// lean on the surface's width any more: it caps the strip at the conversation's
+/// measure and centres it, which is the same column the transcript draws in.
+///
 /// The composer is the exception, on the owner's next pass: a card that sits
 /// flush on three of the surface's edges is a card whose sides cannot be seen,
-/// so the field takes the full width and the surface's clip rounds its two
-/// bottom corners. The gutter belongs to the cards that float ON the surface,
-/// never to the surface's own edge.
+/// so the field takes the full width of the ground. The gutter belongs to the
+/// cards that float ON the surface, never to the surface's own edge.
 #[test]
 fn every_card_in_the_session_is_the_size_of_a_message() {
     let row = RENDER
-        .find("fn session_row(view: AnyElement) -> AnyElement {")
+        .find("fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {")
         .expect("the strips go through one helper");
-    let body = &RENDER[row..row + 400];
+    let body = &RENDER[row..row + 700];
     assert!(
         body.contains(".px_2()"),
         "the strip keeps the transcript's own padding step: {body}"
+    );
+    assert!(
+        body.contains(".when(centred, |d| d.w(px(measure)))"),
+        "and it takes the content column, not the whole ground: {body}"
     );
     assert!(
         !body.contains("SESSION_GUTTER"),

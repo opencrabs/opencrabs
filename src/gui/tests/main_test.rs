@@ -3832,15 +3832,15 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
     );
 }
 
-/// The composer is flat, so its bottom corners are the session card's (#3112).
+/// The composer is flat, and the ground under it is square (#3112).
 ///
 /// It used to round its own corners to the card's radius (#3110) and the two
 /// curves met at the same edge. The owner then called the composer out as the
-/// one surface that should not be a card at all: it takes the full width, ends
-/// on the session's bottom edge, and the surface's clip supplies the only two
-/// corners it has. There is no composer radius left to agree with anything.
+/// one surface that should not be a card at all, and in the same pass took the
+/// session surface with it: the ground is the whole shot now, so there is no
+/// curve left anywhere along the field's edge to agree with.
 #[test]
-fn the_composer_is_flat_and_the_card_rounds_it() {
+fn the_composer_is_flat_and_the_ground_is_square() {
     let render = include_str!("../dashboard_render.rs");
     let shell = &render[render
         .find("let mut shell = div()")
@@ -3853,9 +3853,15 @@ fn the_composer_is_flat_and_the_card_rounds_it() {
         !shell.contains(".rounded("),
         "the composer is flat end to end: {shell}"
     );
-    // The session surface is what rounds it, so that half has to still hold.
+    let surface = &render[render
+        .find("let mut session = div()")
+        .expect("the chat builds a session surface")..];
+    let surface = surface
+        .split(".overflow_hidden();")
+        .next()
+        .expect("the surface clips");
     assert!(
-        render.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "the session card rounds the composer's bottom corners for it"
+        !surface.contains(".rounded("),
+        "the ground is the shot, so it carries no corner either: {surface}"
     );
 }

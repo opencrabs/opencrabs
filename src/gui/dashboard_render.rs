@@ -2339,14 +2339,21 @@ impl Render for Dashboard {
             .h_full()
             .min_w_0()
             .min_h_0()
-            .gap_3()
+            .gap_3();
+        // The unsplit chat's ground IS the shot (#3112): it runs edge to edge
+        // and top to bottom, with no gutter around it and no corner of its own.
+        // The owner's read was that the screen kept a band of empty background
+        // above the first row and below the field, and a rounded box floating
+        // in the middle of the pane. Every other screen keeps the window's
+        // gutter, and so does a split: those panes are cards with a focus ring,
+        // and a ring needs room around it.
+        if self.screen != Screen::Chat || self.window_is_split() {
             // Less room on every side than the old 24px: the header lines up
             // with the sessions title, the input is not floating in empty
             // space above the window edge, and the sides drop to 16px so the
             // gutter stops reading as a band beside the rail (#3001).
-            .px_4()
-            .pt_3()
-            .pb_4();
+            right = right.px_4().pt_3().pb_4();
+        }
         // The chat screen draws no title row (#2596). The conversation's
         // name already prints in the footer, so a second copy across the top
         // only cost a band of the window to repeat it. Every other screen
@@ -2409,31 +2416,33 @@ impl Render for Dashboard {
                     // The session is one surface (#3110). The history, the plan
                     // card, the queue strip, the suggested options, the
                     // running-task row, the bottom topic row and the composer all
-                    // live inside a single rounded card, so the lower half of the
+                    // live inside a single surface, so the lower half of the
                     // window reads as one session instead of a stack of unrelated
                     // strips parked under the chat. The cards inside it stay cards,
                     // because they are still separate objects, but they sit on this
                     // fill rather than beside it, and the composer stops floating
                     // over the gap with a surface of its own.
                     //
-                    // This element is also the corner's only owner, and that is the
-                    // other half of the fix. The transcript scrolls, so it cannot
-                    // clip its own arc: a later `overflow_hidden` would replace
-                    // `overflow_y_scroll` and stop the chat scrolling. That is why a
-                    // scrolled row painted square over the rounded corner, top and
-                    // bottom. The clip lives here now, one level up, and the rows
-                    // are cut by the curve instead of painted over it.
-                    //
-                    // The radius is the message bubbles' own, not `CARD_RADIUS`:
-                    // this is the box the bubbles live in, so a rounder corner than
-                    // theirs reads as two objects meeting at the edge. The fill is
-                    // the transcript's, so the two agree to the pixel where the
-                    // inner surface ends and no seam shows between them.
+                    // The fill is the transcript's, so the two agree to the pixel
+                    // where the inner surface ends and no seam shows between them.
+                    // The clip stays here too: the transcript scrolls, so it cannot
+                    // clip its own rows without losing the scroll, and one scrolled
+                    // row painted past the surface's edge before the clip moved up.
                     //
                     // Built here, before the strips, because it is the ground they
                     // sit on: `middle` is its first child and everything that rides
                     // between the history and the field is appended in the order it
                     // stacks.
+                    // The ground is the shot (#3112). It used to be a card the
+                    // size of the conversation's measure, rounded like the
+                    // bubbles and parked inside the window's gutter, which left
+                    // a band of empty background above the first row and below
+                    // the field. The owner's read: the background should take
+                    // the full height and the full width with no radius at all,
+                    // so the screen is one surface top to bottom. What keeps its
+                    // measure is the CONTENT, not the ground: the transcript
+                    // caps itself and centres, and every strip inside goes
+                    // through `session_row`, which does the same.
                     let mut session = div()
                         .flex()
                         .flex_col()
@@ -2447,12 +2456,7 @@ impl Render for Dashboard {
                         // about to be given (#3110).
                         .h_full()
                         .min_h_0()
-                        // The conversation's own measure, not the pane's whole
-                        // width: the card holds the transcript, so it takes the
-                        // width the transcript draws at. In a narrow window the
-                        // two are the same and this is a no-op (#2586).
-                        .when(centred_chat, |d| d.w(px(chat_measure_px)))
-                        .rounded(px(transcript::MESSAGE_RADIUS))
+                        .w_full()
                         .bg(rgb(transcript::surface_fill(palette::current().bg)))
                         .overflow_hidden();
                     // The topic bar opens the card, then the history. Both are
@@ -2480,7 +2484,11 @@ impl Render for Dashboard {
                         // on that axis by construction: `central` here would
                         // wrap a width it already has. What the strips were
                         // missing is the bubbles' side gutter (#3110).
-                        above = above.child(session_row(plan_view.into_any_element()));
+                        above = above.child(session_row(
+                            plan_view.into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                         above_used = true;
                     }
                     let waiting = self.queued_for_strip();
@@ -2499,6 +2507,8 @@ impl Render for Dashboard {
                                     }),
                                 )
                                 .into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
                         ));
                         above_used = true;
                     }
@@ -2514,6 +2524,8 @@ impl Render for Dashboard {
                                 .map(|(_, at)| at);
                             above = above.child(session_row(
                                 options_strip(&rows, focus).into_any_element(),
+                                centred_chat,
+                                chat_measure_px,
                             ));
                             above_used = true;
                         }
@@ -2525,7 +2537,11 @@ impl Render for Dashboard {
                         && let Some(sid) = self.chat_session
                         && let Some(area) = self.task_area(sid, &label, cx)
                     {
-                        above = above.child(session_row(area));
+                        above = above.child(session_row(
+                            area,
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                         above_used = true;
                     }
                     // The strips take their room from the conversation before
@@ -2569,12 +2585,16 @@ impl Render for Dashboard {
                             if let Some((names, selected)) = popup {
                                 session = session.child(session_row(
                                     command_popup_view(&names, selected).into_any_element(),
+                                    centred_chat,
+                                    chat_measure_px,
                                 ));
                             } else if let Some((items, selected)) =
                                 self.composer.editor.read(cx).emoji_popup()
                             {
                                 session = session.child(session_row(
                                     emoji_popup_view(&items, selected).into_any_element(),
+                                    centred_chat,
+                                    chat_measure_px,
                                 ));
                             }
                         }
@@ -2650,7 +2670,7 @@ impl Render for Dashboard {
                             .min_h_0()
                             .w_full()
                             .justify_center()
-                            .child(session.when(!centred_chat, |d| d.w_full())),
+                            .child(session),
                     );
                 }
                 col
@@ -3705,21 +3725,34 @@ impl Dashboard {
     }
 }
 
-/// One strip, on the bubbles' own column (#3110).
+/// One strip, on the bubbles' own column (#3110, #3112).
 ///
-/// `px_2` is the transcript's own padding step, and it is a half rem rather
-/// than a pixel count, so the strip's left and right edges land exactly where a
-/// message bubble's do at any zoom level: both sit half a rem inside the session
-/// surface, and both are as wide as what the transcript hands its rows
-/// (`measure - rem`). That is what makes a plan card or an options card read as
-/// the same size as the messages above it instead of as a band cut out of the
-/// background with only its top and bottom visible.
-fn session_row(view: AnyElement) -> AnyElement {
+/// The ground runs edge to edge now, so the strips cannot simply take its
+/// width: they would be wider than every message above them. What they match is
+/// the CONTENT column, which is the conversation's measure when the pane is
+/// wider than it, and the pane itself when it is not. `px_2` is the transcript's
+/// own padding step, and it is a half rem rather than a pixel count, so the
+/// strip's left and right edges land exactly where a message bubble's do at any
+/// zoom level: both sit half a rem inside that column, and both are as wide as
+/// what the transcript hands its rows (`measure - rem`). That is what makes a
+/// plan card or an options card read as the same size as the messages above it
+/// instead of as a band cut out of the background with only its top and bottom
+/// visible.
+fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
     div()
+        .flex()
+        .flex_row()
+        .justify_center()
         .w_full()
         .min_w_0()
-        .px_2()
-        .child(view)
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .when(centred, |d| d.w(px(measure)))
+                .child(view),
+        )
         .into_any_element()
 }
 
