@@ -65,14 +65,14 @@ pub(crate) const VOICE_SAMPLES: usize = super::voice_input::METER_BARS;
 /// could reach the reference's `(16, 18, 20)`, so a dark marble rendered as a
 /// solid lit sphere. Nothing about the falloff could fix that; the ramp had to
 /// stop owning brightness.
-const AMBIENT: f32 = 0.0672;
+pub(crate) const AMBIENT: f32 = 0.0672;
 
 /// The band is the one hot thing in the material: a narrow spike on the seam.
 /// Its width is what makes or breaks the figure. Wide enough and it becomes a
 /// stripe painted across a disc; this width puts its half-maximum 0.13 of the
 /// radius apart, which is a lens catching a backlight.
-const BAND_GAIN: f32 = 0.3886;
-const BAND_SIGMA: f32 = 0.0562;
+pub(crate) const BAND_GAIN: f32 = 0.3886;
+pub(crate) const BAND_SIGMA: f32 = 0.0562;
 
 /// How far the seam reaches sideways before it dies out.
 ///
@@ -81,7 +81,7 @@ const BAND_SIGMA: f32 = 0.0562;
 /// it as laid over a disc rather than coming from inside one. A lens stops
 /// lighting the seam where the glass turns away, so this fades the band and the
 /// halo out towards the wall.
-const BAND_REACH: f32 = 0.55;
+pub(crate) const BAND_REACH: f32 = 0.55;
 
 /// What the band and its halo still carry at the wall, as a fraction of the
 /// centre.
@@ -91,7 +91,7 @@ const BAND_REACH: f32 = 0.55;
 /// before the glass did. Holding a floor at the limb lets the glow meet the
 /// inner wall, while the gaussian above it still gives the falloff its
 /// spherical shape.
-const BAND_WALL: f32 = 0.32;
+pub(crate) const BAND_WALL: f32 = 0.32;
 
 /// How far the band's own seam rises towards the wall, as a fraction of the
 /// radius.
@@ -101,17 +101,17 @@ const BAND_WALL: f32 = 0.32;
 /// a sphere, and that rises at the limb. Giving the strip its own arch is what
 /// wraps it onto the glass instead of running it flat and stopping it short of
 /// both walls.
-const BAND_ARCH: f32 = 0.16;
+pub(crate) const BAND_ARCH: f32 = 0.16;
 
 /// The halo the band throws into both halves, which is what stops the seam
 /// reading as a drawn line and lets the temperature bleed into the bowl.
-const GLOW_GAIN: f32 = 0.585;
-const GLOW_SIGMA: f32 = 0.1922;
+pub(crate) const GLOW_GAIN: f32 = 0.585;
+pub(crate) const GLOW_SIGMA: f32 = 0.1922;
 
 /// A low lift under the horizon, so the lower half has depth behind the glass
 /// instead of black showing through it. Small on purpose: the reference's bowl
 /// falls to luma 35 and stays there.
-const BOWL_LIFT: f32 = 0.0192;
+pub(crate) const BOWL_LIFT: f32 = 0.0192;
 
 /// How far the key pushes the halo towards the upper left.
 ///
@@ -120,7 +120,7 @@ const BOWL_LIFT: f32 = 0.0192;
 /// only asymmetry in the light, and it is deliberately small: measured against
 /// the reference, the left of the band carries about 28 more luma than the
 /// right, and nothing in the bowl, which is near black on both sides.
-const SIDE_BIAS: f32 = 0.26;
+pub(crate) const SIDE_BIAS: f32 = 0.26;
 
 /// The border the glass presents at its own silhouette, as three terms.
 ///
@@ -145,12 +145,12 @@ const SIDE_BIAS: f32 = 0.26;
 /// `ORB_PIXELS`, narrow enough to stay a specular edge rather than a drawn
 /// outline. `RIM_TILT_*` aims it at the upper left, where the reference's ring
 /// is bright (88 luma at the top, 64 at the left, 30 at the bottom).
-const RIM_RADIUS: f32 = 0.995;
-const RIM_WIDTH: f32 = 0.0058;
-const RIM_GAIN: f32 = 0.26;
-const RIM_BASE: f32 = 0.02;
-const RIM_TILT_X: f32 = 0.55;
-const RIM_TILT_Y: f32 = 0.83;
+pub(crate) const RIM_RADIUS: f32 = 0.995;
+pub(crate) const RIM_WIDTH: f32 = 0.0058;
+pub(crate) const RIM_GAIN: f32 = 0.26;
+pub(crate) const RIM_BASE: f32 = 0.02;
+pub(crate) const RIM_TILT_X: f32 = 0.55;
+pub(crate) const RIM_TILT_Y: f32 = 0.83;
 
 /// The overhead key's own catch on the top arc, ten o'clock to two.
 ///
@@ -167,10 +167,10 @@ const RIM_TILT_Y: f32 = 0.83;
 /// reference's top arc is a hard silver line: the crystal's edge is where the
 /// material ends, and a soft edge there is what made the earlier passes read as
 /// a translucent sticker.
-const RIM_TOP_GAIN: f32 = 0.55;
-const RIM_TOP_WIDTH: f32 = 0.0040;
-const RIM_TOP_EDGE: f32 = -0.50;
-const RIM_TOP_FULL: f32 = -0.90;
+pub(crate) const RIM_TOP_GAIN: f32 = 0.55;
+pub(crate) const RIM_TOP_WIDTH: f32 = 0.0040;
+pub(crate) const RIM_TOP_EDGE: f32 = -0.50;
+pub(crate) const RIM_TOP_FULL: f32 = -0.90;
 
 /// How far the overhead catch is pulled towards white.
 ///
@@ -178,13 +178,13 @@ const RIM_TOP_FULL: f32 = -0.90;
 /// top arc reads silver rather than cyan. The pull is applied after the tonal
 /// colour and before the composite correction, so it moves hue only: the
 /// correction still lands the pixel on the light field's own brightness.
-const RIM_SILVER: f32 = 0.62;
+pub(crate) const RIM_SILVER: f32 = 0.62;
 
 /// The shoulder the glass shows as it turns away, just inside the ring. This is
 /// what gives the edge thickness: without it the ring floats on the silhouette
 /// with nothing behind it and the object reads as a sticker.
-const RIM_FALL_GAIN: f32 = 0.11;
-const RIM_FALL_SIGMA: f32 = 0.045;
+pub(crate) const RIM_FALL_GAIN: f32 = 0.11;
+pub(crate) const RIM_FALL_SIGMA: f32 = 0.045;
 
 /// The horizon: the seam between the cool dome and the warm bowl, plus the
 /// thin band of light that sits on it.
@@ -194,15 +194,15 @@ const RIM_FALL_SIGMA: f32 = 0.045;
 /// bow is small and grows towards the wall through the same lens the ribbons
 /// ride, so the marble has a top and a bottom instead of one radial fade. One
 /// radial fade is exactly what reads as a lit plate.
-const HORIZON: f32 = 0.0;
-const BOW_BOWL: f32 = 0.10;
+pub(crate) const HORIZON: f32 = 0.0;
+pub(crate) const BOW_BOWL: f32 = 0.10;
 
 /// The seam breathes, and this is by how much of the radius.
 ///
 /// The reference is a single still, so its band is at rest. The orb is not, and
 /// a seam that never moves reads as a printed decal. A hundredth of the radius
 /// is invisible as a shift on its own and is what carries the breathing.
-const BREATHE: f32 = 0.010;
+pub(crate) const BREATHE: f32 = 0.010;
 
 /// How far the seam tips about the centre at full voice, as a fraction of the
 /// radius.
@@ -270,16 +270,16 @@ const SHIMMER: f32 = 0.55;
 /// into a solid gold ball. The dome's cool is fixed: rotating a green accent by
 /// whatever angle cools an amber one lands somewhere else entirely, so a
 /// derived cool loses the split on half the themes.
-const COOL_HUE: f32 = 0.586;
+pub(crate) const COOL_HUE: f32 = 0.586;
 
 /// The reference's warm hue, and the accent hue the fit was measured at.
 ///
 /// `WARM_FOLLOW` moves the warm side a quarter of the way from that reference
 /// point towards the live accent, so a themed orb keeps a trace of its palette
 /// without the bowl leaving the range a glass bowl occupies.
-const BOWL_HUE: f32 = 0.055;
-const AMBER_HUE: f32 = 0.109;
-const WARM_FOLLOW: f32 = 0.25;
+pub(crate) const BOWL_HUE: f32 = 0.055;
+pub(crate) const AMBER_HUE: f32 = 0.109;
+pub(crate) const WARM_FOLLOW: f32 = 0.25;
 
 /// Saturation against brightness, which is the curve that keeps the middle warm
 /// without the ends turning to paint.
@@ -312,9 +312,9 @@ const SAT_STOPS: [f32; 7] = [0.10, 0.15, 0.34, 0.50, 0.55, 0.18, 0.05];
 /// the whole upper hemisphere, and the pocket under the band. `WALL_ALPHA` is
 /// what the body thins to at the extreme left and right, where the chord
 /// collapses and the chromatic caustics are what you see.
-const DOME_ALPHA: f32 = 0.92;
-const BOWL_ALPHA: f32 = 0.90;
-const WALL_ALPHA: f32 = 0.42;
+pub(crate) const DOME_ALPHA: f32 = 0.92;
+pub(crate) const BOWL_ALPHA: f32 = 0.90;
+pub(crate) const WALL_ALPHA: f32 = 0.42;
 
 /// Where the walls start thinning, as a fraction of the radius, and where the
 /// thinning reaches full strength.
@@ -324,8 +324,8 @@ const WALL_ALPHA: f32 = 0.42;
 /// is where its chromatic walls show through. This band is the extra falloff,
 /// and it is weighted by the square of the horizontal position so it touches
 /// only the left and right walls, never the top or bottom rim.
-const WALL_FULL: f32 = 0.55;
-const WALL_EDGE: f32 = 0.95;
+pub(crate) const WALL_FULL: f32 = 0.55;
+pub(crate) const WALL_EDGE: f32 = 0.95;
 
 /// The chromatic walls: light bent through the thick edge of the crystal.
 ///
@@ -343,11 +343,11 @@ const WALL_EDGE: f32 = 0.95;
 /// which is what keeps the seam reading as glass rather than gold leaf; a
 /// caustic is the exception, because a caustic is exactly light that has been
 /// squeezed until its colour separates.
-const EDGE_COOL: f32 = 0.34;
-const EDGE_WARM: f32 = 0.30;
-const EDGE_CAUSTIC: f32 = 0.64;
-const EDGE_DEPTH: f32 = 0.86;
-const EDGE_SPREAD: f32 = 0.15;
+pub(crate) const EDGE_COOL: f32 = 0.34;
+pub(crate) const EDGE_WARM: f32 = 0.30;
+pub(crate) const EDGE_CAUSTIC: f32 = 0.64;
+pub(crate) const EDGE_DEPTH: f32 = 0.86;
+pub(crate) const EDGE_SPREAD: f32 = 0.15;
 
 /// What the glass is composited onto, as the luma of that resolved colour.
 ///
@@ -356,14 +356,14 @@ const EDGE_SPREAD: f32 = 0.15;
 /// lifted emission below needs this number, so it is written down rather than
 /// assumed: getting it wrong darkens or washes the whole marble by a visible
 /// margin.
-const SCRIM_LUMA: f32 = 0.0395;
+pub(crate) const SCRIM_LUMA: f32 = 0.0395;
 
 /// The most the emission may be lifted before the correction gives up.
 ///
 /// In the darkest smoke the lift is already large; letting it run free would
 /// push the near-black body to a visible grey and destroy the shadow that gives
 /// the object its depth.
-const MAX_LIFT: f32 = 3.4;
+pub(crate) const MAX_LIFT: f32 = 3.4;
 
 /// Depth: the far wall, and the fringe at the silhouette.
 ///
@@ -373,9 +373,9 @@ const MAX_LIFT: f32 = 3.4;
 ///
 /// `DISPERSION` splits the rim sliver by a few hundredths of a turn of hue,
 /// which is what glass does at a silhouette.
-const FAR_WALL: f32 = 0.041;
-const FAR_LIFT: f32 = 0.42;
-const DISPERSION: f32 = 0.022;
+pub(crate) const FAR_WALL: f32 = 0.041;
+pub(crate) const FAR_LIFT: f32 = 0.42;
+pub(crate) const DISPERSION: f32 = 0.022;
 
 /// The dome's softbox: a wide, shallow arc on the upper left.
 ///
@@ -389,16 +389,16 @@ const DISPERSION: f32 = 0.022;
 /// is where the reference's slab sits. `SPEC_WIDTH` is its radial thickness and
 /// the span terms cut it off by angle, so the shape is a trapezoid bent to the
 /// glass instead of a disc.
-const SPEC_RADIUS: f32 = 0.76;
-const SPEC_DIR_X: f32 = -0.579;
-const SPEC_DIR_Y: f32 = -0.815;
-const SPEC_WIDTH: f32 = 0.105;
-const SPEC_SPAN_LOW: f32 = 0.62;
-const SPEC_SPAN_HIGH: f32 = 0.97;
-const SPEC_GAIN: f32 = 0.22;
+pub(crate) const SPEC_RADIUS: f32 = 0.76;
+pub(crate) const SPEC_DIR_X: f32 = -0.579;
+pub(crate) const SPEC_DIR_Y: f32 = -0.815;
+pub(crate) const SPEC_WIDTH: f32 = 0.105;
+pub(crate) const SPEC_SPAN_LOW: f32 = 0.62;
+pub(crate) const SPEC_SPAN_HIGH: f32 = 0.97;
+pub(crate) const SPEC_GAIN: f32 = 0.22;
 
 /// A 4x4 ordered dither, already normalised so the loop only subtracts.
-const BAYER: [f32; 16] = [
+pub(crate) const BAYER: [f32; 16] = [
     0.0, 0.5, 0.125, 0.625, 0.75, 0.25, 0.875, 0.375, 0.1875, 0.6875, 0.0625, 0.5625, 0.9375,
     0.4375, 0.8125, 0.3125,
 ];
