@@ -216,13 +216,58 @@ fn message_with_markers(text: &str, attachments: &[Attachment]) -> String {
     payload
 }
 
+/// Where the message's own attachment markers begin, if it has any (#3092).
+///
+/// A marker is an attachment only when it is the message's TAIL: the send path
+/// appends them after the words, so `words <<IMG:..>> <<IMG:..>>` is two files
+/// and `I quoted <<AUD:/x.ogg>> in this sentence` is none. Reading every marker
+/// anywhere in the body made a reply that quoted one draw a player for a clip it
+/// never sent, and a quote shortened with an ellipsis then opened nothing when
+/// pressed. The tail is read from the end, so a run of markers is found without
+/// knowing how many there are.
+fn trailing_markers(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end();
+    let mut start = trimmed.len();
+    loop {
+        let Some(head) = trimmed.get(..start) else {
+            break;
+        };
+        let head = head.trim_end();
+        if !head.ends_with(">>") {
+            break;
+        }
+        let Some(open) = head.rfind("<<") else {
+            break;
+        };
+        let Some(close) = head.len().checked_sub(2) else {
+            break;
+        };
+        let Some(marker) = head.get(open + 2..close) else {
+            break;
+        };
+        let Some((kind, path)) = marker.split_once(':') else {
+            break;
+        };
+        if !(kind == "IMG" || kind == "VID" || kind == "AUD") || path.is_empty() {
+            break;
+        }
+        start = open;
+    }
+    (start < trimmed.len()).then_some(start)
+}
+
 /// The paths carried by `<<IMG:...>>` / `<<VID:...>>` / `<<AUD:...>>` markers in
 /// a message.
 /// Pure string work so it is testable without a window, and shared with the
 /// send path that tracks each attachment against the session.
 pub fn marker_paths(text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let mut rest = text;
+    let Some(tail) = trailing_markers(text) else {
+        return paths;
+    };
+    let Some(mut rest) = text.get(tail..) else {
+        return paths;
+    };
     while let Some(start) = rest.find("<<") {
         let Some(after) = rest.get(start + 2..) else {
             break;
@@ -293,34 +338,45 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
     if !text.contains("<<") {
         return Cow::Borrowed(text.trim());
     }
+    // A path marker is dropped only where it counts as an attachment, which is
+    // the message's tail (`trailing_markers`). One quoted inside a sentence is
+    // part of what the reader wrote, so it stays where it was typed (#3092).
+    // A `SPOKEN` block is text meant for the ear rather than a path, so it has
+    // no file behind it and is dropped wherever it sits: a reply reloaded from
+    // the ledger would otherwise print the whole block under the words it
+    // summarizes.
+    let tail = trailing_markers(text).unwrap_or(text.len());
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<<") {
-        let Some(after) = rest.get(start + 2..) else {
+    let mut cursor = 0usize;
+    while let Some(found) = text.get(cursor..).and_then(|rest| rest.find("<<")) {
+        let start = cursor + found;
+        let Some(after) = text.get(start + 2..) else {
             break;
         };
         let Some(end) = after.find(">>") else { break };
         let Some(marker) = after.get(..end) else {
             break;
         };
-        let is_marker = marker.split_once(':').is_some_and(|(kind, payload)| {
-            // `SPOKEN` is text meant for the ear, not a path, so it has no
-            // file behind it: it is dropped from the row all the same, because
-            // a reply reloaded from the ledger would otherwise print the whole
-            // block under the words it was summarizing.
-            (kind == "IMG" || kind == "VID" || kind == "AUD") && !payload.is_empty()
-                || kind.eq_ignore_ascii_case("SPOKEN")
+        let closer = start + 2 + end + 2;
+        let drop = marker.split_once(':').is_some_and(|(kind, payload)| {
+            kind.eq_ignore_ascii_case("SPOKEN")
+                || ((kind == "IMG" || kind == "VID" || kind == "AUD")
+                    && !payload.is_empty()
+                    && start >= tail)
         });
-        if is_marker {
-            if let Some(head) = rest.get(..start) {
-                out.push_str(head);
-            }
-        } else if let Some(keep) = rest.get(..start + 2 + end + 2) {
-            out.push_str(keep);
+        if let Some(head) = text.get(cursor..start) {
+            out.push_str(head);
         }
-        rest = after.get(end + 2..).unwrap_or_default();
+        if !drop {
+            if let Some(keep) = text.get(start..closer) {
+                out.push_str(keep);
+            }
+        }
+        cursor = closer;
     }
-    out.push_str(rest);
+    if let Some(rest) = text.get(cursor..) {
+        out.push_str(rest);
+    }
     Cow::Owned(out.trim().to_string())
 }
 
@@ -4721,18 +4777,43 @@ mod tests {
         }
     }
 
+    /// A marker in the middle of a sentence is a quotation, not a file
+    /// (#3092). Only the tail belongs to the message, so the words on both
+    /// sides stay exactly where they were typed.
     #[test]
     fn strip_markers_keep_multibyte_text_on_both_sides() {
         assert_eq!(
             strip_markers("olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"),
-            "olá 🦀  fim 中文"
+            "olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"
         );
-        assert_eq!(strip_markers("<<VID:/tmp/動画.mov>>já"), "já");
+        assert_eq!(strip_markers("<<VID:/tmp/動画.mov>>já"), "<<VID:/tmp/動画.mov>>já");
         // An unknown marker is prose and stays whole, multibyte and all.
         assert_eq!(
             strip_markers("veja <<FILE:relatório-ção.pdf>> aqui"),
             "veja <<FILE:relatório-ção.pdf>> aqui"
         );
+        // The message's own attachment is the tail, and that one does leave.
+        assert_eq!(
+            strip_markers("olá 🦀 <<IMG:/tmp/coração.png>>  "),
+            "olá 🦀"
+        );
+    }
+
+    /// A reply that quotes a marker draws no player for it (#3092). The clip it
+    /// names belongs to the question, and the quote is shortened, so a player
+    /// there started nothing when pressed.
+    #[test]
+    fn a_quoted_marker_is_not_an_attachment() {
+        let quoted = "Row 998 carries `<<AUD:…voice-1795192403080.ogg>>` and no prefix.";
+        assert!(marker_paths(quoted).is_empty());
+        // The send path appends them, so a real attachment is still found, and
+        // more than one at a time.
+        let sent = "look at these <<IMG:/tmp/a.png>> <<IMG:/tmp/b.png>>";
+        assert_eq!(
+            marker_paths(sent),
+            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
+        );
+        assert_eq!(strip_markers(sent), "look at these");
     }
 
     #[test]
