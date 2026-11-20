@@ -1069,8 +1069,25 @@ fn the_seeker_prints_the_window_only_rows_and_routes_them() {
         "the row targets the field the keyboard owns, not the window's"
     );
     assert!(
-        arm.contains("editor.toggle_dictation(cx)"),
-        "the row starts the same loop the control and the chord start"
+        arm.contains("editor.toggle_dictation(crate::editor::TakeEnd::Park, cx)"),
+        "the row parks the words: a query is worth reading before it runs"
+    );
+    // The chord is the one caller that sends (#3092): the microphone's click
+    // and the block's click park, so the words wait for Enter exactly as they
+    // always did, and only the fast path spends the take.
+    let editor_src = include_str!("../editor.rs");
+    let chord = fn_body(editor_src, "toggle_voice");
+    assert!(
+        chord.contains("self.toggle_dictation(TakeEnd::Send, cx)"),
+        "the chord sends the moment the words land"
+    );
+    assert!(
+        fn_body(editor_src, "mic").contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the idle control parks: a click is not a decision to send"
+    );
+    assert!(
+        fn_body(editor_src, "voice_block").contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the block parks: stopping the take is not sending it"
     );
 
     // The field's own microphone (#3044): the card records in place. It
@@ -1914,12 +1931,12 @@ fn the_composer_hint_names_the_queue_while_a_turn_runs() {
 fn the_composer_hint_offers_the_microphone_only_when_it_works() {
     let ready = composer_hint_for(false, 0, true);
     assert_eq!(
-        ready, "Talk to the crab… · ctrl+alt+r to record, same key to stop",
+        ready, "Talk to the crab… · ctrl+alt+r to record, same key to send",
         "a configured window names the chord and what it does"
     );
     assert!(
-        ready.contains("same key to stop"),
-        "the one key both starts and stops the take: {ready}"
+        ready.contains("same key to send"),
+        "the one key starts the take and puts it on the wire: {ready}"
     );
     assert!(
         !ready.contains("/voice"),

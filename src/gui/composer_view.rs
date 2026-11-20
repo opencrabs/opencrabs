@@ -147,7 +147,7 @@ pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> Share
         (true, 0) => SharedString::from("esc stops · typing queues"),
         (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
         (false, 0) if voice => {
-            SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to stop")
+            SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to send")
         }
         (false, 0) => SharedString::from("Talk to the crab… · /voice sets up the mic"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),

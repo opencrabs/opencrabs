@@ -494,6 +494,11 @@ pub struct Editor {
     voice_capture: Option<voice_input::Capture>,
     /// Whether the recording has been asked to stop and its WAV is on the way.
     voice_finishing: bool,
+    /// Whether the take now closing was ended by the chord rather than the
+    /// block's click (#3092). Set when the stop is asked for and spent when
+    /// the words land, because the two threads in between are what make the
+    /// intent outlive the press that carried it.
+    voice_send_on_land: bool,
     /// The transcription in flight, if any.
     voice_transcription: Option<voice_input::Transcription>,
     /// Whether the dictation loop is already ticking. Same one-shot shape as
@@ -591,6 +596,29 @@ enum VoicePhase {
     Transcribing,
 }
 
+/// What a press of the voice control asks for once the take closes (#3092).
+///
+/// The Seeker's card has carried this distinction since it was built
+/// (`seeker_voice_send`), and the composer did not: the chord and the block's
+/// click walked into one function with no way to tell them apart, so pressing
+/// the chord again parked the words and waited for Enter. The person pressing
+/// the chord twice is saying "send it", and that has to survive as data rather
+/// than as a second gesture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TakeEnd {
+    /// Stop and leave the words in the preview for reading and editing.
+    Park,
+    /// Stop and send the words the moment they land.
+    Send,
+}
+
+impl TakeEnd {
+    /// Whether this press sends once the words land (#3092).
+    fn sends(self) -> bool {
+        matches!(self, Self::Send)
+    }
+}
+
 /// What the composer says once a dragged range reaches the clipboard (#2587).
 /// The terminal prints these same words on its input border.
 pub const COPIED_NOTICE: &str = "Copied to clipboard";
@@ -655,6 +683,7 @@ impl Editor {
             caret_looping: false,
             voice_capture: None,
             voice_finishing: false,
+            voice_send_on_land: false,
             voice_transcription: None,
             voice_looping: false,
             voice_secs: 0,
@@ -729,9 +758,12 @@ impl Editor {
     /// The dictation shortcut's action (#3044).
     ///
     /// It only forwards to `toggle_dictation`, the same call the microphone's
-    /// click makes, so the key and the button can never drift apart.
+    /// click makes, so the key and the button can never drift apart. It is the
+    /// one caller that passes `Send` (#3092): the chord is the fast
+    /// path, and a person pressing it a second time has already decided the
+    /// take is worth sending.
     fn toggle_voice(&mut self, _: &ToggleVoice, _window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_dictation(cx);
+        self.toggle_dictation(TakeEnd::Send, cx);
     }
 
     /// What the microphone's click does: one control, two jobs.
@@ -745,7 +777,12 @@ impl Editor {
     /// `pub(crate)` because Seeker's own row hands the job here (#3044): the
     /// card cannot reach the composer's private state, and a second copy of
     /// this match would let the row and the button drift apart.
-    pub(crate) fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `end` is what the press means once the take closes (#3092). The chord
+    /// says send, every click and Esc say park, and the flag it leaves behind
+    /// is what makes the send survive the two worker threads between the press
+    /// and the words.
+    pub(crate) fn toggle_dictation(&mut self, end: TakeEnd, cx: &mut Context<Self>) {
         match self.voice_phase() {
             VoicePhase::Idle => {
                 // One take at a time is what the composer holds (#3044). A
@@ -762,6 +799,10 @@ impl Editor {
                 crate::voice_play::silence();
                 self.voice_capture = Some(voice_input::Capture::start());
                 self.voice_finishing = false;
+                // A fresh take carries no intent (#3092): whatever the last
+                // press asked for was spent when its words landed, and a flag
+                // left standing here would send a take nobody asked to send.
+                self.voice_send_on_land = false;
                 self.voice_secs = 0;
                 self.voice_levels.clear();
                 // The block is the strip now (#3092): it opens with the
@@ -772,12 +813,25 @@ impl Editor {
                 self.pump_voice(cx);
             }
             VoicePhase::Recording => {
+                // The intent is written before the stop, not after (#3092):
+                // the tick that drains the capture runs on the same thread
+                // pool, and a flag set after the stop could lose the race to
+                // the transcript it was meant to send.
+                self.voice_send_on_land = end.sends();
                 if let Some(capture) = self.voice_capture.as_ref() {
                     capture.stop();
                 }
                 self.voice_finishing = true;
             }
-            VoicePhase::Finishing | VoicePhase::Transcribing => {}
+            VoicePhase::Finishing | VoicePhase::Transcribing => {
+                // A second press while the words are still being made is the
+                // same decision arriving early (#3092). Today it did nothing,
+                // which reads as a shortcut that stopped working right when
+                // the person wanted it most, so it arms the send instead.
+                if end.sends() {
+                    self.voice_send_on_land = true;
+                }
+            }
         }
         cx.notify();
     }
@@ -840,7 +894,14 @@ impl Editor {
                             self.voice_transcription =
                                 Some(voice_input::Transcription::start(recording));
                         }
-                        Err(message) => self.show_notice(message, cx),
+                        Err(message) => {
+                            // The device failed, so there is nothing left to
+                            // send (#3092). Leaving the intent standing would
+                            // arm the next take with a press the person made
+                            // for this one.
+                            self.voice_send_on_land = false;
+                            self.show_notice(message, cx)
+                        }
                     }
                 }
             }
@@ -854,11 +915,17 @@ impl Editor {
         if let Some(answer) = answer {
             self.voice_transcription = None;
             changed = true;
+            // The intent is taken once, here, whichever way the words came out
+            // (#3092). Reading it into a local rather than at the send keeps a
+            // failed transcription from leaving the press standing for the
+            // next take, and keeps the flag true only for the moment it is
+            // spent.
+            let send = std::mem::take(&mut self.voice_send_on_land);
             match answer {
                 Ok(spoken) if spoken.text.trim().is_empty() => {
                     self.show_notice("The microphone caught nothing.", cx);
                 }
-                Ok(spoken) => self.land_voice(spoken, cx),
+                Ok(spoken) => self.land_voice(spoken, send, cx),
                 Err(message) => self.show_notice(message, cx),
             }
         }
@@ -920,7 +987,12 @@ impl Editor {
     /// A transcription whose clip could not be saved still has words worth
     /// sending, and the field is the only place left to put them, so that case
     /// keeps typing at the caret rather than losing what was said over a file.
-    fn land_voice(&mut self, spoken: voice_input::Spoken, cx: &mut Context<Self>) {
+    ///
+    /// `send` is the intent the chord left behind (#3092). It is honoured only
+    /// on the clip branch below: a take that lost its audio keeps its words at
+    /// the caret, where they can be read before anything goes out, because a
+    /// file that failed is not a reason to send a transcript nobody has seen.
+    fn land_voice(&mut self, spoken: voice_input::Spoken, send: bool, cx: &mut Context<Self>) {
         let Some(clip) = spoken.audio else {
             self.voice_levels.clear();
             self.insert_dictation(&spoken.text, cx);
@@ -942,6 +1014,13 @@ impl Editor {
             seconds: spoken.seconds,
             levels,
         });
+        // The chord already said what it wanted (#3092). The draft is parked
+        // first and spent second, so the one send path stays the only send
+        // path: the payload, the history entry and the clear all happen in
+        // `submit`, exactly as they would had the person pressed Enter.
+        if send {
+            self.submit(cx);
+        }
         cx.notify();
     }
 
@@ -1663,6 +1742,18 @@ impl Editor {
             self.accept_emoji(cx);
             return;
         }
+        self.submit(cx);
+    }
+
+    /// Put what the field holds on the wire, with no key behind it (#3092).
+    ///
+    /// The chord ends a take and the words land a few hundred milliseconds
+    /// later, on a timer, with no key event in sight. Sending from there needs
+    /// no frame: `EditorEvent::Sent` is a plain notification its subscribers
+    /// read with `cx` alone, and nothing in the body below ever touched the
+    /// window. So the emoji branch stays in `send`, where the key belongs, and
+    /// everything that builds a payload lives here, where a tick can reach it.
+    fn submit(&mut self, cx: &mut Context<Self>) {
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
@@ -1788,6 +1879,9 @@ impl Editor {
         // empties the field must not leave a voice message behind to ride the
         // next one.
         self.voice_draft = None;
+        // The intent dies with the message it was for (#3092): a flag left
+        // standing here would send the next take the moment it lands.
+        self.voice_send_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -1815,6 +1909,11 @@ impl Editor {
         // A reply belongs to the conversation it was opened in, so leaving
         // that conversation drops the chip with the draft (#2827).
         self.reply = None;
+        // A press that meant to send into the old conversation must not send
+        // into the new one (#3092): a take still being transcribed when the
+        // person switched would otherwise land as a message in a room they
+        // never meant to speak in.
+        self.voice_send_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -2009,7 +2108,7 @@ impl Editor {
         if ev.keystroke.key == "escape" && self.voice_phase() == VoicePhase::Recording {
             window.prevent_default();
             cx.stop_propagation();
-            self.toggle_dictation(cx);
+            self.toggle_dictation(TakeEnd::Park, cx);
             return;
         }
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {
@@ -3357,7 +3456,7 @@ fn mic(phase: VoicePhase, cx: &mut Context<Editor>) -> impl IntoElement {
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
-                this.toggle_dictation(cx);
+                this.toggle_dictation(TakeEnd::Park, cx);
             }),
         )
 }
@@ -3398,7 +3497,7 @@ fn voice_block(
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
-                this.toggle_dictation(cx);
+                this.toggle_dictation(TakeEnd::Park, cx);
             }),
         )
         .child(gpui::img(block.frame(cx)).absolute().inset_0().size_full())
@@ -5149,7 +5248,7 @@ mod tests {
             "the width the row gave the block never reaches the worker"
         );
         assert!(
-            body.contains("this.toggle_dictation(cx)"),
+            body.contains("this.toggle_dictation(TakeEnd::Park, cx)"),
             "the glass draws a stop it cannot honour"
         );
         // Assembled rather than written out, so the assertion cannot match

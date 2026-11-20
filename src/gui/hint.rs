@@ -22,10 +22,12 @@ use crate::palette;
 ///
 /// The configured case names the chord and what the same key does on the
 /// second press, because a person who hovers before recording is asking two
-/// things: how do I start, and how do I stop.
+/// things: how do I start, and how do I finish. The finish is a send since
+/// #3092: the chord is the fast path, and a key that only stopped the take
+/// left the words waiting for Enter.
 pub(crate) fn mic_line() -> SharedString {
     if composer_view::voice_ready() {
-        SharedString::from("ctrl+alt+r · record a message, same key to stop")
+        SharedString::from("ctrl+alt+r · record a message, same key to send")
     } else {
         SharedString::from("/voice sets up the microphone")
     }

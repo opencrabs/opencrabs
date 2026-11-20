@@ -709,9 +709,13 @@ impl Dashboard {
                 // job to the field the keyboard owns, the same call the
                 // control's click and the chord make (#3044). The card is
                 // already closed and the caret already aimed back at that
-                // field by the time this runs.
+                // field by the time this runs. The row parks rather than sends
+                // (#3092): a query is worth reading before it runs, and Enter
+                // is right there under the caret.
                 let composer = self.composer_entity(cx);
-                composer.update(cx, |editor, cx| editor.toggle_dictation(cx));
+                composer.update(cx, |editor, cx| {
+                    editor.toggle_dictation(crate::editor::TakeEnd::Park, cx)
+                });
                 cx.notify();
             }
             PaletteAction::OpenDocs(path) => {

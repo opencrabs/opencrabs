@@ -377,7 +377,7 @@ fn the_block_is_the_thing_that_stops_it() {
         "the counter says how long, which a red mark alone never does"
     );
     assert!(
-        block.contains("this.toggle_dictation(cx)"),
+        block.contains("this.toggle_dictation(TakeEnd::Park, cx)"),
         "a surface that draws a stop and answers nothing is worse than none"
     );
     assert!(
@@ -420,8 +420,8 @@ fn escape_ends_a_recording_before_anything_else() {
         keys[recording..]
             .split("return;")
             .next()
-            .is_some_and(|arm| arm.contains("self.toggle_dictation(cx)")),
-        "the same toggle that started the recording ends it, click or key"
+            .is_some_and(|arm| arm.contains("self.toggle_dictation(TakeEnd::Park, cx)")),
+        "the same toggle that started the recording ends it, and escape parks rather than sends"
     );
 }
 
@@ -475,5 +475,78 @@ fn the_glass_carries_the_phase_colour() {
     assert!(
         view.contains("orb.update(recording, &self.seeker_voice_levels, colour)"),
         "the colour reaches the material, so nothing has to be drawn over the glass"
+    );
+}
+
+/// The chord sends, and the microphone opening silences the speaker (#3092).
+///
+/// Two promises ride on the same gesture, and both are read from source
+/// because the window has no headless harness. The first is speed: pressing the
+/// chord a second time puts the take on the wire instead of parking it in the
+/// preview, which is what makes dictation usable without reaching for Enter.
+/// The second is that the take is clean: a reply still sounding when the
+/// device opens would be recorded under the person's voice, so playback ends
+/// before the capture starts, on the composer and on the Seeker's own row.
+#[test]
+fn the_chord_sends_and_the_microphone_silences_the_speaker() {
+    let chord = editor("fn toggle_voice(", "pub(crate) fn toggle_dictation(");
+    assert!(
+        chord.contains("self.toggle_dictation(TakeEnd::Send, cx)"),
+        "the chord is the fast path: it asks for a send, not a park"
+    );
+    // Order matters more than presence here: a silence after the device is
+    // open would cut a reply the take has already recorded.
+    let open = editor("pub(crate) fn toggle_dictation(", "fn pump_voice(");
+    let silenced = open
+        .find("crate::voice_play::silence()")
+        .expect("the composer silences playback when the take opens");
+    let started = open
+        .find("voice_input::Capture::start()")
+        .expect("the composer opens the device");
+    assert!(
+        silenced < started,
+        "the speaker steps aside before the microphone is open, never after"
+    );
+    let seeker = region_in(FINDER, "pub(crate) fn seeker_dictate(", "\n    }\n");
+    let quiet = seeker
+        .find("crate::voice_play::silence()")
+        .expect("the Seeker's row silences playback too");
+    let opens = seeker
+        .find("voice_input::Capture::start()")
+        .expect("the Seeker's row opens the device");
+    assert!(
+        quiet < opens,
+        "the same order on the card: quiet first, then listen"
+    );
+}
+
+/// The intent outlives the press, and dies everywhere a take can end (#3092).
+///
+/// The stop and the words are two worker threads apart, so the decision is
+/// written down and spent later. Spending it exactly once is what keeps a
+/// single press from sending twice, and clearing it on every other way out is
+/// what keeps it from arming the next take: a device that failed, a field that
+/// was emptied, and a conversation that was left are all ends without a send.
+#[test]
+fn the_send_intent_is_spent_once_and_cleared_everywhere_else() {
+    let landing = editor("fn land_voice(", "fn discard_voice(");
+    assert!(
+        landing.contains("if send {") && landing.contains("self.submit(cx)"),
+        "the take is parked and then sent through the one send path"
+    );
+    let poll = editor("fn poll_voice(", "fn land_voice(");
+    assert!(
+        poll.contains("std::mem::take(&mut self.voice_send_on_land)"),
+        "the intent is taken, so a second tick cannot send the same words again"
+    );
+    let clear = editor("fn clear_after_send(", "pub fn begin_conversation(");
+    assert!(
+        clear.contains("self.voice_send_on_land = false"),
+        "an emptied field carries no intent into the next message"
+    );
+    let switch = editor("pub fn begin_conversation(", "pub fn ");
+    assert!(
+        switch.contains("self.voice_send_on_land = false"),
+        "leaving the conversation drops the press with the draft"
     );
 }
