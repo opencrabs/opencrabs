@@ -98,18 +98,25 @@ able to freeze a window, so a probe that times out is `Down`, not a hang.
 
 ## Tests
 
-The three layers are testable without a window and without a network:
+The three layers are testable without a window and without a network. Note
+which crate each filter belongs to: `src/gui/` is a **binary** (`path =
+"src/gui/main.rs"`), not part of the library, so its tests need `--bin`, and
+the module path starts at the crate root (`tests::…`, not `gui::tests::…`).
 
 ```
-cargo test --profile ci --lib remote::instance_store
-cargo test --profile ci --lib remote::instance_client
-cargo test --profile ci --lib gui::instances
-cargo test --profile ci --lib gui::tests::instances
-cargo test --profile ci --lib a2a::handler::sessions
+# library
+cargo test --locked --profile ci --lib remote::instance_store
+cargo test --locked --profile ci --lib remote::instance_client
+cargo test --locked --profile ci --lib a2a::handler::sessions
+
+# window binary
+cargo test --locked --profile ci --features gui --bin opencrabs-gui tests::instances
 ```
 
 These are the exact filters the fork's GUI workflow runs before it links a
-binary, so a red test names its module instead of the window.
+binary, so a red test names its module instead of the window. A `--lib` filter
+that matches nothing exits 0 and proves nothing, which is why the window tests
+are pinned to the binary.
 
 ## Known limits
 
