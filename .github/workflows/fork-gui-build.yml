@@ -1,0 +1,63 @@
+name: Fork GUI build (linux-amd64)
+
+# Fork-only. Builds the Linux desktop client on a hosted runner so a laptop
+# that cannot hold the rustc of this crate in RAM does not have to. Lives on
+# `build/**` branches of the fork and never reaches upstream main.
+
+on:
+  push:
+    branches: ['build/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-gui-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: opencrabs-gui (linux-amd64)
+    if: github.repository != 'opencrabs/opencrabs'
+    # Pinned for the glibc floor (2.39), same reason as prerelease.yml (#2206).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Build daemon
+        run: cargo build --locked --profile ci --bin opencrabs
+
+      - name: Build GUI
+        run: cargo build --locked --profile ci --features gui --bin opencrabs-gui
+
+      - name: Record what was built
+        run: |
+          git rev-parse HEAD > target/ci/SOURCE-COMMIT.txt
+          sha256sum target/ci/opencrabs target/ci/opencrabs-gui | tee target/ci/opencrabs-gui.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opencrabs-linux-amd64
+          path: |
+            target/ci/opencrabs
+            target/ci/opencrabs-gui
+            target/ci/opencrabs-gui.sha256
+            target/ci/SOURCE-COMMIT.txt
+          retention-days: 7
