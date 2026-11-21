@@ -24,6 +24,12 @@ fn the_bar_reads_the_plan_strips_state() {
 
 /// It goes above the transcript: a bar under it would scroll away, which is
 /// exactly the problem it exists to fix.
+///
+/// The anchor is the line that adds the conversation to the session surface.
+/// It used to be `right = right.child(middle);`; the remote panel turned the
+/// column into an `AnyElement` and the conversation moved into the chat arm, so
+/// the old anchor matched nothing and this test failed on a tree that was
+/// correct (measured 21 Nov 2026, run 44927789600).
 #[test]
 fn the_bar_is_added_before_the_transcript() {
     let source = include_str!("../dashboard_render.rs");
@@ -31,26 +37,40 @@ fn the_bar_is_added_before_the_transcript() {
         .find("self.work_line()")
         .expect("the render asks for the work line");
     let middle = source
-        .find("right = right.child(middle);")
+        .find("session = session.child(middle);")
         .expect("the chat column is built");
     assert!(bar < middle, "the bar is added before the transcript");
 }
 
 /// It is a chat-screen fact: the other screens keep their own chrome.
+///
+/// Read line by line instead of from a character window: the bar sits deep
+/// inside the `Screen::Chat` arm, far more than the 400 characters the old
+/// window covered, and a window that short would pass for the wrong reason the
+/// moment the arm grew. The arm the line sits in is what the assertion names.
 #[test]
 fn the_bar_is_gated_on_the_chat_screen() {
     let source = include_str!("../dashboard_render.rs");
-    let call = source
-        .split("self.work_line()")
-        .next()
-        .expect("the render asks for the work line");
-    // Windowed by characters, not bytes: a byte slice can land mid-character
-    // and the byte-slice ratchet gate rejects it. This only needs the 400
-    // characters before the call site.
-    let skip = call.chars().count().saturating_sub(400);
-    let window: String = call.chars().skip(skip).collect();
-    assert!(
-        window.contains("self.screen == Screen::Chat"),
-        "the bar belongs to the chat screen"
+    let mut arm: Option<String> = None;
+    let mut found: Option<String> = None;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Screen::")
+            && let Some(name) = rest.split_whitespace().next()
+        {
+            arm = Some(
+                name.trim_end_matches(|c: char| matches!(c, '=' | ',' | '{' | ' '))
+                    .to_string(),
+            );
+        }
+        if trimmed.contains("self.work_line()") {
+            found = arm.clone();
+            break;
+        }
+    }
+    assert_eq!(
+        found.as_deref(),
+        Some("Chat"),
+        "the bar belongs to the chat screen, and it was found under {found:?}"
     );
 }
