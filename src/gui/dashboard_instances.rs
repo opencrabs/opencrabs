@@ -243,14 +243,12 @@ impl Dashboard {
                     // over one starts a fresh mark instead of appending to the
                     // name, which would store a string that is neither a mark
                     // nor a picture.
-                    if self
+                    let starts_fresh = self
                         .instance_glyph
                         .as_ref()
-                        .is_some_and(|f| glyph_is_picture(f.field.text()))
-                    {
-                        if let Some(form) = self.instance_glyph.as_mut() {
-                            form.field = text_field::TextField::new();
-                        }
+                        .is_some_and(|f| glyph_is_picture(f.field.text()));
+                    if starts_fresh && let Some(form) = self.instance_glyph.as_mut() {
+                        form.field = text_field::TextField::new();
                     }
                     // The cap is the field's, so a third character is simply
                     // not accepted: no message, nothing typed that will be cut.
@@ -258,10 +256,8 @@ impl Dashboard {
                         .instance_glyph
                         .as_ref()
                         .is_some_and(|f| f.field.text().chars().count() < GLYPH_MAX_CHARS);
-                    if room {
-                        if let Some(form) = self.instance_glyph.as_mut() {
-                            form.field.insert_text(&ch.to_string());
-                        }
+                    if room && let Some(form) = self.instance_glyph.as_mut() {
+                        form.field.insert_text(&ch.to_string());
                         cx.notify();
                     }
                 }
