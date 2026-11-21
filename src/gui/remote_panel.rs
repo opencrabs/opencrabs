@@ -329,18 +329,18 @@ pub(crate) fn view(
                 .child(SharedString::from("escreve para este crab…")),
         );
     } else {
-        line = line.child(div().child(SharedString::from(before)));
+        line = line.child(div().child(SharedString::from(before.to_string())));
     }
     if !selected.is_empty() {
         line = line.child(
             div()
                 .bg(rgb(p.selection))
-                .child(SharedString::from(selected)),
+                .child(SharedString::from(selected.to_string())),
         );
     }
     line = line.child(caret);
     if !empty {
-        line = line.child(div().child(SharedString::from(after)));
+        line = line.child(div().child(SharedString::from(after.to_string())));
     }
 
     let field = div()
