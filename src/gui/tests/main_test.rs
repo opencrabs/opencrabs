@@ -2162,7 +2162,9 @@ fn the_card_says_what_the_screen_is_asking_for() {
         "the list outranks the offer, because it owns the keys"
     );
 
-    // A split pick reads the same keys for a different promise.
+    // A split pick reads the same keys for a different promise, and it ends on
+    // the line the shared hint carries, not on the shorter one it replaced
+    // (#3124): the card draws `task_line_hint` verbatim.
     let split = card_line(&HintState {
         rail_focused: true,
         rail_split: true,
@@ -2170,7 +2172,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
     })
     .expect("a split pick");
     assert_eq!(
-        split, "type to find · enter splits · esc cancels",
+        split, "type to find · enter splits · esc cancels · yes, you can have two",
         "one word apart is the difference between a shortcut and a surprise"
     );
 
