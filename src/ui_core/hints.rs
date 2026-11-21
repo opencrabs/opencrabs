@@ -292,10 +292,15 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         });
     }
 
+    // The old line named this app's own split, a frontend and a backend, which
+    // is a fact about our build rather than about the reader's work: nobody
+    // could act on it, and it read as trivia about our architecture (#3124).
+    // The jobs are the reader's now, and the last beat is the joke: the point
+    // of separate agents is that one crab keeps them straight.
     if state.turns >= ISOLATION_TIP_TURNS {
         hints.push(Hint {
             id: "isolated-sessions",
-            text: "interesting fact: every session is its own agent · one for frontend, one for backend"
+            text: "every session is its own agent · triage, devops, core, one each · you cannot keep three tabs straight"
                 .to_string(),
             command: "",
         });
