@@ -218,6 +218,30 @@ pub fn strip_label(label: &str) -> String {
     out
 }
 
+/// How many distinct washes a badge can wear. Six is what a column of badges
+/// shows without two neighbours reading the same at a glance.
+pub const BADGE_TINTS: usize = 6;
+
+/// A stable colour slot for a crab, from its `host_id`.
+///
+/// FNV-1a, because it is four lines and it never moves: the same crab is the
+/// same colour across runs, restarts and machines, which is the whole point.
+/// The finaliser is not decoration: FNV's low bits are weak, and `hash % 6` on
+/// the raw value put six different ids in the same slot in the first draft. The
+/// multiply-xor step spreads them before the modulo. Nothing here knows a
+/// palette; the slot is what the strip maps to a hue.
+pub fn badge_tint(host_id: &str) -> usize {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in host_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    (hash % BADGE_TINTS as u64) as usize
+}
+
 /// "last seen" in the panel, from a pair of unix timestamps.
 pub fn age_label(now: u64, ts: u64) -> String {
     if ts == 0 {

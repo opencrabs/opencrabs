@@ -136,3 +136,40 @@ fn badge_title_names_the_state() {
         .contains("por verificar")
     );
 }
+
+#[test]
+fn badge_tint_is_stable_and_bounded() {
+    // Same id, same slot, every run and every machine: the strip's colour is a
+    // property of the crab, not of this boot.
+    assert_eq!(badge_tint("lenovo:4f2a"), badge_tint("lenovo:4f2a"));
+    for id in [
+        "a:1",
+        "",
+        "lenovo:4f2a",
+        "máquina do norte",
+        "192.168.1.114",
+    ] {
+        assert!(badge_tint(id) < BADGE_TINTS, "slot out of range for {id:?}");
+    }
+}
+
+#[test]
+fn badge_tint_does_not_collapse_a_realistic_column() {
+    // The first draft hashed with plain FNV and `% 6`, which is where this
+    // test comes from: five different ids landed in slot 5, so a column of
+    // crabs wore one colour. Four distinct slots over six ids is the floor.
+    let ids = [
+        "pc-do-daniel",
+        "lenovo",
+        "mac",
+        "server i7",
+        "thinkpad",
+        "192.168.1.114",
+    ];
+    let slots: std::collections::BTreeSet<usize> = ids.iter().map(|id| badge_tint(id)).collect();
+    assert!(
+        slots.len() >= 4,
+        "tints collapsed to {} slots: {slots:?}",
+        slots.len()
+    );
+}
