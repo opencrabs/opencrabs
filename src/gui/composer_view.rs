@@ -162,7 +162,8 @@ pub(crate) fn options_strip(
                 })
                 // The answer's body size, not the small print (#3124): an
                 // offer is the one control on screen that wants a click, and
-                // at `text_xs` it read smaller than the words above it.
+                // at the small print size it read smaller than the words above
+                // it.
                 .text_size(px(transcript::PLAIN_TEXT_SIZE))
                 .text_color(rgb(ink))
                 .cursor_pointer()

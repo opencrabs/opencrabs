@@ -114,7 +114,7 @@ fn the_rail_names_its_own_keys_and_silences_the_rest() {
     })
     .expect("the rail always has something to say");
     assert_eq!(
-        filtering, "type to filter · enter opens · esc back",
+        filtering, "type to filter · enter opens · esc back · the list will not read itself",
         "the list owns the keys, so its keys are the card"
     );
 
@@ -127,7 +127,7 @@ fn the_rail_names_its_own_keys_and_silences_the_rest() {
     })
     .expect("a split pick");
     assert_eq!(
-        splitting, "type to find · enter splits · esc cancels",
+        splitting, "type to find · enter splits · esc cancels · yes, you can have two",
         "one word apart is the difference between a shortcut and a surprise"
     );
 }
