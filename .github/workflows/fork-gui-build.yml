@@ -83,31 +83,51 @@ jobs:
       # `--locked` stays on: the bin's test build must honour the same lockfile
       # the released binary does, or the test proves a dependency graph nobody
       # ships.
-      # `mod tests;` sits at the ROOT of the bin crate (`src/gui/main.rs`), so the
-      # test paths are `tests::instances_test::…`, not `gui::tests::…`. The filter
-      # below catches both `instances_test` and `instances_wiring_test`, and both
-      # are named explicitly so neither can be dropped by a rename unnoticed.
-      - name: Test the instance modules (window)
+      #
+      # `mod tests;` sits at the ROOT of the bin crate (`src/gui/main.rs`), so
+      # the test paths are `tests::<module>::…`, not `gui::tests::…`.
+      #
+      # This step used to name two modules by hand. That is a step that goes
+      # green while every module added after it runs nowhere: `instance_glyph_test`
+      # and `share_address_test` both landed in this batch and neither was in
+      # the list. The list is now READ from `src/gui/tests/mod.rs`, so a new
+      # module is covered by the act of declaring it, and a module that declares
+      # no tests is a hard failure instead of a silent pass (the same
+      # zero-match tripwire as the library slice above).
+      - name: Test every window test module
         run: |
+          # One build for the whole suite: 13 modules, one link.
+          cargo test --locked --profile ci --features gui \
+            --bin opencrabs-gui --no-run
+
+          # Every `mod x;` in the test tree must name at least one test that the
+          # harness can see. `--list` runs nothing; it prints the inventory.
+          cargo test --locked --profile ci --features gui \
+            --bin opencrabs-gui -- --list > /tmp/window-tests.txt 2>&1 || {
+              echo "::error::the window test binary will not list its tests"
+              tail -25 /tmp/window-tests.txt
+              exit 1
+            }
+
           status=0
-          for m in tests::instances_test tests::instances_wiring_test; do
-            set +e
-            out=$(cargo test --locked --profile ci --features gui \
-                    --bin opencrabs-gui -- "$m" 2>&1)
-            rc=$?
-            set -e
-            n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
-            if [ $rc -ne 0 ]; then
-              echo "::error::window rail slice FAILS (rc=$rc): $m"
-              printf '%s\n' "$out" | tail -25
+          n_mods=0
+          for m in $(sed -n 's/^mod \([a-z0-9_]*\);/\1/p' src/gui/tests/mod.rs); do
+            n_mods=$((n_mods + 1))
+            if ! grep -q "^tests::${m}::" /tmp/window-tests.txt; then
+              echo "::error::window module ZERO-MATCH: tests::${m} declares no tests (renamed? gated out?)"
               status=1
-            elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
-              echo "::error::window rail slice ZERO-MATCH: $m names no tests (renamed?)"
-              status=1
-            else
-              echo "window rail slice PASS: $m ($n tests)"
             fi
           done
+          if [ "$n_mods" -eq 0 ]; then
+            echo "::error::no test modules were found in src/gui/tests/mod.rs; the sed no longer matches the file"
+            exit 1
+          fi
+          echo "window modules found: $n_mods"
+
+          # Now run them. `tests::` is the whole window suite, which is the
+          # point: a green run that skipped a module is the bug this replaces.
+          cargo test --locked --profile ci --features gui \
+            --bin opencrabs-gui -- tests::
           exit $status
 
       - name: Build daemon
