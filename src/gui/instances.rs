@@ -232,15 +232,33 @@ pub const BADGE_TINTS: usize = 6;
 /// text size; a third pushes the pair off centre.
 pub const GLYPH_MAX_CHARS: usize = 2;
 
+/// Whether a mark is a stored picture name rather than characters to draw.
+///
+/// A crab's mark and a topic's icon are the same pick: the topic pack's names
+/// (`topic:<name>`) and a custom image's (`img:<file>`). Both are long strings
+/// on purpose, and both mean "draw this picture" to the badge.
+pub fn glyph_is_picture(glyph: &str) -> bool {
+    let glyph = glyph.trim();
+    glyph.starts_with(crate::topic_icons::TOPIC_PREFIX)
+        || glyph.starts_with(crate::topic_icons::IMG_PREFIX)
+}
+
 /// Clean what the owner typed into a badge mark.
 ///
 /// `None` means "nothing usable, derive it": the field was left empty, or what
-/// is in it is whitespace. Two characters is the cap, because the circle is
+/// is in it is whitespace. Two characters is the cap, because the square is
 /// 32 px and the badge's text size is fixed; the caller never has to think
 /// about that, and a paste of a whole word cannot break the strip.
+///
+/// A picture name passes through whole. It is not a mark the square has to
+/// hold: it is a file the badge draws, and cutting `topic:crab_code` at two
+/// characters would store `to` and paint nothing at all.
 pub fn normalise_glyph(raw: &str) -> Option<String> {
-    let mut cleaned: String = raw
-        .trim()
+    let trimmed = raw.trim();
+    if glyph_is_picture(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    let mut cleaned: String = trimmed
         .chars()
         .filter(|c| !c.is_whitespace() && !c.is_control())
         .take(GLYPH_MAX_CHARS)

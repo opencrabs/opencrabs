@@ -18,9 +18,10 @@
 
 use super::*;
 use crate::instance_strip::{self, StripFrame};
-use crate::instances::{GLYPH_MAX_CHARS, Health, Instances, normalise_glyph};
+use crate::instances::{GLYPH_MAX_CHARS, Health, Instances, glyph_is_picture, normalise_glyph};
 use crate::menu;
 use crate::remote_panel::{self, RemotePanelFrame};
+use crate::topic_icons;
 use crate::transcript;
 use gpui::ScrollHandle;
 use opencrabs::config::Config;
@@ -159,10 +160,34 @@ impl Dashboard {
             return;
         };
         let glyph = normalise_glyph(form.field.text());
+        self.instance_glyph_write(&form.host_id, glyph, cx);
+    }
+
+    /// Apply one picture from the grid as the crab's mark.
+    ///
+    /// A pick is the whole act, the way it is in the topic prompt: the owner
+    /// clicks a picture and the badge wears it. A grid that only moved the
+    /// preview and waited for a second click is the two-step that made this
+    /// feel unlike the topics (#3133).
+    pub(crate) fn instance_glyph_pick(&mut self, stored: String, cx: &mut Context<Self>) {
+        let Some(form) = self.instance_glyph.clone() else {
+            return;
+        };
+        self.instance_glyph_write(&form.host_id, Some(stored), cx);
+    }
+
+    /// The one write both paths take: store first, then the strip's model, and
+    /// the modal only closes once the disk took it.
+    fn instance_glyph_write(
+        &mut self,
+        host_id: &str,
+        glyph: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let store = InstanceStore::new(InstanceStore::default_path());
-        match store.find(&form.host_id) {
+        match store.find(host_id) {
             Ok(Some(mut known)) => {
-                known.glyph = glyph.clone();
+                known.glyph = glyph;
                 if let Err(e) = store.upsert(known.clone()) {
                     self.instance_error = Some(SharedString::from(format!("ícone: {e:#}")));
                     cx.notify();
@@ -205,7 +230,28 @@ impl Dashboard {
                     self.apply_glyph_edit(edit, cx);
                     return true;
                 }
-                if let Some(ch) = ks.key.chars().next().filter(|c| !c.is_control()) {
+                // `key_char` and not `key`: the latter is the key's name, so a
+                // space would have inserted an "s". A space is whitespace and
+                // the mark never keeps one, so it is dropped whole.
+                let typed = if ks.key == "space" {
+                    None
+                } else {
+                    ks.key_char.as_ref().and_then(|s| s.chars().next())
+                };
+                if let Some(ch) = typed.filter(|c| !c.is_control()) {
+                    // A picture mark is a stored name, not characters. Typing
+                    // over one starts a fresh mark instead of appending to the
+                    // name, which would store a string that is neither a mark
+                    // nor a picture.
+                    if self
+                        .instance_glyph
+                        .as_ref()
+                        .is_some_and(|f| glyph_is_picture(f.field.text()))
+                    {
+                        if let Some(form) = self.instance_glyph.as_mut() {
+                            form.field = text_field::TextField::new();
+                        }
+                    }
                     // The cap is the field's, so a third character is simply
                     // not accepted: no message, nothing typed that will be cut.
                     let room = self
@@ -719,6 +765,47 @@ impl Dashboard {
         let shown = palette::current();
         let (before, selected, after) = form.field.render_spans();
         let typed = form.field.text().chars().count();
+        // The badge previews what the field holds: a picture when the mark is
+        // one, the characters otherwise.
+        let preview: AnyElement = match normalise_glyph(form.field.text()) {
+            Some(mark) => match topic_icons::tab_icon(&mark, 1.5) {
+                Some(picture) => picture,
+                None => div()
+                    .text_size(rems(0.875))
+                    .text_color(rgb(shown.text_title))
+                    .child(SharedString::from(mark))
+                    .into_any_element(),
+            },
+            None => div()
+                .text_size(rems(0.875))
+                .text_color(rgb(shown.text_title))
+                .child(SharedString::from("?"))
+                .into_any_element(),
+        };
+        // The same pack the topic prompt shows (#3133): a crab's badge and a
+        // topic's tab wear one set, so picking here is picking there. A pick
+        // applies at once, which is what "igual aos topics" means.
+        let families: Vec<(&'static str, Vec<Stateful<Div>>)> = topic_icons::TOPIC_FAMILIES
+            .iter()
+            .map(|&(caption, prefix)| {
+                let cells: Vec<Stateful<Div>> = topic_icons::family_icons(prefix)
+                    .map(|(name, bytes)| {
+                        let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                            this.instance_glyph_pick(topic_icons::store_name(name), cx);
+                        });
+                        div()
+                            .id(SharedString::from(format!("instance-glyph-icon-{name}")))
+                            .p_1()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(palette::current().panel_hi)))
+                            .on_click(pick)
+                            .child(topic_icons::picture(bytes, 3.0))
+                    })
+                    .collect();
+                (caption, cells)
+            })
+            .collect();
         let submit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.instance_glyph_submit(cx);
         });
@@ -736,7 +823,7 @@ impl Dashboard {
                     .text_size(rems(0.6875))
                     .text_color(rgb(shown.text_faint))
                     .child(SharedString::from(format!(
-                        "o ícone de {} na coluna da esquerda (até {GLYPH_MAX_CHARS} caracteres, vazio volta à inicial)",
+                        "o ícone de {} na coluna da esquerda: uma letra (até {GLYPH_MAX_CHARS} caracteres, vazio volta à inicial) ou uma imagem abaixo",
                         form.label
                     ))),
             )
@@ -754,16 +841,11 @@ impl Dashboard {
                             .justify_center()
                             .w(rems(2.0))
                             .h(rems(2.0))
-                            .rounded_full()
+                            .rounded_md()
                             .bg(rgb(shown.panel_hi))
                             .border_1()
                             .border_color(rgb(shown.accent))
-                            .text_size(rems(0.875))
-                            .text_color(rgb(shown.text_title))
-                            .child(SharedString::from(
-                                normalise_glyph(&form.field.text().to_string())
-                                    .unwrap_or_else(|| "?".to_string()),
-                            )),
+                            .child(preview),
                     )
                     .child(
                         div()
@@ -804,6 +886,37 @@ impl Dashboard {
                             )
                             .child(SharedString::from(after.to_string())),
                     ),
+            )
+            // The pack, the same one the topic prompt shows (#3133). A pick
+            // applies at once: the modal closes with the mark written, which
+            // is what picking an icon in the topic prompt does.
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(shown.text_faint))
+                    .child(SharedString::from("ou escolhe uma imagem")),
+            )
+            .child(
+                div()
+                    .id("instance-glyph-grid")
+                    .max_h(rems(11.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(families.into_iter().map(|(caption, cells)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(rems(0.625))
+                                    .text_color(rgb(shown.text_faint))
+                                    .child(SharedString::from(caption)),
+                            )
+                            .child(div().flex().flex_row().flex_wrap().gap_1().children(cells))
+                    })),
             )
             .when(typed >= GLYPH_MAX_CHARS, |d| {
                 d.child(
@@ -860,7 +973,9 @@ impl Dashboard {
                 body,
                 footer: None,
                 width: 22.0 * self.rem,
-                max_height: 14.0 * self.rem,
+                // Tall enough for the two families the pack ships and the
+                // field above them; the grid scrolls past that (#3133).
+                max_height: 30.0 * self.rem,
             },
             dismiss,
         )
@@ -948,9 +1063,6 @@ impl Dashboard {
         let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.instance_disconnect(cx);
         });
-        // `text()` borrows the field, and the frame outlives this method: the
-        // copy is what makes the draft's bytes the frame's own.
-        let draft = SharedString::from(self.remote_draft.text().to_string());
         // Borrowed after the frame is built: `state` is not `Clone`, and cloning
         // 200 KB of rows per paint to satisfy a frame field would be a worse bug
         // than the divergence this panel is fixing. `None` when no session is
@@ -966,7 +1078,7 @@ impl Dashboard {
             self.rem,
             handlers,
             copy,
-            &draft,
+            &self.remote_draft,
             move |ev, window, app| send(ev, window, app),
             move |ev, window, app| close(ev, window, app),
         )

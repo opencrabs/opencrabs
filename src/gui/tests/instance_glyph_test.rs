@@ -121,3 +121,39 @@ fn a_mark_round_trips_through_the_store_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A picture mark is a stored name, not characters, and the two-character cap
+/// must not cut it.
+///
+/// The grid writes `topic:<name>` (or `img:<file>`) into the same field the
+/// owner types a letter in. Normalising that like a letter stored `to` and
+/// painted nothing, so the badge went back to the label's initial and the
+/// pick looked ignored (#3133).
+#[test]
+fn a_picture_mark_passes_through_whole() {
+    let stored = crate::topic_icons::store_name("crab_cli");
+    assert!(
+        stored.len() > GLYPH_MAX_CHARS,
+        "the name is longer than a mark"
+    );
+    assert_eq!(normalise_glyph(&stored), Some(stored.clone()));
+    assert!(glyph_is_picture(&stored));
+    assert!(glyph_is_picture("img:9f2c.png"));
+    assert!(!glyph_is_picture("L"));
+    assert!(!glyph_is_picture("🦀"));
+
+    // And it is what the badge draws, which is the whole point of storing it.
+    assert!(
+        crate::topic_icons::tab_icon(&stored, 1.24).is_some(),
+        "the badge must be able to resolve the stored name to a picture"
+    );
+}
+
+/// The entry's mark is the stored picture when there is one, and the label's
+/// initial when there is not.
+#[test]
+fn a_picture_mark_reaches_the_entry() {
+    let stored = crate::topic_icons::store_name("crab_cli");
+    assert_eq!(entry(Some(stored.as_str())).glyph(), stored);
+    assert_eq!(entry(None).glyph(), "L");
+}

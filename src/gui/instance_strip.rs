@@ -51,7 +51,7 @@ impl StripBadge {
     fn from_entry(entry: &InstanceEntry, now: u64) -> Self {
         Self {
             host_id: entry.host_id().to_string(),
-            // One initial, not a cut label: the badge is a circle and the full
+            // One initial, not a cut label: the badge is 32 px and the full
             // name lives in `title` below, where the hover can show it whole.
             label: SharedString::from(entry.glyph()),
             title: SharedString::from(badge_title(entry, now)),
@@ -126,13 +126,26 @@ impl InstanceStrip {
             .ok();
     }
 
-    /// The window's mark at the top of the column. It is not an instance and
-    /// never selects anything; it is there so the column has a head and the
-    /// badges below it read as a list rather than a floating stack.
+    /// Back to this window's own crab.
+    ///
+    /// The mark is the door out of a remote: it is where the column starts, so
+    /// a click on it means "eu", the same way the badges below mean "aquele".
+    /// Without it the only way back was Esc, which nobody could guess.
+    fn clear(&self, cx: &mut Context<Self>) {
+        let dashboard = self.dashboard.clone();
+        dashboard
+            .update(cx, |dash, cx| dash.instance_clear(cx))
+            .ok();
+    }
+
+    /// The window's mark at the top of the column. It is not an instance: it
+    /// selects nothing, and a click on it goes back to this machine's own crab.
+    /// It is there so the column has a head and the badges below it read as a
+    /// list rather than a floating stack.
     ///
     /// It is also the door to this machine: right-clicking it offers a pairing
     /// code for another crab, the pairing form, and this machine's settings.
-    fn workspace_mark(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn workspace_mark(&self, remote: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette::current();
         let ask = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
             let at = ev.position;
@@ -141,6 +154,7 @@ impl InstanceStrip {
                 .update(cx, |dash, cx| dash.instance_mark_menu(at, cx))
                 .ok();
         });
+        let home = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.clear(cx));
         div()
             .id("instance-workspace-mark")
             .flex()
@@ -149,11 +163,17 @@ impl InstanceStrip {
             .justify_center()
             .w(rems(BADGE_REM))
             .h(rems(1.75))
-            .rounded_full()
+            // A rounded square, like the rail's session marks and the topic
+            // tabs: the strip is part of the same chrome, and a circle in a
+            // column of squares read as a different widget (#3133).
+            .rounded_md()
             .bg(rgb(p.panel_hi))
             .border_1()
-            .border_color(rgb(p.track))
+            // While a remote is showing, the way home is the one thing on this
+            // column that is not the remote, so it wears the accent.
+            .border_color(rgb(if remote { p.accent } else { p.track }))
             .cursor_pointer()
+            .on_click(home)
             .on_mouse_down(MouseButton::Right, ask)
             .child(
                 div()
@@ -225,17 +245,15 @@ impl InstanceStrip {
                     .justify_center()
                     .w(rems(BADGE_REM))
                     .h(rems(BADGE_REM))
-                    .rounded_full()
+                    // A rounded square, the shape the rail's session marks and
+                    // the topic tabs wear. The column is the same chrome, and
+                    // a circle among squares read as a widget from another
+                    // window (#3133).
+                    .rounded_md()
                     .bg(rgb(wash))
                     .border_1()
                     .border_color(rgb(if selected { p.accent } else { ring }))
-                    .child(
-                        div()
-                            .text_size(rems(0.6875))
-                            .when(selected, |d| d.font_weight(gpui::FontWeight::BOLD))
-                            .text_color(rgb(text))
-                            .child(badge.label.clone()),
-                    ),
+                    .child(mark(badge, text, selected)),
             )
             // The dot is the only thing health changes, and it sits on the
             // badge's shoulder so it never widens the cell.
@@ -319,7 +337,7 @@ impl InstanceStrip {
         let p = palette::current();
         let selected = self.frame.selected.clone();
         let mut children: Vec<AnyElement> = Vec::with_capacity(self.frame.badges.len() + 3);
-        children.push(self.workspace_mark(cx));
+        children.push(self.workspace_mark(selected.is_some(), cx));
         children.push(div().h(rems(0.625)).into_any_element());
         for badge in &self.frame.badges {
             let is_selected = selected.as_deref() == Some(badge.host_id.as_str());
@@ -375,4 +393,23 @@ fn tint_hue(slot: usize, p: &palette::Palette) -> u32 {
         4 => p.accent,
         _ => p.red,
     }
+}
+
+/// What a badge draws: the owner's picture when the mark is one, the mark's
+/// characters otherwise.
+///
+/// A mark can be a letter, an emoji, or one of the embedded pictures the topic
+/// tabs pick from (`topic:`/`img:` names). Resolving it here, instead of
+/// storing two kinds of value, keeps one field in the store and one column on
+/// screen: a crab's icon and a topic's icon are the same pick (#3133).
+fn mark(badge: &StripBadge, text: u32, selected: bool) -> AnyElement {
+    if let Some(picture) = crate::topic_icons::tab_icon(&badge.label, BADGE_REM * 0.62) {
+        return picture;
+    }
+    div()
+        .text_size(rems(0.6875))
+        .when(selected, |d| d.font_weight(gpui::FontWeight::BOLD))
+        .text_color(rgb(text))
+        .child(badge.label.clone())
+        .into_any_element()
 }

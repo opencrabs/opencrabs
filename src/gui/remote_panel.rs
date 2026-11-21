@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use gpui::{
     AnyElement, App, ClickEvent, IntoElement, ScrollHandle, SharedString, Window, div, prelude::*,
-    rems, rgb,
+    px, rems, rgb,
 };
 
 use crate::instances::Health;
@@ -196,7 +196,9 @@ pub(crate) fn view(
     // can read a remote answer but not take it, which is half the interaction
     // a local answer offers (#2750).
     copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
-    draft: &SharedString,
+    // The field itself, not its text: the composer draws a caret from the
+    // spans, and a `SharedString` cannot say where the next character lands.
+    draft: &opencrabs::ui_core::text_field::TextField,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -303,51 +305,85 @@ pub(crate) fn view(
         }
     };
 
-    // The composer is one line and one button, and it names its destination so
-    // nobody mistakes it for the local composer.
-    let composer = div()
+    // The composer closes the panel the way the local one closes the chat:
+    // the same shell (glass fill, hairline border, the messages' radius, a
+    // one pixel divider above the hints) and a field that shows a caret. A
+    // remote that drew a plain box with a green button read as another
+    // product, which is what the owner called out (#3133).
+    let (before, selected, after) = draft.render_spans();
+    let empty = draft.is_empty();
+    // A caret of its own: the field is not a real text input, so without this
+    // bar there is no way to see where the next character lands.
+    let caret = div().flex_none().w(px(1.5)).h(rems(0.95)).bg(rgb(p.accent));
+    let mut line = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .w_full()
+        .min_w_0();
+    if empty {
+        line = line.child(
+            div()
+                .text_color(rgb(p.text_faint))
+                .child(SharedString::from("escreve para este crab…")),
+        );
+    } else {
+        line = line.child(div().child(SharedString::from(before)));
+    }
+    if !selected.is_empty() {
+        line = line.child(
+            div()
+                .bg(rgb(p.selection))
+                .child(SharedString::from(selected)),
+        );
+    }
+    line = line.child(caret);
+    if !empty {
+        line = line.child(div().child(SharedString::from(after)));
+    }
+
+    let field = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .px_3()
+        .py_2()
+        .text_size(rems(0.8125))
+        .text_color(rgb(p.text))
+        .child(line);
+
+    // The footer carries the two chords instead of a second button: Enter is
+    // the send, exactly as it is in the local composer, and Esc is the way
+    // back to this window's own crab.
+    let footer = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_2()
         .w_full()
-        .px_4()
-        .py_2()
-        .border_t_1()
-        .border_color(rgb(p.track))
+        .px_3()
+        .py_1()
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(p.track))
-                .text_size(rems(0.75))
-                .text_color(if draft.is_empty() {
-                    rgb(p.text_faint)
-                } else {
-                    rgb(p.text)
-                })
-                .child(if draft.is_empty() {
-                    SharedString::from("mensagem para este crab (Enter envia)")
-                } else {
-                    draft.clone()
-                }),
+                .flex_none()
+                .text_size(rems(0.625))
+                .text_color(rgb(p.text_faint))
+                .child(SharedString::from("enter envia · esc volta ao meu crab")),
         )
+        .child(div().flex_1())
         .child(
             div()
                 .id("remote-send")
                 .flex_none()
-                .px_3()
-                .py_1()
+                .px_2()
                 .rounded_md()
                 .when(frame.sending, |d| d.opacity(0.5))
                 .when(!frame.sending, |d| d.cursor_pointer())
-                .bg(rgb(p.accent))
-                .text_size(rems(0.75))
-                .text_color(rgb(p.bg))
+                .text_size(rems(0.625))
+                .text_color(rgb(p.accent))
+                .hover(|d| d.bg(rgb(p.panel_hi)))
                 .child(SharedString::from(if frame.sending {
                     "a enviar…"
                 } else {
@@ -355,6 +391,25 @@ pub(crate) fn view(
                 }))
                 .on_click(on_send),
         );
+
+    // No `w_full` here: the panel is a column, so the card stretches to it and
+    // the side margins inset it instead of pushing it past the edge.
+    let composer = div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .min_w_0()
+        .mx_4()
+        .mt_1()
+        .mb_2()
+        .bg(opencrabs::ui_core::card::glass_fill(p.panel))
+        .border_1()
+        .border_color(rgb(p.panel_hi))
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .overflow_hidden()
+        .child(field)
+        .child(div().w_full().h(px(1.)).bg(rgb(p.panel_hi)))
+        .child(footer);
 
     div()
         .flex()
