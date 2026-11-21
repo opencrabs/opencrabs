@@ -611,3 +611,27 @@ fn every_pairing_field_answers_the_mouse() {
          thing Tab does"
     );
 }
+
+#[test]
+fn the_card_copies_the_whole_pairing_in_one_click() {
+    // Reported 2026-11-21: "nao tenho opcao para copiar a configuracao, tem de
+    // ser algo facil de copiar idelamente copia tudo e tem de ser so colar e
+    // ele cola tudo". Copying one field at a time is a puzzle the user has to
+    // solve by hand: the paste target wants the whole block, so the button has
+    // to hand over the whole block.
+    let source = include_str!("../dashboard_instances.rs");
+    let body = fn_body(source, "pub(crate) fn instance_share_tunnel")
+        .expect("instance_share_tunnel is the card that shows the pairing");
+    assert!(
+        body.contains("instance-share-copy-all"),
+        "the card needs a control whose whole job is the one-click copy"
+    );
+    assert!(
+        body.contains("copy_all"),
+        "and the control must have a handler, or it paints a button that does nothing"
+    );
+    assert!(
+        !body.contains("instance-share-copy-token"),
+        "one button per field is the state the owner complained about"
+    );
+}

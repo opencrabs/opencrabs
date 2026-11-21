@@ -1856,6 +1856,34 @@ impl Dashboard {
                 )
                 .into_any_element(),
         );
+        // One click, one paste, whole pairing. The link is the only artefact
+        // that carries address, code and name together, and the far side fills
+        // all three from it (`PairingForm::absorb_link`), so the button that
+        // hands it over belongs next to the code: the granular copies sat at
+        // the bottom of a scrolling card and the owner never reached them
+        // (2026-11-21, Daniel: "tem de ser so colar e ele cola tudo").
+        let copy_all = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            if let Some(share) = this.instance_share.as_ref() {
+                cx.write_to_clipboard(ClipboardItem::new_string(share.link.clone()));
+            }
+        });
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(button("instance-share-copy-all", "copiar tudo", true).on_click(copy_all))
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(
+                            "cola no outro crab: preenche endereço, código e nome de uma vez",
+                        )),
+                )
+                .into_any_element(),
+        );
         if let Some(warning) = &share.warning {
             body.push(
                 div()
