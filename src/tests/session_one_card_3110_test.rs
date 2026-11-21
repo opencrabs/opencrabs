@@ -107,9 +107,7 @@ fn the_transcript_keeps_its_scroll_and_gives_up_the_clip() {
 #[test]
 fn the_composer_is_a_row_of_the_session() {
     assert!(
-        RENDER.contains(
-            "session = session.child(shell.child(dock.child(footer.into_any_element())));"
-        ),
+        RENDER.contains("dock.child(central(footer, centred_chat, chat_measure_px))"),
         "the composer joins the session surface"
     );
     assert!(
@@ -143,6 +141,15 @@ fn the_composer_is_a_row_of_the_session() {
 /// flush on three of the surface's edges is a card whose sides cannot be seen,
 /// so the field takes the full width of the ground. The gutter belongs to the
 /// cards that float ON the surface, never to the surface's own edge.
+///
+/// The exception is the SURFACE, not the words in it (#3114). Once the card ran
+/// edge to edge its rows measured their own inset from the PANE while every
+/// message measured the same inset from the MEASURE, so in a pane wider than the
+/// cap the field, the hints and the footer all sat one slack to the left of the
+/// conversation above them. The owner read it as the footer starting at the
+/// beginning of the background card, where no text ever starts. The rows go
+/// through `central` now: the card keeps the ground's width, its words keep the
+/// conversation's column.
 #[test]
 fn every_card_in_the_session_is_the_size_of_a_message() {
     let row = RENDER
@@ -178,16 +185,41 @@ fn every_card_in_the_session_is_the_size_of_a_message() {
     // called the gutter out as wrong for the field specifically, because a card
     // that sits flush on three edges is a card whose sides you cannot see. It
     // spans the surface now and the clip rounds its bottom corners.
-    let composer = RENDER
-        .find("session = session.child(shell.child(dock.child(footer.into_any_element())));")
-        .expect("the composer is a row of the session");
     let shell = RENDER
         .find("let mut shell = div()")
         .expect("the composer still builds a shell");
-    let tail = &RENDER[shell..composer];
+    let dock = RENDER
+        .find("let dock = div()")
+        .expect("the composer still builds a dock");
+    let tail = &RENDER[shell..dock];
     assert!(
         !tail.contains(".px_2()") && !tail.contains(".pb_2()"),
         "the composer is full-bleed, not a message-sized card: {tail}"
+    );
+    // The surface is full-bleed and the words in it are not (#3114): the field,
+    // the hint strip and the footer all take the conversation's measure, or
+    // their 24 is counted from the pane edge while a message's is counted from
+    // the measure and the two drift apart by the slack the cap leaves.
+    let end = RENDER
+        .find("_ => right.child(middle).child(footer)")
+        .expect("the other screens follow the chat arm");
+    let rows = &RENDER[dock..end];
+    assert!(
+        rows.contains(".child(central(composer, centred_chat, chat_measure_px))"),
+        "the field takes the conversation's column: {rows}"
+    );
+    assert!(
+        rows.contains("dock.child(central(footer, centred_chat, chat_measure_px))"),
+        "so does the footer under it: {rows}"
+    );
+    assert!(
+        rows.contains("hint_card(&line).into_any_element(),"),
+        "and the hint strip above it: {rows}"
+    );
+    assert_eq!(
+        rows.matches("central(").count(),
+        3,
+        "all three rows of the card are measured against the conversation: {rows}"
     );
 }
 

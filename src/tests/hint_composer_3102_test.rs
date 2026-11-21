@@ -292,7 +292,7 @@ fn the_card_sits_on_top_of_the_composer() {
         .find("let mut shell = div()")
         .expect("the card and the composer share one shell");
     let dock = render
-        .find(".child(dock.child(footer.into_any_element()))")
+        .find("dock.child(central(footer, centred_chat, chat_measure_px))")
         .expect("the composer card is what it rides on");
     assert!(
         stack < dock,

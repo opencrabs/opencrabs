@@ -217,8 +217,8 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         .get(..end)
         .expect("the chat column ends on a char boundary");
     for rule in [
-        ".child(composer)",
-        ".child(footer.into_any_element())",
+        ".child(central(composer, centred_chat, chat_measure_px))",
+        "central(footer, centred_chat, chat_measure_px)",
         ".border_t(px(1.))",
         ".bg(glass_fill(palette::current().panel))",
         ".gap_0()",

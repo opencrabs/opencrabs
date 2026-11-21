@@ -2027,9 +2027,16 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         !shell.contains(".rounded("),
         "the composer is a flat footer, so the shell carries no curve: {shell}"
     );
+    // The card is a child of that shell, and it takes the conversation's
+    // measure like the field under it (#3114): the card runs edge to edge, the
+    // words in it do not.
+    let card = render
+        .find("shell = shell.child(central(")
+        .expect("the card is a child of that shell, not a sibling floating over it");
+    let card = &render[card..card + 160];
     assert!(
-        render.contains("shell = shell.child(hint_card(&line));"),
-        "the card is a child of that shell, not a sibling floating over it"
+        card.contains("hint_card(&line).into_any_element(),"),
+        "the strip itself is what the shell holds: {card}"
     );
     // The dock lost the surface it used to paint (#2987): the shell above owns
     // it now, so there is exactly one card on screen.
@@ -2038,7 +2045,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         .nth(1)
         .expect("the composer dock is still built");
     let dock = dock
-        .split(".child(composer)")
+        .split(".child(central(composer, centred_chat, chat_measure_px))")
         .next()
         .expect("the dock still starts with the field");
     assert!(

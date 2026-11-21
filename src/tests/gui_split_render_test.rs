@@ -555,8 +555,9 @@ fn the_window_composer_stands_down_once_the_window_is_split() {
         "the window's composer sits inside the gate, still on the chat measure"
     );
     assert!(
-        gated.contains(".child(composer)"),
-        "and the dock holds the composer the swap chose"
+        gated.contains(".child(central(composer, centred_chat, chat_measure_px))"),
+        "and the dock holds the composer the swap chose, on the conversation's \
+         column (#3114)"
     );
     assert!(
         gated.contains(".editing_view(actions.as_ref())")

@@ -2561,11 +2561,20 @@ impl Render for Dashboard {
                         && let Some(sid) = self.chat_session
                         && let Some(area) = self.task_area(sid, &label, cx)
                     {
-                        above = above.child(session_row(
-                            area,
-                            centred_chat,
-                            chat_measure_px,
-                        ));
+                        // An open list is a card of the messages' size, so it
+                        // takes the strips' half-rem gutter. A closed list is
+                        // one bare line, like the hint strip and the footer, and
+                        // it already pads its own: handing it the gutter as well
+                        // put its right edge a second 8 in from the column every
+                        // other row ends on, which is the misalignment the owner
+                        // predicted for the detached-task row before he saw it
+                        // (#3114). `central` only centres and caps; it adds no
+                        // inset of its own.
+                        above = above.child(if self.tasks_open.contains(&sid) {
+                            session_row(area, centred_chat, chat_measure_px)
+                        } else {
+                            central(area, centred_chat, chat_measure_px)
+                        });
                         above_used = true;
                     }
                     // The strips take their room from the conversation before
@@ -2630,12 +2639,25 @@ impl Render for Dashboard {
                     // card is attached to the same surface (#3102): two boxes
                     // stacked flush would each round their own corners and
                     // leave a notch where they meet.
+                    //
+                    // The field itself takes the conversation's measure
+                    // (#3114). The dock is the ground's width, but the words
+                    // in it have to start where the words above them start,
+                    // and a pane wider than the measure puts the transcript's
+                    // column in from the edge by the slack the cap leaves. A
+                    // bare child of a full-width dock measured its own 24 from
+                    // the PANE edge instead, which is the notch the owner
+                    // photographed: the field, the hints and the footer all sat
+                    // one slack to the left of every message. `central` is the
+                    // same wrapper the plan card, the popups and the topic
+                    // strip already go through, and it is a no-op wherever the
+                    // transcript is not capped.
                     let dock = div()
                         .id("composer-dock")
                         .flex()
                         .flex_col()
                         .gap_0()
-                        .child(composer)
+                        .child(central(composer, centred_chat, chat_measure_px))
                         .child(
                             div()
                                 .w_full()
@@ -2668,7 +2690,15 @@ impl Render for Dashboard {
                         .border_color(rgb(palette::current().panel_hi))
                         .overflow_hidden();
                     if let Some(line) = self.task_card_line() {
-                        shell = shell.child(hint_card(&line));
+                        // On the conversation's column, like the field under it
+                        // (#3114): a full-width strip would keep its 24 on the
+                        // pane edge while the message text above it starts a
+                        // slack further in.
+                        shell = shell.child(central(
+                            hint_card(&line).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
                     }
                     // The composer closes the session as its last row, inside
                     // the same clip, edge to edge (#3110, #3112). It used to
@@ -2679,13 +2709,20 @@ impl Render for Dashboard {
                     // cannot see. Flat is the answer: no gutter, no radius of
                     // its own, and the session's clip supplies the two bottom
                     // corners.
-                    session = session.child(shell.child(dock.child(footer.into_any_element())));
-                    // The card takes the conversation's measure and centres as
-                    // a whole, so its own edges line up with the text instead
-                    // of the card being full width with the text inset (#2586).
-                    // `central` cannot do this job: its row is `flex_none`, so
-                    // a card that has to fill the height would collapse inside
-                    // it. This row grows, and the card is what it centres.
+                    //
+                    // The footer is the last row of the card and it takes the
+                    // conversation's column like the field above it (#3114):
+                    // the card runs edge to edge, its words do not.
+                    session = session.child(shell.child(
+                        dock.child(central(footer, centred_chat, chat_measure_px)),
+                    ));
+                    // The session card takes the conversation's measure and
+                    // centres as a whole, so its own edges line up with the
+                    // text instead of the card being full width with the text
+                    // inset (#2586). `central` cannot do this job: its row is
+                    // `flex_none`, so a card that has to fill the height would
+                    // collapse inside it. This row grows, and the card is what
+                    // it centres.
                     col = col.child(
                         div()
                             .flex()
