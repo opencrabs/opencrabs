@@ -1,13 +1,15 @@
 //! #3088 regression pins: unknown claude CLI event types are ignored quietly.
 //!
-//! CLI 2.1.325 started emitting `{"type":"command_lifecycle",...}` lines.
-//! `CliMessage` had a closed set of variants, so each one failed to parse and
-//! logged a WARN on every command. An unknown `type` must now land on
+//! Newer CLI builds emit event types this build does not know. `CliMessage`
+//! had a closed set of variants, so each unknown one failed to parse and
+//! logged a WARN per event. An unknown `type` must now land on
 //! `CliMessage::Unknown`, while a malformed known type must still fail.
 
 use crate::brain::provider::claude_cli::CliMessage;
 
-/// Real payload shape from a daemon log (2026-11-20, CLI 2.1.325).
+/// Shape reported in #3088. The variant name is the newest reported instance,
+/// not a measured one: on the host where this test was written the WARN fired
+/// with `tool_progress` (33 times, 2026-11-11/12).
 const COMMAND_LIFECYCLE: &str = r#"{"type":"command_lifecycle","command_uuid":"b160bddd-689a-47d9-905e-6573cfae6fd9","state":"started","uuid":"a2e66082-7d5b-4fa7-8d54-750d55c7f571","session_id":"ade7dbe2-30d2-4ed6-a5dd-4d44f1ad313f"}"#;
 
 #[test]
