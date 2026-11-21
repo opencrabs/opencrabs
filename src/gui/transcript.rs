@@ -7282,10 +7282,10 @@ mod tests {
         assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
         // The token is declared once and applied where a message is painted:
         // the settled bubble, the settled card and the live card that becomes
-        // it. Every other rounded surface in this file still reads
-        // CARD_RADIUS. Count on the production half only: this file includes
-        // itself, so the literals in this test would otherwise match
-        // themselves.
+        // it, and the session card that clips them all (#3110). Every other
+        // rounded surface in this file still reads CARD_RADIUS. Count on the
+        // production half only: this file includes itself, so the literals in
+        // this test would otherwise match themselves.
         let production = src
             .split("\n#[cfg(test)]\nmod tests")
             .next()
@@ -7296,8 +7296,8 @@ mod tests {
             .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
             .count();
         assert_eq!(
-            message_radius_uses, 3,
-            "the bubble, the settled card and the live card apply the message radius, found {message_radius_uses} uses"
+            message_radius_uses, 4,
+            "the bubble, the settled card, the live card and the session card apply the message radius, found {message_radius_uses} uses"
         );
         let settled = production
             .split("fn settled_card(")
