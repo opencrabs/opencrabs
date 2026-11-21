@@ -60,11 +60,17 @@ impl HintDismissalRepository {
                 // round trip: a read must never take a write lock just to find
                 // out what is hidden, and the table then stays the size of the
                 // tip list instead of the size of the history.
+                //
+                // The sweep is the closure's tail expression, so its
+                // `rusqlite::Result` is what pins the closure's error type.
+                // A trailing `Ok(())` after two `?` sites leaves that type
+                // uninferable, because rusqlite::Error has more than one
+                // `From` impl in scope (E0282/E0283), which is the same
+                // receipt as session_favorites.rs.
                 conn.execute(
                     "DELETE FROM hint_dismissals WHERE until_at <= strftime('%s', 'now')",
                     [],
-                )?;
-                Ok(())
+                )
             })
             .await
             .map_err(interact_err)?
@@ -97,28 +103,6 @@ impl HintDismissalRepository {
             .await
             .map_err(interact_err)?
             .context("Failed to read hint dismissals")
-    }
-
-    /// Drop every row whose window has passed, reporting how many went.
-    ///
-    /// [`dismiss`](Self::dismiss) already sweeps inside its own round trip, so
-    /// no caller needs this to keep the table small. It exists for a caller
-    /// that wants the sweep on its own, and it stays a write: a read must never
-    /// take a write lock just to find out what is hidden.
-    pub async fn clear_expired(&self) -> Result<usize> {
-        self.pool
-            .get()
-            .await
-            .context("Failed to get connection")?
-            .interact(move |conn| {
-                conn.execute(
-                    "DELETE FROM hint_dismissals WHERE until_at <= strftime('%s', 'now')",
-                    [],
-                )
-            })
-            .await
-            .map_err(interact_err)?
-            .context("Failed to sweep hint dismissals")
     }
 }
 
