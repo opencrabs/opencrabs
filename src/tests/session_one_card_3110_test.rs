@@ -21,8 +21,6 @@
 const RENDER: &str = include_str!("../gui/dashboard_render.rs");
 /// The transcript, which owns the history's own scroll.
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
-/// One pane of a split, which is the session surface in that arrangement.
-const PANE: &str = include_str!("../gui/pane_view.rs");
 
 /// The block that builds the session surface, from its first line to the end of
 /// the chain that paints it.
