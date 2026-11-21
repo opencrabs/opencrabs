@@ -457,3 +457,69 @@ fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
         .unwrap_or(rest.len());
     Some(&rest[..end])
 }
+#[test]
+fn the_workspace_mark_is_the_way_home() {
+    // The owner's report: clicking the mark did nothing, and the only way back
+    // to his own crab was toggling a badge off. The mark carried a right-click
+    // menu and no left click at all, so the one control that names "my crab"
+    // was the one that could not select it (#3133). A source test is the right
+    // shape here: the wiring is a gpui listener, and what can regress is the
+    // listener going away while the element still paints.
+    let source = include_str!("../instance_strip.rs");
+    let body =
+        fn_body(source, "fn workspace_mark").expect("workspace_mark is the mark the owner clicks");
+    assert!(
+        body.contains(".on_click(home)"),
+        "the mark must answer a left click: it is the only way home from a \
+         remote crab, and a right-click menu cannot be discovered"
+    );
+    assert!(
+        body.contains("this.clear(cx)"),
+        "the click handler must clear the remote, which is what selects this \
+         machine's own crab again"
+    );
+}
+
+#[test]
+fn clearing_the_remote_keeps_the_pairing() {
+    // Two different acts share a neighbourhood here and must never share a
+    // control: `clear` closes the view and returns home, `instance_remove`
+    // forgets the crab (and costs a fresh code to get back). The mark is the
+    // first one only.
+    let source = include_str!("../instance_strip.rs");
+    let body = fn_body(source, "fn clear").expect("clear is the mark's handler");
+    assert!(
+        body.contains("instance_clear"),
+        "closing the view must go through instance_clear, which keeps the \
+         pairing: forgetting lives in the badge's right-click menu"
+    );
+    assert!(
+        !body.contains("instance_remove"),
+        "the way home must never forget the crab: a code is a fresh round trip \
+         to the other machine"
+    );
+}
+
+#[test]
+fn the_mark_and_the_badges_are_rounded_squares() {
+    // A circle in a column of squares read as a different widget from the rail
+    // it sits in. The badge's own box is the square; the health dot and the
+    // selection bar inside it stay round, because they are a dot and a bar.
+    let source = include_str!("../instance_strip.rs");
+    let mark = fn_body(source, "fn workspace_mark").expect("workspace_mark exists");
+    assert!(
+        mark.contains(".rounded_md()") && !mark.contains("rounded_full"),
+        "the mark is a rounded square, the shape of the session marks and the \
+         topic tabs"
+    );
+    let badge = fn_body(source, "fn badge").expect("badge exists");
+    let square_at = badge
+        .find(".rounded_md()")
+        .expect("the badge's box is a rounded square");
+    let first_round = badge.find("rounded_full()").unwrap_or(usize::MAX);
+    assert!(
+        square_at < first_round,
+        "the badge's box must take its radius before the dot inside it does, \
+         or the box itself is being drawn as a circle"
+    );
+}
