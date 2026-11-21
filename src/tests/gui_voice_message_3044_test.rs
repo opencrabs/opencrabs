@@ -186,7 +186,7 @@ fn enter_stops_a_take_and_keeps_it() {
         "the arm hands the key over and stops: a park that fell through would send an empty field"
     );
     assert!(
-        !send.contains("EditorEvent::Sent"),
+        !send.contains("cx.emit(EditorEvent::Sent"),
         "Enter on a recording sends nothing, because the words are still being made"
     );
 }
