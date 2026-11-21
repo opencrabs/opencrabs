@@ -34,7 +34,7 @@ mod theme_lookup;
 pub(crate) mod theme_picker;
 // Boot-apply in tui::runner references presets::by_name at startup.
 pub(crate) mod presets;
-mod tips;
+pub(crate) mod tips;
 mod title;
 mod tools;
 pub(crate) mod user_themes;

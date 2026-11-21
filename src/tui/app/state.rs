@@ -799,6 +799,14 @@ pub struct App {
     /// Version string when an update is available (shown in update prompt dialog)
     pub update_available_version: Option<String>,
 
+    /// Hint ids the reader has hidden with `alt+h`, while still inside their
+    /// window (#3122).
+    ///
+    /// Read once at startup and appended to on each dismissal. The engine asks
+    /// on every frame which lines may print, and a query behind a redraw is a
+    /// stutter the reader would feel as the terminal thinking.
+    pub hint_dismissed: Vec<String>,
+
     /// Session to resume after restart (set via --session CLI arg)
     pub resume_session_id: Option<Uuid>,
     /// Start in a brand-new session instead of the last one (`chat --new`)
@@ -1253,6 +1261,7 @@ impl App {
             tps_tracker: StreamingTpsTracker::default(),
             active_tool_group: None,
             update_available_version: None,
+            hint_dismissed: Vec::new(),
             resume_session_id: None,
             start_fresh: false,
             render_cache: HashMap::new(),
@@ -1829,6 +1838,15 @@ impl App {
 
     /// Initialize the app by loading or creating a session
     pub async fn initialize(&mut self) -> Result<()> {
+        // Which hints the reader has hidden, read before the first frame so a
+        // dismissed line never flashes in and out (#3122). A read that fails
+        // shows every hint rather than none: a repeated tip is a small
+        // annoyance, an empty row is a feature that looks broken.
+        self.hint_dismissed = self
+            .session_service
+            .hint_dismissals()
+            .await
+            .unwrap_or_default();
         // Resume a specific session (e.g. after a restart) or load the most recent
         if let Some(session_id) = self.resume_session_id.take() {
             self.load_session(session_id).await?;
@@ -5006,6 +5024,38 @@ impl App {
     pub(crate) fn abort_session_task(&mut self, session_id: Uuid) {
         if let Some(handle) = self.task_abort_handles.remove(&session_id) {
             handle.abort();
+        }
+    }
+
+    /// Hide the hint the row is showing, for `DISMISS_DAYS` (#3122).
+    ///
+    /// It asks the same function the paint path asks, so the chord can only
+    /// hide the line that is actually on screen. A warning is never hidden: the
+    /// class comes from the engine, which keeps the lines that protect work (a
+    /// context about to overflow) out of it, and pressing the chord on one of
+    /// those does nothing, which is the honest answer because the row does not
+    /// print the chord for them either.
+    ///
+    /// The id is pushed before the write, so the row disappears on the next
+    /// frame rather than after a database round trip. A write that fails costs
+    /// the reader the line coming back on the next launch, which is the safe
+    /// direction.
+    pub(crate) async fn dismiss_current_hint(&mut self) {
+        let Some(hint) = crate::tui::render::tips::current(self) else {
+            return;
+        };
+        if !crate::ui_core::hints::dismissible(hint.id) {
+            return;
+        }
+        if !self.hint_dismissed.iter().any(|id| id == hint.id) {
+            self.hint_dismissed.push(hint.id.to_string());
+        }
+        if let Err(e) = self
+            .session_service
+            .dismiss_hint(hint.id, crate::ui_core::hints::DISMISS_DAYS)
+            .await
+        {
+            tracing::warn!("hint dismissal write failed: {e}");
         }
     }
 

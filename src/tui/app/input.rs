@@ -1617,6 +1617,18 @@ impl App {
             }
         }
 
+        // `alt+h` hides the hint row's current line for a week (#3122). It is
+        // a chord and not a command because the row is one line of advice, not
+        // a mode: the reader wants it gone without leaving the field. The key
+        // asks the same function the paint path uses, so it can only hide the
+        // line that is actually on screen.
+        if event.modifiers.contains(KeyModifiers::ALT)
+            && matches!(event.code, KeyCode::Char('h') | KeyCode::Char('H'))
+        {
+            self.dismiss_current_hint().await;
+            return Ok(());
+        }
+
         // Intercept keys when /approve menu is pending
         if self.has_pending_approve_menu() {
             if keys::is_up(&event) {

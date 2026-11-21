@@ -19,7 +19,7 @@
 //! draws too. This module only turns the answer into cells and reads the
 //! terminal's own state into the shape that function expects.
 
-use crate::ui_core::hints::{CONTEXT_TIGHT, HintState, task_line};
+use crate::ui_core::hints::{CONTEXT_TIGHT, Hint, HintState, dismissible, task_line_hint};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -27,6 +27,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::super::app::App;
 use super::theme::{self, Role};
@@ -65,13 +66,15 @@ fn state_of(app: &App) -> HintState {
         // screen of its own, and the composer is not drawn behind it.
         rail_focused: false,
         rail_split: false,
-        // Filled from the dismissal store by the terminal itself, once it has
-        // one; the engine stays free of the database.
-        dismissed: Vec::new(),
-        // No engine is known to this surface yet, so the tip that names
-        // `/whisper` stays quiet rather than pointing at a command with
-        // nothing behind it.
-        voice: false,
+        // Filled from the dismissal store by the terminal itself; the engine
+        // stays free of the database.
+        dismissed: app.hint_dismissed.clone(),
+        // Read from the live config, the same pointer clone the window asks
+        // before it offers the record chord: a tip pointing at `/whisper` with
+        // no engine behind it would bounce.
+        voice: crate::config::Config::current()
+            .voice_config()
+            .stt_enabled,
     }
 }
 
@@ -91,18 +94,12 @@ fn queued_count(app: &App) -> usize {
         .unwrap_or(0)
 }
 
-/// Paint the card, or leave it blank when the work has nothing to say.
+/// The hint the row is printing right now, if any (#3122).
 ///
-/// One line, chosen by what the screen is asking for right now (#3102): the
-/// rail holding the keyboard, an offer waiting above the field, a queue on its
-/// way out, or a rung of the ladder. It used to cycle through all of them on a
-/// timer, and a line that changes on its own reads as noise.
-pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
-    // The terminal dispatches the whole shared table, so a name the table
-    // knows is a name it answers. `support` is the window's narrower list, and
-    // asking it here would hide a command this surface runs fine. A command the
-    // terminal cannot run must never be printed: it bounces with "Unknown
-    // command", which is the failure the issue was filed about.
+/// Shared by the paint path and the hide chord, so the key hides exactly the
+/// line on screen. Two functions deciding separately what is showing is how a
+/// dismissal ends up hiding a hint nobody can see.
+pub(crate) fn current(app: &App) -> Option<Hint> {
     let mut state = state_of(app);
     // What `/clear` leaves behind is the system prompt and the tool schemas.
     // The provider reports the whole prompt, so the base is the only part the
@@ -113,10 +110,48 @@ pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
     if state.context_percent() >= CONTEXT_TIGHT {
         state.clear_base = u64::from(app.agent_service.base_context_tokens_raw());
     }
-    let Some(line) = task_line(&state, |command| {
+    // The terminal dispatches the whole shared table, so a name the table
+    // knows is a name it answers. `support` is the window's narrower list, and
+    // asking it here would hide a command this surface runs fine. A command the
+    // terminal cannot run must never be printed: it bounces with "Unknown
+    // command", which is the failure the issue was filed about.
+    task_line_hint(&state, |command| {
         crate::ui_core::commands::lookup(command).is_some()
-    }) else {
+    })
+}
+
+/// Paint the card, or leave it blank when the work has nothing to say.
+///
+/// One line, chosen by what the screen is asking for right now (#3102): the
+/// rail holding the keyboard, an offer waiting above the field, a queue on its
+/// way out, or a rung of the ladder. It used to cycle through all of them on a
+/// timer, and a line that changes on its own reads as noise.
+///
+/// The chord that hides the line is painted at the row's right edge, in its own
+/// cell, instead of being appended to the sentence (#3122). Appending it works
+/// until the tip is long, and the roast lines are long on purpose: the chord
+/// then falls off the right edge and the reader is left with a key nobody told
+/// them about. In its own cell it survives any width, and the tip clips under
+/// it the way it always clipped at the edge of the row.
+pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(hint) = current(app) else {
         return;
+    };
+    // Only advice carries the chord: a warning cannot be hidden, so printing a
+    // key that would do nothing is worse than printing nothing.
+    let chord = if dismissible(hint.id) {
+        "alt+h hides"
+    } else {
+        ""
+    };
+    let background = Style::default().bg(theme::background().unwrap_or_default());
+    // The gap between the sentence and the chord, so the two never touch.
+    const GAP: u16 = 3;
+    let chord_width = UnicodeWidthStr::width(chord) as u16;
+    let text_width = if chord_width == 0 {
+        area.width
+    } else {
+        area.width.saturating_sub(chord_width + GAP)
     };
     // The whole line is the accent, not the muted chrome the status bar uses.
     // The row exists to be noticed by someone who does not yet know the keys,
@@ -124,10 +159,26 @@ pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
     // colour for that (#3102). The accent comes from the theme, so it follows
     // whichever palette the reader picked.
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(line, accent())))
-            .style(Style::default().bg(theme::background().unwrap_or_default())),
-        area,
+        Paragraph::new(Line::from(Span::styled(hint.text, accent()))).style(background),
+        Rect {
+            width: text_width,
+            ..area
+        },
     );
+    if chord_width > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                chord,
+                Style::default().fg(theme::role(Role::TextMuted)),
+            )))
+            .style(background),
+            Rect {
+                x: area.x + area.width.saturating_sub(chord_width),
+                width: chord_width,
+                ..area
+            },
+        );
+    }
 }
 
 /// The theme's accent: present, and impossible to mistake for the transcript.
