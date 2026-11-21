@@ -106,8 +106,10 @@ fn the_menu_floats_as_a_card_and_the_strip_nothing_grows_from() {
 
     // Painted last, so the conversation cannot cover the open card. It is
     // attached at the window root now, deferred, above everything (#2690).
+    // Every screen but the chat collapsed into one fallback arm, so the chat
+    // column ends where that arm begins.
     let footer_arm = GUI_MAIN
-        .find("Screen::MissionControl => right.child(footer),")
+        .find("_ => right.child(middle).child(footer)")
         .expect("the chat column ends with its footer");
     let menu = GUI_MAIN
         .find("if let Some(menu) = self.chat_menu(cx) {")
