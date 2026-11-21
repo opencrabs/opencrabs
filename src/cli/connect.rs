@@ -158,8 +158,9 @@ pub fn cmd_connect(
             st
         }
         None => {
-            println!("Starting cloudflared quick tunnel → 127.0.0.1:{port} …");
-            match tunnel::start(&TunnelSpec::new(port)) {
+            let spec = TunnelSpec::on(port, &config.a2a.bind);
+            println!("Starting cloudflared quick tunnel → {} …", spec.origin());
+            match tunnel::start(&spec) {
                 Ok(st) => st,
                 Err(e) => {
                     eprintln!("Tunnel failed: {e:#}");

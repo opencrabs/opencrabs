@@ -122,6 +122,7 @@ fn start_status_stop_lifecycle_with_stub() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub_script(dir.path(), true);
     let spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18999,
         state_dir: dir.path().to_path_buf(),
         binary: Some(stub),
@@ -163,6 +164,7 @@ fn second_start_after_stop_reports_new_tunnel_url() {
     let dir = tempfile::tempdir().unwrap();
     let first = stub_script_with_url(dir.path(), Some("https://first-tunnel-1.trycloudflare.com"));
     let spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18997,
         state_dir: dir.path().to_path_buf(),
         binary: Some(first),
@@ -180,6 +182,7 @@ fn second_start_after_stop_reports_new_tunnel_url() {
         Some("https://second-tunnel-2.trycloudflare.com"),
     );
     let spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18997,
         state_dir: dir.path().to_path_buf(),
         binary: Some(second),
@@ -197,6 +200,7 @@ fn concurrent_second_start_fails_instead_of_double_spawning() {
     // timeout, holding the start lock through the whole window.
     let silent = stub_script_with_url(dir.path(), None);
     let first_spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18995,
         state_dir: dir.path().to_path_buf(),
         binary: Some(silent.clone()),
@@ -206,6 +210,7 @@ fn concurrent_second_start_fails_instead_of_double_spawning() {
     // Let the first start get inside its URL wait (spawn + log poll).
     std::thread::sleep(Duration::from_millis(400));
     let second_spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18995,
         state_dir: dir.path().to_path_buf(),
         binary: Some(silent),
@@ -266,6 +271,7 @@ fn start_times_out_and_kills_silent_stub() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub_script(dir.path(), false);
     let spec = TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
         port: 18998,
         state_dir: dir.path().to_path_buf(),
         binary: Some(stub),
@@ -306,4 +312,38 @@ fn pid_alive_clamps_out_of_range_pids() {
     // u32::MAX must NOT become kill(-1): clamp to i32::MAX → ESRCH.
     assert!(!pid_alive(u32::MAX));
     assert!(!pid_alive(i32::MAX as u32));
+}
+
+/// The tunnel must dial the address the gateway is bound to.
+///
+/// Measured on the lenovo, 21 Nov: `[a2a] bind = "100.125.20.50"`, so the
+/// gateway answered `401` on that address and `connection refused` on
+/// `127.0.0.1`; cloudflared was started with a hardcoded `127.0.0.1`, and every
+/// pairing came back **502** while the card showed a healthy URL. A constant
+/// here is a pairing that can never work, so the spec carries the bind.
+#[test]
+fn a_tunnel_dials_where_the_gateway_listens() {
+    assert_eq!(
+        TunnelSpec::on(18790, "100.125.20.50").origin(),
+        "http://100.125.20.50:18790",
+        "a gateway bound to one address refuses loopback, so dialling loopback \
+         is the 502 the owner saw"
+    );
+    // A wildcard bind does answer on loopback, and loopback is the shortest
+    // path: nothing else needs to resolve.
+    for bind in ["0.0.0.0", "::", "", "127.0.0.1", "localhost", "::1"] {
+        assert_eq!(
+            TunnelSpec::on(18790, bind).origin(),
+            "http://127.0.0.1:18790",
+            "bind {bind:?} accepts loopback"
+        );
+    }
+    // An IPv6 literal needs its brackets back or the origin URL does not parse.
+    assert_eq!(origin_host("fd7a::1"), "[fd7a::1]");
+    assert_eq!(origin_host("[fd7a::1]"), "[fd7a::1]");
+    // The port is the caller's, not a constant: `--port` exists.
+    assert_eq!(
+        TunnelSpec::on(9000, "10.0.0.4").origin(),
+        "http://10.0.0.4:9000"
+    );
 }

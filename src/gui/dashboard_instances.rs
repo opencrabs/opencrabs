@@ -1675,8 +1675,8 @@ impl Dashboard {
         if self.instance_share.is_none() {
             return;
         }
-        let port = match Config::load() {
-            Ok(config) => config.a2a.port,
+        let (port, bind) = match Config::load() {
+            Ok(config) => (config.a2a.port, config.a2a.bind),
             Err(e) => {
                 if let Some(share) = self.instance_share.as_mut() {
                     share.tunnel = ShareTunnel::Failed(format!("não consegui ler a config: {e}"));
@@ -1701,7 +1701,7 @@ impl Dashboard {
                     let state_dir = tunnel::default_state_dir();
                     match tunnel::status(&state_dir) {
                         Ok(Some(state)) => Ok(state.url),
-                        Ok(None) => tunnel::start(&tunnel::TunnelSpec::new(port))
+                        Ok(None) => tunnel::start(&tunnel::TunnelSpec::on(port, &bind))
                             .map(|state| state.url)
                             .map_err(|e| format!("{e:#}")),
                         Err(e) => Err(format!("{e:#}")),

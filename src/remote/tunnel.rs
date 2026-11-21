@@ -42,6 +42,16 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 pub struct TunnelSpec {
     /// Local port the tunnel forwards to (the A2A gateway).
     pub port: u16,
+    /// Host cloudflared dials for that port.
+    ///
+    /// Loopback is only right while the gateway listens on loopback. A gateway
+    /// bound to one address (a tailnet IP, a LAN IP) refuses `127.0.0.1`, and
+    /// cloudflared then answers every request with **502** while the card still
+    /// shows a healthy URL. Measured on the lenovo (21 Nov):
+    /// `[a2a] bind = "100.125.20.50"`, tunnel dialling `127.0.0.1:18790`,
+    /// `dial tcp 127.0.0.1:18790: connect: connection refused` on every
+    /// `/a2a/pair`. The tunnel must dial where the door actually is.
+    pub origin_host: String,
     /// Where `tunnel.json`, `tunnel.log` and `bin/` live.
     pub state_dir: PathBuf,
     /// Explicit cloudflared binary; `None` = resolve/ensure.
@@ -52,11 +62,47 @@ pub struct TunnelSpec {
 
 impl TunnelSpec {
     pub fn new(port: u16) -> Self {
+        Self::on(port, "127.0.0.1")
+    }
+
+    /// A tunnel that dials the address the gateway is bound to.
+    ///
+    /// Callers pass `[a2a] bind` straight from the config; [`origin_host`]
+    /// decides what cloudflared should dial for it.
+    pub fn on(port: u16, bind: &str) -> Self {
         Self {
             port,
+            origin_host: origin_host(bind),
             state_dir: default_state_dir(),
             binary: None,
             url_timeout: URL_WAIT_DEFAULT,
+        }
+    }
+
+    /// The origin URL cloudflared is told to forward to.
+    pub fn origin(&self) -> String {
+        format!("http://{}:{}", self.origin_host, self.port)
+    }
+}
+
+/// The host cloudflared must dial for a gateway bound to `bind`.
+///
+/// A wildcard bind accepts loopback, so it dials loopback; a specific address
+/// is dialled as itself. `localhost`/`::1` normalise to `127.0.0.1` because
+/// cloudflared wants a literal, and any other IPv6 literal gets its brackets
+/// back so the URL parses.
+pub fn origin_host(bind: &str) -> String {
+    match bind.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" | "*" | "127.0.0.1" | "localhost" | "::1" | "[::1]" => {
+            "127.0.0.1".to_string()
+        }
+        other => {
+            let bare = other.trim_start_matches('[').trim_end_matches(']');
+            if bare.contains(':') {
+                format!("[{bare}]")
+            } else {
+                bare.to_string()
+            }
         }
     }
 }
@@ -219,11 +265,12 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
     // dir could adopt the dead tunnel's URL. Fresh log, fresh tunnel.
     std::fs::File::create(&log).context("truncate stale tunnel.log")?;
 
+    let origin = spec.origin();
     let child = std::process::Command::new(&binary)
         .args([
             "tunnel",
             "--url",
-            &format!("http://127.0.0.1:{}", spec.port),
+            origin.as_str(),
             "--no-autoupdate",
             "--logfile",
         ])
