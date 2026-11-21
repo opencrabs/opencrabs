@@ -7,10 +7,13 @@
 
 use crate::brain::provider::claude_cli::CliMessage;
 
-/// Shape reported in #3088. The variant name is the newest reported instance,
-/// not a measured one: on the host where this test was written the WARN fired
-/// with `tool_progress` (33 times, 2026-11-11/12).
-const COMMAND_LIFECYCLE: &str = r#"{"type":"command_lifecycle","command_uuid":"b160bddd-689a-47d9-905e-6573cfae6fd9","state":"started","uuid":"a2e66082-7d5b-4fa7-8d54-750d55c7f571","session_id":"ade7dbe2-30d2-4ed6-a5dd-4d44f1ad313f"}"#;
+/// Shape measured on 2026-11-21 with claude CLI 2.1.329. The CLI emits the
+/// frame only for a message that arrives over `--input-format stream-json`
+/// with a client-supplied `uuid`; the one-shot `-p "prompt"` text path emits
+/// none, so this shape cannot reach a provider that spawns the CLI that way.
+/// The WARN itself fired on this host with `tool_progress` (33 times,
+/// 2026-11-11/12).
+const COMMAND_LIFECYCLE: &str = r#"{"type":"command_lifecycle","command_uuid":"6f1c0e2a-1111-4a2b-9c3d-000000000001","state":"started","uuid":"8d5a55b1-c95b-44af-9846-752decae0d59","session_id":"70eb3d93-f974-4c25-89ae-de37f2b79c59"}"#;
 
 #[test]
 fn command_lifecycle_parses_as_unknown() {
