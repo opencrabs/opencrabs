@@ -204,7 +204,7 @@ impl PaneView {
     /// reads it through its weak handle and mints its listeners against the
     /// same handle. Nothing here is built by the walk and handed over: the
     /// column, its ids and its handlers all belong to the leaf.
-    fn chrome(&mut self, cx: &mut Context<Self>) -> Div {
+    fn chrome(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         // The strips share one box that may shrink and clip (#2980), and the
         // composer is appended after it so the input is never the row that
         // gets cut. `flex_none` on the column as a whole is what let the
@@ -271,8 +271,8 @@ impl PaneView {
         self.plan.refresh();
         if let Some(view) = self
             .plan
-            .editing_view(Some(&actions))
-            .or_else(|| self.plan.pane_view(density, expanded))
+            .editing_view(Some(&actions), window)
+            .or_else(|| self.plan.pane_view(density, expanded, window))
         {
             // A click trades the conversation's room for the whole checklist,
             // per pane (#2624). The handler stops the event so the press does
@@ -410,7 +410,7 @@ impl Render for PaneView {
     /// here because everything in it is the pane's own: which conversation it
     /// shows, whether it holds the keyboard, whether the pointer is dragging a
     /// pane over it. The walk is left with the tree.
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = self.window.clone();
         let session = self.session;
         // Separate weak handles for the closures built in this same frame.
@@ -781,7 +781,7 @@ impl Render for PaneView {
         // redraws itself must not lose the strip the window built last frame
         // (#2686, #2687).
         let topics = window.update(cx, |win, cx| win.pane_topics(session, cx));
-        let chrome = self.chrome(cx).into_any_element();
+        let chrome = self.chrome(window, cx).into_any_element();
         // The frame fills a box of its own, and that box is what the cached
         // view path lays out (`pane_root`, #2805).
         pane_root()

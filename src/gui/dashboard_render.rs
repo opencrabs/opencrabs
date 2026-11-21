@@ -650,7 +650,7 @@ impl Render for Dashboard {
                 // The panes come from the tree (#2472): one leaf is the
                 // window as it was, and each split adds a divider and the
                 // panes its children hold.
-                let body = self.panes_body(primary, pane_width, true, cx);
+                let body = self.panes_body(primary, pane_width, true, window, cx);
                 (
                     div()
                         .flex()
@@ -2516,8 +2516,8 @@ impl Render for Dashboard {
                     self.plan.refresh();
                     let card = self
                         .plan
-                        .editing_view(actions.as_ref())
-                        .or_else(|| self.plan.view());
+                        .editing_view(actions.as_ref(), window)
+                        .or_else(|| self.plan.view(window));
                     if let Some(plan_view) = card {
                         // The session is already capped to the conversation's
                         // measure and centred as a whole, so a child of it is

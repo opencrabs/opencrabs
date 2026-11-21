@@ -15,7 +15,7 @@
 //! through that one ledger.
 //!
 //! The chime decision itself is behavioural and lives in
-//! `gui::plan_strip::tests`, over a real plan file. No audio is asserted here:
+//! `gui/tests/plan_strip_test.rs`, over a real plan file. No audio is asserted here:
 //! CI has no output device.
 
 const GUI_MAIN: &str = concat!(

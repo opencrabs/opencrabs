@@ -23,7 +23,7 @@ use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView}
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use gpui::{Div, MouseButton, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, rgb};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
@@ -124,7 +124,11 @@ impl PlanStripState {
     }
 
     /// The strip, or `None` when there is no plan to show.
-    pub fn view(&self) -> Option<Div> {
+    ///
+    /// `window` is here to measure (#3124): every card in this file caps itself
+    /// at the width of its own longest row, and that number only the live text
+    /// system can give.
+    pub fn view(&self, window: &Window) -> Option<Div> {
         let plan = self.doc.as_ref()?;
         // An Editing plan is a design draft: nothing is executing yet, so a
         // checklist would be a lie about state. The TUI keeps its card in the
@@ -135,11 +139,18 @@ impl PlanStripState {
         Some(if plan.tasks.is_empty() {
             // Approved design whose checklist is still being seeded, or a
             // seed that failed. Same two states the TUI names.
+            let text = format!("📋 {} · checklist not seeded yet", plan.title);
+            // As wide as the sentence, no wider (#3124): the row is the whole
+            // card, so stretching it to the column paints a slab of empty
+            // surface behind eight words.
+            let width = card_width([line_width(window, &text, SMALL_TEXT_SIZE)]);
             div()
                 .flex()
                 .flex_row()
                 .gap_2()
                 .p_3()
+                .w_full()
+                .max_w(px(width))
                 // The message card's curve and fill (#3114): the strips above
                 // the composer stand in the conversation's column, so they are
                 // one family with the bubbles rather than a second set of
@@ -148,17 +159,9 @@ impl PlanStripState {
                 .bg(glass_fill(message_card_surface()))
                 .border_1()
                 .border_color(session_edge(palette::current().panel_hi))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(palette::current().warn))
-                        .child(SharedString::from(format!(
-                            "📋 {} · checklist not seeded yet",
-                            fit(&plan.title, 60)
-                        ))),
-                )
+                .child(card_line(text, palette::current().warn))
         } else {
-            checklist(plan)
+            checklist(plan, window)
         })
     }
 
@@ -173,19 +176,44 @@ impl PlanStripState {
     ///
     /// `actions` is `None` only when the caller has no session to send through:
     /// the card still names the plan and the commands, it just offers no tap.
-    pub fn editing_view(&self, actions: Option<&PlanActions>) -> Option<Div> {
+    pub fn editing_view(&self, actions: Option<&PlanActions>, window: &Window) -> Option<Div> {
         let plan = self.doc.as_ref()?;
         if !matches!(plan.status, PlanStatus::Editing) {
             return None;
         }
         let mut lines = editing_lines(plan).into_iter();
         let head = lines.next().map(|(_, line)| line).unwrap_or_default();
+        let tail: Vec<(LineKind, String)> = lines.collect();
+        // The card is as wide as the widest thing it draws (#3124): the head
+        // row, every visible task, the two command lines, and the two chips at
+        // the bottom. Anything narrower would cut the row it was measured
+        // from; anything wider is surface the card never fills.
+        let mut widths = vec![if plan.tasks.is_empty() {
+            line_width(window, &head, SMALL_TEXT_SIZE)
+        } else {
+            header_width(window, plan, &head)
+        }];
+        for task in windowed_tasks(plan) {
+            widths.push(task_row_width(window, task));
+        }
+        for (_, line) in &tail {
+            widths.push(line_width(window, line, SMALL_TEXT_SIZE));
+        }
+        if actions.is_some() {
+            widths.push(
+                action_chip_width(window, APPROVE_LABEL)
+                    + ROW_GAP
+                    + action_chip_width(window, DISCARD_LABEL),
+            );
+        }
         let mut col = div()
             .flex()
             .flex_col()
             .gap_1()
             .p_3()
             .min_w_0()
+            .w_full()
+            .max_w(px(card_width(widths)))
             // The same curve and fill as the messages around it (#3114).
             .rounded(px(MESSAGE_RADIUS))
             .bg(glass_fill(message_card_surface()))
@@ -201,7 +229,7 @@ impl PlanStripState {
             col = col.child(progress_header_row(plan, head));
             col = task_rows(col, plan);
         }
-        for (kind, line) in lines {
+        for (kind, line) in tail {
             let color = match kind {
                 LineKind::Title => palette::current().text_muted,
                 _ => palette::current().text_faint,
@@ -239,12 +267,26 @@ impl PlanStripState {
     /// it knows one split width. A window has to survive anything from two
     /// panes to eight and more, so the shape is a parameter: the caller turns
     /// the pane count and the pane's own width into a [`PaneDensity`].
-    pub fn pane_view(&self, density: PaneDensity, expanded: bool) -> Option<Div> {
+    pub fn pane_view(&self, density: PaneDensity, expanded: bool, window: &Window) -> Option<Div> {
         let plan = self.doc.as_ref()?;
         // Same rule as the full card: an Editing plan is a design draft, not a
         // checklist, so a pane shows nothing rather than a lie about state.
         if !matches!(plan.status, PlanStatus::Active) {
             return None;
+        }
+        let lines = pane_lines(plan, density, expanded);
+        // The pane card is as wide as its longest line (#3124). A pane is the
+        // place this matters most: the card was `w_full` inside a column that
+        // can be 600 points, so a task name was cut to forty characters with
+        // most of the card empty beside it, and the ellipsis was read as "the
+        // title is long" when the truth was "the card is short of nothing but
+        // its own text".
+        let mut widths = Vec::with_capacity(lines.len());
+        for (index, (_, line)) in lines.iter().enumerate() {
+            // The leading chevron and the gap after it belong to the first row
+            // alone; the rest start at the card's padding.
+            let lead = if index == 0 { 16.0 + ROW_GAP } else { 0.0 };
+            widths.push(line_width(window, line, SMALL_TEXT_SIZE) + lead);
         }
         // `flex_none` on the card itself: inside a pane the transcript above
         // it takes `flex_1`, and a shrinkable card was squeezed to zero height
@@ -254,7 +296,9 @@ impl PlanStripState {
         // sized from its own content contains truncating text, so the text was
         // measured against the width it was about to define. gpui resolved
         // that circle by giving every line one character of room, which is why
-        // a split pane showed a wide card of nothing but ellipses.
+        // a split pane showed a wide card of nothing but ellipses. The cap
+        // added in #3124 is what stops the other half of that: full width for
+        // a line that needs a third of it.
         //
         // The padding is the family's (#3117). It was a bare 8 by 4, so the
         // card's own lines started on its edge and the card read as a strip of
@@ -266,6 +310,7 @@ impl PlanStripState {
             .flex_col()
             .flex_none()
             .w_full()
+            .max_w(px(card_width(widths)))
             .gap_1()
             .p_3()
             .min_w_0()
@@ -286,7 +331,13 @@ impl PlanStripState {
             // so it still has to answer the pointer, and the message fill has
             // nothing lighter to step to.
             .hover(|d| d.bg(rgb(palette::current().panel_hi)));
-        for (index, (kind, line)) in pane_lines(plan, density, expanded).into_iter().enumerate() {
+        // The expanded checklist scrolls (#3124). It used to be clipped to the
+        // six rows `visible_window` returns, so a ten-task plan in a pane was
+        // a card that stopped mid-list with no way to see the rest, while the
+        // terminal showed all of them. The head and the bar stay put and only
+        // the task rows move, so the count is always on screen.
+        let mut scroll: Vec<Div> = Vec::new();
+        for (index, (kind, line)) in lines.into_iter().enumerate() {
             let color = match kind {
                 LineKind::Title | LineKind::Bar | LineKind::Done => palette::current().teal,
                 LineKind::Running => palette::current().text,
@@ -300,33 +351,49 @@ impl PlanStripState {
             // ellipsis no matter how wide the card gets. The full card above
             // already renders through this shape (#2642); the pane card did not,
             // which is why every pane line was a dot in a wide empty card.
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .w_full()
-                    .min_w_0()
-                    .when(index == 0, |d| {
-                        d.child(
-                            div()
-                                .flex_shrink_0()
-                                .w(px(16.0))
-                                .child(disclosure_icon(color, 1.0)),
-                        )
-                    })
-                    .child(
+            let row = div()
+                .flex()
+                .flex_row()
+                .w_full()
+                .min_w_0()
+                .when(index == 0, |d| {
+                    d.child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(color))
-                            .child(SharedString::from(line)),
-                    ),
-            );
+                            .flex_shrink_0()
+                            .w(px(16.0))
+                            .child(disclosure_icon(color, 1.0)),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(line)),
+                );
+            if expanded && index >= 2 {
+                scroll.push(row);
+            } else {
+                col = col.child(row);
+            }
         }
-        Some(col)
+        if scroll.is_empty() {
+            return Some(col);
+        }
+        Some(col.child(
+            div()
+                .id(SharedString::from(format!("plan-pane-scroll-{}", plan.id)))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w_0()
+                .max_h(px(PANE_SCROLL_HEIGHT))
+                .overflow_y_scroll()
+                .children(scroll),
+        ))
     }
 }
 
@@ -348,13 +415,10 @@ pub const APPROVE_HINT: &str = "Approve with /execute, or discard with /discard.
 /// there is nothing to count.
 pub fn editing_lines(plan: &PlanDocument) -> Vec<(LineKind, String)> {
     let header = if plan.tasks.is_empty() {
-        format!("✍️ Editing plan · {}", fit(&plan.title, 60))
+        format!("✍️ Editing plan · {}", plan.title)
     } else {
         let (done, total) = progress_counts(plan);
-        format!(
-            "✍️ Editing plan · {} · {done}/{total}",
-            fit(&plan.title, 60)
-        )
+        format!("✍️ Editing plan · {} · {done}/{total}", plan.title)
     };
     vec![
         (LineKind::Title, header),
@@ -445,31 +509,28 @@ pub fn pane_lines(
         // Approved design whose checklist is still being seeded, or a seed
         // that failed. Same two states the terminal names.
         return vec![
-            (LineKind::Title, fit(&plan.title, 32)),
+            (LineKind::Title, plan.title.clone()),
             (LineKind::Next, CHECKLIST_NOT_SEEDED.to_string()),
         ];
     }
     if expanded {
         let mut out = vec![
-            (
-                LineKind::Title,
-                format!("{} · {done}/{total}", fit(&plan.title, 32)),
-            ),
+            (LineKind::Title, format!("{} · {done}/{total}", plan.title)),
             (LineKind::Bar, format!("{bar} {percent}%")),
         ];
-        let current = plan
-            .tasks
-            .iter()
-            .position(|t| matches!(t.status, TaskStatus::InProgress));
-        let (start, len) = visible_window(total, current);
-        for task in plan.tasks.iter().skip(start).take(len) {
+        // Every task, not the six-row window (#3124). The card that draws this
+        // list scrolls, so the window only ever hid work: a twenty-task plan in
+        // a pane stopped at six rows with no way to reach the rest, while the
+        // terminal showed all of them. The head and the bar stay put and the
+        // rows move under them.
+        for task in &plan.tasks {
             let kind = match task.status {
                 TaskStatus::Completed | TaskStatus::Skipped => LineKind::Done,
                 TaskStatus::InProgress => LineKind::Running,
                 TaskStatus::Failed | TaskStatus::Blocked(_) => LineKind::Running,
                 TaskStatus::Pending => LineKind::Next,
             };
-            out.push((kind, format!("{}. {}", task.order, fit(&task.title, 34))));
+            out.push((kind, format!("{}. {}", task.order, task.title)));
         }
         return out;
     }
@@ -478,7 +539,7 @@ pub fn pane_lines(
         .iter()
         .find(|t| matches!(t.status, TaskStatus::InProgress));
     let running_line = match running {
-        Some(task) => format!("▸ {}", fit(&task.title, 32)),
+        Some(task) => format!("▸ {}", task.title),
         None if done == total => "✓ complete".to_string(),
         None => "▸ waiting".to_string(),
     };
@@ -515,7 +576,7 @@ pub fn pane_lines(
                 .filter(|t| matches!(t.status, TaskStatus::Pending))
                 .take(2)
             {
-                out.push((LineKind::Next, format!("· {}", fit(&task.title, 32))));
+                out.push((LineKind::Next, format!("· {}", task.title)));
             }
             out
         }
@@ -590,32 +651,48 @@ fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
 /// checklist and the approval card, so the six tasks a plan is approved on are
 /// spelled exactly the way that plan then reports its progress.
 fn task_row(task: &PlanTask) -> Div {
-    let (mark, color) = match &task.status {
-        TaskStatus::Completed | TaskStatus::Skipped => ("☑", palette::current().teal),
-        TaskStatus::InProgress => ("▶", palette::current().accent),
-        TaskStatus::Failed => ("✗", palette::current().warn),
-        TaskStatus::Blocked(_) => ("⊘", palette::current().warn),
-        TaskStatus::Pending => ("☐", palette::current().text_faint),
-    };
+    let (mark, color) = task_mark(task);
     div()
         .flex()
         .flex_row()
         .gap_2()
         .child(div().text_xs().text_color(rgb(color)).child(mark))
         .child(
+            // One row whatever the title does (#3124): the card is measured
+            // from this string, so it only cuts when the pane itself is
+            // narrower than the words, and then it says so with an ellipsis
+            // rather than spilling past the card's edge.
             div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .truncate()
                 .text_xs()
                 .text_color(rgb(if matches!(task.status, TaskStatus::InProgress) {
                     palette::current().text
                 } else {
                     palette::current().text_muted
                 }))
-                .child(SharedString::from(format!(
-                    "{}. {}",
-                    task.order,
-                    fit(&task.title, 70)
-                ))),
+                .child(SharedString::from(task_line(task))),
         )
+}
+
+/// The mark a task's status draws and the colour it draws in.
+fn task_mark(task: &PlanTask) -> (&'static str, u32) {
+    match &task.status {
+        TaskStatus::Completed | TaskStatus::Skipped => ("☑", palette::current().teal),
+        TaskStatus::InProgress => ("▶", palette::current().accent),
+        TaskStatus::Failed => ("✗", palette::current().warn),
+        TaskStatus::Blocked(_) => ("⊘", palette::current().warn),
+        TaskStatus::Pending => ("☐", palette::current().text_faint),
+    }
+}
+
+/// What a task row prints beside its mark. Untruncated on purpose (#3124): the
+/// card is measured from this string, so a character cap here would cut a title
+/// and then measure the cut, which is the bug the cap was meant to prevent.
+fn task_line(task: &PlanTask) -> String {
+    format!("{}. {}", task.order, task.title)
 }
 
 /// One plain line of a card: the text owns the row and cuts when it is long.
@@ -636,40 +713,54 @@ fn card_line(text: String, color: u32) -> Div {
 /// same window the terminal and the compact pane use. `visible_window` returns
 /// the slice; this walks it into the column.
 fn task_rows(col: Div, plan: &PlanDocument) -> Div {
+    let mut col = col;
+    for task in windowed_tasks(plan) {
+        col = col.child(task_row(task));
+    }
+    col
+}
+
+/// The tasks the six-row window shows, in order. One place, so the rows a card
+/// draws and the rows it measures can never be different sets (#3124).
+fn windowed_tasks(plan: &PlanDocument) -> impl Iterator<Item = &PlanTask> + '_ {
     let current = plan
         .tasks
         .iter()
         .position(|t| matches!(t.status, TaskStatus::InProgress));
     let (start, len) = visible_window(plan.tasks.len(), current);
-    let mut col = col;
-    for task in plan.tasks.iter().skip(start).take(len) {
-        col = col.child(task_row(task));
-    }
-    col
+    plan.tasks.iter().skip(start).take(len)
 }
 
 /// The checklist body: header line, progress bar, then the visible tasks
 /// windowed around the running one so a long plan cannot push the editor off
 /// the screen. Six task rows is what fits above the editor at the default
 /// window height without squeezing the chat pane.
-fn checklist(plan: &PlanDocument) -> Div {
+fn checklist(plan: &PlanDocument, window: &Window) -> Div {
     let (done, total) = progress_counts(plan);
+    let header = format!("📋 {} · {done}/{total}", plan.title);
+    // As wide as the widest row it draws (#3124): the header with its bar and
+    // percentage, or whichever visible task runs longest. The card is a column
+    // of short lines, so without the cap a plan called "Fix the offer card"
+    // painted 900 points of surface for 300 points of words.
+    let mut widths = vec![header_width(window, plan, &header)];
+    for task in windowed_tasks(plan) {
+        widths.push(task_row_width(window, task));
+    }
     let col = div()
         .flex()
         .flex_col()
         .gap_1()
         .p_3()
         .min_w_0()
+        .w_full()
+        .max_w(px(card_width(widths)))
         // The message card's curve and fill (#3114), so the card does not change
         // family when the plan stops waiting and starts running.
         .rounded(px(MESSAGE_RADIUS))
         .bg(glass_fill(message_card_surface()))
         .border_1()
         .border_color(session_edge(palette::current().panel_hi))
-        .child(progress_header_row(
-            plan,
-            format!("📋 {} · {done}/{total}", fit(&plan.title, 60)),
-        ));
+        .child(progress_header_row(plan, header));
     task_rows(col, plan)
 }
 
@@ -723,7 +814,7 @@ pub fn completed_plan_card(
 
 /// The task window: six rows, centred on the running task, or the first six
 /// when nothing is running.
-fn visible_window(total: usize, current: Option<usize>) -> (usize, usize) {
+pub(crate) fn visible_window(total: usize, current: Option<usize>) -> (usize, usize) {
     const ROWS: usize = 6;
     if total <= ROWS {
         return (0, total);
@@ -737,473 +828,84 @@ fn visible_window(total: usize, current: Option<usize>) -> (usize, usize) {
     }
 }
 
-/// Char-safe truncation, the same rule the rail and the transcript follow
-/// (#2271: never slice bytes).
-fn fit(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    out
+/// The card's own step inside its border: `p_3`, both sides.
+const CARD_PAD_X: f32 = 24.0;
+/// The 1px border, both sides.
+const CARD_EDGE: f32 = 2.0;
+/// `gap_2`, the step a row keeps between its parts.
+const ROW_GAP: f32 = 8.0;
+/// `px_2`, the padding inside one of the approval card's chips.
+const CHIP_PAD_X: f32 = 16.0;
+/// A few points of slack, so a measured line is never a pixel short of the box
+/// that has to draw it and cut it with an ellipsis.
+const CARD_SLACK: f32 = 6.0;
+/// How tall the expanded pane checklist gets before it scrolls: about seven
+/// rows of small type with the gaps between them (#3124).
+const PANE_SCROLL_HEIGHT: f32 = 160.0;
+
+/// The width one line paints at, shaped by the live text system in the card's
+/// own family and size (#3124).
+///
+/// A card that spans the column leaves most of its surface empty when its rows
+/// are short, so every card in this file caps itself at the width of its
+/// longest row. That number has to come from the shaper: a character count is a
+/// guess, and the guess is what cut a task title at forty characters inside a
+/// pane with two thirds of its card still blank. A shaper that refuses the run
+/// falls back to the same per-character estimate `sessions::text_width` uses,
+/// which keeps the card placeable rather than collapsing it.
+fn line_width(window: &Window, text: &str, size: f32) -> f32 {
+    let style = window.text_style();
+    let run = TextRun {
+        len: text.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(text.to_string()),
+            px(size),
+            &[run],
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .map(|line| f32::from(line.width()))
+        .unwrap_or_else(|| text.chars().count() as f32 * size * 0.7)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{LineKind, PaneDensity, pane_density, pane_lines, visible_window};
-    use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
+/// What a card caps itself at: its widest row, plus the padding, the border and
+/// the slack it draws in (#3124).
+fn card_width(rows: impl IntoIterator<Item = f32>) -> f32 {
+    rows.into_iter().fold(0.0_f32, f32::max) + CARD_PAD_X + CARD_EDGE + CARD_SLACK
+}
 
-    fn plan_with(tasks: usize, done: usize, running: Option<usize>) -> PlanDocument {
-        let mut plan = PlanDocument::new(uuid::Uuid::new_v4(), "Landing".to_string());
-        plan.status = PlanStatus::Active;
-        for i in 0..tasks {
-            let mut task = PlanTask::new(i + 1, format!("task {i}"), String::new(), TaskType::Edit);
-            if i < done {
-                task.status = TaskStatus::Completed;
-            }
-            plan.add_task(task);
-        }
-        if let Some(i) = running {
-            plan.tasks[i].status = TaskStatus::InProgress;
-        }
-        plan
-    }
+/// The width of a card's header row: the line the caller wrote, then the bar and
+/// the percentage at the trailing edge with the row's own 8 between them
+/// (#2496, #3124).
+fn header_width(window: &Window, plan: &PlanDocument, text: &str) -> f32 {
+    let (_, _, percent, bar) = progress(plan);
+    line_width(window, text, SMALL_TEXT_SIZE)
+        + ROW_GAP
+        + line_width(window, &bar, SMALL_TEXT_SIZE)
+        + ROW_GAP
+        + line_width(window, &format!("{percent}%"), SMALL_TEXT_SIZE)
+}
 
-    /// #2691: the GUI had no chime call site at all, so the notification the
-    /// terminal rings was silence in the window. The window's pass reads the
-    /// strips through `document()` and dedupes with one shared seen set. This
-    /// pins the data half of that wiring against a real plan file: a settled
-    /// task counts once, an unchanged re-read counts zero, and the same plan
-    /// drawn by two strips still counts once.
-    #[test]
-    fn a_settled_task_rings_once_across_every_strip_showing_it() {
-        use super::PlanStripState;
-        use opencrabs::utils::completion_sound::newly_resolved;
-        use std::collections::HashSet;
+/// The width of one task row: the status mark, the gap, then the numbered
+/// title.
+fn task_row_width(window: &Window, task: &PlanTask) -> f32 {
+    let (mark, _) = task_mark(task);
+    line_width(window, mark, SMALL_TEXT_SIZE)
+        + ROW_GAP
+        + line_width(window, &task_line(task), SMALL_TEXT_SIZE)
+}
 
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("plan.json");
-        let mut plan = plan_with(2, 1, Some(1));
-        std::fs::write(
-            &path,
-            serde_json::to_string(&plan).expect("plan serializes"),
-        )
-        .expect("plan file written");
-
-        let mut window_strip = PlanStripState::default();
-        window_strip.set_path(Some(path.clone()));
-        let mut pane_strip = PlanStripState::default();
-        pane_strip.set_path(Some(path.clone()));
-        assert!(
-            window_strip.document().is_some(),
-            "the strip loads the plan the chime pass reads"
-        );
-
-        // One seen set for the window, the union the Dashboard's ledger keeps
-        // in memory and carries to disk per session (#3004).
-        let mut seen: HashSet<uuid::Uuid> = HashSet::new();
-        assert_eq!(
-            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
-            1,
-            "the same settled task in two strips is one chime, not two"
-        );
-        window_strip.refresh();
-        pane_strip.refresh();
-        assert_eq!(
-            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
-            0,
-            "an unchanged re-read must not ring again"
-        );
-
-        // The second task settles and the tool rewrites the file.
-        plan.tasks[1].status = TaskStatus::Completed;
-        std::fs::write(
-            &path,
-            serde_json::to_string(&plan).expect("plan serializes"),
-        )
-        .expect("plan file rewritten");
-        window_strip.refresh();
-        pane_strip.refresh();
-        assert_eq!(
-            newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),
-            1,
-            "the newly settled task rings once"
-        );
-        assert_eq!(seen.len(), 2, "both settled tasks are recorded");
-    }
-
-    /// #2624: the pane card was a wide box of ellipses in a split. Two faults
-    /// stacked. A column sized from its own truncating content made gpui
-    /// measure each line against the width it was about to define, and each
-    /// line was a width-full block div holding truncating text, which gpui
-    /// lays out once at a zero flex basis and caches as an ellipsis (#2642).
-    /// Both halves are pinned: the card owns its width, and each row is a flex
-    /// row with a growing, shrinkable, truncated child.
-    #[test]
-    fn the_pane_card_owns_its_width_and_click_affordance() {
-        const SRC: &str = include_str!("plan_strip.rs");
-        let body = SRC
-            .split_once("pub fn pane_view(")
-            .expect("pane_view exists")
-            .1
-            .split_once("/// How much of a plan one pane shows")
-            .expect("pane_view ends")
-            .0;
-        assert!(
-            body.contains(".w_full()"),
-            "the pane card must own its width, not derive it from the text it truncates"
-        );
-        assert!(
-            body.contains(".cursor_pointer()") && body.contains(".hover("),
-            "the active plan card looks clickable in both pane render paths"
-        );
-        assert!(
-            body.contains(".when(index == 0") && body.contains("disclosure_icon(color, 1.0)"),
-            "the disclosure arrow uses the progress bar's teal on the summary row"
-        );
-        let row = body
-            .split_once("col = col.child(")
-            .expect("pane rows are built in a loop")
-            .1;
-        let flat: String = row.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            flat.contains(".flex_row()"),
-            "each line is a flex row: {flat}"
-        );
-        assert!(
-            flat.contains(".flex_1()"),
-            "the text child grows and shrinks inside that row: {flat}"
-        );
-        assert!(
-            !flat.contains(".w_full() .min_w_0() .overflow_hidden() .truncate()"),
-            "the block-div truncate shape is back: gpui lays it out one character wide"
-        );
-    }
-
-    /// #2755: `Editing` is the state that owns the approval, and the window
-    /// drew nothing at all in it while the terminal and Telegram grew an
-    /// Approve button for the same plan.
-    #[test]
-    fn an_editing_plan_gets_a_card_naming_the_plan_and_the_commands() {
-        let mut plan = PlanDocument::new(uuid::Uuid::new_v4(), "Ship the card".to_string());
-        plan.status = PlanStatus::Editing;
-        let lines = super::editing_lines(&plan);
-        assert_eq!(lines[0].0, LineKind::Title);
-        assert!(
-            lines[0].1.contains("Editing plan") && lines[0].1.contains("Ship the card"),
-            "{:?}",
-            lines[0]
-        );
-        assert_eq!(lines[1], (LineKind::Next, super::APPROVE_HINT.to_string()));
-        assert!(super::APPROVE_HINT.contains("/execute"));
-        assert!(super::APPROVE_HINT.contains("/discard"));
-
-        // A plan with work says how much of it is done, not just how many rows
-        // it has; an empty one still says it waits (#2970).
-        let sized = plan_with(3, 0, None);
-        assert!(
-            super::editing_lines(&sized)[0].1.ends_with("0/3"),
-            "{:?}",
-            super::editing_lines(&sized)[0]
-        );
-        assert!(
-            super::editing_lines(&plan_with(3, 2, None))[0]
-                .1
-                .ends_with("2/3"),
-            "the count is progress, so a half-done plan says so"
-        );
-        assert!(
-            super::editing_lines(&plan)[0]
-                .1
-                .starts_with("\u{270d}\u{fe0f} Editing plan"),
-            "an empty plan is still waiting: {:?}",
-            super::editing_lines(&plan)[0]
-        );
-        assert!(
-            !super::editing_lines(&plan)[0].1.contains('/'),
-            "a design plan has nothing to count, so it prints no fraction: {:?}",
-            super::editing_lines(&plan)[0]
-        );
-    }
-
-    /// #2970: the approval card named a count and stopped, so a reader asked to
-    /// approve a six-task checklist could not see the progress or a single row
-    /// of it. Telegram draws every row whatever its status, Discord draws the
-    /// rows beside `done/total`, and the window's own live card draws
-    /// `done/total`, the bar and the windowed rows. The one card that carries
-    /// the Approve button was the only surface that showed none of them.
-    #[test]
-    fn the_approval_card_shows_the_progress_and_the_rows_it_asks_to_approve() {
-        let src = include_str!("plan_strip.rs");
-        let body = src
-            .split("pub fn editing_view(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// The plan as a split pane draws it").next())
-            .expect("the editing view body");
-        assert!(
-            body.contains("progress_header_row(plan, head)"),
-            "a checklist plan's header keeps the metrics the live card prints"
-        );
-        assert!(
-            body.contains("task_rows(col, plan)"),
-            "the six-row window the live card uses draws here too"
-        );
-        assert!(
-            body.contains("if plan.tasks.is_empty()"),
-            "only a plan with nothing to count falls back to the bare header"
-        );
-        assert_eq!(
-            super::editing_lines(&plan_with(6, 0, None))[0].1,
-            "\u{270d}\u{fe0f} Editing plan · Landing · 0/6"
-        );
-    }
-
-    /// The card is drawn for Editing only, in both draw paths, and its two
-    /// taps send the literal commands the terminal sends rather than calling
-    /// an approval implementation of their own.
-    #[test]
-    fn the_approval_card_is_drawn_where_the_taps_can_be_pressed() {
-        let src = include_str!("plan_strip.rs");
-        let body = src
-            .split("pub fn editing_view(")
-            .nth(1)
-            .and_then(|rest| rest.split("/// The plan as a split pane draws it").next())
-            .expect("the editing view body");
-        assert!(
-            body.contains("matches!(plan.status, PlanStatus::Editing)"),
-            "only a waiting plan gets the approval card"
-        );
-        assert!(
-            body.contains("actions.on_approve") && body.contains("actions.on_discard"),
-            "the card renders both taps it is handed"
-        );
-
-        // The strip is called from three places after the split (#2822): the
-        // split pane's body, the tap builder, and the window's own render for
-        // the unsplit case. The order below is the order the one file had.
-        let main = concat!(
-            include_str!("dashboard_panes.rs"),
-            include_str!("dashboard_turns.rs"),
-            include_str!("dashboard_render.rs"),
-        );
-        let panes = main
-            .split("fn panes_body(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("panes body");
-        assert!(
-            panes.contains("editing_view(Some(&actions))"),
-            "a split pane draws the waiting plan, not just the running one"
-        );
-        // The unsplit arm is the `else` of the split gate (#3110 moved the
-        // check from a `!window_is_split()` wrapper to the branch itself), so
-        // the slice starts at the gate and ends where the queue is read.
-        let unsplit = main
-            .split("if self.window_is_split() {")
-            .nth(1)
-            .and_then(|rest| rest.split("let waiting = self.queued_for_strip();").next())
-            .expect("the unsplit strip block");
-        assert!(
-            unsplit.contains("editing_view(actions.as_ref())"),
-            "the unsplit window draws the waiting plan"
-        );
-
-        let taps = main
-            .split("fn plan_actions(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("the tap builder");
-        assert!(
-            taps.contains("\"/execute\".to_string()"),
-            "Approve sends the command the terminal sends"
-        );
-        assert!(
-            taps.contains("\"/discard\".to_string()"),
-            "Discard sends the command the terminal sends"
-        );
-        assert!(
-            taps.contains("send_turn_to(session,"),
-            "a tap goes through the composer path that parses the command"
-        );
-    }
-
-    #[test]
-    fn a_wide_pane_shows_the_running_task_and_the_next_two() {
-        // #2624: three panes at a readable width keep the detail the user
-        // asked for: what is running, and the one or two tasks after it.
-        let lines = pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Tasks, false);
-        assert_eq!(lines.len(), 4, "summary, running, two next: {lines:?}");
-        assert_eq!(lines[0].1, "3/8 · ███░░░░░░░ 37%");
-        assert_eq!(lines[1], (LineKind::Running, "▸ task 4".to_string()));
-        assert_eq!(lines[2].0, LineKind::Next);
-        assert!(lines[2].1.starts_with("· task 5"), "{:?}", lines[2]);
-        assert!(lines[3].1.starts_with("· task 6"), "{:?}", lines[3]);
-        assert!(
-            !lines.iter().any(|(kind, _)| *kind == LineKind::Title),
-            "a pane spends its rows on the work, not on the plan's title"
-        );
-    }
-
-    #[test]
-    fn a_split_grid_separates_the_disclosure_arrow_from_its_summary() {
-        // The renderer owns the disclosure arrow, while the data keeps only
-        // the readable summary that belongs beside it.
-        let lines = pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Bar, false);
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert_eq!(lines[0], (LineKind::Bar, "3/8".to_string()));
-        // Four to seven keeps the same progress and running task.
-        let summary = pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Summary, false);
-        assert_eq!(summary.len(), 2, "{summary:?}");
-        assert_eq!(summary[0].1, "3/8 · ███░░░░░░░ 37%");
-        assert_eq!(summary[1], (LineKind::Running, "▸ task 4".to_string()));
-        assert!(
-            !summary.iter().any(|(kind, _)| *kind == LineKind::Title),
-            "a summary pane spends its rows on the progress and the task"
-        );
-    }
-
-    #[test]
-    fn the_density_follows_the_pane_count_and_the_pane_width() {
-        // The count decides first, then the measured width, so a narrow
-        // column of a three-pane window compacts like a grid leaf.
-        assert_eq!(pane_density(2, 600.0), PaneDensity::Tasks);
-        assert_eq!(pane_density(3, 400.0), PaneDensity::Tasks);
-        assert_eq!(pane_density(4, 400.0), PaneDensity::Summary);
-        assert_eq!(pane_density(7, 400.0), PaneDensity::Summary);
-        assert_eq!(pane_density(8, 400.0), PaneDensity::Bar);
-        assert_eq!(pane_density(2, 300.0), PaneDensity::Summary);
-        assert_eq!(pane_density(2, 200.0), PaneDensity::Bar);
-    }
-
-    #[test]
-    fn an_expanded_pane_shows_the_checklist_windowed() {
-        // A click expands: the same six-row window the full card uses, so a
-        // long plan cannot push the composer out of the pane.
-        let lines = pane_lines(&plan_with(20, 3, Some(4)), PaneDensity::Bar, true);
-        assert_eq!(lines[0].0, LineKind::Title);
-        assert_eq!(lines[0].1, "Landing · 3/20");
-        assert_eq!(lines[1].0, LineKind::Bar);
-        assert_eq!(lines.len(), 8, "header, bar and the six-row window");
-        assert!(lines[2].1.starts_with("2. "), "{:?}", lines[2]);
-        assert!(lines.iter().skip(2).any(|(k, _)| *k == LineKind::Running));
-    }
-
-    #[test]
-    fn a_pane_names_the_idle_states() {
-        let complete = plan_with(4, 4, None);
-        let lines = pane_lines(&complete, PaneDensity::Tasks, false);
-        assert_eq!(lines[1].1, "✓ complete");
-        let waiting = plan_with(4, 1, None);
-        assert_eq!(
-            pane_lines(&waiting, PaneDensity::Tasks, false)[1].1,
-            "▸ waiting"
-        );
-        let mut seed = PlanDocument::new(uuid::Uuid::new_v4(), "Landing".to_string());
-        seed.status = PlanStatus::Active;
-        let lines = pane_lines(&seed, PaneDensity::Tasks, false);
-        assert_eq!(lines.len(), 2, "a plan with no checklist is two lines");
-        assert_eq!(lines[0].1, "Landing");
-        assert!(lines[1].1.contains("checklist not seeded"));
-    }
-
-    #[test]
-    fn a_pane_truncates_a_long_task_title() {
-        // A pane can be narrow; a long task title is cut instead of wrapped
-        // into rows the pane does not have.
-        let mut plan = plan_with(3, 1, Some(1));
-        plan.tasks[1].title = "x".repeat(120);
-        plan.tasks[2].title = "y".repeat(120);
-        let lines = pane_lines(&plan, PaneDensity::Tasks, false);
-        assert_eq!(lines[1].0, LineKind::Running);
-        assert!(
-            lines[1].1.chars().count() <= 40,
-            "the running line is cut: {}",
-            lines[1].1
-        );
-        assert!(
-            lines[1].1.ends_with('…'),
-            "a cut line says it was cut: {:?}",
-            lines[1]
-        );
-        assert!(
-            lines[2].1.chars().count() <= 40,
-            "the next line is cut too: {}",
-            lines[2].1
-        );
-        // The bar keeps its count whatever the titles do.
-        assert!(lines[0].1.ends_with("33%"), "{:?}", lines[0]);
-    }
-
-    #[test]
-    fn window_centres_on_the_running_task_and_never_overruns() {
-        assert_eq!(visible_window(3, Some(1)), (0, 3));
-        assert_eq!(visible_window(20, Some(0)), (0, 6));
-        assert_eq!(visible_window(20, Some(10)), (7, 6));
-        assert_eq!(visible_window(20, None), (0, 6));
-        // Every case stays inside the task list, so no row is ever dropped
-        // by a window that starts past the end.
-        for total in 1..40 {
-            for current in [None, Some(0), Some(total / 2), Some(total - 1)] {
-                let (start, len) = visible_window(total, current);
-                assert!(start + len <= total, "{total} {current:?} -> {start} {len}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_checklist_header_gives_the_title_the_slack() {
-        // #2496: the header row packed to the left, so a wide card carried a
-        // dead band on the right and a long title pushed the bar out of it.
-        // The title takes the slack and truncates; the metrics keep their
-        // width at the trailing edge. The row is one helper now, because the
-        // approval card prints the same metrics as the live card (#2970).
-        let src = include_str!("plan_strip.rs");
-        let body = src
-            .split("fn progress_header_row(plan: &PlanDocument, text: String) -> Div {")
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn ").next())
-            .expect("the header row body");
-        assert!(body.contains(".flex_1()"), "the title takes the slack");
-        assert!(
-            body.contains(".flex_none()"),
-            "the metric group keeps its width"
-        );
-        assert!(body.contains(".truncate()"), "a long title is cut");
-        assert!(
-            src.contains("progress_header_row(plan, head)")
-                && src.contains("progress_header_row(\n            plan,"),
-            "the live card and the approval card both draw through it"
-        );
-    }
-
-    /// #2678: a finished plan's card is text the user reads, so each of its
-    /// lines has to be a selectable segment, spelled exactly as `copy_text`
-    /// spells it. Otherwise the only thing a drag can copy is the whole card.
-    #[test]
-    fn the_completed_card_draws_one_selectable_line_per_copy_line() {
-        let src = include_str!("plan_strip.rs");
-        let body = src
-            .split("pub fn completed_plan_card(")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .expect("the completed card body");
-        assert_eq!(
-            body.matches(["selectable_", "styled_text("].concat().as_str())
-                .count(),
-            3,
-            "the header, the task rows and the footer are all selectable"
-        );
-        // The draw spells the tick as an escape while `copy_text` spells it as
-        // the character, so compare the way the code renders it rather than the
-        // bytes it happens to be written with.
-        let rendered = body.replace("\\u{2611}", "\u{2611}");
-        assert!(
-            rendered.contains("\u{2611} {}. {}") && body.contains("task.order, task.title"),
-            "a task line is spelled the way copy_text spells it"
-        );
-        assert!(
-            !body.contains(".text_xs()"),
-            "a selectable line carries its size in the style, not on the div"
-        );
-    }
+/// The width of one approval chip: its label plus the pill's padding.
+fn action_chip_width(window: &Window, label: &str) -> f32 {
+    line_width(window, label, SMALL_TEXT_SIZE) + CHIP_PAD_X
 }

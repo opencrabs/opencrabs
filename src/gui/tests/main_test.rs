@@ -1884,13 +1884,13 @@ fn a_split_pane_draws_the_plans_density_shape() {
         .and_then(|rest| rest.split("\n}\n").next())
         .expect("panes body");
     assert!(
-        body.contains("self.plan.pane_view(density, expanded)"),
+        body.contains("self.plan.pane_view(density, expanded, window)"),
         "the chat leaf in a split draws the compact strip"
     );
     // A split pane builds its own strip in its own render (#2805), so the
     // density shape is read where that leaf draws.
     assert!(
-        PANE_VIEW.contains("self.plan.pane_view(density, expanded)"),
+        PANE_VIEW.contains("self.plan.pane_view(density, expanded, window)"),
         "every pane draws the compact strip"
     );
     assert!(
@@ -1906,7 +1906,7 @@ fn a_split_pane_draws_the_plans_density_shape() {
         "a click expands the checklist for that pane alone"
     );
     assert!(
-        !body.contains(".plan.view()"),
+        !body.contains(".plan.view(window)"),
         "no split pane draws the full checklist"
     );
 }

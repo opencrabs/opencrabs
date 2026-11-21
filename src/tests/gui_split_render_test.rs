@@ -588,8 +588,8 @@ fn the_window_composer_stands_down_once_the_window_is_split() {
          helper places (#3114)"
     );
     assert!(
-        gated.contains(".editing_view(actions.as_ref())")
-            && gated.contains(".or_else(|| self.plan.view())"),
+        gated.contains(".editing_view(actions.as_ref(), window)")
+            && gated.contains(".or_else(|| self.plan.view(window))"),
         "so does the window's plan strip: the Editing approval card draws \
          first (#2755) and the running view falls back"
     );

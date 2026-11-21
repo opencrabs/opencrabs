@@ -1046,6 +1046,7 @@ impl Dashboard {
         chat: AnyElement,
         content: f32,
         interactive: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Shares are clamped to the pixel floor against the area the last
@@ -1199,8 +1200,8 @@ impl Dashboard {
                     self.plan.refresh();
                     (
                         self.plan
-                            .editing_view(Some(&actions))
-                            .or_else(|| self.plan.pane_view(density, expanded)),
+                            .editing_view(Some(&actions), window)
+                            .or_else(|| self.plan.pane_view(density, expanded, window)),
                         self.queued_for_strip(),
                         self.composer.editor.clone(),
                     )
