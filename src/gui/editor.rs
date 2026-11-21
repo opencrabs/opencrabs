@@ -4866,11 +4866,14 @@ mod tests {
     fn a_marker_at_the_end_of_its_line_is_an_attachment() {
         // The shape that leaked: a voice note, then a background task's notice
         // appended after it.
-        let with_notice = "We can aggregate to the push. <<AUD:/tmp/voice-1.ogg>>\n\
+        // `/fixtures/`, not `/tmp/`: this module is not test-gated as a file, so
+        // the windows-footguns scan reads these literals as live for the windows
+        // build. The path shape is what the test needs, not a real temp dir.
+        let with_notice = "We can aggregate to the push. <<AUD:/fixtures/voice-1.ogg>>\n\
                            🔧 background task failed: mkdir -p ~/.opencrabs/tmp/gate";
         assert_eq!(
             marker_paths(with_notice),
-            vec![PathBuf::from("/tmp/voice-1.ogg")],
+            vec![PathBuf::from("/fixtures/voice-1.ogg")],
             "the clip the words carry is still the row's attachment"
         );
         assert_eq!(
@@ -4882,13 +4885,13 @@ mod tests {
 
         // Two voice notes queued together: each ends its own line, so both are
         // attachments and neither marker is printed.
-        let two_clips = "I mean the issue. <<AUD:/tmp/voice-2.ogg>>\n\
-                         I know. <<AUD:/tmp/voice-3.ogg>>";
+        let two_clips = "I mean the issue. <<AUD:/fixtures/voice-2.ogg>>\n\
+                         I know. <<AUD:/fixtures/voice-3.ogg>>";
         assert_eq!(
             marker_paths(two_clips),
             vec![
-                PathBuf::from("/tmp/voice-2.ogg"),
-                PathBuf::from("/tmp/voice-3.ogg")
+                PathBuf::from("/fixtures/voice-2.ogg"),
+                PathBuf::from("/fixtures/voice-3.ogg")
             ]
         );
         assert_eq!(strip_markers(two_clips), "I mean the issue. \nI know.");
