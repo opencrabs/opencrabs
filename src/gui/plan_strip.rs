@@ -15,15 +15,17 @@
 use super::icon::disclosure_icon;
 use crate::palette;
 use crate::transcript::{
-    ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
-    selectable_styled_text, small_style,
+    ClickHandler, MESSAGE_RADIUS, PLAIN_TEXT_SIZE, SMALL_TEXT_SIZE, SelectionContext,
+    message_card_surface, selectable_styled_text, small_style,
 };
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
+use opencrabs::ui_core::card::{glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use gpui::{Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, rgb};
+use gpui::{
+    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, rgb, rgba,
+};
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
 /// The strip's state: the plan file it is showing, the mtime it last read,
@@ -44,10 +46,10 @@ pub struct PlanStripState {
 /// The window mints them: only its own view can build a listener, and only it
 /// knows which session the card belongs to. The card stays a pure draw.
 pub struct PlanActions {
-    /// `✅ Approve plan`: sends `/execute`, the command the terminal and
+    /// `✅ Approve`: sends `/execute`, the command the terminal and
     /// Telegram send.
     pub on_approve: ClickHandler,
-    /// `🗑 Discard`: sends `/discard`.
+    /// `🗑️ Discard`: sends `/discard`.
     pub on_discard: ClickHandler,
 }
 
@@ -317,8 +319,9 @@ impl PlanStripState {
             // The message card's curve and fill (#3117), the same pair the
             // unseeded row, the approval card, the live checklist and the
             // finished card wear since #3114. This was the last plan card on
-            // `CARD_RADIUS` over the raised panel, so in a split the plan read
-            // as a panel from another window wedged in above the composer.
+            // the larger card curve over the raised panel, so in a split the
+            // plan read as a panel from another window wedged in above the
+            // composer.
             .rounded(px(MESSAGE_RADIUS))
             .bg(glass_fill(message_card_surface()))
             // Same edge as the unsplit card (#3110): a pane paints the same
@@ -399,10 +402,12 @@ impl PlanStripState {
     }
 }
 
-/// What the approval card calls the plan: the same words the Telegram chrome
-/// uses, so one plan reads the same on both surfaces.
-const APPROVE_LABEL: &str = "✅ Approve plan";
-const DISCARD_LABEL: &str = "🗑 Discard";
+/// What the approval card calls the plan: the same two decisions Telegram
+/// offers, in fewer words (#3124). The card already names the plan one line
+/// up, so repeating "plan" inside the button only made the label longer than
+/// the decision it carries.
+const APPROVE_LABEL: &str = "✅ Approve";
+const DISCARD_LABEL: &str = "🗑️ Discard";
 /// What the card tells the user to do, under the plan it names.
 pub const APPROVE_HINT: &str = "Approve with /execute, or discard with /discard.";
 
@@ -430,22 +435,49 @@ pub fn editing_lines(plan: &PlanDocument) -> Vec<(LineKind, String)> {
 
 /// One tap on the approval card. The id comes from the plan, so two strips
 /// showing the same plan never mint the same element twice.
+///
+/// The chrome is the offer rows' chrome (#3124): the same curve one step
+/// inside the message card, a 1px edge, the body size, and a wash instead of
+/// the raised panel. Drawn as bare text on `panel_hi` at `text_xs` the two
+/// decisions read as lines flying loose inside the card, not as the buttons
+/// they are, and the card was the only place in the window that asked for a
+/// click without showing an edge to click.
 fn action_chip(id: String, label: &str, accent: bool, handler: ClickHandler) -> Stateful<Div> {
-    let color = if accent {
-        palette::current().teal
+    let p = palette::current();
+    // The accent wash for the decision the card is asking for, the quiet one
+    // for the way out, exactly as an offer row splits primary from default.
+    let (ink, wash) = if accent {
+        (p.accent, rgba((p.accent << 8) | 0x1c))
     } else {
-        palette::current().text_muted
+        (p.text_normal, rgba(0xffffff0d))
     };
     div()
         .id(SharedString::from(id))
         .flex_none()
-        .px_2()
-        .py_1()
-        .rounded(px(CARD_RADIUS))
-        .bg(rgb(palette::current().panel_hi))
+        .px_3()
+        .py_1p5()
+        .rounded(px(MESSAGE_RADIUS - 4.0))
+        .border_1()
+        // Approve keeps the accent edge, the way the offer row the keyboard is
+        // on does: it is the one the card is asking for. Discard carries the
+        // quiet edge every offer row starts with.
+        .border_color(if accent {
+            rgba((ink << 8) | 0x88)
+        } else {
+            rgba(0xffffff1a)
+        })
+        .bg(wash)
+        .when(accent, |d| {
+            d.hover(|d| d.border_color(rgba((ink << 8) | 0xbb)))
+        })
+        .when(!accent, |d| {
+            d.hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
+        })
         .cursor_pointer()
-        .text_xs()
-        .text_color(rgb(color))
+        // The answer's body size, not the small print: the same reason the
+        // offer rows took it in #3124.
+        .text_size(px(PLAIN_TEXT_SIZE))
+        .text_color(rgb(ink))
         .child(SharedString::from(label.to_string()))
         // A tap on a chip is not a tap on the card it sits in: the pane's card
         // toggles its checklist on a press, and approving a plan must not also
@@ -836,8 +868,8 @@ const CARD_PAD_X: f32 = 24.0;
 const CARD_EDGE: f32 = 2.0;
 /// `gap_2`, the step a row keeps between its parts.
 const ROW_GAP: f32 = 8.0;
-/// `px_2`, the padding inside one of the approval card's chips.
-const CHIP_PAD_X: f32 = 16.0;
+/// `px_3`, the padding inside one of the approval card's chips.
+const CHIP_PAD_X: f32 = 24.0;
 /// A few points of slack, so a measured line is never a pixel short of the box
 /// that has to draw it and cut it with an ellipsis.
 const CARD_SLACK: f32 = 6.0;
@@ -907,7 +939,8 @@ fn task_row_width(window: &Window, task: &PlanTask) -> f32 {
         + line_width(window, &task_line(task), SMALL_TEXT_SIZE)
 }
 
-/// The width of one approval chip: its label plus the pill's padding.
+/// The width of one approval chip: its label at the body size, the padding
+/// inside the pill, and the 1px edge on both sides (#3124).
 fn action_chip_width(window: &Window, label: &str) -> f32 {
-    line_width(window, label, SMALL_TEXT_SIZE) + CHIP_PAD_X
+    line_width(window, label, PLAIN_TEXT_SIZE) + CHIP_PAD_X + CARD_EDGE
 }

@@ -385,13 +385,34 @@ fn the_cards_share_the_message_curve_and_fill() {
         5,
         "and all five take the message fill"
     );
-    // The chips inside a card are controls rather than cards, so they keep the
-    // larger curve. The pane's ring used to be counted here too; it went to
-    // `MESSAGE_RADIUS` with the session surface (#3110).
+    // The two approval chips wear the offer rows' chrome (#3124): a control
+    // one step inside the message card's curve, with an edge that shows a
+    // pointer where to click. They used to be bare text on the raised panel at
+    // `CARD_RADIUS`, which read as two words flying loose inside the card
+    // rather than as the two decisions it was asking for.
     assert_eq!(
-        PLAN_STRIP.matches(".rounded(px(CARD_RADIUS))").count(),
+        PLAN_STRIP
+            .matches(".rounded(px(MESSAGE_RADIUS - 4.0))")
+            .count(),
         1,
-        "the action chip keeps its own curve"
+        "one chip builder, drawn twice"
+    );
+    let chip = region(
+        PLAN_STRIP,
+        "fn action_chip(",
+        "/// How much of a plan one pane shows",
+    );
+    assert!(
+        chip.contains(".border_1()"),
+        "a chip is a button, so it shows an edge: {chip}"
+    );
+    assert!(
+        chip.contains(".text_size(px(PLAIN_TEXT_SIZE))"),
+        "and the body size the offer rows took, not the small print"
+    );
+    assert!(
+        !chip.contains("CARD_RADIUS"),
+        "the chips left that curve with the rest of the card family"
     );
 }
 
