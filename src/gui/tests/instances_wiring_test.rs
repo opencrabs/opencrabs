@@ -548,3 +548,41 @@ fn a_remote_send_carries_the_conversation_on_screen() {
          dropped on the way"
     );
 }
+
+#[test]
+fn the_remote_composer_takes_the_local_ones_measurements() {
+    // The owner's report was not "make it prettier", it was that the remote
+    // field did not look like the one in the chat: 13 px of text in a 32 px
+    // box against the local 14 px on a 22 px line with a 44 px floor (#3133).
+    // Both numbers live in two files that nothing forces together, so a change
+    // to the local composer would silently leave the remote one behind. The
+    // guard reads both and compares them.
+    let panel = include_str!("../remote_panel.rs");
+    let composer = fn_body(panel, "pub(crate) fn view(").expect("the panel has a view");
+    let editor = include_str!("../editor.rs");
+
+    for measurement in [
+        ".line_height(px(22.))",
+        ".text_size(px(14.))",
+        ".min_h(px(44.))",
+        "transcript::card_inset()",
+    ] {
+        assert!(
+            composer.contains(measurement),
+            "the remote composer must carry {measurement}, which is what the \
+             local field uses; without it the two fields are different sizes"
+        );
+        assert!(
+            editor.contains(measurement),
+            "{measurement} is no longer the local composer's, so this guard is \
+             comparing the remote field against nothing: update both together"
+        );
+    }
+
+    // The placeholder is the local field's own constant. A second copy of the
+    // string is how the two drift into saying different things.
+    assert!(
+        composer.contains("crate::editor::PLACEHOLDER"),
+        "the remote placeholder must be the local constant, not a literal"
+    );
+}
