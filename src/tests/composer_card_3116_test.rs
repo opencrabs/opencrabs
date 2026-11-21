@@ -24,7 +24,7 @@ const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
 /// it in the session.
 fn shell() -> &'static str {
     let start = RENDER
-        .find("let mut shell = div()")
+        .find("let shell = div()")
         .expect("the composer still builds a shell");
     RENDER[start..]
         .split("col = col.child(")

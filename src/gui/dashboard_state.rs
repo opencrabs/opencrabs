@@ -181,6 +181,13 @@ pub(crate) struct Dashboard {
     /// Period fetches reuse it; they never re-read the config, because
     /// tiny-stack background threads must not run `Config::load`.
     pub(crate) db_path: std::path::PathBuf,
+    /// The hint ids the reader has hidden, read once at startup and appended
+    /// to on each dismissal (#3121).
+    ///
+    /// Held here rather than queried per frame: the engine asks on every
+    /// repaint which lines may print, and a database read behind a paint is a
+    /// stutter the reader would feel as the window thinking.
+    pub(crate) hint_dismissed: Vec<String>,
     /// The session rail's live state.
     pub(crate) sessions: sessions::SessionsState,
     /// Which rail rows have work in flight, and which plans wait (#2636).

@@ -171,18 +171,22 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         !PANE_CHROME.contains(".p_3()"),
         "and keeps no uniform inset of its own"
     );
-    // The task strip is the top row of the same footer, so it lands on the same
-    // column: the row pads the column minus the hover pill, and the label pads
-    // the pill's own 4.
+    // The hint is a card of its own now, in the same column as the plan, the
+    // queue and the offers, so it pads the card's uniform step rather than the
+    // footer's row arithmetic (#3102).
     let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
     assert!(
-        strip.contains(".px(transcript::card_row_inset())")
-            && strip.contains(".px(transcript::hover_pill_inset())"),
-        "the strip's two insets add up to the field's column inside the card"
+        strip.contains(".p_3()"),
+        "the card pads the same 12 as its neighbours in the stack"
     );
     assert!(
-        !strip.contains(".px_3()"),
-        "the 16 it inherited from the shell's old gutter is gone"
+        strip.contains(".rounded(px(transcript::MESSAGE_RADIUS))")
+            && strip.contains(".bg(glass_fill(transcript::message_card_surface()))"),
+        "and wears the message card's fill and curve, like the queue above it"
+    );
+    assert!(
+        !strip.contains(".px(transcript::card_row_inset())"),
+        "it is no longer a row of the composer's card"
     );
     // The footer row under the hairline is the last of those rows, and it
     // padded a flat 12 while everything above it moved (#3114).

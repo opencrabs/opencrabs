@@ -10,6 +10,16 @@ use crate::window_input::{QUIT_WINDOW, WHEEL_LINE_PX};
 use opencrabs::brain::mission_control::McAnalytics;
 use opencrabs::ui_core::hints::HintState;
 
+/// The card's line, as the window paints it (#3102).
+///
+/// The window reads the line with its id, because the card can be dismissed and
+/// a dismissal names which one. These tests only care about the words, so they
+/// drop the id here rather than reaching into a second door that would have to
+/// be kept in step with the first.
+fn card_line(state: &HintState) -> Option<String> {
+    crate::composer_view::task_hint_for(state).map(|hint| hint.text)
+}
+
 /// A leaf is its own view now (#2805): its state and the transcript it
 /// draws are scanned here, not in the crate root.
 const PANE_VIEW: &str = include_str!("../pane_view.rs");
@@ -1994,52 +2004,54 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
 fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
     let render = include_str!("../dashboard_render.rs");
     assert!(
-        render.contains("fn hint_card(line: &SharedString) -> Div"),
-        "the card is a strip of its own, painted from its own line"
+        render.contains("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div"),
+        "the card is a card of its own, drawn from the hint it carries"
     );
-    // Flush on top of the composer, not floating in the gap above it: one
-    // column, no gap, card first and the dock under it.
+    // The composer's shell is the field and its footer, and nothing else: a
+    // line of advice welded to the top of the box you type into reads as part
+    // of the input, and it had no way to be answered.
     assert!(
-        render.contains("let mut shell = div()"),
-        "the card and the composer share one shell"
+        render.contains("let shell = div()"),
+        "the shell holds the field and the footer only"
     );
     assert!(
-        render.contains(".gap_0()"),
-        "the card and the composer stack with nothing between them"
+        !render.contains("shell = shell.child(hint_card"),
+        "and the card is no longer a strip of the composer's own box"
     );
-    // The shell owns the single edge and the single curve (#3102, #3114): the
-    // composer is a card of a message's size again, so the card's top strip and
-    // the field under it share one box. Two boxes stacked flush would each round
-    // their own corners and leave a notch where they meet, which is exactly what
-    // the card floating above the composer did.
+    // The card is the last strip of the stack above the composer, so it sits
+    // under the plans, the queue and the offers: act on what is waiting, then
+    // read the tip about it.
+    let card = render
+        .find("if let Some(hint) = self.task_hint()")
+        .expect("the card is drawn from the hint the screen is showing");
+    let card = &render[card..];
+    let card = card
+        .split("above_used = true;")
+        .next()
+        .expect("the card closes the stack");
+    assert!(
+        card.contains("session_row(") && card.contains("hint_card(&hint, cx)"),
+        "the card takes the conversation's column, like every strip above it: {card}"
+    );
+    // The shell owns the single edge and the single curve (#3114): the composer
+    // is a card of a message's size, and it is now the only thing in that box.
     let shell = &render[render
-        .find("let mut shell = div()")
-        .expect("the card and the composer share one shell")..];
+        .find("let shell = div()")
+        .expect("the composer still builds a shell")..];
     let shell = shell
         .split("col = col.child(")
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
         shell.contains(".border_1()"),
-        "one edge for the pair, so it reads as a single card: {shell}"
+        "one edge for the field and its footer: {shell}"
     );
     assert!(
         shell.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "and the messages' curve, so the pair matches the bubbles: {shell}"
+        "and the messages' curve, so the card matches the bubbles: {shell}"
     );
-    // The card is a child of that shell, and the shell is a card of the
-    // conversation's own size (#3114): its rows pad the card's column instead of
-    // measuring the pane.
-    let card = render
-        .find("shell = shell.child(hint_card(&line));")
-        .expect("the card is a child of that shell, not a sibling floating over it");
-    let card = render[card..].lines().next().expect("the join is one line");
-    assert!(
-        card.contains("hint_card(&line)"),
-        "the strip itself is what the shell holds: {card}"
-    );
-    // The dock lost the surface it used to paint (#2987): the shell above owns
-    // it now, so there is exactly one card on screen.
+    // The dock lost the surface it used to paint (#2987): the shell owns it, so
+    // there is exactly one card on screen.
     let dock = render
         .split("let dock = div()")
         .nth(1)
@@ -2067,7 +2079,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
     );
     // The card never repeats them: a line already on screen does not need a
     // second home.
-    let quiet = crate::composer_view::task_line_for(&HintState::default());
+    let quiet = card_line(&HintState::default());
     assert!(
         quiet.is_none(),
         "a quiet conversation paints no card at all: {quiet:?}"
@@ -2083,7 +2095,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
 fn the_card_says_what_the_screen_is_asking_for() {
     // An offer waiting is the most actionable thing on screen, and the arrows
     // reach it instead of the composer history.
-    let offered = crate::composer_view::task_line_for(&HintState {
+    let offered = card_line(&HintState {
         offers: 1,
         ..HintState::default()
     })
@@ -2099,7 +2111,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
         "and how to leave it: {offered}"
     );
 
-    let many = crate::composer_view::task_line_for(&HintState {
+    let many = card_line(&HintState {
         offers: 3,
         ..HintState::default()
     })
@@ -2115,7 +2127,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
 
     // The rail holds the keyboard, so the card names its keys and nothing the
     // composer would never receive.
-    let rail = crate::composer_view::task_line_for(&HintState {
+    let rail = card_line(&HintState {
         rail_focused: true,
         offers: 2,
         ..HintState::default()
@@ -2127,7 +2139,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
     );
 
     // A split pick reads the same keys for a different promise.
-    let split = crate::composer_view::task_line_for(&HintState {
+    let split = card_line(&HintState {
         rail_focused: true,
         rail_split: true,
         ..HintState::default()
@@ -2139,7 +2151,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
     );
 
     // A queue is the only rung also true while a turn runs.
-    let queued = crate::composer_view::task_line_for(&HintState {
+    let queued = card_line(&HintState {
         processing: true,
         queued: 2,
         ..HintState::default()
@@ -2152,7 +2164,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
 
     // Nothing is suggested while the answer is still being written: the field
     // already says Esc stops it.
-    let busy = crate::composer_view::task_line_for(&HintState {
+    let busy = card_line(&HintState {
         processing: true,
         ..HintState::default()
     });
@@ -2192,7 +2204,7 @@ fn the_card_never_repeats_the_fields_own_keys() {
         },
     ];
     for state in &states {
-        let Some(line) = crate::composer_view::task_line_for(state) else {
+        let Some(line) = card_line(state) else {
             continue;
         };
         assert!(
@@ -3860,7 +3872,7 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
 fn the_composer_is_a_card_on_a_square_ground() {
     let render = include_str!("../dashboard_render.rs");
     let shell = &render[render
-        .find("let mut shell = div()")
+        .find("let shell = div()")
         .expect("the composer still builds a shell")..];
     let shell = shell
         .split("col = col.child(")

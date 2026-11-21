@@ -61,6 +61,7 @@ mod editor;
 mod fonts;
 mod help_view;
 mod hint;
+mod hint_dismiss;
 mod icon;
 mod launch;
 mod layout_store;
@@ -200,7 +201,7 @@ use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };

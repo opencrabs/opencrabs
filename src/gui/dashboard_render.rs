@@ -5,7 +5,7 @@
 //! earlier (#2690).
 
 use super::*;
-use opencrabs::ui_core::hints::{CONTEXT_TIGHT, HintState};
+use opencrabs::ui_core::hints::{CONTEXT_TIGHT, Hint, HintState, dismissible};
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2593,6 +2593,22 @@ impl Render for Dashboard {
                         });
                         above_used = true;
                     }
+                    // The hint card closes the stack, directly above the
+                    // composer it talks about (#3121). It moved here from a
+                    // strip welded to the composer's own border: the field is
+                    // for typing, and a line of advice pinned to it read as
+                    // part of the input. As the last card of the stack it sits
+                    // under the plans, the queue and the offers, which is the
+                    // order a reader needs them in: act on what is waiting,
+                    // then read the tip about it.
+                    if let Some(hint) = self.task_hint() {
+                        above = above.child(session_row(
+                            hint_card(&hint, cx).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
+                        above_used = true;
+                    }
                     // The strips take their room from the conversation before
                     // the composer does: the box goes in above the input, and
                     // an empty box adds no row at all.
@@ -2651,10 +2667,10 @@ impl Render for Dashboard {
                     };
                     // The dock is the composer's column: the field, the
                     // hairline, and the key hints under it. The surface, border
-                    // and radius live on the shell around it, because the task
-                    // card is attached to the same surface (#3102): two boxes
-                    // stacked flush would each round their own corners and
-                    // leave a notch where they meet.
+                    // and radius live on the shell around it, so the field and
+                    // its footer read as one box instead of two stacked flush,
+                    // which would each round their own corners and leave a
+                    // notch where they meet.
                     //
                     // The card is the messages' size again (#3114). It ran edge
                     // to edge after #3112, and the owner called that out on a
@@ -2678,14 +2694,12 @@ impl Render for Dashboard {
                                 .h(px(1.))
                                 .bg(rgb(palette::current().panel_hi)),
                         );
-                    // The task card rides on top of the composer, flush, as a
-                    // thin strip of the same surface (#3102). It is not a box
-                    // of its own: the shell below owns the one border and the
-                    // one radius, so the card cannot float over the gap or
-                    // leave a notch where the two meet. It says what the screen
-                    // is asking for, which is why it disappears when there is
-                    // nothing to ask.
-                    let mut shell = div()
+                    // The composer's shell is the field and the footer, and
+                    // nothing else (#3102). The hint that used to ride on top
+                    // of it as a strip is now a card of its own above the
+                    // composer, where it can be read and dismissed instead of
+                    // being welded to the thing you type into.
+                    let shell = div()
                         .flex()
                         .flex_col()
                         .gap_0()
@@ -2696,9 +2710,6 @@ impl Render for Dashboard {
                         .border_color(rgb(palette::current().panel_hi))
                         .rounded(px(transcript::MESSAGE_RADIUS))
                         .overflow_hidden();
-                    if let Some(line) = self.task_card_line() {
-                        shell = shell.child(hint_card(&line));
-                    }
                     // The composer closes the session as its last row, a card of
                     // the conversation's own size (#3110, #3114). `session_row`
                     // spends the half rem on each side, so the card's edge is
@@ -3769,13 +3780,13 @@ impl Dashboard {
             // different promise, and one word apart is the difference between a
             // shortcut and a surprise (#3102).
             rail_split: self.split_target.is_some(),
-            // Filled from the dismissal store by the window itself, once it
-            // has one; the engine stays free of the database.
-            dismissed: Vec::new(),
-            // No engine is known to this surface yet, so the tip that names
-            // `/whisper` stays quiet rather than pointing at a command with
-            // nothing behind it.
-            voice: false,
+            // Filled from the dismissal store by the window itself; the engine
+            // stays free of the database.
+            dismissed: self.hint_dismissed.clone(),
+            // The same predicate the field's cold line uses, so the tip and the
+            // prompt never disagree about whether there is an engine to record
+            // with.
+            voice: crate::composer_view::voice_ready(),
         };
         // What a `/clear` leaves behind is the system prompt and the tool
         // schemas. Counting it tokenises every tool schema, so it is measured
@@ -3821,44 +3832,86 @@ fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// The thin strip across the top of the composer (#3102).
+/// The hint card above the composer (#3102, #3121).
 ///
 /// It carries one line about the work: what the screen is asking for right now.
 /// The keys that act on the field itself stay inside the field, where the caret
 /// is, so the two never compete for the same glance.
 ///
-/// It paints no surface of its own. The shell around the composer owns the one
-/// border and the one radius, and this strip only adds a hairline under itself,
-/// so the pair reads as a single card with a header rather than two boxes
-/// stacked flush.
+/// It is a card of the conversation's column, not a strip of the composer's
+/// box. A line welded to the top of the field read as part of the input, and it
+/// had no way to be answered: a reader who already knew the tip had to look at
+/// it forever. So it stands on its own, in the message card's fill and curve,
+/// and hovering it offers the one control it needs, a way to make it stop.
 ///
-/// The accent comes from the live palette, so it follows whichever theme the
-/// reader picked and is never a literal.
-fn hint_card(line: &SharedString) -> Div {
+/// The hover state lives in the shared thread-local the player blocks use, so
+/// a repaint costs one map lookup and no view rebuild.
+fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div {
     let shown = palette::current();
-    div()
+    let hover_id = format!("hint-card-{}", hint.id);
+    let over = crate::composer_orb::hovering(&hover_id);
+    let mut card = div()
+        .id("hint-card")
         .flex()
         .flex_row()
         .items_center()
+        .justify_between()
+        .gap_2()
         .w_full()
-        // The strip is a row of the composer's card (#3114), so it pads the
-        // card's column minus the hover pill's inset, and the label inside pads
-        // the rest: the pill needs its own 4 or the hover fill would start on
-        // the glyph. The card already sits on the session's half rem, so this
-        // row's own step is the card's, not the pane's.
-        .px(transcript::card_row_inset())
-        .py_1()
-        .border_b(px(1.))
-        .border_color(rgb(shown.panel_hi))
+        .min_w_0()
+        // The strips' own step (#3114): the queue and the plan card pad 12, and
+        // this one is the same family, so it does too.
+        .p_3()
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .bg(glass_fill(transcript::message_card_surface()))
+        .border_1()
+        .border_color(session_edge(shown.panel_hi))
+        .on_hover(move |is_over: &bool, window, _cx| {
+            // Only a change is worth a frame: a pointer that rests on the card
+            // would otherwise repaint the window on every mouse move.
+            if crate::composer_orb::note_hover(&hover_id, *is_over) {
+                window.refresh();
+            }
+        })
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .px(transcript::hover_pill_inset())
+                .min_w_0()
                 .overflow_hidden()
                 .text_xs()
                 .text_color(rgb(shown.accent))
-                .child(line.clone()),
-        )
+                .child(SharedString::from(hint.text.clone())),
+        );
+    // Only a hint the reader may hide gets the control, and only while the
+    // pointer is on the card: a permanent × on every line would be a button
+    // asking to be pressed by accident. The class comes from the engine, which
+    // keeps the warnings (a context about to overflow) undismissable: hiding
+    // the one line that says the conversation is running out of room is not a
+    // preference, it is a way to lose work.
+    if over && dismissible(hint.id) {
+        let id = hint.id;
+        card = card.child(
+            div()
+                .id("hint-dismiss")
+                .flex_none()
+                .px_1()
+                .rounded(px(4.0))
+                .text_xs()
+                .text_color(rgb(shown.text_muted))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(shown.track)).text_color(rgb(shown.text_normal)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Dashboard, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_hint(id, cx);
+                    }),
+                )
+                .child(SharedString::from("×")),
+        );
+    }
+    card
 }
+

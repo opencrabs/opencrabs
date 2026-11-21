@@ -16,7 +16,7 @@ use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb,
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
 use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::commands as slash;
-use opencrabs::ui_core::hints::{HintState, task_line};
+use opencrabs::ui_core::hints::{Hint, HintState, task_line_hint};
 
 use std::ops::Range;
 
@@ -245,16 +245,16 @@ pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> Share
     }
 }
 
-/// The task line the card above the composer paints right now, if any (#3102).
+/// The same line with its id, for the card that can act on it (#3121).
 ///
-/// The card is about the work, so it is filtered through the commands the
-/// desktop app actually answers: a line naming a command this surface does not
-/// run is worse than no line at all.
-pub(crate) fn task_line_for(state: &HintState) -> Option<SharedString> {
-    task_line(state, |command| {
+/// The window needs the id and not just the words: hiding a hint means
+/// remembering which one, and the text is reworded between releases. The
+/// support gate is the window's own, so a card never names a command this
+/// surface cannot run.
+pub(crate) fn task_hint_for(state: &HintState) -> Option<Hint> {
+    task_line_hint(state, |command| {
         slash::support_gui(command) == slash::Support::Runs
     })
-    .map(SharedString::from)
 }
 
 /// How many queued messages stay on screen. Two, until the user opens the

@@ -187,7 +187,7 @@ fn every_card_in_the_session_is_the_size_of_a_message() {
     // goes through the same helper as the strips now, so its edge lands where a
     // message's edge lands.
     let shell = RENDER
-        .find("let mut shell = div()")
+        .find("let shell = div()")
         .expect("the composer still builds a shell");
     let end = RENDER
         .find("_ => right.child(middle).child(footer)")

@@ -167,16 +167,35 @@ impl Dashboard {
         self.composer.sync_composer_hint(hint, &panes, cx);
     }
 
-    /// The line the card above the composer paints right now (#3102).
+    /// The line the card under the conversation paints right now (#3121).
     ///
     /// It has an intent: it names what the screen is asking for at this moment,
     /// and nothing else. The keys that act on the field itself stay inside the
     /// field, so the two never compete for the same glance.
     ///
-    /// `None` when the work has nothing to say, which paints no card at all
-    /// rather than an empty one.
-    pub(crate) fn task_card_line(&self) -> Option<SharedString> {
-        crate::composer_view::task_line_for(&self.hint_state())
+    /// It comes back with its id, because the card can now be dismissed and a
+    /// dismissal needs to know which line the reader hid. `None` when the work
+    /// has nothing to say, which paints no card at all rather than an empty
+    /// one.
+    pub(crate) fn task_hint(&self) -> Option<opencrabs::ui_core::hints::Hint> {
+        crate::composer_view::task_hint_for(&self.hint_state())
+    }
+
+    /// Hide the hint the card is showing, for seven days.
+    ///
+    /// The window stops drawing it immediately and the ledger write happens on
+    /// its own thread, so the click never waits on a database open. Seven days
+    /// is the temporary half of the promise the card makes: long enough that
+    /// the reader stops being nagged, short enough that a hint they later want
+    /// comes back on its own instead of being lost for good.
+    pub(crate) fn dismiss_hint(&mut self, hint_id: &str, cx: &mut Context<Self>) {
+        if !self.hint_dismissed.iter().any(|id| id == hint_id) {
+            self.hint_dismissed.push(hint_id.to_string());
+        }
+        let db_path = self.db_path.clone();
+        let hint_id = hint_id.to_string();
+        crate::hint_dismiss::dismiss(db_path, hint_id);
+        cx.notify();
     }
 
     /// Every split pane's own composer. The window's field lives on the chat

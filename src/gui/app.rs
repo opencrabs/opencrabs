@@ -98,6 +98,11 @@ pub(crate) fn run() {
     }
     let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
     let session_list = futures::executor::block_on(sessions::load_sessions(db_path.clone()));
+    // Which hints the reader has hidden, read before the first frame so a
+    // dismissed line never flashes in and out (#3121). A read that fails shows
+    // every hint rather than none: a repeated hint is a small annoyance, a
+    // silently empty card is a feature that looks broken.
+    let hint_dismissed = hint_dismiss::load(db_path.clone());
     // The pinned set is a sidecar table, so it is its own read. A failure
     // leaves the rail unpinned rather than hiding the conversations.
     let favorites: std::collections::HashSet<uuid::Uuid> =
@@ -486,6 +491,7 @@ pub(crate) fn run() {
                         window_frame_seen: saved_window,
                         window_frame_saved: saved_window,
                         db_path: db_path.clone(),
+                        hint_dismissed,
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),
                         rail_index: rail_activity::PlanIndex::default(),

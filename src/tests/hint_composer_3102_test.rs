@@ -280,49 +280,51 @@ fn the_card_does_not_rotate() {
     );
 }
 
-/// The card rides on top of the composer on both surfaces.
+/// The card is its own card above the composer, on both surfaces.
 ///
-/// In the window it is a thin strip flush against the composer, separated by a
-/// single hairline, so the pair reads as one surface. In the terminal it takes
-/// the row directly above the input box.
+/// It used to be a strip welded to the composer's top border, sharing the
+/// shell's single radius. That made a line of advice read as part of the input,
+/// and it left the reader no way to answer it. It stands on its own now, in the
+/// conversation's column, above the field it talks about (#3102).
 #[test]
-fn the_card_sits_on_top_of_the_composer() {
+fn the_card_is_its_own_card_above_the_composer() {
     let render = include_str!("../gui/dashboard_render.rs");
-    let stack = render
-        .find("let mut shell = div()")
-        .expect("the card and the composer share one shell");
-    let dock = render
+    // The card is asked for once, and that call sits above the composer's
+    // shell: a card painted after the field would float over it.
+    let card = render
+        .find("if let Some(hint) = self.task_hint()")
+        .expect("the card is asked for once, with its id");
+    let composer = render
         .find("shell.child(dock.child(footer))")
-        .expect("the composer card is what it rides on");
+        .expect("the composer card is what it stands above");
     assert!(
-        stack < dock,
-        "the card is added to the stack before the composer"
+        card < composer,
+        "the card is added to the column before the composer"
     );
-    // One surface, and the shell clips it. The pair shares one radius (#3102),
-    // which came back when the composer became a card of a message's size again
-    // (#3114): the strip is its top edge, so the curve is the card's own and the
-    // clip stays, because the card must not paint past the surface it rides on.
-    let shell_body = render
-        .get(stack..)
+    // It rides the strips' column, so its edge lands where a message's does.
+    let call = render
+        .get(card..)
+        .expect("the call starts on a char boundary")
+        .split("above_used = true;")
+        .next()
+        .expect("the call ends where the flag is raised");
+    assert!(
+        call.contains("session_row("),
+        "the card takes the conversation's column, not the pane's: {call}"
+    );
+    // And the composer's shell is the field and the footer alone.
+    let shell_start = render
+        .find("let shell = div()")
+        .expect("the composer's shell is built once");
+    let shell = render
+        .get(shell_start..)
         .expect("the shell starts on a char boundary")
-        // The shell ends where the card joins the column. The marker used to
-        // name `central`, which the session surface replaced (#3110), and a
-        // stale marker made this slice run to the end of the file: the
-        // assertion below would then have been reading every other card.
         .split("col = col.child(")
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        shell_body.contains(".border_1()"),
-        "the card floats, so it needs all four of its sides"
-    );
-    assert!(
-        shell_body.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "and the messages' curve, so the pair reads as one family: {shell_body}"
-    );
-    assert!(
-        shell_body.contains(".overflow_hidden()"),
-        "and clips, so nothing paints past the surface"
+        !shell.contains("hint_card"),
+        "the field's shell carries no advice any more: {shell}"
     );
 
     // The terminal lays the card out before the input, in that order.
@@ -355,7 +357,7 @@ fn the_card_is_painted_in_the_theme_accent() {
 
     let render = include_str!("../gui/dashboard_render.rs");
     let start = render
-        .find("fn hint_card(line: &SharedString) -> Div {")
+        .find("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div {")
         .expect("the window's card");
     let body = render
         .get(start..)
