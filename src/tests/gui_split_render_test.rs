@@ -516,7 +516,7 @@ fn each_pane_owns_composer_plan_and_queue() {
     // The transcript pads half a rem on each side, so a card drawn flush to the
     // pane's edge came out wider than every message above it.
     assert!(
-        body.contains(".min_w_0() .px_2() .gap_2();"),
+        body.contains("div().flex().flex_col().flex_none().min_w_0().px_2().gap_2();"),
         "the chat leaf's chrome spends the transcript's half rem"
     );
     // A split pane builds that column in its own render (#2805), from its own
