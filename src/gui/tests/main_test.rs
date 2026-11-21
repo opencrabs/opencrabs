@@ -2004,7 +2004,7 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
 fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
     let render = include_str!("../dashboard_render.rs");
     assert!(
-        render.contains("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div"),
+        render.contains("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement"),
         "the card is a card of its own, drawn from the hint it carries"
     );
     // The composer's shell is the field and its footer, and nothing else: a

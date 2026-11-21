@@ -227,14 +227,18 @@ impl PaneView {
             .overflow_hidden()
             .gap_2();
         let mut above_used = false;
-        let Some(window) = self.window.upgrade() else {
+        // The upgraded handle is the window's state, named apart from the
+        // `&Window` the plan cards measure their text with (#3124): the two
+        // were one name, and the shadowing handed the entity to a call that
+        // wanted the frame.
+        let Some(owner) = self.window.upgrade() else {
             return col;
         };
         let session = self.session;
         // The window's own answers, read once, so its state is not borrowed
         // while the strips are built.
         let (panes, expanded, queue_expanded, topic_idle, focused, running, forwarding) = {
-            let win = window.read(cx);
+            let win = owner.read(cx);
             (
                 win.panes
                     .as_ref()
@@ -343,7 +347,7 @@ impl PaneView {
         }
         if let Some(label) = running
             && let Some(area) =
-                window.update(cx, |win, cx| win.task_area(session, label.as_ref(), cx))
+                owner.update(cx, |win, cx| win.task_area(session, label.as_ref(), cx))
         {
             above = above.child(area);
             above_used = true;
@@ -361,7 +365,7 @@ impl PaneView {
         // (#2530, #2610). A forward opened from this leaf swaps its composer
         // for the destination picker, the same placement the chat uses.
         let composer = if forwarding {
-            window.update(cx, |win, cx| win.forward_picker(cx))
+            owner.update(cx, |win, cx| win.forward_picker(cx))
         } else if focused {
             let mut cell = div().flex().flex_col().flex_none().gap_2();
             let slash_popup = self.editor.read(cx).command_popup();
@@ -436,13 +440,13 @@ impl Render for PaneView {
                 });
             },
         );
-        let Some(window) = self.window.upgrade() else {
+        let Some(owner) = self.window.upgrade() else {
             return div().into_any_element();
         };
         // The keyboard owner and the status row are the window's answers, so
         // they are read from it rather than guessed here.
         let (focused, footer, landing) = {
-            let win = window.read(cx);
+            let win = owner.read(cx);
             // The footer is built once per frame for every leaf (#2899), so
             // the pane reads the one the walk already resolved instead of
             // taking the bridge lock again on its own draw.
@@ -721,7 +725,7 @@ impl Render for PaneView {
             // pane's live card never knew its turn was running.
             self.busy,
             self.width,
-            f32::from(_window.rem_size()),
+            f32::from(window.rem_size()),
             fold_handlers,
             transcript::ViewHooks {
                 // The pane's own budget (#2854), not the window's.
@@ -780,7 +784,7 @@ impl Render for PaneView {
         // it is asked for here rather than handed over: a pane that only
         // redraws itself must not lose the strip the window built last frame
         // (#2686, #2687).
-        let topics = window.update(cx, |win, cx| win.pane_topics(session, cx));
+        let topics = owner.update(cx, |win, cx| win.pane_topics(session, cx));
         let chrome = self.chrome(window, cx).into_any_element();
         // The frame fills a box of its own, and that box is what the cached
         // view path lays out (`pane_root`, #2805).

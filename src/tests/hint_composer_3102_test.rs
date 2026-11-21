@@ -357,7 +357,7 @@ fn the_card_is_painted_in_the_theme_accent() {
 
     let render = include_str!("../gui/dashboard_render.rs");
     let start = render
-        .find("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div {")
+        .find("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {")
         .expect("the window's card");
     let body = render
         .get(start..)

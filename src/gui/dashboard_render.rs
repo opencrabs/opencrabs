@@ -3846,10 +3846,13 @@ fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
 ///
 /// The hover state lives in the shared thread-local the player blocks use, so
 /// a repaint costs one map lookup and no view rebuild.
-fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> Div {
+fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
     let shown = palette::current();
     let hover_id = format!("hint-card-{}", hint.id);
     let over = crate::composer_orb::hovering(&hover_id);
+    // The id is what makes the card stateful, and `on_hover` only exists on a
+    // stateful element (#3121), so the card returns the element it builds
+    // rather than a plain `Div` it can no longer be.
     let mut card = div()
         .id("hint-card")
         .flex()
