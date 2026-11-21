@@ -1134,6 +1134,52 @@ impl Dashboard {
                 .into_any_element(),
         );
 
+        // The instructions are the point of the card. A code with no "what do I
+        // do with this" is a number the owner has to reverse-engineer, and the
+        // other crab's flow has three steps that are not guessable from here.
+        body.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(shown.track))
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from("como ligar o outro crab")),
+                )
+                .children(share_steps().iter().enumerate().map(|(i, step)| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(rems(0.75))
+                                .text_color(rgb(shown.accent))
+                                .child(SharedString::from(format!("{}.", i + 1))),
+                        )
+                        .child(
+                            div()
+                                .text_size(rems(0.75))
+                                .text_color(rgb(shown.text))
+                                .child(SharedString::from(*step)),
+                        )
+                        .into_any_element()
+                }))
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(SHARE_FOOTNOTE)),
+                )
+                .into_any_element(),
+        );
+
         let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.instance_share_close(cx);
         });
@@ -1169,6 +1215,28 @@ impl Dashboard {
 /// One QR module's side in pixels. 4 px over a 33-module code is 132 px, which
 /// fits a card and is still big enough for a phone camera to lock on.
 const QR_MODULE_PX: f32 = 4.0;
+
+/// The steps the card prints, in the order the other crab needs them.
+///
+/// Pure and fixed so a test can pin them: the card's value is the instruction,
+/// and an instruction that drifts from the flow the other crab actually has is
+/// worse than no instruction at all. Each one names the exact control the owner
+/// must press on the far side.
+pub(crate) fn share_steps() -> [&'static str; 3] {
+    [
+        "no outro crab: botão direito no C, no topo da barra, e escolhe «emparelhar um crab»",
+        "cola o link copiado: preenche o endereço, o código e o nome de uma vez",
+        "carrega em «emparelhar»: o crab novo aparece na barra e as sessões dele abrem",
+    ]
+}
+
+/// What the card says about the two things it cannot do yet.
+///
+/// Both are true today and both surprise people: the QR needs a client that
+/// reads codes (two desktops paste the link), and discovery on the local
+/// network does not exist, so a crab never appears without a code. Saying it
+/// here costs one line; leaving it out costs an hour of "porque não aparece?".
+pub(crate) const SHARE_FOOTNOTE: &str = "entre dois PCs o caminho é o link colado; o QR serve um cliente que saiba ler códigos. descoberta automática na rede ainda não existe: sem código, um crab não aparece na barra.";
 
 /// The sharing card's model: everything the paint reads, built once when the
 /// code is minted. The code exists in plaintext only here and in the store's

@@ -66,3 +66,59 @@ fn a_link_without_a_code_is_not_a_link() {
     assert!(parse_pair_link("https://example.com").is_none());
     assert!(parse_pair_link("").is_none());
 }
+
+#[test]
+fn the_card_prints_the_steps_the_other_crab_actually_has() {
+    // The card's whole job is to tell the owner what to do on the far side. The
+    // steps are pinned here because a menu label that changes on one side and
+    // not on the other turns the card into a wrong instruction, which is worse
+    // than an empty card: the owner follows it and fails.
+    use crate::dashboard_instances::share_steps;
+    let steps = share_steps();
+    assert_eq!(
+        steps.len(),
+        3,
+        "three steps, one per action on the far side"
+    );
+    // Step one names the menu row the other crab's mark really offers.
+    assert!(
+        steps[0].contains("emparelhar um crab"),
+        "step 1 must name the menu row: {}",
+        steps[0]
+    );
+    assert!(
+        steps[0].contains("botão direito"),
+        "step 1 must say how the menu opens: {}",
+        steps[0]
+    );
+    // Step two is the paste, which is what makes the code usable without typing.
+    assert!(
+        steps[1].contains("cola o link"),
+        "step 2 must be the paste: {}",
+        steps[1]
+    );
+    // Step three ends on the button that submits the form.
+    assert!(
+        steps[2].contains("emparelhar"),
+        "step 3 must end on the submit: {}",
+        steps[2]
+    );
+}
+
+#[test]
+fn the_card_says_what_it_cannot_do() {
+    // Two expectations the card must kill before they are formed: that the QR
+    // is scannable by the other desktop (it is not, there is no reader), and
+    // that a crab on the same network shows up on its own (it does not, the
+    // discovery pass does not exist yet). Both are one line here and an hour of
+    // confusion in the owner's head.
+    use crate::dashboard_instances::SHARE_FOOTNOTE;
+    assert!(
+        SHARE_FOOTNOTE.contains("link colado"),
+        "the footnote must point at the link as the desktop path"
+    );
+    assert!(
+        SHARE_FOOTNOTE.contains("descoberta"),
+        "the footnote must say discovery does not exist yet"
+    );
+}
