@@ -492,6 +492,13 @@ fn each_pane_owns_composer_plan_and_queue() {
         body.contains("chrome.insert(*session, col.into_any_element())"),
         "the chat leaf gets a chrome column of its own"
     );
+    // The chat leaf's strips are cards in the conversation's column (#3117).
+    // The transcript pads half a rem on each side, so a card drawn flush to the
+    // pane's edge came out wider than every message above it.
+    assert!(
+        body.contains(".min_w_0() .px_2() .gap_2();"),
+        "the chat leaf's chrome spends the transcript's half rem"
+    );
     // A split pane builds that column in its own render (#2805), from its own
     // session and through the window handle it reports through.
     assert!(

@@ -211,11 +211,19 @@ impl PaneView {
         // strips ask for more height than the pane has and paint past its
         // bottom edge, over the footer and the pane under it.
         let mut col = div().flex().flex_col().flex_shrink().min_h_0().gap_2();
+        // The strips are cards in the conversation's column, not bands of the
+        // pane (#3117). The transcript pads half a rem on each side and every
+        // row it draws starts there, so a card drawn flush to the pane's edge
+        // came out wider than the messages above it and the two columns read as
+        // two different screens. The box spends that half rem once for all of
+        // them, the same step `session_row` takes in the unsplit chat, and the
+        // cards inside keep their own padding.
         let mut above = div()
             .flex()
             .flex_col()
             .flex_shrink()
             .min_h_0()
+            .px_2()
             .overflow_hidden()
             .gap_2();
         let mut above_used = false;
@@ -368,6 +376,12 @@ impl PaneView {
             let draft = self.editor.read(cx).content.clone();
             pane_composer_dim(draft, session, false, self.window.clone())
         };
+        // The field closes the pane's column as its last row, one step under
+        // the cards above it (#3117). That step is the column's own `gap_2`,
+        // the same 8 the unsplit session keeps above its composer card, and it
+        // is why nothing here pads the composer's top: a second gutter on the
+        // field would make the two surfaces disagree about the step between
+        // them the way the old full-bleed cards did.
         col.child(composer)
     }
 
@@ -1016,6 +1030,15 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
         // as the pane's background, before it gave up a single strip. The
         // listener is the only witness this state has ever had.
         //
+        // The wrapper clips (#3117). The transcript asks for a floor, so in a
+        // short pane it is taller than the room the chrome leaves it and its
+        // rows paint down over the plan card and behind the composer: the
+        // conversation was cut in half by the field instead of stopping above
+        // it. The clip belongs on this box and not on the transcript, because
+        // the transcript IS the scroller and a later `overflow_hidden` there
+        // would replace the scroll (#3110). #3003 removed this one while a
+        // different symptom was being chased; the rows under the composer are
+        // what it was always for.
         .child(
             div()
                 .flex()
@@ -1023,6 +1046,7 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .min_h(px(CONVERSATION_FLOOR))
+                .overflow_hidden()
                 .on_children_prepainted(move |bounds, _window, _cx| {
                     witness_conversation_height(
                         bounds.first().map(|bounds| f32::from(bounds.size.height)),

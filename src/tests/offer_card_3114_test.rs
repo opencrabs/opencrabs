@@ -314,23 +314,25 @@ fn the_cards_share_the_message_curve_and_fill() {
     );
     assert_eq!(
         PLAN_STRIP.matches(".rounded(px(MESSAGE_RADIUS))").count(),
-        4,
+        5,
         "every plan card: the unseeded row, the approval card, the live \
-         checklist and the finished one in the transcript"
+         checklist, the finished one in the transcript and the split pane's \
+         own card (#3117)"
     );
     assert_eq!(
         PLAN_STRIP
             .matches(".bg(glass_fill(message_card_surface()))")
             .count(),
-        4,
-        "and all four take the message fill"
+        5,
+        "and all five take the message fill"
     );
-    // The pane's own ring is the pane's, and the chips inside a card are
-    // controls rather than cards: both keep the larger curve.
+    // The chips inside a card are controls rather than cards, so they keep the
+    // larger curve. The pane's ring used to be counted here too; it went to
+    // `MESSAGE_RADIUS` with the session surface (#3110).
     assert_eq!(
         PLAN_STRIP.matches(".rounded(px(CARD_RADIUS))").count(),
-        2,
-        "the pane ring and the action chip keep their own curve"
+        1,
+        "the action chip keeps its own curve"
     );
 }
 

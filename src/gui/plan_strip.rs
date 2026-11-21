@@ -255,22 +255,36 @@ impl PlanStripState {
         // measured against the width it was about to define. gpui resolved
         // that circle by giving every line one character of room, which is why
         // a split pane showed a wide card of nothing but ellipses.
+        //
+        // The padding is the family's (#3117). It was a bare 8 by 4, so the
+        // card's own lines started on its edge and the card read as a strip of
+        // text pressed against two borders rather than as the plan card the
+        // unsplit chat draws. Every other plan card pads 12, and a pane's card
+        // is the same object on a narrower column.
         let mut col: Div = div()
             .flex()
             .flex_col()
             .flex_none()
             .w_full()
             .gap_1()
-            .px_2()
-            .py_1()
+            .p_3()
             .min_w_0()
-            .rounded(px(CARD_RADIUS))
-            .bg(glass_fill(palette::current().panel))
+            // The message card's curve and fill (#3117), the same pair the
+            // unseeded row, the approval card, the live checklist and the
+            // finished card wear since #3114. This was the last plan card on
+            // `CARD_RADIUS` over the raised panel, so in a split the plan read
+            // as a panel from another window wedged in above the composer.
+            .rounded(px(MESSAGE_RADIUS))
+            .bg(glass_fill(message_card_surface()))
             // Same edge as the unsplit card (#3110): a pane paints the same
             // session surface, so its card cannot be the one without a border.
             .border_1()
             .border_color(session_edge(palette::current().panel_hi))
             .cursor_pointer()
+            // The hover is the one thing that keeps the raised tone (#3117):
+            // the card is a tap target in a pane (it folds the checklist open),
+            // so it still has to answer the pointer, and the message fill has
+            // nothing lighter to step to.
             .hover(|d| d.bg(rgb(palette::current().panel_hi)));
         for (index, (kind, line)) in pane_lines(plan, density, expanded).into_iter().enumerate() {
             let color = match kind {
