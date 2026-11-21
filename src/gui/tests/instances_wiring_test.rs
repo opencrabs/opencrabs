@@ -586,3 +586,28 @@ fn the_remote_composer_takes_the_local_ones_measurements() {
         "the remote placeholder must be the local constant, not a literal"
     );
 }
+
+#[test]
+fn every_pairing_field_answers_the_mouse() {
+    // Reported twice: the form prints three boxes that look editable and only
+    // Tab could move between them (2026-11-21, Daniel: "no ecra de adicionar
+    // crab nao consigo carregar com o rato noutros inputs"). A source test is
+    // the right shape because the wiring is a gpui listener: what regresses is
+    // the handler going away while the box still paints.
+    let source = include_str!("../dashboard_instances.rs");
+    let body = fn_body(source, "pub(crate) fn instance_pair_modal")
+        .expect("instance_pair_modal is the form the owner fills in");
+    assert!(
+        body.contains("instance-pair-field-{index}"),
+        "each row needs its own id, or the click target is the whole card"
+    );
+    assert!(
+        body.contains(".on_click(focus_here)"),
+        "the row must answer a left click: the mouse is how a field is found"
+    );
+    assert!(
+        body.contains("form.field = index"),
+        "the click must move the caret to the row that was clicked, the same \
+         thing Tab does"
+    );
+}

@@ -645,11 +645,25 @@ impl Dashboard {
             // The same span split the composer and the topic prompt use: the
             // window never slices a string, the core does.
             let (before, selected, after) = field.render_spans();
+            // A field that only Tab can reach is a field half the owners never
+            // find: the form printed three boxes that looked editable and
+            // ignored the mouse entirely (2026-11-21, Daniel: "no ecra de
+            // adicionar crab nao consigo carregar com o rato noutros inputs").
+            // Clicking a row now moves the caret there, exactly like Tab.
+            let focus_here = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                if let Some(form) = this.instance_pairing.as_mut() {
+                    form.field = index;
+                }
+                cx.notify();
+            });
             body.push(
                 div()
+                    .id(SharedString::from(format!("instance-pair-field-{index}")))
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .cursor_pointer()
+                    .on_click(focus_here)
                     .child(
                         div()
                             .text_size(rems(0.6875))
