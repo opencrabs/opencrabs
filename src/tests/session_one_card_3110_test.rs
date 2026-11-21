@@ -161,17 +161,25 @@ fn every_card_in_the_session_is_the_size_of_a_message() {
         "the gutter is a rem step, never a pixel literal: {body}"
     );
     // The transcript's rows are padded by that same step, which is what the
-    // strips are matching.
+    // strips are matching. The element is sliced to its own chain rather than a
+    // fixed character window: comments between the scroll and the padding are
+    // free to grow, and a window would start reading the next element's
+    // paddings once they do.
     let scroll = TRANSCRIPT
         .find(".track_scroll(scroll)")
         .expect("the transcript scrolls");
     let tail = &TRANSCRIPT[scroll..];
-    let pad = tail
-        .find(".px_2()")
-        .expect("the history pads its rows by the same step");
+    let end = tail
+        .find(".bg(rgb(surface_fill(")
+        .expect("the history paints its own surface");
+    let element = &tail[..end];
     assert!(
-        pad < 400,
-        "the history's padding is its own step, not a literal: {tail:?}"
+        element.contains(".px_2()"),
+        "the history pads its rows by the same rem step the strips use: {element}"
+    );
+    assert!(
+        !element.contains(".px(px("),
+        "the padding is a rem step, never a pixel literal: {element}"
     );
     // The composer is a card of a message's size again (#3114). #3112 ran it
     // edge to edge and the owner called that out on a single pane: a full-bleed
@@ -233,10 +241,20 @@ fn every_card_in_the_session_draws_one_edge() {
         CARD.contains("pub fn session_edge(base: u32) -> Hsla {"),
         "the edge is one token in the shared card module"
     );
-    assert!(
-        !PLAN.contains("0xffffff") && !COMPOSER.contains("0xffffff"),
-        "the edge is never a literal: it follows whichever theme the reader picked"
-    );
+    // The edge is a token or it follows the palette. What breaks the theme is an
+    // OPAQUE literal, so that is what this rejects. The white washes at
+    // `rgba(0xffffff..)` are alpha overlays: they tint whatever the theme put
+    // under them, so they are theme-independent by construction, and a border
+    // that reads `rgb(palette::current()...)` is following the theme too.
+    for (name, src) in [("plan_strip.rs", PLAN), ("composer_view.rs", COMPOSER)] {
+        let literal = src
+            .lines()
+            .find(|line| line.contains("border_color(") && line.contains("rgb(0x"));
+        assert!(
+            literal.is_none(),
+            "{name} paints an edge from an opaque literal, which ignores the theme: {literal:?}"
+        );
+    }
     // Four plan surfaces: the seeded-less notice, the approval card, the live
     // checklist, and the same checklist compressed inside a split pane.
     assert_eq!(
