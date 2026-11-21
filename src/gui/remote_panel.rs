@@ -196,9 +196,6 @@ pub(crate) fn view(
     // can read a remote answer but not take it, which is half the interaction
     // a local answer offers (#2750).
     copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
-    // The row whose copy icon shows its check. Read from the window because
-    // the mark is one per copy and its timer lives there.
-    copied: Option<uuid::Uuid>,
     draft: &SharedString,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,

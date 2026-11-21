@@ -55,7 +55,7 @@ fn on_remote_runtime<T, F>(call: F) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    crate::remote::instance_client::block_on(call)
+    instance_client::block_on(call)
 }
 
 impl Dashboard {
@@ -928,10 +928,6 @@ impl Dashboard {
                 );
             }
         }
-        // The copy tick. The mark and the timer that clears it live on the
-        // window, so the panel reads the window's mark instead of keeping a
-        // second one that could disagree with it.
-        let copied = self.copied_row();
         let send = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.send_remote(cx);
         });
@@ -959,7 +955,6 @@ impl Dashboard {
             self.rem,
             handlers,
             copy,
-            copied,
             &draft,
             move |ev, window, app| send(ev, window, app),
             move |ev, window, app| close(ev, window, app),
