@@ -534,8 +534,8 @@ impl Dashboard {
                     modal_shell::footer("tab campos · enter emparelha · esc fecha".to_string())
                         .into_any_element(),
                 ),
-                width: 26.0 * f32::from(self.rem),
-                max_height: 26.0 * f32::from(self.rem),
+                width: 26.0 * self.rem,
+                max_height: 26.0 * self.rem,
             },
             dismiss,
         )
@@ -1130,10 +1130,10 @@ impl Dashboard {
         // copies one thing instead of editing TOML from a sentence.
         if let Some(snippet) = &share.snippet {
             let copy_snippet = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                if let Some(share) = this.instance_share.as_ref() {
-                    if let Some(snippet) = share.snippet.as_ref() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(snippet.clone()));
-                    }
+                if let Some(share) = this.instance_share.as_ref()
+                    && let Some(snippet) = share.snippet.as_ref()
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(snippet.clone()));
                 }
             });
             body.push(
@@ -1252,7 +1252,11 @@ impl Dashboard {
                     // and a column that paints past the card's edge covers the
                     // footer and the close button. Capped and scrollable, it
                     // clips where it should and the whole card stays reachable.
-                    .max_h(px(21.0 * f32::from(self.rem)))
+                    .max_h(px(21.0 * self.rem))
+                    // Scroll is state in GPUI: `overflow_y_scroll` lives on
+                    // `StatefulInteractiveElement`, so the div needs an id
+                    // first or the method does not resolve at all.
+                    .id("instance-share-body")
                     .overflow_y_scroll()
                     .children(body)
                     .into_any_element(),
@@ -1263,8 +1267,8 @@ impl Dashboard {
                     ))
                     .into_any_element(),
                 ),
-                width: 26.0 * f32::from(self.rem),
-                max_height: 30.0 * f32::from(self.rem),
+                width: 26.0 * self.rem,
+                max_height: 30.0 * self.rem,
             },
             close,
         )

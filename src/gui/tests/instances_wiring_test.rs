@@ -208,3 +208,33 @@ fn the_snippet_leaves_what_is_already_right_alone() {
         "the one missing key: {snippet}"
     );
 }
+
+/// GPUI only offers `overflow_y_scroll` on `StatefulInteractiveElement`, which
+/// is `Stateful<Div>`: a scroll container without an id does not compile at
+/// all. That cost a clippy cycle on 2026-11-21, and the same trap is already
+/// documented in `topic_tabs.rs`. Scanning the source catches the class, not
+/// just the one line, because the next card is where it comes back.
+#[test]
+fn every_scroll_container_in_the_wiring_carries_an_id() {
+    let source = include_str!("../dashboard_instances.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut checked = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains(".overflow_y_scroll()") && !line.contains(".overflow_scroll()") {
+            continue;
+        }
+        // The id sits above in the same builder chain. Look back far enough to
+        // cover a comment block between the two, which is how this one is
+        // written: the reason is documented right where it is needed.
+        let window = &lines[i.saturating_sub(12)..i];
+        assert!(
+            window.iter().any(|l| l.contains(".id(")),
+            "scroll container at line {} carries no id, so the method cannot \
+             resolve: {}",
+            i + 1,
+            line.trim()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "the scan found no scroll container to check");
+}
