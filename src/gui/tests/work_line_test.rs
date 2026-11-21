@@ -44,7 +44,11 @@ fn the_bar_is_gated_on_the_chat_screen() {
         .split("self.work_line()")
         .next()
         .expect("the render asks for the work line");
-    let window = &call[call.len().saturating_sub(400)..];
+    // Windowed by characters, not bytes: a byte slice can land mid-character
+    // and the byte-slice ratchet gate rejects it. This only needs the 400
+    // characters before the call site.
+    let skip = call.chars().count().saturating_sub(400);
+    let window: String = call.chars().skip(skip).collect();
     assert!(
         window.contains("self.screen == Screen::Chat"),
         "the bar belongs to the chat screen"
