@@ -19,7 +19,10 @@ fn projects_is_a_real_service_backed_dashboard_screen() {
         "mod projects_view;",
         "projects: projects::ProjectsState",
         "Screen::Projects => (div().flex_1().into_any_element(), div().into_any_element())",
-        "Screen::Projects => right.child(footer)",
+        // The per-screen body+footer arms collapsed into one fallback, so the
+        // proof that Projects reaches a body and a footer is the fallback
+        // itself plus the arm above (#3112).
+        "_ => right.child(middle).child(footer)",
         "projects: projects::ProjectsState::default()",
         "self.projects_key(ev, cx)",
         "self.projects_escape(cx)",
