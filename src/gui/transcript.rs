@@ -3086,10 +3086,12 @@ fn audio_path(path: &std::path::Path) -> bool {
 /// The clip a message carries when the message is a voice note (#3111).
 ///
 /// A voice note is not any audio file: it is a take the microphone heard, and
-/// the send path writes an `<<AUD:...>>` marker whose path sits in the profile's
-/// voice folder under the recording prefix. `voice_input::is_recording` is that
-/// rule, and it is the same one the turn list uses to decide a turn began as
-/// one, so the row and the send path cannot disagree about what a voice note is.
+/// the send path writes an `<<AUD:...>>` marker whose path sits in the
+/// conversation's own folder (its project's attachments dir, or the profile's
+/// `voice/` when it has no project) under the recording prefix (#3114).
+/// `voice_input::is_recording` is that rule, and it is the same one the turn
+/// list uses to decide a turn began as one, so the row and the send path cannot
+/// disagree about what a voice note is.
 ///
 /// Returns only the clip: whether there are words to fold away is a question
 /// about the row's text, which the caller already has stripped of every marker.

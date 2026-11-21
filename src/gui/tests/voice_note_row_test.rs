@@ -7,16 +7,34 @@
 //!
 //! `voice_note` is a plain function over the body string, so these cases run it
 //! rather than restate it. `is_recording` reads no filesystem, only the path's
-//! parent and its name prefix, so a constructed path is enough and nothing here
-//! touches the profile on disk.
+//! folder, its extension and its name prefix, so a constructed path is enough
+//! and nothing here touches the profile on disk.
 
 use crate::transcript::voice_note;
 use std::path::PathBuf;
 
-/// The folder the capture path writes takes into, spelled the way the row
-/// spells it: the profile's `voice/` directory.
+/// The folder the capture path writes takes into when the session has no
+/// project: the profile's `voice/` directory.
 fn voice_folder() -> PathBuf {
     opencrabs::config::opencrabs_home().join(crate::voice_input::VOICE_DIR)
+}
+
+/// A take belongs to its conversation, so it lands in the session's project
+/// attachments folder whenever there is one (#3114). The row has to recognise
+/// it there too, or the words stay in front of the player and the agent gets a
+/// path it cannot open.
+#[test]
+fn a_take_in_a_project_folder_is_a_recording() {
+    let clip = opencrabs::services::ProjectService::projects_dir()
+        .join("devops")
+        .join("files")
+        .join("voice-1730000000000.ogg");
+    let body = format!("make this shorter please <<AUD:{}>>", clip.display());
+    assert_eq!(
+        voice_note(&body),
+        Some(clip),
+        "a clip saved beside the project's other files is still a take"
+    );
 }
 
 /// A body that carries one recording.

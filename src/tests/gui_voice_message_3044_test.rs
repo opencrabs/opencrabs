@@ -294,8 +294,71 @@ fn a_recording_and_a_spoken_reply_keep_different_names() {
     );
     let reply = region_in(input, "pub(crate) fn save_reply_audio(", "fn write_clip(");
     assert!(
-        reply.contains("write_clip(ogg, REPLY_PREFIX)"),
+        reply.contains("write_clip(ogg, REPLY_PREFIX, session)"),
         "the synthesized answer is written under the reply prefix"
+    );
+}
+
+/// A clip follows its conversation (#3114).
+///
+/// The take used to land in the profile's `voice/` drawer whatever the session
+/// was, so a project's recordings piled up in one folder the project never
+/// showed. The folder is now the session's project attachments dir, through the
+/// same resolver every other attachment uses, and only a session with no
+/// project falls back to `voice/`.
+#[test]
+fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
+    let input = VOICE_INPUT;
+    let clip_dir = region_in(input, "fn clip_dir(", "/// Write one take");
+    assert!(
+        clip_dir.contains("project_clip_dir(session)"),
+        "the project folder is asked for first"
+    );
+    assert!(
+        clip_dir.contains(".unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))"),
+        "a session with no project still has somewhere to put its take"
+    );
+    let resolve = region_in(input, "fn project_clip_dir(", "/// Write one take");
+    assert!(
+        resolve.contains("FileService::new"),
+        "the clip goes where every other attachment goes, through the file service"
+    );
+    assert!(
+        resolve.contains(".project_files_dir(session)"),
+        "the attachments dir is the project's own resolver, not a second guess at the slug"
+    );
+    assert!(
+        resolve.contains("global_pool()"),
+        "the capture thread reuses the process's open pool instead of connecting again"
+    );
+    // The capture path has to hand the session down, or the resolver above has
+    // nothing to resolve: the take is transcribed on its own thread.
+    assert!(
+        input.contains("pub(crate) fn start(recording: Recording, session: Option<Uuid>) -> Self"),
+        "the transcription job carries the conversation it belongs to"
+    );
+    assert!(
+        input.contains("save_voice_note(&recording.pcm, session)"),
+        "the save is told which conversation the take came from"
+    );
+    assert!(
+        editor("voice_input::Transcription::start(", "));").contains("self.session"),
+        "the composer hands its own session to the take it starts"
+    );
+    let speak = region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}");
+    assert!(
+        speak.contains("save_reply_audio(&audio, Some(session_id))"),
+        "a spoken answer lands beside the take that asked for it"
+    );
+    // A take is now readable from two homes, so the folder test admits both.
+    let recording = region_in(input, "pub(crate) fn is_recording(", "/// The folder a clip");
+    assert!(
+        recording.contains("ProjectService::projects_dir()"),
+        "a clip in a project's attachments folder is still a take"
+    );
+    assert!(
+        recording.contains("profile.join(VOICE_DIR)"),
+        "and so is one in the profile's own voice folder"
     );
 }
 

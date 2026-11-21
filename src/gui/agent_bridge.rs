@@ -891,7 +891,7 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                     return;
                 }
             };
-            let path = match crate::voice_input::save_reply_audio(&audio) {
+            let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
                 Ok(path) => path,
                 Err(e) => {
                     crate::logging::error(&format!("voice reply save: {e}"));
