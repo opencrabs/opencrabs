@@ -214,10 +214,11 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         hints.push(Hint {
             id: "offers",
             text: if state.offers == 1 {
-                "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
+                "↑ picks the option · enter sends · ↓ or esc back to the field · stop overthinking, pick one"
+                    .to_string()
             } else {
                 format!(
-                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
+                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field · stop overthinking, pick one",
                     state.offers
                 )
             },
@@ -229,7 +230,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         let freed = compact_tokens(state.clearable());
         hints.push(Hint {
             id: "context",
-            text: format!("new task? /clear frees {freed} tokens"),
+            text: format!("new task? /clear frees {freed} tokens · cheaper than watching this thing choke"),
             command: "/clear",
         });
     }
@@ -237,7 +238,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if let Some(version) = state.update_version.as_deref().filter(|v| !v.is_empty()) {
         hints.push(Hint {
             id: "update",
-            text: format!("v{version} is out · /evolve"),
+            text: format!("v{version} is out · /evolve · new version, same crabs"),
             command: "/evolve",
         });
     }
@@ -264,7 +265,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if state.turns >= LONG_SESSION_TURNS && percent < CONTEXT_ROOMY {
         hints.push(Hint {
             id: "fresh-start",
-            text: "/new for a fresh start or new use case · /clear wipes context, keeps history"
+            text: "/new for a fresh start or new use case · /clear wipes context, keeps history · both beat scrolling into the void"
                 .to_string(),
             command: "/new",
         });
@@ -280,7 +281,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if (1..=SEEKER_TIP_TURNS).contains(&state.turns) {
         hints.push(Hint {
             id: "seeker",
-            text: "hint: meet the Seeker · alt+space finds anything, so you can stop pretending you knew where it was"
+            text: "meet the Seeker · alt+space finds anything, so you can stop pretending you knew where it was"
                 .to_string(),
             command: "",
         });
@@ -298,7 +299,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if state.turns >= USAGE_TIP_TURNS {
         hints.push(Hint {
             id: "usage",
-            text: "hint: /usage shows where the tokens went · spoiler: it was that four hour debugging session"
+            text: "/usage shows where the tokens went · spoiler: it was that four hour debugging session"
                 .to_string(),
             command: "/usage",
         });
@@ -309,7 +310,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if state.voice {
         hints.push(Hint {
             id: "whisper",
-            text: "hint: /whisper lets you talk instead of type · your wrists will send a thank you card"
+            text: "/whisper lets you talk instead of type · your wrists will send a thank you card"
                 .to_string(),
             command: "/whisper",
         });
@@ -318,7 +319,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if state.turns >= BROWSER_TIP_TURNS {
         hints.push(Hint {
             id: "browser-automation",
-            text: "hint: ask me to set up browser automation · social media, daily briefs, whatever you keep doing by hand"
+            text: "ask me to set up browser automation · social media, daily briefs, whatever you keep doing by hand"
                 .to_string(),
             command: "",
         });
@@ -385,14 +386,14 @@ pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Op
     if state.rail_split {
         return Some(Hint {
             id: "rail-split",
-            text: "type to find · enter splits · esc cancels".to_string(),
+            text: "type to find · enter splits · esc cancels · yes, you can have two".to_string(),
             command: "",
         });
     }
     if state.rail_focused {
         return Some(Hint {
             id: "rail",
-            text: "type to filter · enter opens · esc back".to_string(),
+            text: "type to filter · enter opens · esc back · the list will not read itself".to_string(),
             command: "",
         });
     }
@@ -407,10 +408,11 @@ pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Op
         return Some(Hint {
             id: "offers",
             text: if state.offers == 1 {
-                "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
+                "↑ picks the option · enter sends · ↓ or esc back to the field · stop overthinking, pick one"
+                    .to_string()
             } else {
                 format!(
-                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
+                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field · stop overthinking, pick one",
                     state.offers
                 )
             },
@@ -422,9 +424,12 @@ pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Op
         return Some(Hint {
             id: "queue",
             text: if state.processing {
-                format!("{} queued · sent when the turn ends", state.queued)
+                format!(
+                    "{} queued · sent when the turn ends · patience, they are coming",
+                    state.queued
+                )
             } else {
-                format!("{} queued · sending now", state.queued)
+                format!("{} queued · sending now · yes, all of them", state.queued)
             },
             command: "",
         });
