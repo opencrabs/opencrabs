@@ -101,16 +101,42 @@ fn the_dead_keys_are_removed_even_without_a_master() {
 
 #[test]
 fn a_config_without_the_pack_is_left_alone() {
+    // "Left alone" is migration 6's own business: a file that never carried the
+    // pack has nothing to collapse, so the two surviving keys keep their values
+    // and none of the dead ones appears. It is NOT a byte-equality assertion,
+    // because the default injections (migrations 3 and 5) add their commented
+    // keys to every file that lacks them, which is a different migration doing
+    // its job on the same launch.
     let before = "[agent]\nnotify_on_plan_completed = true\nnotify_on_turn_failed = true\n";
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(&path, before).unwrap();
     Config::migrate_if_needed(&path);
+    let after = std::fs::read_to_string(&path).unwrap();
+    let doc: toml::Value = toml::from_str(&after).unwrap();
+    let agent = agent(&doc);
     assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        before,
-        "a migrated file must not be rewritten on every launch"
+        agent
+            .get("notify_on_plan_completed")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "the plan switch is not rewritten when there was no pack: {after}"
     );
+    assert_eq!(
+        agent.get("notify_on_turn_failed").and_then(|v| v.as_bool()),
+        Some(true),
+        "and neither is the failure switch: {after}"
+    );
+    for dead in [
+        "completion_notification_enabled",
+        "notify_on_task_completed",
+        "notify_on_turn_completed",
+    ] {
+        assert!(
+            agent.get(dead).is_none(),
+            "{dead} must not be introduced by a launch: {after}"
+        );
+    }
 }
 
 #[test]
