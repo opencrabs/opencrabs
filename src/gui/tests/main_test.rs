@@ -1977,10 +1977,18 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
     // inside give the room and nothing paints past the pane's bottom edge.
     // #2985 moved the floor onto the wrapper, so the body chain carries
     // `min_h(px(CONVERSATION_FLOOR))` rather than `min_h_0` (#3000).
+    // #3119 spends the transcript's own 8px between the conversation and the
+    // cards under it, so the gap is part of the chain the pin holds. It is
+    // asserted as two runs because the comment explaining the gap sits inside
+    // the chain, and a flattened region keeps its comments.
     let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        flat.contains(".flex_shrink() .min_h_0() .min_w_0() .overflow_hidden() .child(chrome),"),
+        flat.contains(".flex_shrink() .min_h_0() .min_w_0()"),
         "the chrome stack is not shrinkable"
+    );
+    assert!(
+        flat.contains(".pt_2() .overflow_hidden() .child(chrome),"),
+        "the stack does not carry the gap above the cards, or does not clip what does not fit"
     );
     assert!(
         flat.contains(
