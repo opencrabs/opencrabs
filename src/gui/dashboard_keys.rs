@@ -1,4 +1,5 @@
-//! Key handling for the whole window, and the chime a settled plan plays.
+//! Key handling for the whole window, and the settle pass a plan's tasks run
+//! through, plus the one chime a finished plan plays.
 //!
 //! Part of the dashboard split (#2822): the same inherent impl, moved out of
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
@@ -1146,11 +1147,11 @@ impl Dashboard {
         }
 
         // Every plan in this frame, each paired with the row that draws it, in
-        // one order so a settled task reaches the chime, the banner, and the
-        // flash from a single pass. A pre-init plan writes the nil session
-        // until the hook stamps it, so the drawing row is the honest fallback.
+        // one order so a settled task reaches the flash from a single pass. A
+        // pre-init plan writes the nil session until the hook stamps it, so the
+        // drawing row is the honest fallback.
         // Owned snapshots: a pane is an entity now (#2805), so a borrowed
-        // document would keep its handle borrowed across the announce. One
+        // document would keep its handle borrowed across the record. One
         // snapshot per pane per frame, and a plan is a handful of tasks.
         let mut plans: Vec<Option<opencrabs::tui::plan::PlanDocument>> =
             Vec::with_capacity(1 + self.pane_states.len());
@@ -1165,11 +1166,11 @@ impl Dashboard {
 
         let seen = &mut self.announced_task_completions;
 
-        // Which sessions settle in this pass. Read before the announce, because
-        // the announce is what writes them into `seen`, the only record of what
-        // already rang. Asking `contains` rather than `insert` keeps that write
-        // in one place, so the flash and the chime cannot disagree about which
-        // task was fresh.
+        // Which sessions settle in this pass. Read before the record, because
+        // the record is what writes them into `seen`, the only record of what
+        // already flashed. Asking `contains` rather than `insert` keeps that
+        // write in one place, so the settled sessions and the flash cannot
+        // disagree about which task was fresh.
         let mut settled: Vec<Uuid> = Vec::new();
         for (slot, owner) in plans.iter().zip(owners.iter()) {
             let Some(doc) = slot else {
