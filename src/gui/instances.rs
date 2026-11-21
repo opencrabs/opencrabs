@@ -35,6 +35,10 @@ pub enum Health {
     Down { since: u64 },
 }
 
+// Test-only: the strip matches on `Health` directly, so these two are dead in
+// the bin target and clippy's dead_code pass fires there. `cfg(test)` keeps
+// them out of that target instead of silencing the lint with an allow.
+#[cfg(test)]
 impl Health {
     pub fn is_up(self) -> bool {
         matches!(self, Health::Up { .. })
@@ -97,10 +101,15 @@ impl Instances {
         }
     }
 
+    // Test-only: the strip asks `entries()` for everything it needs. Kept out
+    // of the bin target so clippy's dead_code pass does not fire on helpers the
+    // tests legitimately want.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -157,11 +166,6 @@ impl Instances {
 
     pub fn selected_host_id(&self) -> Option<&str> {
         self.selected.as_deref()
-    }
-
-    pub fn selected(&self) -> Option<&InstanceEntry> {
-        let id = self.selected.as_deref()?;
-        self.get(id)
     }
 
     /// Select a crab we actually hold. Selecting an unknown id is a no-op
