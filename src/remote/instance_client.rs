@@ -308,7 +308,7 @@ pub async fn list_sessions(target: &Target<'_>, limit: usize) -> Result<Vec<Remo
 /// the panel is not showing, which is exactly what "não consigo enviar
 /// mensagem" looked like from the owner's chair (#3133).
 #[derive(Debug, Clone, Default)]
-pub struct RemoteSession {
+pub struct RemoteTranscript {
     pub title: String,
     pub context_id: Option<String>,
     pub messages: Vec<RemoteMessage>,
@@ -319,7 +319,7 @@ pub async fn transcript(
     target: &Target<'_>,
     session_id: &str,
     limit: usize,
-) -> Result<RemoteSession> {
+) -> Result<RemoteTranscript> {
     let result = call(
         target,
         "session/transcript",
@@ -463,7 +463,7 @@ pub fn parse_sessions(value: &serde_json::Value) -> Result<Vec<RemoteSession>> {
         .collect())
 }
 
-pub fn parse_transcript(value: &serde_json::Value) -> Result<RemoteSession> {
+pub fn parse_transcript(value: &serde_json::Value) -> Result<RemoteTranscript> {
     let title = value
         .get("title")
         .and_then(|v| v.as_str())
@@ -509,7 +509,7 @@ pub fn parse_transcript(value: &serde_json::Value) -> Result<RemoteSession> {
                 .unwrap_or(false),
         })
         .collect();
-    Ok(RemoteSession {
+    Ok(RemoteTranscript {
         title,
         // A peer that predates the field answers without it, and then the
         // panel sends the way it always did: one fresh session per message is
