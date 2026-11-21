@@ -4,7 +4,10 @@
 //! the state the window holds, because that is what the paint reads. The
 //! client and the store carry their own tests next to the code that parses.
 
-use crate::dashboard_instances::{PairingForm, RemoteState, RemoteView};
+use crate::dashboard_instances::{
+    PairingForm, RemoteState, RemoteView, ShareTunnel, ShareView, apply_tunnel, pair_link,
+    parse_pair_link,
+};
 use opencrabs::config::A2aConfig;
 use opencrabs::ui_core::text_field::TextField;
 
@@ -216,7 +219,20 @@ fn the_snippet_leaves_what_is_already_right_alone() {
 /// just the one line, because the next card is where it comes back.
 #[test]
 fn every_scroll_container_in_the_wiring_carries_an_id() {
-    let source = include_str!("../dashboard_instances.rs");
+    // Both panels: the dashboard cards and the remote transcript, which is the
+    // one that shipped clipped because nothing scanned it.
+    for (name, source) in [
+        (
+            "dashboard_instances.rs",
+            include_str!("../dashboard_instances.rs"),
+        ),
+        ("remote_panel.rs", include_str!("../remote_panel.rs")),
+    ] {
+        check_scroll_ids(name, source);
+    }
+}
+
+fn check_scroll_ids(name: &str, source: &str) {
     let lines: Vec<&str> = source.lines().collect();
     let mut checked = 0;
     for (i, line) in lines.iter().enumerate() {
@@ -229,12 +245,148 @@ fn every_scroll_container_in_the_wiring_carries_an_id() {
         let window = &lines[i.saturating_sub(12)..i];
         assert!(
             window.iter().any(|l| l.contains(".id(")),
-            "scroll container at line {} carries no id, so the method cannot \
-             resolve: {}",
+            "{name}: scroll container at line {} carries no id, so the method \
+             cannot resolve: {}",
             i + 1,
             line.trim()
         );
         checked += 1;
     }
-    assert!(checked > 0, "the scan found no scroll container to check");
+    assert!(
+        checked > 0,
+        "{name}: the scan found no scroll container to check"
+    );
+}
+
+/// A card as it comes out on a machine whose gateway only listens on loopback:
+/// a code, a link, and the two blocks that explain why the address is useless
+/// from anywhere else.
+fn card_on_loopback() -> ShareView {
+    let code = "K7QP2M4X".to_string();
+    ShareView {
+        url: "http://127.0.0.1:18790".into(),
+        link: pair_link("http://127.0.0.1:18790", &code, "este pc"),
+        code,
+        qr: Vec::new(),
+        width: 0,
+        warning: Some("esta máquina só aceita ligações locais".into()),
+        snippet: Some("[a2a]\nbind = \"0.0.0.0\"".into()),
+        tunnel: ShareTunnel::Idle,
+        ttl_secs: 300,
+    }
+}
+
+#[test]
+fn a_tunnel_repoints_the_card_at_the_public_url() {
+    let mut card = card_on_loopback();
+    apply_tunnel(&mut card, "https://x.trycloudflare.com".into(), "este pc");
+
+    assert_eq!(card.url, "https://x.trycloudflare.com");
+    assert!(matches!(card.tunnel, ShareTunnel::Up(ref u) if u == "https://x.trycloudflare.com"));
+    // The warning and the TOML block described an address that is no longer
+    // the one being handed out. Leaving them up would be two lies on one card.
+    assert!(card.warning.is_none());
+    assert!(card.snippet.is_none());
+    assert!(card.width > 0, "the QR is rebuilt around the new link");
+
+    let parsed = parse_pair_link(&card.link).expect("the rebuilt link parses");
+    assert_eq!(parsed.0, "https://x.trycloudflare.com");
+    assert_eq!(parsed.1, "K7QP2M4X");
+    assert_eq!(parsed.2.as_deref(), Some("este pc"));
+}
+
+#[test]
+fn a_failed_tunnel_keeps_the_bind_address_on_screen() {
+    // A tunnel that could not open must not blank the card: the bind address
+    // and its warning are still the only true thing it has.
+    let mut card = card_on_loopback();
+    card.tunnel = ShareTunnel::Failed("cloudflared download failed".into());
+    assert_eq!(card.url, "http://127.0.0.1:18790");
+    assert!(card.warning.is_some());
+}
+
+/// The panel's "desligar" must close the view, not the pairing.
+///
+/// A code is minted on the far machine and typed in on this one. Losing it to a
+/// button that reads like "close this" is the kind of loss the user only
+/// notices when the other crab is off and cannot mint another. So the two acts
+/// have two controls, and this pins which one the panel's button reaches.
+#[test]
+fn disconnecting_closes_the_view_and_keeps_the_pairing() {
+    let source = include_str!("../dashboard_instances.rs");
+
+    let close = fn_body(source, "pub(crate) fn instance_disconnect")
+        .expect("instance_disconnect is where the panel's close lands");
+    assert!(
+        !close.contains("InstanceStore") && !close.contains(".remove("),
+        "desligar must not touch the store: {close}"
+    );
+    assert!(
+        close.contains("instance_remote = None"),
+        "it must close the remote view: {close}"
+    );
+
+    // The button's listener is wired to it, and nothing else.
+    // The listener that reaches the button: from its own `let close` to the
+    // call that hands it to the panel.
+    let before = source
+        .split("remote_panel::view(")
+        .next()
+        .expect("the panel is drawn somewhere");
+    let head = before
+        .rsplit("let close = cx.listener")
+        .next()
+        .unwrap_or(before);
+    assert!(
+        head.contains("this.instance_disconnect(cx)"),
+        "the close button must reach instance_disconnect: {head}"
+    );
+    assert!(
+        !head.contains("this.instance_remove("),
+        "the close button must not forget the crab: {head}"
+    );
+}
+
+/// Forgetting a crab is a right-click on its badge, and the menu says its name.
+#[test]
+fn a_badge_right_click_opens_a_menu_that_names_the_crab() {
+    let strip = include_str!("../instance_strip.rs");
+    assert!(
+        strip.contains("instance_badge_menu("),
+        "the badge must open its own menu"
+    );
+    assert!(
+        strip.contains(".on_mouse_down(MouseButton::Right, ask)"),
+        "a right press is what opens it"
+    );
+
+    let dash = include_str!("../dashboard_instances.rs");
+    let items = fn_body(dash, "fn instance_badge_menu_items")
+        .expect("the badge's rows are built somewhere");
+    assert!(
+        items.contains("esquecer {label}"),
+        "the destructive row must carry the crab's name: {items}"
+    );
+    assert!(
+        items.contains("instance_remove(&forget_host"),
+        "and it must be the row that forgets: {items}"
+    );
+    assert!(
+        items.contains("menu_item(\"abrir\")"),
+        "with a harmless row above it, so the pointer does not land on the \
+         destructive one: {items}"
+    );
+}
+
+/// The body of one `fn`, from its signature to the next item at the same
+/// indent. Enough to assert on what a function does without a parser.
+fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+    let start = source.find(signature)?;
+    let rest = &source[start..];
+    let end = rest[1..]
+        .find("\n    fn ")
+        .or_else(|| rest[1..].find("\n    pub(crate) fn "))
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
 }

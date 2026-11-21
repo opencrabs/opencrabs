@@ -25,6 +25,7 @@ use opencrabs::config::Config;
 use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_store::{InstanceStore, KnownInstance, now};
 use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
+use opencrabs::remote::tunnel;
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays, and it is the only clock the strip has: the
@@ -88,6 +89,15 @@ impl Dashboard {
             self.instance_clear(cx);
             return;
         }
+        self.instance_open(host_id, cx);
+    }
+
+    /// Open a crab whether or not it is already the selection.
+    ///
+    /// The menu's "abrir" means open, not toggle: picking the crab you are
+    /// already reading from a menu must not close it, which is the one thing a
+    /// badge click does differently.
+    pub(crate) fn instance_open(&mut self, host_id: &str, cx: &mut Context<Self>) {
         if !self.instances.select(host_id) {
             return;
         }
@@ -99,6 +109,19 @@ impl Dashboard {
     /// Back to the local crab: the workspace mark at the top of the strip.
     pub(crate) fn instance_clear(&mut self, cx: &mut Context<Self>) {
         self.instances.clear_selection();
+        self.instance_remote = None;
+        self.remote_transcript = None;
+        cx.notify();
+    }
+
+    /// Close the remote view and keep the pairing.
+    ///
+    /// The panel's "desligar" is the one control a user reaches for when the
+    /// other machine is off or slow, and it used to delete the stored crab: the
+    /// next look needed a new code, minted on the far side, from a crab that
+    /// might be the reason it did not answer. Closing the view and forgetting
+    /// the crab are two different acts, so they are two different controls.
+    pub(crate) fn instance_disconnect(&mut self, cx: &mut Context<Self>) {
         self.instance_remote = None;
         self.remote_transcript = None;
         cx.notify();
@@ -219,8 +242,14 @@ impl Dashboard {
                             if !title.is_empty() {
                                 transcript.title = SharedString::from(title);
                             }
-                            transcript.rows =
-                                messages.iter().map(RemoteRow::from_message).collect();
+                            // `filter_map`: a seed the harness sent itself, or a
+                            // compaction marker, is stored but is not conversation.
+                            // The local panel hides both, and a remote panel that
+                            // painted them would show scaffolding as chat.
+                            transcript.rows = messages
+                                .iter()
+                                .filter_map(RemoteRow::from_message)
+                                .collect();
                             transcript.notice = None;
                         }
                     }
@@ -574,16 +603,11 @@ impl Dashboard {
         let send = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.send_remote(cx);
         });
-        let remove = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-            let Some(host_id) = this
-                .instance_remote
-                .as_ref()
-                .map(|r| r.host_id.clone())
-                .or_else(|| this.instances.selected_host_id().map(str::to_string))
-            else {
-                return;
-            };
-            this.instance_remove(&host_id, cx);
+        // "desligar" closes the view; it does not touch the store. Forgetting a
+        // crab is its badge's right-click menu, because that costs the pairing
+        // and a fresh code is a round trip to the other machine.
+        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_disconnect(cx);
         });
         // `text()` borrows the field, and the frame outlives this method: the
         // copy is what makes the draft's bytes the frame's own.
@@ -592,7 +616,7 @@ impl Dashboard {
             &frame,
             &draft,
             move |ev, window, app| send(ev, window, app),
-            move |ev, window, app| remove(ev, window, app),
+            move |ev, window, app| close(ev, window, app),
         )
     }
 
@@ -907,16 +931,37 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.instance_menu_at = Some(at);
+        self.instance_menu_for = None;
         cx.notify();
     }
 
-    /// The mark's menu, wired. Three rows, because the head of the column can
-    /// do three things: hand a code to another crab, take one from another
-    /// crab, or open this machine's own settings.
+    /// A badge was right-clicked: open *its* menu at the press point.
+    ///
+    /// The same card as the mark's, told apart by `instance_menu_for`. The
+    /// badge is the pick, so the destructive row cannot live on it: this menu
+    /// is opened on purpose, with a right-click, and that is the confirmation
+    /// a left-click would never get.
+    pub(crate) fn instance_badge_menu(
+        &mut self,
+        host_id: &str,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.instance_menu_at = Some(at);
+        self.instance_menu_for = Some(host_id.to_string());
+        cx.notify();
+    }
+
+    /// Whatever the open card is, wired. The mark's menu has three rows,
+    /// because the head of the column can hand a code out, take one in, or open
+    /// this machine's settings; a badge's has the one row that forgets it.
     pub(crate) fn instance_mark_menu_items(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::Stateful<gpui::Div>> {
+        if let Some(host_id) = self.instance_menu_for.clone() {
+            return self.instance_badge_menu_items(&host_id, cx);
+        }
         let share = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.instance_share_begin(cx);
         });
@@ -932,6 +977,40 @@ impl Dashboard {
             menu::menu_item("gerar código de acesso remoto").on_click(share),
             menu::menu_item("emparelhar um crab").on_click(pair),
             menu::menu_item("definições desta máquina").on_click(settings),
+        ]
+    }
+
+    /// A badge's menu: open it, or forget it.
+    ///
+    /// "abrir" is the left-click's job, repeated here because a menu whose only
+    /// row is destructive is a trap: the pointer lands on it and a slip of the
+    /// hand costs the pairing. Forgetting keeps the name in the row so nobody
+    /// deletes the wrong crab.
+    fn instance_badge_menu_items(
+        &mut self,
+        host_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::Stateful<gpui::Div>> {
+        let label = self
+            .instances
+            .get(host_id)
+            .map(|e| e.label().to_string())
+            .unwrap_or_else(|| host_id.to_string());
+        let open_host = host_id.to_string();
+        let open = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.instance_menu_at = None;
+            this.instance_menu_for = None;
+            this.instance_open(&open_host, cx);
+        });
+        let forget_host = host_id.to_string();
+        let forget = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.instance_menu_at = None;
+            this.instance_menu_for = None;
+            this.instance_remove(&forget_host, cx);
+        });
+        vec![
+            menu::menu_item("abrir").on_click(open),
+            menu::menu_item_owned(SharedString::from(format!("esquecer {label}"))).on_click(forget),
         ]
     }
 
@@ -955,10 +1034,23 @@ impl Dashboard {
                 return;
             }
         };
+        // A tunnel that is already running is the truth about how another crab
+        // reaches this one, and it outranks the bind address. Measured on the
+        // lenovo (21 Nov): cloudflared was publishing 127.0.0.1:18790 on a
+        // public hostname while the card told the owner "só aceita ligações
+        // locais" and handed out an address nothing outside the box could
+        // reach. The card may not contradict the machine it describes.
+        let mut live = ShareTunnel::Idle;
         let (url, warning, snippet) = match Config::load() {
             Ok(config) => {
-                let (url, warning) = share_target(&config.a2a);
-                (url, warning, share_config_snippet(&config.a2a))
+                // `status` reads one small file and checks one pid: no shell,
+                // no network, so it rides the same disk read the window does
+                // at open instead of needing a background hop.
+                let running = tunnel::status(&tunnel::default_state_dir()).ok().flatten();
+                if let Some(state) = running.as_ref() {
+                    live = ShareTunnel::Up(state.url.clone());
+                }
+                share_address(&config.a2a, running.as_ref())
             }
             Err(e) => (
                 "http://127.0.0.1:18790".to_string(),
@@ -967,12 +1059,7 @@ impl Dashboard {
             ),
         };
         let label = this_host_label();
-        let link = format!(
-            "opencrabs://pair?url={}&code={}&label={}",
-            percent_encode(&url),
-            percent_encode(&code),
-            percent_encode(&label),
-        );
+        let link = pair_link(&url, &code, &label);
         let (qr, width) = qr_modules(&link);
         self.instance_share = Some(ShareView {
             url,
@@ -982,9 +1069,70 @@ impl Dashboard {
             width,
             warning,
             snippet,
+            tunnel: live,
             ttl_secs: CODE_TTL_SECS,
         });
         cx.notify();
+    }
+
+    /// Open a public tunnel and repoint the card at it.
+    ///
+    /// This is a separate click on purpose. A quick tunnel publishes a URL on
+    /// the internet, and doing that behind a button labelled "gerar código"
+    /// would be the same class of surprise as minting a code nobody asked for.
+    /// The code is untouched: only the address the card hands out changes, and
+    /// the link and QR are rebuilt around it.
+    pub(crate) fn instance_share_tunnel(&mut self, cx: &mut Context<Self>) {
+        if self.instance_share.is_none() {
+            return;
+        }
+        let port = match Config::load() {
+            Ok(config) => config.a2a.port,
+            Err(e) => {
+                if let Some(share) = self.instance_share.as_mut() {
+                    share.tunnel = ShareTunnel::Failed(format!("não consegui ler a config: {e}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(share) = self.instance_share.as_mut() {
+            share.tunnel = ShareTunnel::Starting;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    // `tunnel::start` is blocking (it spawns cloudflared and
+                    // waits up to a minute for the URL) and shells out to curl,
+                    // so it must not run on the UI thread. It needs no Tokio
+                    // reactor of its own: nothing in it builds a reqwest client.
+                    let state_dir = tunnel::default_state_dir();
+                    match tunnel::status(&state_dir) {
+                        Ok(Some(state)) => Ok(state.url),
+                        Ok(None) => tunnel::start(&tunnel::TunnelSpec::new(port))
+                            .map(|state| state.url)
+                            .map_err(|e| format!("{e:#}")),
+                        Err(e) => Err(format!("{e:#}")),
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                let label = this_host_label();
+                let Some(share) = this.instance_share.as_mut() else {
+                    return;
+                };
+                match result {
+                    Ok(url) => apply_tunnel(share, url, &label),
+                    Err(e) => share.tunnel = ShareTunnel::Failed(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Close the sharing card. The code stays valid until it expires: closing
@@ -1061,6 +1209,9 @@ impl Dashboard {
         });
         let fresh = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.instance_share_begin(cx);
+        });
+        let open_tunnel = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_share_tunnel(cx);
         });
 
         let button = |id: &'static str, label: &'static str, accent: bool| {
@@ -1172,6 +1323,79 @@ impl Dashboard {
                     .into_any_element(),
             );
         }
+        // The public tunnel, and the only way to get one from this window. It is
+        // its own click because it publishes a URL on the internet; the label
+        // says what it does, and the failure keeps the bind address on screen
+        // instead of leaving an empty card.
+        body.push(match &share.tunnel {
+            ShareTunnel::Idle => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(
+                            "noutra rede (ou fora de casa) o endereço acima não chega lá",
+                        )),
+                )
+                .child(
+                    button("instance-share-tunnel", "abrir túnel público", false)
+                        .on_click(open_tunnel),
+                )
+                .into_any_element(),
+            ShareTunnel::Starting => div()
+                .text_size(rems(0.75))
+                .text_color(rgb(shown.text_normal))
+                .child(SharedString::from(
+                    "a abrir o túnel público… (o primeiro arranque descarrega o cloudflared)",
+                ))
+                .into_any_element(),
+            ShareTunnel::Up(url) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(rems(0.75))
+                        .text_color(rgb(shown.green))
+                        .child(SharedString::from(
+                            "túnel público ativo: este endereço funciona de qualquer lado",
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(url.clone())),
+                )
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_hint))
+                        .child(SharedString::from(
+                            "fica de pé depois de fechares o cartão; desliga-o com `opencrabs connect --stop`",
+                        )),
+                )
+                .into_any_element(),
+            ShareTunnel::Failed(why) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(rems(0.75))
+                        .text_color(rgb(shown.warn))
+                        .child(SharedString::from(format!("túnel: {why}"))),
+                )
+                .child(
+                    button("instance-share-tunnel-retry", "tentar outra vez", false)
+                        .on_click(open_tunnel),
+                )
+                .into_any_element(),
+        });
+
         body.push(
             div()
                 .flex()
@@ -1302,6 +1526,27 @@ pub(crate) fn share_steps() -> [&'static str; 3] {
 /// here costs one line; leaving it out costs an hour of "porque não aparece?".
 pub(crate) const SHARE_FOOTNOTE: &str = "entre dois PCs o caminho é o link colado; o QR serve um cliente que saiba ler códigos. descoberta automática na rede ainda não existe: sem código, um crab não aparece na barra.";
 
+/// Where the address on the card comes from.
+///
+/// The bind is the honest answer for a machine on the same network, and the
+/// wrong answer for one that is not: a loopback gateway is unreachable, and a
+/// LAN address dies the moment the other crab is somewhere else. `opencrabs
+/// connect` already solves that with a cloudflared quick tunnel, so the card
+/// offers the same path instead of telling the owner to edit TOML and restart
+/// the window (2026-11-21, Daniel: "a parte de qr code nao sei como vai
+/// funcionar isso a nivel do user").
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ShareTunnel {
+    /// No tunnel asked for: the card shows the bind address and its warning.
+    Idle,
+    /// cloudflared is being resolved, downloaded or started.
+    Starting,
+    /// A quick tunnel is up. This URL works from anywhere.
+    Up(String),
+    /// The tunnel could not be opened; the bind address is all that is left.
+    Failed(String),
+}
+
 /// The sharing card's model: everything the paint reads, built once when the
 /// code is minted. The code exists in plaintext only here and in the store's
 /// hash, which is why the card is rebuilt rather than re-read.
@@ -1320,7 +1565,28 @@ pub(crate) struct ShareView {
     pub(crate) warning: Option<String>,
     /// The `[a2a]` block to paste when the config is what is in the way.
     pub(crate) snippet: Option<String>,
+    /// Public tunnel state: the card is usable over the internet only when this
+    /// is `Up`, and it says so instead of letting the owner assume it.
+    pub(crate) tunnel: ShareTunnel,
     pub(crate) ttl_secs: u64,
+}
+
+/// The address the card prints, with a running tunnel taking precedence.
+///
+/// Split from `share_target` so the precedence is testable without a config
+/// file, a store or a window: a tunnel that is up is an address another machine
+/// can actually dial, and the bind address it forwards is not. The warning and
+/// the TOML block exist only for the case where nothing is published, so a live
+/// tunnel clears both instead of leaving two stale paragraphs on the card.
+pub(crate) fn share_address(
+    a2a: &opencrabs::config::A2aConfig,
+    tunnel: Option<&tunnel::TunnelState>,
+) -> (String, Option<String>, Option<String>) {
+    if let Some(state) = tunnel {
+        return (state.url.clone(), None, None);
+    }
+    let (url, warning) = share_target(a2a);
+    (url, warning, share_config_snippet(a2a))
 }
 
 /// The address to hand out, and the reason it may be useless.
@@ -1468,7 +1734,13 @@ fn qr_modules(link: &str) -> (Vec<bool>, usize) {
 }
 
 /// The remote session being read, and the draft going to it.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Clone` only. The rows carry parsed markdown (`MdBlock` has no `PartialEq`
+/// and no `Debug`), and nothing in the window ever compares two transcripts:
+/// the derived `PartialEq`/`Debug` this struct used to carry were never read,
+/// and a hand-written `PartialEq` over parsed blocks would compare pointers
+/// and lie about it.
+#[derive(Clone)]
 pub(crate) struct RemoteTranscript {
     pub(crate) session_id: String,
     pub(crate) title: SharedString,
@@ -1614,6 +1886,37 @@ pub(crate) fn percent_encode(value: &str) -> String {
         }
     }
     out
+}
+
+/// Point the card at a public tunnel URL.
+///
+/// Everything downstream follows from the address: the link, the QR, and the
+/// two blocks that only existed because the bind was unreachable. Clearing them
+/// here (rather than in the caller) is what keeps "túnel activo" and "esta
+/// máquina só aceita ligações locais" from being on screen at the same time.
+pub(crate) fn apply_tunnel(share: &mut ShareView, url: String, label: &str) {
+    share.tunnel = ShareTunnel::Up(url.clone());
+    share.url = url;
+    share.warning = None;
+    share.snippet = None;
+    share.link = pair_link(&share.url, &share.code, label);
+    let (qr, width) = qr_modules(&share.link);
+    share.qr = qr;
+    share.width = width;
+}
+
+/// Build the `opencrabs://pair?…` link the card hands out and the QR carries.
+///
+/// One function so the link the card shows and the link the parser accepts
+/// cannot drift: [`parse_pair_link`] is its inverse, and a test walks the round
+/// trip.
+pub(crate) fn pair_link(url: &str, code: &str, label: &str) -> String {
+    format!(
+        "opencrabs://pair?url={}&code={}&label={}",
+        percent_encode(url),
+        percent_encode(code),
+        percent_encode(label),
+    )
 }
 
 /// What the panel shows for the selected remote.

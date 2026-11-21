@@ -3746,6 +3746,7 @@ impl Render for Dashboard {
             let items = self.instance_mark_menu_items(cx);
             let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
                 this.instance_menu_at = None;
+                this.instance_menu_for = None;
                 cx.notify();
             });
             root = root.child(

@@ -25,7 +25,7 @@ use gpui::{
     SharedString, StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
 };
 
-use crate::instances::{Health, InstanceEntry, badge_tint, badge_title, health_mark};
+use crate::instances::{Health, InstanceEntry, badge_glyph, badge_tint, badge_title, health_mark};
 use crate::palette;
 use opencrabs::config::gui_theme;
 
@@ -51,7 +51,9 @@ impl StripBadge {
     fn from_entry(entry: &InstanceEntry, now: u64) -> Self {
         Self {
             host_id: entry.host_id().to_string(),
-            label: SharedString::from(entry.strip_label()),
+            // One initial, not a cut label: the badge is a circle and the full
+            // name lives in `title` below, where the hover can show it whole.
+            label: SharedString::from(badge_glyph(entry.label())),
             title: SharedString::from(badge_title(entry, now)),
             health: entry.health,
         }
@@ -182,6 +184,20 @@ impl InstanceStrip {
         let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
             this.pick(host_id.clone(), cx);
         });
+        // Right-click is the badge's own menu, which today holds one row: the
+        // one that forgets the crab. It sits here, and not on the panel's
+        // "desligar", because closing the view must not cost the pairing: a
+        // code is a fresh round trip to the other machine and nobody expects a
+        // "desligar" to make them do it again.
+        let menu_host = SharedString::from(badge.host_id.clone());
+        let ask = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+            let dashboard = this.dashboard.clone();
+            dashboard
+                .update(cx, |dash, cx| {
+                    dash.instance_badge_menu(menu_host.as_ref(), ev.position, cx)
+                })
+                .ok();
+        });
 
         let mut cell = div()
             // A click needs an element id in this gpui: `on_click` lives on
@@ -200,6 +216,7 @@ impl InstanceStrip {
             .h(rems(BADGE_REM))
             .cursor_pointer()
             .on_click(click)
+            .on_mouse_down(MouseButton::Right, ask)
             .child(
                 div()
                     .flex()

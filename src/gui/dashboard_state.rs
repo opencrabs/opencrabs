@@ -729,6 +729,11 @@ pub(crate) struct Dashboard {
     /// Where the workspace mark's context menu was asked for, in window
     /// coordinates. `None` is the normal state.
     pub(crate) instance_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// Which crab the open menu belongs to. `None` means the workspace mark's
+    /// menu (share / pair / settings); `Some(host_id)` is that badge's own,
+    /// which today holds the one row that forgets it. Same card, same press
+    /// point, so the two never need two overlays.
+    pub(crate) instance_menu_for: Option<String>,
     /// The sharing card: a fresh single-use code and the QR that carries it,
     /// minted when the mark's menu asked for one and dropped when it closes.
     pub(crate) instance_share: Option<dashboard_instances::ShareView>,

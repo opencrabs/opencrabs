@@ -95,18 +95,18 @@ fn select_refuses_an_unknown_id() {
 }
 
 #[test]
-fn strip_label_collapses_and_cuts_on_char_boundaries() {
-    assert_eq!(strip_label("server i7"), "server i7");
-    assert_eq!(strip_label("  server   i7  "), "server i7");
-    assert_eq!(strip_label("portátil do norte"), "portátil …");
-    // Multi-byte throughout: the cut must not split a code point, and the
-    // result must still fit the strip (MAX chars including the ellipsis).
-    assert_eq!(strip_label("açãoçãoçãoção"), "açãoçãoçã…");
-    assert_eq!(
-        strip_label("açãoçãoçãoção").chars().count(),
-        STRIP_LABEL_MAX
-    );
-    assert_eq!(strip_label(""), "");
+fn badge_glyph_is_one_character_and_never_an_empty_circle() {
+    // "lenovo" was drawn whole inside a 32 px circle and spilled out of it.
+    assert_eq!(badge_glyph("lenovo-g780"), "L");
+    assert_eq!(badge_glyph("  portátil do norte"), "P");
+    // A leading symbol is not a letter: the initial is the first alphanumeric.
+    assert_eq!(badge_glyph("_crab"), "C");
+    assert_eq!(badge_glyph("i7"), "I");
+    // Multi-byte input yields exactly one code point, never a broken one.
+    assert_eq!(badge_glyph("ção").chars().count(), 1);
+    // No alphanumeric at all still has to draw something.
+    assert_eq!(badge_glyph(""), "?");
+    assert_eq!(badge_glyph("---"), "?");
 }
 
 #[test]

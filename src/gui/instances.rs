@@ -19,11 +19,6 @@
 
 use opencrabs::remote::instance_store::{InstanceFile, KnownInstance};
 
-/// Longest label the strip will draw before cutting it. Chosen against the
-/// 56 px strip: ten characters plus an ellipsis is what fits without the
-/// badge growing and shoving its neighbours.
-pub const STRIP_LABEL_MAX: usize = 10;
-
 /// What the last probe of a remote told us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
@@ -69,11 +64,6 @@ impl InstanceEntry {
 
     pub fn url(&self) -> &str {
         &self.known.url
-    }
-
-    /// What the strip draws under the crab.
-    pub fn strip_label(&self) -> String {
-        strip_label(self.label())
     }
 }
 
@@ -205,21 +195,22 @@ impl Instances {
     }
 }
 
-/// Cut a label to what the strip can draw, on a character boundary, with a
-/// single ellipsis. Whitespace is collapsed first: a label pasted from a
-/// hostname list can carry a tab and the strip would draw a gap.
-pub fn strip_label(label: &str) -> String {
-    let collapsed: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
-    let count = collapsed.chars().count();
-    if count <= STRIP_LABEL_MAX {
-        return collapsed;
-    }
-    let mut out: String = collapsed
+/// The single character a badge wears.
+///
+/// The badge is a 32 px circle. A ten-character label inside it does not fit
+/// and cannot be made to fit: Daniel saw "lenovo" spilling out of the square on
+/// the Lenovo. One initial is what a circle can hold, and the full label stays
+/// in the hover title, which is where a name too long for the strip belongs.
+///
+/// Digits and letters both count, so "i7" reads as `I` and a crab named after
+/// a machine still gets a stable glyph. Anything with no alphanumeric at all
+/// falls back to `?` rather than drawing an empty circle.
+pub fn badge_glyph(label: &str) -> String {
+    label
         .chars()
-        .take(STRIP_LABEL_MAX.saturating_sub(1))
-        .collect();
-    out.push('…');
-    out
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// How many distinct washes a badge can wear. Six is what a column of badges
