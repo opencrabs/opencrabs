@@ -35,8 +35,8 @@ use std::rc::Rc;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, MouseDownEvent,
-    Pixels, Point, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle,
-    Window, div, point, prelude::*, px, rems, rgb, rgba,
+    Pixels, Point, Rems, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout,
+    TextStyle, Window, div, point, prelude::*, px, rems, rgb, rgba,
 };
 
 use opencrabs::channels::voice::spoken;
@@ -2152,18 +2152,22 @@ pub(crate) const HOVER_PILL_INSET_REM: f32 = 0.25;
 /// `.px(rems(a - b))` written out at every row was the same subtraction in six
 /// places, and a reader checking whether two rows line up had to do arithmetic
 /// across two files to answer.
-pub(crate) fn conversation_inset() -> Pixels {
+///
+/// They return `Rems` and not `Pixels` on purpose: the conversion happens where
+/// the style is resolved, so a zoom change moves the row with the text instead
+/// of freezing it at whatever the rem was when the view was built.
+pub(crate) fn conversation_inset() -> Rems {
     rems(CONVERSATION_INSET_REM)
 }
 
 /// The inset of a row that carries clickable labels, which reach out to the
 /// column by the pill's own padding (#3114).
-pub(crate) fn conversation_row_inset() -> Pixels {
+pub(crate) fn conversation_row_inset() -> Rems {
     rems(CONVERSATION_INSET_REM - HOVER_PILL_INSET_REM)
 }
 
 /// The padding a hover pill adds inside such a row (#3114).
-pub(crate) fn hover_pill_inset() -> Pixels {
+pub(crate) fn hover_pill_inset() -> Rems {
     rems(HOVER_PILL_INSET_REM)
 }
 
