@@ -28,6 +28,10 @@ const SOURCE: &str = include_str!("../utils/desktop_notify.rs");
 /// The window's poll tick, where a click is taken off the queue.
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 
+/// The durable record of announced settles, which is where a session-less plan
+/// is refused a target (#3004).
+const LEDGER: &str = include_str!("../utils/settle_ledger.rs");
+
 fn plan_with(title: &str, statuses: &[TaskStatus]) -> PlanDocument {
     let mut plan = PlanDocument::new(Uuid::new_v4(), title.to_string());
     plan.status = PlanStatus::Active;
@@ -290,12 +294,21 @@ fn a_click_waits_for_the_window_and_the_queue_stays_bounded() {
 
 #[test]
 fn a_settled_task_banner_points_at_its_plan() {
-    // The session comes off the plan file, which is written by the turn that
-    // owns the conversation. A plan from before the hook stamped its session
-    // carries the nil id, and the nil id is not a click target (#2751).
+    // Two halves, and both moved since the rule was written (#2751, #3004).
+    // The event is what a click URI is built from, so it has to carry the
+    // session it is about. The session itself is stamped by the turn that owns
+    // the conversation, which is why the only nil check left is the durable
+    // record's: a plan whose hook never stamped it carries the nil id, and the
+    // nil id is not a click target because nothing durable is keyed on it.
     assert!(
-        SOURCE.contains("(plan.session_id != Uuid::nil()).then_some(plan.session_id)"),
-        "a settled task must take its session from the plan"
+        SOURCE.contains(
+            "Self::PlanCompleted { session, .. } | Self::TurnFailed { session, .. } => *session,"
+        ),
+        "the banner's click target is the session the event carries"
+    );
+    assert!(
+        LEDGER.contains("if session != Uuid::nil() && self.seeded.insert(session)"),
+        "a plan with no session is never a click target"
     );
 }
 
