@@ -383,17 +383,19 @@ impl PlanStripState {
         if scroll.is_empty() {
             return Some(col);
         }
-        Some(col.child(
-            div()
-                .id(SharedString::from(format!("plan-pane-scroll-{}", plan.id)))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .min_w_0()
-                .max_h(px(PANE_SCROLL_HEIGHT))
-                .overflow_y_scroll()
-                .children(scroll),
-        ))
+        Some(
+            col.child(
+                div()
+                    .id(SharedString::from(format!("plan-pane-scroll-{}", plan.id)))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .min_w_0()
+                    .max_h(px(PANE_SCROLL_HEIGHT))
+                    .overflow_y_scroll()
+                    .children(scroll),
+            ),
+        )
     }
 }
 

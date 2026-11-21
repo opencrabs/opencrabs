@@ -72,9 +72,7 @@ fn state_of(app: &App) -> HintState {
         // Read from the live config, the same pointer clone the window asks
         // before it offers the record chord: a tip pointing at `/whisper` with
         // no engine behind it would bounce.
-        voice: crate::config::Config::current()
-            .voice_config()
-            .stt_enabled,
+        voice: crate::config::Config::current().voice_config().stt_enabled,
     }
 }
 

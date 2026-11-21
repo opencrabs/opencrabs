@@ -145,7 +145,10 @@ fn the_offer_does_not_crowd_out_a_context_that_is_running_out() {
         "the offer and the clear line are both carried"
     );
     assert_eq!(all[0].id, "offers", "the offer wins the row");
-    assert_eq!(all[1].command, "/clear", "the clear line is still behind it");
+    assert_eq!(
+        all[1].command, "/clear",
+        "the clear line is still behind it"
+    );
     // And with room to spare the offer still wins the row: a tip riding
     // behind it never outranks something the reader can act on right now.
     let mut roomy = with_offer(1);

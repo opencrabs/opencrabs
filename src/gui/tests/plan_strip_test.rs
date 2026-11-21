@@ -150,7 +150,10 @@ fn an_editing_plan_gets_a_card_naming_the_plan_and_the_commands() {
         "{:?}",
         lines[0]
     );
-    assert_eq!(lines[1], (LineKind::Next, crate::plan_strip::APPROVE_HINT.to_string()));
+    assert_eq!(
+        lines[1],
+        (LineKind::Next, crate::plan_strip::APPROVE_HINT.to_string())
+    );
     assert!(crate::plan_strip::APPROVE_HINT.contains("/execute"));
     assert!(crate::plan_strip::APPROVE_HINT.contains("/discard"));
 
@@ -158,7 +161,9 @@ fn an_editing_plan_gets_a_card_naming_the_plan_and_the_commands() {
     // it has; an empty one still says it waits (#2970).
     let sized = plan_with(3, 0, None);
     assert!(
-        crate::plan_strip::editing_lines(&sized)[0].1.ends_with("0/3"),
+        crate::plan_strip::editing_lines(&sized)[0]
+            .1
+            .ends_with("0/3"),
         "{:?}",
         crate::plan_strip::editing_lines(&sized)[0]
     );

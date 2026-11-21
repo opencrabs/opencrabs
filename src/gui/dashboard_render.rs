@@ -3949,4 +3949,3 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
     }
     card
 }
-

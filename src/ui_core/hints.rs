@@ -101,7 +101,10 @@ pub const DISMISS_DAYS: i64 = 7;
 /// a new tip is dismissible by default instead of silently joining the class
 /// that can never be hidden.
 pub fn dismissible(id: &str) -> bool {
-    !matches!(id, "offers" | "queue" | "rail" | "rail-split" | "context" | "update")
+    !matches!(
+        id,
+        "offers" | "queue" | "rail" | "rail-split" | "context" | "update"
+    )
 }
 
 /// What a surface knows about the conversation when it draws the row.
@@ -230,7 +233,9 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         let freed = compact_tokens(state.clearable());
         hints.push(Hint {
             id: "context",
-            text: format!("new task? /clear frees {freed} tokens · cheaper than watching this thing choke"),
+            text: format!(
+                "new task? /clear frees {freed} tokens · cheaper than watching this thing choke"
+            ),
             command: "/clear",
         });
     }
@@ -329,9 +334,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     // dismissed id here is what lets the next rung through, which is the whole
     // reason the store exists. Functional lines are exempt, so a stale row in
     // the store can never hide what the keys are doing.
-    hints.retain(|hint| {
-        !dismissible(hint.id) || !state.dismissed.iter().any(|id| id == hint.id)
-    });
+    hints.retain(|hint| !dismissible(hint.id) || !state.dismissed.iter().any(|id| id == hint.id));
     hints
 }
 
@@ -393,7 +396,8 @@ pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Op
     if state.rail_focused {
         return Some(Hint {
             id: "rail",
-            text: "type to filter · enter opens · esc back · the list will not read itself".to_string(),
+            text: "type to filter · enter opens · esc back · the list will not read itself"
+                .to_string(),
             command: "",
         });
     }
