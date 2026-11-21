@@ -155,6 +155,10 @@ pub async fn handle_transcript(
     // A missing session and an empty one look the same on the wire, so check
     // the session exists first: "no such session" is a different thing to
     // tell the human than "this session has no messages yet".
+    // The pool is taken before the context is handed to the service: the
+    // context is moved in there, and the transcript still needs the pool to
+    // resolve which A2A context the session belongs to (#3133).
+    let pool = service_context.pool();
     let known = SessionService::new(service_context)
         .get_session(session_id)
         .await;
@@ -231,8 +235,7 @@ pub async fn handle_transcript(
             // minting a context (and with it a session) per message; the client
             // cannot derive it, and guessing would either fork the
             // conversation or write into a stranger's (#3133).
-            let context_id =
-                persistence::lookup_context_for_session(&service_context.pool(), session_id).await;
+            let context_id = persistence::lookup_context_for_session(&pool, session_id).await;
             JsonRpcResponse::success(
                 id,
                 // `title` rides along because the panel's banner names the
