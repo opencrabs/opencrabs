@@ -1246,6 +1246,14 @@ impl Dashboard {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .min_h_0()
+                    // The card grew: QR, address, code, warning, the config
+                    // block, buttons and three steps do not fit a short window,
+                    // and a column that paints past the card's edge covers the
+                    // footer and the close button. Capped and scrollable, it
+                    // clips where it should and the whole card stays reachable.
+                    .max_h(px(21.0 * f32::from(self.rem)))
+                    .overflow_y_scroll()
                     .children(body)
                     .into_any_element(),
                 footer: Some(
