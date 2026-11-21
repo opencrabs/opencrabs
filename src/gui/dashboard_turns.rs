@@ -979,6 +979,17 @@ impl Dashboard {
         // the file and published it to `Config::current()`, so this tick only
         // re-derives the values the window cached at boot.
         self.drain_config_reloads(cx);
+        // Report window focus to the notification transport (#3005). Nothing
+        // in the GUI ever called `set_surface_focused`, so the transport read
+        // "unknown", and `should_raise` treats unknown as "the user is not
+        // looking": every event raised a banner, including the ones for work
+        // that settled while the window sat frontmost. `active_window` is the
+        // platform's main window, which is nil whenever another application
+        // holds focus, so its presence is the same signal the TUI reports from
+        // its focus events. Sampled every tick instead of wired to a callback
+        // because gpui hands the dashboard no activation event, and a relaxed
+        // atomic store twenty times a second costs nothing.
+        opencrabs::utils::desktop_notify::set_surface_focused(cx.active_window().is_some());
         // One clock for the whole tick (#2899): the checks below that cost a
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.
