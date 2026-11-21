@@ -430,6 +430,7 @@ pub mod help_mode_entry_test;
 pub mod help_table_test;
 pub mod hint_composer_3102_test;
 pub mod hints_2279_test;
+pub mod hints_dismissal_test;
 pub mod inbound_download_guard_test;
 pub mod init_command_test;
 pub mod install_homebrew_test;

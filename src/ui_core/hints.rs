@@ -44,6 +44,66 @@ pub const CONTEXT_ROOMY: f64 = 40.0;
 /// just starting.
 pub const LONG_SESSION_TURNS: usize = 12;
 
+/// Where the compaction tip starts talking.
+///
+/// Below [`CONTEXT_TIGHT`] on purpose. The tight rung tells the reader to
+/// `/clear`, and by then the automatic compaction has already begun: a line
+/// that explains the machine AFTER it acted reads as a surprise, not a tip. At
+/// this mark the conversation is long enough to be worth explaining and still
+/// short of the soft trigger, which is the only window where the explanation
+/// arrives before the event.
+pub const COMPACTION_TIP_AT: f64 = 55.0;
+
+/// Exchanges the Seeker introduction is still worth making.
+///
+/// The first few, because it is an introduction: a reader three turns in has a
+/// screen full of unfamiliar machinery and no idea the search exists, while a
+/// reader thirty turns in has either found it or built a workflow without it.
+/// Repeating it later would be nagging, and the dismissal store is for the tips
+/// that keep earning their line.
+pub const SEEKER_TIP_TURNS: usize = 3;
+
+/// Exchanges after which the per-session isolation tip is worth a line.
+///
+/// The same dozen as [`LONG_SESSION_TURNS`]: a reader with that much history in
+/// one conversation is the reader who would benefit from splitting the next
+/// use case out of it.
+pub const ISOLATION_TIP_TURNS: usize = LONG_SESSION_TURNS;
+
+/// Exchanges after which `/usage` is worth pointing at.
+pub const USAGE_TIP_TURNS: usize = 20;
+
+/// Exchanges after which asking for browser automation is worth a line.
+///
+/// The latest rung, because it asks the reader to hand over a job rather than
+/// press a key: only a conversation that has been running this long has shown
+/// the kind of repeated manual work the offer is about.
+pub const BROWSER_TIP_TURNS: usize = 30;
+
+/// Exchanges a tip stays quiet after the reader dismisses it.
+///
+/// Seven days, not forever. A permanent dismissal chosen before the feature has
+/// had a chance to be useful is a lost reader: the point of the tips is to be
+/// discovered, and a week is long enough that the line is not nagging and short
+/// enough that it comes back to someone who never read it.
+pub const DISMISS_DAYS: i64 = 7;
+
+/// Whether a line can be dismissed at all.
+///
+/// Two classes share the card and only one of them is advice. A functional line
+/// names what the keys do RIGHT NOW (the rail holding the keyboard, an offer
+/// waiting, a queue on its way out) or states a fact about the machine (the
+/// context is nearly full, a release is waiting). Hiding any of those for a
+/// week would leave the reader guessing about a screen that is behaving in a
+/// way they cannot see the reason for, so they stay.
+///
+/// The allowlist is inverted: a line is dismissible unless it is named here, so
+/// a new tip is dismissible by default instead of silently joining the class
+/// that can never be hidden.
+pub fn dismissible(id: &str) -> bool {
+    !matches!(id, "offers" | "queue" | "rail" | "rail-split" | "context" | "update")
+}
+
 /// What a surface knows about the conversation when it draws the row.
 ///
 /// Every field is something both frontends already track for their own chrome,
@@ -89,6 +149,19 @@ pub struct HintState {
     /// opening the conversation, and Esc answers the dialog's N. One word apart
     /// is the difference between a shortcut and a surprise (#3102).
     pub rail_split: bool,
+    /// Hint ids the reader has dismissed, while still inside their window.
+    ///
+    /// Ids, not lines. The text is exactly the part that gets reworded, so a
+    /// store keyed by the sentence would let a dismissed tip come back the
+    /// moment a word changed, which is the failure mode a dismissal is supposed
+    /// to end.
+    pub dismissed: Vec<String>,
+    /// A speech engine is configured, so `/whisper` has something to run.
+    ///
+    /// Read from the live config rather than assumed: a tip pointing at a
+    /// command with no engine behind it is the same bounce as a command the
+    /// surface does not answer.
+    pub voice: bool,
 }
 
 impl HintState {
@@ -110,9 +183,16 @@ impl HintState {
     }
 }
 
-/// One suggestion: the line to print, and the command it names.
+/// One suggestion: what it is, the line to print, and the command it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hint {
+    /// A stable name for this suggestion, never shown.
+    ///
+    /// The dismissal store keys on this rather than on [`text`](Self::text),
+    /// because the copy is what gets reworded: a store keyed by the sentence
+    /// would resurrect a dismissed tip the first time a word changed, and the
+    /// reader who dismissed it would have no way to tell that from a bug.
+    pub id: &'static str,
     pub text: String,
     /// The command the text points at, so a surface can drop a hint it cannot
     /// honour instead of printing a name that bounces.
@@ -132,6 +212,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     // command to point at, so the text carries its own keys.
     if state.offers > 0 {
         hints.push(Hint {
+            id: "offers",
             text: if state.offers == 1 {
                 "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
             } else {
@@ -147,6 +228,7 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     if percent >= CONTEXT_TIGHT {
         let freed = compact_tokens(state.clearable());
         hints.push(Hint {
+            id: "context",
             text: format!("new task? /clear frees {freed} tokens"),
             command: "/clear",
         });
@@ -154,8 +236,23 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
 
     if let Some(version) = state.update_version.as_deref().filter(|v| !v.is_empty()) {
         hints.push(Hint {
+            id: "update",
             text: format!("v{version} is out · /evolve"),
             command: "/evolve",
+        });
+    }
+
+    // The explanation, while it can still arrive before the event. The tight
+    // rung above tells the reader to clear, and the machine has usually already
+    // started compacting by then: saying "this happens by itself" only after it
+    // happened reads as a surprise rather than a tip, which is why this rung
+    // sits BELOW the warning instead of replacing it.
+    if (COMPACTION_TIP_AT..CONTEXT_TIGHT).contains(&percent) {
+        hints.push(Hint {
+            id: "compaction",
+            text: "pro tip: I compact on my own, no babysitting needed · /clear keeps history, /new starts fresh"
+                .to_string(),
+            command: "/clear",
         });
     }
 
@@ -166,12 +263,74 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     // secret (#3113).
     if state.turns >= LONG_SESSION_TURNS && percent < CONTEXT_ROOMY {
         hints.push(Hint {
+            id: "fresh-start",
             text: "/new for a fresh start or new use case · /clear wipes context, keeps history"
                 .to_string(),
             command: "/new",
         });
     }
 
+    // The friendly rungs. They exist to be discovered rather than to warn, so
+    // they are ordered by how early they are useful and each one only comes up
+    // once the reader has had the chance to act on the one before it: a
+    // dismissal lets the next through, and nothing ever rotates on a timer.
+    // From the first exchange, not from an empty session: there is nothing to
+    // search yet on a screen with no messages, and a greeting card over an
+    // empty transcript is chrome, not a hint.
+    if (1..=SEEKER_TIP_TURNS).contains(&state.turns) {
+        hints.push(Hint {
+            id: "seeker",
+            text: "hint: meet the Seeker · alt+space finds anything, so you can stop pretending you knew where it was"
+                .to_string(),
+            command: "",
+        });
+    }
+
+    if state.turns >= ISOLATION_TIP_TURNS {
+        hints.push(Hint {
+            id: "isolated-sessions",
+            text: "interesting fact: every session is its own agent · one for frontend, one for backend"
+                .to_string(),
+            command: "",
+        });
+    }
+
+    if state.turns >= USAGE_TIP_TURNS {
+        hints.push(Hint {
+            id: "usage",
+            text: "hint: /usage shows where the tokens went · spoiler: it was that four hour debugging session"
+                .to_string(),
+            command: "/usage",
+        });
+    }
+
+    // Only when there is an engine behind the command. `/whisper` is answered by
+    // both surfaces, so the tip is about the config, not about the frontend.
+    if state.voice {
+        hints.push(Hint {
+            id: "whisper",
+            text: "hint: /whisper lets you talk instead of type · your wrists will send a thank you card"
+                .to_string(),
+            command: "/whisper",
+        });
+    }
+
+    if state.turns >= BROWSER_TIP_TURNS {
+        hints.push(Hint {
+            id: "browser-automation",
+            text: "hint: ask me to set up browser automation · social media, daily briefs, whatever you keep doing by hand"
+                .to_string(),
+            command: "",
+        });
+    }
+
+    // A dismissal silences one line for its window, not the card: dropping the
+    // dismissed id here is what lets the next rung through, which is the whole
+    // reason the store exists. Functional lines are exempt, so a stale row in
+    // the store can never hide what the keys are doing.
+    hints.retain(|hint| {
+        !dismissible(hint.id) || !state.dismissed.iter().any(|id| id == hint.id)
+    });
     hints
 }
 
@@ -210,14 +369,32 @@ pub fn gui_hint(state: &HintState) -> Option<Hint> {
 /// cannot tell a new fact from the same fact coming round again. It changes
 /// when the situation changes, which is what makes it worth reading at all.
 pub fn task_line(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<String> {
+    task_line_hint(state, supported).map(|hint| hint.text)
+}
+
+/// The same line, with its id, for a surface that can act on it.
+///
+/// A dismissal needs to know WHICH line the reader hid, and the text is not an
+/// identity: it is reworded, translated and reformatted. So the id travels with
+/// the line, and [`task_line`] stays the plain-text door every existing caller
+/// already uses.
+pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<Hint> {
     // The rail outranks everything, because while it holds the keyboard the
     // composer receives nothing at all and the arrows walk the list, not the
     // field: naming a command here would teach a habit that bounces.
     if state.rail_split {
-        return Some("type to find · enter splits · esc cancels".to_string());
+        return Some(Hint {
+            id: "rail-split",
+            text: "type to find · enter splits · esc cancels".to_string(),
+            command: "",
+        });
     }
     if state.rail_focused {
-        return Some("type to filter · enter opens · esc back".to_string());
+        return Some(Hint {
+            id: "rail",
+            text: "type to filter · enter opens · esc back".to_string(),
+            command: "",
+        });
     }
     // An offer waiting is the most actionable thing on screen, and the arrows
     // reach it instead of the composer history, so the card has to say so or
@@ -227,26 +404,34 @@ pub fn task_line(state: &HintState, supported: impl Fn(&str) -> bool) -> Option<
     // card was told nothing about getting back out (#3114). Down past the last
     // row and Esc both return the caret to the field.
     if state.offers > 0 && !state.processing {
-        return Some(if state.offers == 1 {
-            "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
-        } else {
-            format!(
-                "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
-                state.offers
-            )
+        return Some(Hint {
+            id: "offers",
+            text: if state.offers == 1 {
+                "↑ picks the option · enter sends · ↓ or esc back to the field".to_string()
+            } else {
+                format!(
+                    "↑↓ walk the {} options · enter sends · ↓ past the last or esc back to the field",
+                    state.offers
+                )
+            },
+            command: "",
         });
     }
     // A queue is the only rung that is also true while a turn runs.
     if state.queued > 0 {
-        return Some(if state.processing {
-            format!("{} queued · sent when the turn ends", state.queued)
-        } else {
-            format!("{} queued · sending now", state.queued)
+        return Some(Hint {
+            id: "queue",
+            text: if state.processing {
+                format!("{} queued · sent when the turn ends", state.queued)
+            } else {
+                format!("{} queued · sending now", state.queued)
+            },
+            command: "",
         });
     }
     // Nothing is suggested while the answer is still being written: the reader
     // is waiting, not choosing, and the field already says Esc stops it.
-    hint(state, supported).map(|hint| hint.text)
+    hint(state, supported)
 }
 
 /// A token count the way a person reads it: `840`, `104.4k`, `1.2M`.

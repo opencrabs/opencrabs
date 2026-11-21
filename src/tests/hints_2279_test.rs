@@ -112,7 +112,14 @@ fn a_long_conversation_with_little_room_left_gets_no_clean_slate_line() {
     let mut state = fresh();
     state.turns = LONG_SESSION_TURNS + 6;
     state.context_used = 90_000; // 45%, under the tight line, over the roomy one
-    assert!(tui(&state).is_none());
+    // The row is not silent any more, because the tips live here too. What must
+    // stay absent is the clean-slate line itself: the claim is about that
+    // advice, not about the card having nothing at all to say.
+    let ids: Vec<&str> = candidates(&state).iter().map(|hint| hint.id).collect();
+    assert!(
+        !ids.contains(&"fresh-start"),
+        "past the roomy line the clean slate is the wrong half of the advice: {ids:?}"
+    );
 }
 
 #[test]
@@ -123,13 +130,23 @@ fn the_ladder_is_ordered_by_how_much_it_matters() {
     state.turns = LONG_SESSION_TURNS;
     state.update_version = Some("0.6.1".to_string());
     state.context_used = 190_000;
-    let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
+    // Only the rungs that name a command: the tips speak about keys and have no
+    // place in an ordering question about commands.
+    let order: Vec<&str> = candidates(&state)
+        .iter()
+        .map(|hint| hint.command)
+        .filter(|command| !command.is_empty())
+        .collect();
     assert_eq!(order, vec!["/clear", "/evolve"]);
 
     // With room left the clean-slate line comes back, still under the update:
     // a release waiting is news, a long session is only an option.
     state.context_used = 4_000;
-    let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
+    let order: Vec<&str> = candidates(&state)
+        .iter()
+        .map(|hint| hint.command)
+        .filter(|command| !command.is_empty())
+        .collect();
     assert_eq!(order, vec!["/evolve", "/new"]);
 }
 
@@ -142,10 +159,13 @@ fn a_surface_drops_a_hint_it_cannot_run_instead_of_printing_it() {
     state.turns = LONG_SESSION_TURNS;
     let only_new = hint(&state, |command| command == "/new").expect("the last rung still runs");
     assert_eq!(only_new.command, "/new");
+    // The tips that name no command survive any filter, because keys are not a
+    // name to look up. What must never survive is a line pointing at a command
+    // this surface cannot run: that is the bounce the filter exists to stop.
     let nothing = hint(&state, |_| false);
     assert!(
-        nothing.is_none(),
-        "a surface that runs none of them is silent"
+        nothing.map_or(true, |hint| hint.command.is_empty()),
+        "a surface that runs none of the commands is left only with the lines that name keys"
     );
 }
 

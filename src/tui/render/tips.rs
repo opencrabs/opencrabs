@@ -65,6 +65,13 @@ fn state_of(app: &App) -> HintState {
         // screen of its own, and the composer is not drawn behind it.
         rail_focused: false,
         rail_split: false,
+        // Filled from the dismissal store by the terminal itself, once it has
+        // one; the engine stays free of the database.
+        dismissed: Vec::new(),
+        // No engine is known to this surface yet, so the tip that names
+        // `/whisper` stays quiet rather than pointing at a command with
+        // nothing behind it.
+        voice: false,
     }
 }
 

@@ -108,9 +108,16 @@ fn no_offer_says_nothing_about_offers() {
     // The common case: the turn offered nothing, and the row must not advertise
     // keys that would land on an empty card.
     let state = with_offer(0);
-    assert!(tui(&state).is_none());
-    assert!(gui_hint(&state).is_none());
-    assert!(candidates(&state).is_empty());
+    // The card may still carry a tip, which is the point of the tips. What it
+    // must never carry is a line about offer keys when the turn offered none.
+    assert!(
+        candidates(&state).iter().all(|hint| hint.id != "offers"),
+        "no offer, no line advertising the keys that would land on an empty card"
+    );
+    assert!(
+        gui_hint(&state).is_none_or(|hint| hint.id != "offers"),
+        "the desktop app has no offer to point at either"
+    );
 }
 
 #[test]
@@ -131,14 +138,23 @@ fn the_offer_does_not_crowd_out_a_context_that_is_running_out() {
     state.context_used = 170_000; // over the tight line
     assert!(state.context_percent() >= CONTEXT_TIGHT);
     let all = candidates(&state);
-    assert_eq!(all.len(), 2, "the offer and the clear line");
-    assert!(all[0].command.is_empty());
-    assert_eq!(all[1].command, "/clear");
-    // And with room to spare, the offer stands alone.
+    // The tips ride behind both, so the claim is about the two that matter
+    // here: the offer keeps the row and the clear line is still carried.
+    assert!(
+        all.len() >= 2,
+        "the offer and the clear line are both carried"
+    );
+    assert_eq!(all[0].id, "offers", "the offer wins the row");
+    assert_eq!(all[1].command, "/clear", "the clear line is still behind it");
+    // And with room to spare the offer still wins the row: a tip riding
+    // behind it never outranks something the reader can act on right now.
     let mut roomy = with_offer(1);
     roomy.context_used = 1_000;
     assert!(roomy.context_percent() < CONTEXT_ROOMY);
-    assert_eq!(candidates(&roomy).len(), 1);
+    assert_eq!(
+        candidates(&roomy).first().map(|hint| hint.id),
+        Some("offers")
+    );
 }
 
 #[test]

@@ -3769,6 +3769,13 @@ impl Dashboard {
             // different promise, and one word apart is the difference between a
             // shortcut and a surprise (#3102).
             rail_split: self.split_target.is_some(),
+            // Filled from the dismissal store by the window itself, once it
+            // has one; the engine stays free of the database.
+            dismissed: Vec::new(),
+            // No engine is known to this surface yet, so the tip that names
+            // `/whisper` stays quiet rather than pointing at a command with
+            // nothing behind it.
+            voice: false,
         };
         // What a `/clear` leaves behind is the system prompt and the tool
         // schemas. Counting it tokenises every tool schema, so it is measured
