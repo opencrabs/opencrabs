@@ -380,6 +380,35 @@ fn a_badge_right_click_opens_a_menu_that_names_the_crab() {
 
 /// The body of one `fn`, from its signature to the next item at the same
 /// indent. Enough to assert on what a function does without a parser.
+#[test]
+fn the_transcript_is_built_off_the_ui_thread() {
+    // Building a session is a markdown parse per row, and a real one is 216 KB
+    // with rows over 10 KB. That build used to run inside `this.update`, on the
+    // UI thread, right before the repaint: the window froze for the whole parse
+    // and the switch looked like it was waiting on the network, when the
+    // network was answering in 17-55 ms (measured 21 Nov, P4 in
+    // perf-switch.md). The build must sit between the executor spawn and the
+    // closure that only installs the finished state.
+    let source = include_str!("../dashboard_instances.rs");
+    let body = fn_body(source, "pub(crate) fn open_remote_session")
+        .expect("open_remote_session is where a switch fetches and builds");
+    let spawn_at = body
+        .find(".background_executor()")
+        .expect("the fetch runs on the background executor");
+    let build_at = body
+        .find("remote_panel::state_for")
+        .expect("the turns are built somewhere in this path");
+    let update_at = body
+        .find("this.update(cx")
+        .expect("the finished state is installed on the window");
+    assert!(
+        spawn_at < build_at && build_at < update_at,
+        "state_for must run between the executor spawn and the update closure, \
+         or the parse lands on the UI thread: spawn {spawn_at}, build {build_at}, \
+         update {update_at}"
+    );
+}
+
 fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
     let start = source.find(signature)?;
     let rest = &source[start..];

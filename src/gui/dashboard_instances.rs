@@ -339,13 +339,25 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let fetch_url = url.clone();
             let fetch_id = session_id.clone();
+            // The turns are built here, on the background executor, not inside
+            // `this.update` below. Building them parses markdown for every row
+            // of the session, and a 216 KB session is tens of thousands of
+            // blocks: doing that on the UI thread froze the window for the
+            // whole parse, which is what "the switch takes ages" actually was
+            // (measured 21 Nov, P4 in perf-switch.md). `TranscriptState` is
+            // plain data with no `Rc` in it, so it crosses the executor
+            // boundary intact.
+            let build_id = session_id.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    on_remote_runtime(async {
+                    let (title, messages) = on_remote_runtime(async {
                         let target = Target::new(&fetch_url, Some(&token));
                         instance_client::transcript(&target, &fetch_id, 40).await
-                    })
+                    })?;
+                    let state = remote_panel::state_for(&build_id, &messages);
+                    let has_rows = state.turns.iter().any(|t| !t.blocks.is_empty());
+                    Ok::<_, anyhow::Error>((title, state, has_rows))
                 })
                 .await;
 
@@ -358,7 +370,7 @@ impl Dashboard {
                     return;
                 }
                 match result {
-                    Ok((title, messages)) => {
+                    Ok((title, state, has_rows)) => {
                         if let Some(transcript) = this.remote_transcript.as_mut() {
                             // The host's title wins over the rail's: the list
                             // may be a minute old, and a rename in between is
@@ -366,15 +378,14 @@ impl Dashboard {
                             if !title.is_empty() {
                                 transcript.title = SharedString::from(title);
                             }
-                            // The whole remote session goes through the
-                            // transcript's own rules: it decides what is
-                            // conversation (a seed and a compaction marker are
-                            // not), folds reasoning, and caps a 40 KB answer.
-                            // Filtering here instead is what made a remote
-                            // panel read like a different product.
-                            transcript.state = remote_panel::state_for(&session_id, &messages);
-                            transcript.has_rows =
-                                transcript.state.turns.iter().any(|t| !t.blocks.is_empty());
+                            // The whole remote session went through the
+                            // transcript's own rules on the executor (see the
+                            // spawn above): a seed and a compaction marker are
+                            // not conversation, reasoning folds, a 40 KB answer
+                            // is capped. This only installs the finished state,
+                            // so the UI thread does no parsing at all.
+                            transcript.state = state;
+                            transcript.has_rows = has_rows;
                             transcript.notice = None;
                         }
                     }
