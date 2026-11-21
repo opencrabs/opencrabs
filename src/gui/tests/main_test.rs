@@ -2158,7 +2158,7 @@ fn the_card_says_what_the_screen_is_asking_for() {
     })
     .expect("the rail always has something to say");
     assert_eq!(
-        rail, "type to filter · enter opens · esc back",
+        rail, "type to filter · enter opens · esc back · the list will not read itself",
         "the list outranks the offer, because it owns the keys"
     );
 
@@ -2238,7 +2238,7 @@ fn the_field_hint_names_the_two_keys_that_act_on_it() {
     );
     let ready = composer_hint_for(false, 0, true);
     assert!(
-        ready.contains("ctrl+alt+r") && ready.contains("same key sends"),
+        ready.contains("ctrl+alt+r") && ready.contains("same key to send"),
         "a configured window names the chord and what it does: {ready}"
     );
     let cold = composer_hint_for(false, 0, false);
