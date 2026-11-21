@@ -32,6 +32,9 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.98.1
+          # clippy is not part of the default profile; without it the lint step
+          # below dies with "no such command: clippy" instead of linting.
+          components: clippy
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -39,6 +42,21 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      # The same gate main CI runs, for the same reason it runs first: a lint
+      # error is cheap to see and expensive to discover after 45 minutes of
+      # tests and builds. It is also the only way clippy gets checked at all
+      # for this branch, because a fork build never reaches the origin lint
+      # job, and `--all-features` is what brings the GUI binary into the run.
+      #
+      # The touch is not cosmetic: on a restored cargo cache every unit is
+      # fresh, clippy emits nothing, and the ratchet would pass without
+      # checking. Touching our own crate keeps dependencies cached and the
+      # check real (see scripts/check-byte-slice-ratchet.py).
+      - name: Clippy, with the byte-slice ratchet
+        run: |
+          touch src/lib.rs
+          python3 scripts/check-byte-slice-ratchet.py
 
       # The modules of the instance rail are pure enough to be tested before a
       # single binary is linked: the store, the wire client, the view model, the
