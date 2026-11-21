@@ -50,22 +50,65 @@ jobs:
       # green while running zero tests. The window's own tests need `--bin
       # opencrabs-gui`, and each filter is run against the target that can see
       # it, which is the whole point of naming the module.
+      #
+      # A filter that matches nothing is a GREEN STEP with zero tests behind
+      # it, so every module is judged on its own and a zero-match is a FAILURE,
+      # not a pass. That is not hypothetical: this step was green while running
+      # nothing until the target was fixed (d6e11d97e), and the module names
+      # below are the thing a sibling rename would silently break. Same
+      # zero-match tripwire as the Windows slice in ci.yml.
       - name: Test the instance modules (library)
         run: |
-          cargo test --locked --profile ci --lib remote::instance_store
-          cargo test --locked --profile ci --lib remote::instance_client
-          cargo test --locked --profile ci --lib a2a::handler::sessions
+          status=0
+          for m in remote::instance_store remote::instance_client \
+                   a2a::handler::sessions; do
+            set +e
+            out=$(cargo test --locked --profile ci --lib -- "$m" 2>&1)
+            rc=$?
+            set -e
+            n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+            if [ $rc -ne 0 ]; then
+              echo "::error::rail slice FAILS (rc=$rc): $m"
+              printf '%s\n' "$out" | tail -25
+              status=1
+            elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
+              echo "::error::rail slice ZERO-MATCH: $m names no tests (renamed?)"
+              status=1
+            else
+              echo "rail slice PASS: $m ($n tests)"
+            fi
+          done
+          exit $status
 
       # `--locked` stays on: the bin's test build must honour the same lockfile
       # the released binary does, or the test proves a dependency graph nobody
       # ships.
       # `mod tests;` sits at the ROOT of the bin crate (`src/gui/main.rs`), so the
       # test paths are `tests::instances_test::…`, not `gui::tests::…`. The filter
-      # below catches both `instances_test` and `instances_wiring_test`.
+      # below catches both `instances_test` and `instances_wiring_test`, and both
+      # are named explicitly so neither can be dropped by a rename unnoticed.
       - name: Test the instance modules (window)
         run: |
-          cargo test --locked --profile ci --features gui --bin opencrabs-gui \
-            tests::instances
+          status=0
+          for m in tests::instances_test tests::instances_wiring_test; do
+            set +e
+            out=$(cargo test --locked --profile ci --features gui \
+                    --bin opencrabs-gui -- "$m" 2>&1)
+            rc=$?
+            set -e
+            n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+            if [ $rc -ne 0 ]; then
+              echo "::error::window rail slice FAILS (rc=$rc): $m"
+              printf '%s\n' "$out" | tail -25
+              status=1
+            elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
+              echo "::error::window rail slice ZERO-MATCH: $m names no tests (renamed?)"
+              status=1
+            else
+              echo "window rail slice PASS: $m ($n tests)"
+            fi
+          done
+          exit $status
 
       - name: Build daemon
         run: cargo build --locked --profile ci --bin opencrabs
