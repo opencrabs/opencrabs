@@ -677,6 +677,8 @@ pub(crate) fn run() {
                         instances: instances::Instances::default(),
                         instance_strip,
                         instance_pairing: None,
+                        instance_menu_at: None,
+                        instance_share: None,
                         instance_remote: None,
                         instance_error: None,
                         remote_transcript: None,

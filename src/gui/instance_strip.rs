@@ -21,12 +21,13 @@
 //!    the pointer cannot slide away between the press and the release.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, IntoElement, Render, SharedString, StyleRefinement,
-    WeakEntity, Window, div, prelude::*, rems, rgb,
+    AnyElement, ClickEvent, Context, Div, IntoElement, MouseButton, MouseDownEvent, Render,
+    SharedString, StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
 };
 
-use crate::instances::{Health, InstanceEntry, badge_title, health_mark};
+use crate::instances::{Health, InstanceEntry, badge_tint, badge_title, health_mark};
 use crate::palette;
+use opencrabs::config::gui_theme;
 
 /// The strip's width in rems. 56 px at the window's 16 px root, which is the
 /// mockup's number and the same axis the badges are centred on.
@@ -126,9 +127,20 @@ impl InstanceStrip {
     /// The window's mark at the top of the column. It is not an instance and
     /// never selects anything; it is there so the column has a head and the
     /// badges below it read as a list rather than a floating stack.
-    fn workspace_mark(&self) -> AnyElement {
+    ///
+    /// It is also the door to this machine: right-clicking it offers a pairing
+    /// code for another crab, the pairing form, and this machine's settings.
+    fn workspace_mark(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette::current();
+        let ask = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+            let at = ev.position;
+            let dashboard = this.dashboard.clone();
+            dashboard
+                .update(cx, |dash, cx| dash.instance_mark_menu(at, cx))
+                .ok();
+        });
         div()
+            .id("instance-workspace-mark")
             .flex()
             .flex_row()
             .items_center()
@@ -139,6 +151,8 @@ impl InstanceStrip {
             .bg(rgb(p.panel_hi))
             .border_1()
             .border_color(rgb(p.track))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Right, ask)
             .child(
                 div()
                     .text_size(rems(0.6875))
@@ -155,7 +169,15 @@ impl InstanceStrip {
             Health::Down { .. } => p.red,
             Health::Unknown => p.text_faint,
         };
-        let text = if selected { p.accent } else { p.text_muted };
+        // Each crab wears its own hue, derived from its host id, so the column
+        // is recognisable before any label is read. The wash and the ring are
+        // the same hue at two strengths; the glyph mixes with the palette's own
+        // text colour, which keeps it legible in the light theme too.
+        let hue = tint_hue(badge_tint(&badge.host_id), &p);
+        let wash = gui_theme::mix(p.panel, hue, 30, 100);
+        let ring = gui_theme::mix(p.panel, hue, 62, 100);
+        let glyph = gui_theme::mix(hue, p.text, 40, 100);
+        let text = if selected { p.accent } else { glyph };
         let host_id = SharedString::from(badge.host_id.clone());
         let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
             this.pick(host_id.clone(), cx);
@@ -187,8 +209,9 @@ impl InstanceStrip {
                     .w(rems(BADGE_REM))
                     .h(rems(BADGE_REM))
                     .rounded_full()
-                    .bg(rgb(if selected { p.panel_hi } else { p.panel }))
-                    .when(selected, |d| d.border_1().border_color(rgb(p.accent)))
+                    .bg(rgb(wash))
+                    .border_1()
+                    .border_color(rgb(if selected { p.accent } else { ring }))
                     .child(
                         div()
                             .text_size(rems(0.6875))
@@ -279,7 +302,7 @@ impl InstanceStrip {
         let p = palette::current();
         let selected = self.frame.selected.clone();
         let mut children: Vec<AnyElement> = Vec::with_capacity(self.frame.badges.len() + 3);
-        children.push(self.workspace_mark());
+        children.push(self.workspace_mark(cx));
         children.push(div().h(rems(0.625)).into_any_element());
         for badge in &self.frame.badges {
             let is_selected = selected.as_deref() == Some(badge.host_id.as_str());
@@ -319,4 +342,20 @@ pub(crate) fn strip_root_style() -> StyleRefinement {
         .min_w_0()
         .min_h_0();
     boxed.style().clone()
+}
+
+/// The hue a badge's colour slot wears in the live palette.
+///
+/// The slots are palette colours rather than computed hues, so every crab's
+/// tint follows the theme: switch to the light theme and the washes lighten
+/// with it instead of burning a hole in the paper.
+fn tint_hue(slot: usize, p: &palette::Palette) -> u32 {
+    match slot % crate::instances::BADGE_TINTS {
+        0 => p.blue,
+        1 => p.teal,
+        2 => p.green,
+        3 => p.amber,
+        4 => p.accent,
+        _ => p.red,
+    }
 }

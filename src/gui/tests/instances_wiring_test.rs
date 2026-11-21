@@ -5,19 +5,20 @@
 //! client and the store carry their own tests next to the code that parses.
 
 use crate::dashboard_instances::{PairingForm, RemoteState, RemoteView};
+use opencrabs::ui_core::text_field::TextField;
 
 #[test]
 fn a_busy_form_refuses_to_look_idle() {
     // `..Default::default()` on purpose: the form grows fields as the keyboard
     // work lands, and a literal here breaks the test build every time it does.
     let form = PairingForm {
-        url: "http://a:7878".into(),
-        code: "123456".into(),
+        url: TextField::from_text("http://a:7878"),
+        code: TextField::from_text("123456"),
         ..Default::default()
     }
     .busy();
     assert!(form.busy);
-    assert_eq!(form.code, "123456");
+    assert_eq!(form.code.text(), "123456");
 }
 
 #[test]

@@ -3738,6 +3738,32 @@ impl Render for Dashboard {
         if self.instance_pairing.is_some() {
             root = root.child(self.instance_pair_modal(cx));
         }
+        // The mark's menu is a window-level card, at the press point, for the
+        // reason #2690 gives: a child of the strip would have its coordinates
+        // translated by the strip's own frame and land far from the pointer.
+        if self.instance_menu_at.is_some() {
+            let at = self.instance_menu_at.unwrap_or_default();
+            let items = self.instance_mark_menu_items(cx);
+            let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                this.instance_menu_at = None;
+                cx.notify();
+            });
+            root = root.child(
+                gpui::deferred(menu::dismissible_menu_popover(
+                    "instance-mark-menu",
+                    items,
+                    at,
+                    dismiss,
+                ))
+                .with_priority(2),
+            );
+        }
+        // The sharing card is the mirror of the pairing form: it hands a code
+        // out instead of taking one in, and it must sit above the strip that
+        // opened it.
+        if self.instance_share.is_some() {
+            root = root.child(self.instance_share_modal(cx));
+        }
         // The settings modal follows the same rule (#2878).
         if self.settings_open {
             root = root.child(self.settings_modal(cx));

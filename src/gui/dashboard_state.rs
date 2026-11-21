@@ -726,6 +726,12 @@ pub(crate) struct Dashboard {
     /// The last instance error, said in one line at the bottom of the strip's
     /// column. `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,
+    /// Where the workspace mark's context menu was asked for, in window
+    /// coordinates. `None` is the normal state.
+    pub(crate) instance_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// The sharing card: a fresh single-use code and the QR that carries it,
+    /// minted when the mark's menu asked for one and dropped when it closes.
+    pub(crate) instance_share: Option<dashboard_instances::ShareView>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one

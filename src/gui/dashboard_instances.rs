@@ -19,14 +19,40 @@
 use super::*;
 use crate::instance_strip::{self, StripFrame};
 use crate::instances::{Health, Instances};
+use crate::menu;
 use crate::remote_panel::{self, RemotePanelFrame, RemoteRow};
+use opencrabs::config::Config;
 use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_store::{InstanceStore, KnownInstance, now};
+use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays, and it is the only clock the strip has: the
 /// paint never asks for a probe, it only draws what the last one recorded.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run one remote call on a Tokio runtime of its own.
+///
+/// `reqwest::Client::new()` panics with *"there is no reactor running, must be
+/// called from the context of a Tokio 1.x runtime"* when it is built outside
+/// one, and gpui's background executor is not a Tokio runtime. It only looked
+/// fine because nothing had paired yet: the panic fires on the first
+/// `emparelhar`, and it took the window down with it (2026-11-20 23:46Z).
+///
+/// A short-lived current-thread runtime per call is what `agent_bridge` does
+/// for the same reason: cheap, and it cannot collide with the surface's own
+/// runtime. The call still runs off the UI thread, because it is the
+/// background executor that awaits this future.
+fn on_remote_runtime<T, F>(call: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("não consegui abrir um runtime para a chamada remota: {e}"))?;
+    runtime.block_on(call)
+}
 
 impl Dashboard {
     /// Read `state/remote/instances.json` into the window's model.
@@ -169,8 +195,10 @@ impl Dashboard {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let target = Target::new(&fetch_url, Some(&token));
-                    instance_client::transcript(&target, &fetch_id, 40).await
+                    on_remote_runtime(async {
+                        let target = Target::new(&fetch_url, Some(&token));
+                        instance_client::transcript(&target, &fetch_id, 40).await
+                    })
                 })
                 .await;
 
@@ -282,10 +310,10 @@ impl Dashboard {
     /// The pairing form's keyboard: three fields, Tab between them, Enter to
     /// submit, Esc to give up. Returns whether the key was consumed.
     pub(crate) fn pair_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
-        let Some(form) = self.instance_pairing.as_mut() else {
+        let Some(busy) = self.instance_pairing.as_ref().map(|form| form.busy) else {
             return false;
         };
-        if form.busy {
+        if busy {
             // A submit in flight owns nothing: the answer comes back in the
             // form itself, and typing into a request already sent would lie.
             return true;
@@ -298,20 +326,30 @@ impl Dashboard {
             }
             "enter" => self.instance_pair_submit(cx),
             "tab" => {
-                let back = ks.modifiers.shift;
-                form.field = if back {
-                    (form.field + 2) % 3
-                } else {
-                    (form.field + 1) % 3
-                };
-                cx.notify();
-            }
-            "backspace" => {
-                form.pop();
+                if let Some(form) = self.instance_pairing.as_mut() {
+                    let back = ks.modifiers.shift;
+                    form.field = if back {
+                        (form.field + 2) % 3
+                    } else {
+                        (form.field + 1) % 3
+                    };
+                }
                 cx.notify();
             }
             _ => {
+                if let Some(edit) = text_field::editing_chord(
+                    ks.key.as_str(),
+                    ks.modifiers.control,
+                    ks.modifiers.platform,
+                    ks.modifiers.alt,
+                    ks.modifiers.shift,
+                ) {
+                    self.apply_pair_edit(edit, cx);
+                    return true;
+                }
                 if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    // A chord this field does not implement belongs to nobody
+                    // here: swallowing it would eat a window shortcut.
                     return true;
                 }
                 let typed = if ks.key == "space" {
@@ -320,12 +358,41 @@ impl Dashboard {
                     ks.key_char.as_ref().and_then(|s| s.chars().next())
                 };
                 if let Some(ch) = typed {
-                    form.push(ch);
+                    if let Some(form) = self.instance_pairing.as_mut() {
+                        form.focused().insert_text(&ch.to_string());
+                    }
                     cx.notify();
                 }
             }
         }
         true
+    }
+
+    /// Apply one editing chord to the focused pairing field, clipboard
+    /// included, exactly as the composer does.
+    fn apply_pair_edit(&mut self, edit: text_field::TextFieldEdit, cx: &mut Context<Self>) {
+        let Some(form) = self.instance_pairing.as_mut() else {
+            return;
+        };
+        let in_url = form.field == 0;
+        match text_field::apply(form.focused(), edit) {
+            Some(text_field::ClipboardRequest::Write(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Some(text_field::ClipboardRequest::Read) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    // A pasted pairing link fills both fields at once, which is
+                    // the whole reason the other crab prints one.
+                    if in_url && form.absorb_link(&text) {
+                        cx.notify();
+                        return;
+                    }
+                    form.focused().insert_text(&text);
+                }
+            }
+            None => {}
+        }
+        cx.notify();
     }
 
     /// The pairing modal: the URL the other crab announces, the code it printed
@@ -336,8 +403,11 @@ impl Dashboard {
         };
         let shown = palette::current();
         let mut body: Vec<AnyElement> = Vec::new();
-        for (index, (label, value)) in form.fields().iter().enumerate() {
+        for (index, (label, field)) in form.fields().iter().enumerate() {
             let here = form.field == index;
+            // The same span split the composer and the topic prompt use: the
+            // window never slices a string, the core does.
+            let (before, selected, after) = field.render_spans();
             body.push(
                 div()
                     .flex()
@@ -357,6 +427,9 @@ impl Dashboard {
                         div()
                             .w_full()
                             .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
                             .px_2()
                             .py_1()
                             .rounded_md()
@@ -364,20 +437,38 @@ impl Dashboard {
                             .border_1()
                             .border_color(rgb(if here { shown.accent } else { shown.track }))
                             .text_size(rems(0.8125))
-                            .text_color(rgb(if value.is_empty() {
+                            .text_color(rgb(if field.is_empty() {
                                 shown.text_faint
                             } else {
                                 shown.text
                             }))
-                            .child(SharedString::from(if value.is_empty() {
-                                if here {
-                                    "a escrever…".to_string()
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                value.to_string()
-                            })),
+                            // A field with nothing in it and no caret on it is
+                            // a hole in the form, so it says what it wants.
+                            .when(field.is_empty() && !here, |d| {
+                                d.child(SharedString::from(match index {
+                                    0 => "https://…",
+                                    1 => "8 caracteres",
+                                    _ => "o nome do outro crab",
+                                }))
+                            })
+                            .child(SharedString::from(before.to_string()))
+                            .when(!selected.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .bg(rgb(shown.selection))
+                                        .child(SharedString::from(selected.to_string())),
+                                )
+                            })
+                            .when(here, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(1.5))
+                                        .h(rems(1.0))
+                                        .bg(rgb(shown.accent)),
+                                )
+                            })
+                            .child(SharedString::from(after.to_string())),
                     )
                     .into_any_element(),
             );
@@ -537,8 +628,10 @@ impl Dashboard {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let target = Target::new(&send_url, Some(&token));
-                    instance_client::send(&target, &body).await
+                    on_remote_runtime(async {
+                        let target = Target::new(&send_url, Some(&token));
+                        instance_client::send(&target, &body).await
+                    })
                 })
                 .await;
 
@@ -606,17 +699,27 @@ impl Dashboard {
                     continue;
                 }
 
-                let results = cx
+                let results = match cx
                     .background_executor()
                     .spawn(async move {
-                        let probes = targets.into_iter().map(|(host_id, url, token)| async move {
-                            let target = Target::new(&url, Some(&token));
-                            let result = instance_client::probe(&target).await;
-                            (host_id, result)
-                        });
-                        futures::future::join_all(probes).await
+                        on_remote_runtime(async move {
+                            let probes =
+                                targets.into_iter().map(|(host_id, url, token)| async move {
+                                    let target = Target::new(&url, Some(&token));
+                                    let result = instance_client::probe(&target).await;
+                                    (host_id, result)
+                                });
+                            Ok::<_, anyhow::Error>(futures::future::join_all(probes).await)
+                        })
                     })
-                    .await;
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(e) => {
+                        logging::info(&format!("instances: probe round failed: {e:#}"));
+                        continue;
+                    }
+                };
 
                 let at = now();
                 if this
@@ -670,8 +773,10 @@ impl Dashboard {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let target = Target::new(&target_url, Some(&token));
-                    instance_client::list_sessions(&target, 50).await
+                    on_remote_runtime(async {
+                        let target = Target::new(&target_url, Some(&token));
+                        instance_client::list_sessions(&target, 50).await
+                    })
                 })
                 .await;
 
@@ -696,9 +801,9 @@ impl Dashboard {
         let Some(form) = self.instance_pairing.clone() else {
             return;
         };
-        let url = form.url.trim().to_string();
-        let code = form.code.trim().to_string();
-        let label = form.label.trim().to_string();
+        let url = form.url.trimmed().to_string();
+        let code = form.code.trimmed().to_string();
+        let label = form.label.trimmed().to_string();
         if url.is_empty() || code.is_empty() {
             self.instance_error = Some(SharedString::from(
                 "emparelhar: preciso do URL e do código".to_string(),
@@ -717,16 +822,18 @@ impl Dashboard {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    opencrabs::remote::instance_store::pair(
-                        &pair_url,
-                        &pair_code,
-                        if pair_label.is_empty() {
-                            &pair_url
-                        } else {
-                            &pair_label
-                        },
-                    )
-                    .await
+                    on_remote_runtime(async {
+                        opencrabs::remote::instance_store::pair(
+                            &pair_url,
+                            &pair_code,
+                            if pair_label.is_empty() {
+                                &pair_url
+                            } else {
+                                &pair_label
+                            },
+                        )
+                        .await
+                    })
                 })
                 .await;
 
@@ -756,9 +863,9 @@ impl Dashboard {
                         this.instance_error =
                             Some(SharedString::from(format!("emparelhar: {e:#}")));
                         this.instance_pairing = Some(PairingForm {
-                            url,
-                            code: String::new(),
-                            label,
+                            url: TextField::from_text(&url),
+                            code: TextField::new(),
+                            label: TextField::from_text(&label),
                             busy: false,
                             field: 0,
                         });
@@ -792,6 +899,395 @@ impl Dashboard {
         }
         cx.notify();
     }
+
+    /// The workspace mark was right-clicked: open its menu at the press point.
+    pub(crate) fn instance_mark_menu(
+        &mut self,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.instance_menu_at = Some(at);
+        cx.notify();
+    }
+
+    /// The mark's menu, wired. Three rows, because the head of the column can
+    /// do three things: hand a code to another crab, take one from another
+    /// crab, or open this machine's own settings.
+    pub(crate) fn instance_mark_menu_items(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::Stateful<gpui::Div>> {
+        let share = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_share_begin(cx);
+        });
+        let pair = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_menu_at = None;
+            this.instance_add_clicked(cx);
+        });
+        let settings = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_menu_at = None;
+            this.toggle_settings(cx);
+        });
+        vec![
+            menu::menu_item("gerar código de acesso remoto").on_click(share),
+            menu::menu_item("emparelhar um crab").on_click(pair),
+            menu::menu_item("definições desta máquina").on_click(settings),
+        ]
+    }
+
+    /// Mint a code and build the card that carries it.
+    ///
+    /// The code is minted **in this process**, not by `opencrabs connect`: the
+    /// window already runs the A2A gateway (the surface boots it, so it is the
+    /// same listener the CLI would tunnel), and `PairingStore` is the same file
+    /// that gateway reads. A round trip through the CLI would need a terminal
+    /// and cloudflared to say what this says from inside the window.
+    pub(crate) fn instance_share_begin(&mut self, cx: &mut Context<Self>) {
+        self.instance_menu_at = None;
+        self.instance_error = None;
+        let store = PairingStore::new(PairingStore::default_path());
+        let scopes = vec!["a2a:read".to_string(), "a2a:send".to_string()];
+        let code = match store.mint_code(&scopes) {
+            Ok(code) => code,
+            Err(e) => {
+                self.instance_error = Some(SharedString::from(format!("código: {e:#}")));
+                cx.notify();
+                return;
+            }
+        };
+        let (url, warning) = match Config::load() {
+            Ok(config) => share_target(&config.a2a),
+            Err(e) => (
+                "http://127.0.0.1:18790".to_string(),
+                Some(format!("não consegui ler a config: {e}")),
+            ),
+        };
+        let label = this_host_label();
+        let link = format!(
+            "opencrabs://pair?url={}&code={}&label={}",
+            percent_encode(&url),
+            percent_encode(&code),
+            percent_encode(&label),
+        );
+        let (qr, width) = qr_modules(&link);
+        self.instance_share = Some(ShareView {
+            url,
+            code,
+            link,
+            qr,
+            width,
+            warning,
+            ttl_secs: CODE_TTL_SECS,
+        });
+        cx.notify();
+    }
+
+    /// Close the sharing card. The code stays valid until it expires: closing
+    /// the card is not a revoke, and pretending otherwise would be a lie the
+    /// store cannot back.
+    pub(crate) fn instance_share_close(&mut self, cx: &mut Context<Self>) {
+        self.instance_share = None;
+        cx.notify();
+    }
+
+    /// The sharing card: what to hand the other crab, and what it cannot do.
+    pub(crate) fn instance_share_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(share) = self.instance_share.clone() else {
+            return div().into_any_element();
+        };
+        let shown = palette::current();
+
+        // The QR is drawn white-on-black whatever the theme is: a scanner needs
+        // contrast, and a dark card with dark modules is a pretty square that
+        // no camera reads. Fixed colours, not palette ones.
+        let qr = if share.width > 0 {
+            let mut rows: Vec<AnyElement> = Vec::with_capacity(share.width);
+            for y in 0..share.width {
+                let mut cells: Vec<AnyElement> = Vec::with_capacity(share.width);
+                for x in 0..share.width {
+                    let dark = share.qr.get(y * share.width + x).copied().unwrap_or(false);
+                    cells.push(
+                        div()
+                            .w(px(QR_MODULE_PX))
+                            .h(px(QR_MODULE_PX))
+                            .bg(rgb(if dark { 0x000000 } else { 0xffffff }))
+                            .into_any_element(),
+                    );
+                }
+                rows.push(div().flex().flex_row().children(cells).into_any_element());
+            }
+            // The card is centred by a row, not by `self_center`: gpui's `Div`
+            // has no self-alignment, and a full-width row with `justify_center`
+            // is the same thing with one element less to get wrong.
+            div()
+                .flex()
+                .flex_row()
+                .justify_center()
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(0xffffff))
+                        .children(rows),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .text_size(rems(0.75))
+                .text_color(rgb(shown.warn))
+                .child(SharedString::from(
+                    "não consegui desenhar o QR: usa o link copiado abaixo",
+                ))
+                .into_any_element()
+        };
+
+        let copy_link = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            if let Some(share) = this.instance_share.as_ref() {
+                cx.write_to_clipboard(ClipboardItem::new_string(share.link.clone()));
+            }
+        });
+        let copy_code = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            if let Some(share) = this.instance_share.as_ref() {
+                cx.write_to_clipboard(ClipboardItem::new_string(share.code.clone()));
+            }
+        });
+        let fresh = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_share_begin(cx);
+        });
+
+        let button = |id: &'static str, label: &'static str, accent: bool| {
+            div()
+                .id(id)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(rgb(if accent { shown.accent } else { shown.panel_hi }))
+                .text_size(rems(0.75))
+                .text_color(rgb(if accent { shown.bg } else { shown.text }))
+                .child(SharedString::from(label))
+        };
+
+        let mut body: Vec<AnyElement> = Vec::new();
+        body.push(qr);
+        body.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from("endereço deste crab")),
+                )
+                .child(
+                    div()
+                        .text_size(rems(0.8125))
+                        .text_color(rgb(shown.text))
+                        .child(SharedString::from(share.url.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(rems(0.6875))
+                                .text_color(rgb(shown.text_faint))
+                                .child(SharedString::from("código")),
+                        )
+                        .child(
+                            div()
+                                .text_size(rems(1.1))
+                                .text_color(rgb(shown.accent))
+                                .child(SharedString::from(share.code.clone())),
+                        ),
+                )
+                .into_any_element(),
+        );
+        if let Some(warning) = &share.warning {
+            body.push(
+                div()
+                    .text_size(rems(0.75))
+                    .text_color(rgb(shown.warn))
+                    .child(SharedString::from(warning.clone()))
+                    .into_any_element(),
+            );
+        }
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(button("instance-share-copy-link", "copiar link", true).on_click(copy_link))
+                .child(
+                    button("instance-share-copy-code", "copiar código", false).on_click(copy_code),
+                )
+                .child(button("instance-share-new", "novo código", false).on_click(fresh))
+                .into_any_element(),
+        );
+
+        let close = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_share_close(cx);
+        });
+        modal_shell::render(
+            modal_shell::ModalView {
+                id: "instance-share-modal",
+                title: "Acesso remoto a este crab".to_string(),
+                subtitle: "o outro crab lê este link e fica emparelhado".to_string(),
+                actions: None,
+                header_close: true,
+                body: div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(body)
+                    .into_any_element(),
+                footer: Some(
+                    modal_shell::footer(format!(
+                        "expira em {} min · esc fecha · o link copiado é a via segura",
+                        share.ttl_secs / 60
+                    ))
+                    .into_any_element(),
+                ),
+                width: 26.0 * f32::from(self.rem),
+                max_height: 30.0 * f32::from(self.rem),
+            },
+            close,
+        )
+        .into_any_element()
+    }
+}
+
+/// One QR module's side in pixels. 4 px over a 33-module code is 132 px, which
+/// fits a card and is still big enough for a phone camera to lock on.
+const QR_MODULE_PX: f32 = 4.0;
+
+/// The sharing card's model: everything the paint reads, built once when the
+/// code is minted. The code exists in plaintext only here and in the store's
+/// hash, which is why the card is rebuilt rather than re-read.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShareView {
+    /// The address another crab should dial.
+    pub(crate) url: String,
+    /// The single-use code.
+    pub(crate) code: String,
+    /// `opencrabs://pair?…`, which is what the QR carries.
+    pub(crate) link: String,
+    /// Row-major modules, `width` per side.
+    pub(crate) qr: Vec<bool>,
+    pub(crate) width: usize,
+    /// Why this address will not work from another machine, when it will not.
+    pub(crate) warning: Option<String>,
+    pub(crate) ttl_secs: u64,
+}
+
+/// The address to hand out, and the reason it may be useless.
+///
+/// `advertise_url` wins because it is the owner's explicit answer to "how do I
+/// reach this box". Without it the bind decides: a loopback gateway cannot be
+/// reached from anywhere else, and saying "here is a code" while the listener
+/// is bound to 127.0.0.1 is how an hour disappears into a pairing that could
+/// never have worked.
+fn share_target(a2a: &opencrabs::config::A2aConfig) -> (String, Option<String>) {
+    if !a2a.enabled {
+        return (
+            format!("http://127.0.0.1:{}", a2a.port),
+            Some(
+                "o gateway A2A está desligado nesta máquina: põe [a2a] enabled = true e volta a abrir a janela."
+                    .to_string(),
+            ),
+        );
+    }
+    if let Some(url) = a2a
+        .advertise_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        return (url.trim_end_matches('/').to_string(), None);
+    }
+    let loopback = matches!(a2a.bind.as_str(), "127.0.0.1" | "localhost" | "::1");
+    if loopback {
+        return (
+            format!("http://127.0.0.1:{}", a2a.port),
+            Some(format!(
+                "esta máquina só aceita ligações locais, por isso outro crab não chega aqui. Para abrir à rede: [a2a] bind = \"0.0.0.0\" e advertise_url = \"http://{}:{}\", depois fecha e reabre a janela.",
+                lan_ip().unwrap_or_else(|| "o-ip-desta-máquina".to_string()),
+                a2a.port
+            )),
+        );
+    }
+    let host = lan_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+    let warning = if a2a
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        Some(
+            "sem api_key, qualquer crab na tua rede pode chamar /a2a/v1. Põe uma em [a2a] api_key."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    (format!("http://{host}:{}", a2a.port), warning)
+}
+
+/// This machine's address on the LAN.
+///
+/// A UDP socket that never sends a packet: `connect` only picks the route, and
+/// the local address it reports is the interface the kernel would use. Reading
+/// it this way needs no crate and no DNS.
+fn lan_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+/// What this crab calls itself in a pairing link, so the other side's strip
+/// shows a name rather than a URL.
+fn this_host_label() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+        })
+        .unwrap_or_else(|| "este crab".to_string())
+}
+
+/// The link as QR modules, row-major, and the side length.
+///
+/// A link that does not fit the largest QR version comes back empty rather
+/// than as a half-drawn square: the card then shows the warning and the copy
+/// button, which still works.
+fn qr_modules(link: &str) -> (Vec<bool>, usize) {
+    match qrcode::QrCode::new(link.as_bytes()) {
+        Ok(code) => {
+            let width = code.width();
+            let dark = code
+                .to_colors()
+                .into_iter()
+                .map(|color| color == qrcode::Color::Dark)
+                .collect();
+            (dark, width)
+        }
+        Err(_) => (Vec::new(), 0),
+    }
 }
 
 /// The remote session being read, and the draft going to it.
@@ -806,11 +1302,19 @@ pub(crate) struct RemoteTranscript {
 }
 
 /// The pairing form's state, which is also "the form is open".
+///
+/// The three fields are real [`TextField`]s, not `String`s: a field that only
+/// appends is a field you cannot fix a typo in, and a URL pasted from a
+/// terminal arrives with a trailing newline and a code that has to replace
+/// what is already there. Caret, selection, Home/End and the clipboard chords
+/// all come from the same engine the composer uses, so the two cannot drift
+/// (2026-11-20: the form was three `div`s printing a `String`, and Ctrl+V did
+/// nothing at all).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PairingForm {
-    pub(crate) url: String,
-    pub(crate) code: String,
-    pub(crate) label: String,
+    pub(crate) url: TextField,
+    pub(crate) code: TextField,
+    pub(crate) label: TextField,
     /// A submit is in flight; the button says so and refuses a second one.
     pub(crate) busy: bool,
     /// Which field the keyboard is in: 0 url, 1 code, 2 label.
@@ -824,38 +1328,115 @@ impl PairingForm {
     }
 
     /// The three fields, in the order Tab walks them.
-    pub(crate) fn fields(&self) -> [(&'static str, &str); 3] {
+    pub(crate) fn fields(&self) -> [(&'static str, &TextField); 3] {
         [
-            ("URL do crab", self.url.as_str()),
-            ("código de emparelhamento", self.code.as_str()),
-            ("nome (opcional)", self.label.as_str()),
+            ("URL do crab", &self.url),
+            ("código de emparelhamento", &self.code),
+            ("nome (opcional)", &self.label),
         ]
     }
 
-    /// Where a typed character goes. One writer, so the field the keyboard is
-    /// in and the field the paint highlights cannot disagree.
-    pub(crate) fn push(&mut self, ch: char) {
+    /// The field the keyboard is in, for the editing chords.
+    pub(crate) fn focused(&mut self) -> &mut TextField {
         match self.field {
-            0 => self.url.push(ch),
-            1 => self.code.push(ch),
-            _ => self.label.push(ch),
+            0 => &mut self.url,
+            1 => &mut self.code,
+            _ => &mut self.label,
         }
     }
 
-    /// Backspace in the focused field.
-    pub(crate) fn pop(&mut self) {
-        match self.field {
-            0 => {
-                self.url.pop();
+    /// Fill the form from a pairing link, which is what the other crab prints
+    /// and what the QR carries. Returns whether the text was one.
+    ///
+    /// The link is the whole point of the QR: reading four fields off a screen
+    /// and typing them is where a pairing dies. One paste, both fields.
+    pub(crate) fn absorb_link(&mut self, text: &str) -> bool {
+        let Some((url, code, label)) = parse_pair_link(text) else {
+            return false;
+        };
+        self.url.set_text(&url);
+        self.code.set_text(&code);
+        if let Some(label) = label {
+            self.label.set_text(&label);
+        }
+        self.field = 2;
+        true
+    }
+}
+
+/// `opencrabs://pair?url=…&code=…&label=…`, as the sharing modal prints it.
+///
+/// The scheme is the contract between the two crabs, so the parser is here
+/// rather than in a frontend: a link read by the window and a link read by the
+/// terminal must mean the same thing.
+pub(crate) fn parse_pair_link(text: &str) -> Option<(String, String, Option<String>)> {
+    let text = text.trim();
+    let rest = text.strip_prefix("opencrabs://pair?")?;
+    let mut url = None;
+    let mut code = None;
+    let mut label = None;
+    for pair in rest.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        let value = percent_decode(value);
+        match key {
+            "url" => url = Some(value),
+            "code" => code = Some(value),
+            "label" => label = Some(value),
+            _ => {}
+        }
+    }
+    Some((url?, code?, label.filter(|l| !l.is_empty())))
+}
+
+/// Percent-decode a query value. The encoder on the printing side is
+/// [`percent_encode`], and they are the only two halves of this format.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
             }
-            1 => {
-                self.code.pop();
+            b'+' => {
+                out.push(b' ');
+                i += 1;
             }
-            _ => {
-                self.label.pop();
+            byte => {
+                out.push(byte);
+                i += 1;
             }
         }
     }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-encode everything outside the unreserved set. A URL carries `:`,
+/// `/` and `.`, a code is base32, and a label is whatever the owner typed:
+/// only the last one can surprise us, and this keeps it from breaking the
+/// query.
+pub(crate) fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// What the panel shows for the selected remote.
