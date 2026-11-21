@@ -177,7 +177,7 @@ impl Render for Dashboard {
         // tick: the strip was re-read by mtime just above, and the pane
         // strips are re-read again when the split body is built below, so a
         // pane that settles between frames is caught on the next one.
-        self.chime_settled_plan_tasks(cx);
+        self.settle_plan_tasks(cx);
 
         // The expanded rail is a cached view of its own (#2933). The closed
         // rail never resolves that frame: it keeps only the logo and reopen

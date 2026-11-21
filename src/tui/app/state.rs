@@ -1676,26 +1676,16 @@ impl App {
         self.pane_manager.focused_plan()
     }
 
-    /// Chime once for every plan task that settled since the last tick (#2574).
-    ///
-    /// Covers the focused plan and every pane's plan: a split can hold several
-    /// live checklists, and the pane that just finished a task is not
-    /// necessarily the one holding the keyboard. The config flag is read at the
-    /// moment of the chime, so flipping
-    /// `[agent] completion_notification_enabled` takes effect without a restart.
-    async fn chime_settled_plan_tasks(&mut self) {
-        if self.settle_plan_tasks().await == 0 {
-            return;
-        }
-        Self::play_task_chime();
-    }
-
     /// Record the plan tasks that settled since the last tick and pulse the
-    /// pane that owns each one. Returns the count the chime responds to.
+    /// pane that owns each one. Returns the count the caller flashes on.
+    ///
+    /// This is bookkeeping, not sound: the per-task chime was retired in #3118
+    /// because a plan that settles six tasks rang six times. The one sound is
+    /// the plan-finished chime, raised from the `PlanCompleted` progress event.
     ///
     /// Every pane is refreshed from its own file first. Reloading only the
     /// focused pane left a background session's checklist frozen at the
-    /// moment it was opened, so its settle chimed minutes later, on the click
+    /// moment it was opened, so its settle flashed minutes later, on the click
     /// that finally reloaded it (#2733).
     pub(crate) async fn settle_plan_tasks(&mut self) -> usize {
         self.pane_manager.bind_missing_plan_paths().await;
@@ -1719,7 +1709,7 @@ impl App {
         let mut settled = 0usize;
         let mut flashes: Vec<Uuid> = Vec::new();
         for (session_id, plan) in &per_pane {
-            let count = crate::utils::desktop_notify::announce_settled_tasks(
+            let count = crate::utils::desktop_notify::record_settled_tasks(
                 &mut self.announced_task_completions,
                 &[plan.as_ref()],
             );
@@ -1730,7 +1720,7 @@ impl App {
                 flashes.push(*session_id);
             }
         }
-        settled += crate::utils::desktop_notify::announce_settled_tasks(
+        settled += crate::utils::desktop_notify::record_settled_tasks(
             &mut self.announced_task_completions,
             &[window_plan.as_ref()],
         );
@@ -1740,20 +1730,6 @@ impl App {
         }
         settled
     }
-
-    /// The chime itself, honouring the operator's opt-in and the build feature.
-    #[cfg(feature = "notification-sound")]
-    fn play_task_chime() {
-        let enabled = crate::config::Config::load()
-            .map(|c| c.agent.completion_notification_enabled)
-            .unwrap_or(false);
-        if enabled {
-            crate::utils::completion_sound::play_completion_sound();
-        }
-    }
-
-    #[cfg(not(feature = "notification-sound"))]
-    fn play_task_chime() {}
 
     /// The focused pane's resolved plan JSON path.
     pub fn plan_file_path(&self) -> Option<&std::path::PathBuf> {
@@ -2768,11 +2744,12 @@ impl App {
                 // shares the notice slot inline in the input area (#1816).
                 self.refresh_clipboard_hint(false);
 
-                // A plan task that just settled gets its own chime (#2574).
-                // The tick is the right place: the plan file is written by
-                // the tool and re-read here, so no tool path has to know
-                // whether a sound is wanted.
-                self.chime_settled_plan_tasks().await;
+                // A plan task that just settled pulses its pane. No sound: the
+                // per-task chime was retired in #3118, the plan-finished chime
+                // is the only completion sound. The tick is the right place to
+                // notice the settle, since the plan file is written by the tool
+                // and re-read here.
+                self.settle_plan_tasks().await;
 
                 // Plan rows are live, not a snapshot of when the list opened:
                 // a task settles while the owner stares at the cards, and the

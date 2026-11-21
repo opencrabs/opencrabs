@@ -245,6 +245,7 @@ pub mod config_last_good_recovery_test;
 pub mod config_live_home_guard_test;
 pub mod config_load_status_isolation_test;
 pub mod config_memory_external_test;
+pub mod config_notify_pack_migration_test;
 pub mod config_owner_seed_migration_test;
 pub mod config_phantom_xiaomi_default_test;
 pub mod config_provider_registry_test;

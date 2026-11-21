@@ -552,7 +552,10 @@ impl Config {
 
     /// Migrate old config keys in-place.
     ///
-    /// Currently handles: `channels.trello.allowed_channels` → `board_ids`.
+    /// Currently handles: `channels.trello.allowed_channels` → `board_ids`,
+    /// `[voice]` → `providers.stt.*` / `providers.tts.*`, the per-channel
+    /// `bot_owner` seed, the subagent and plan-mode default injections, and the
+    /// five-to-two notification key collapse (#3118).
     /// Called once after loading so old configs are silently upgraded on first run.
     pub(crate) fn migrate_if_needed(path: &Path) {
         // Hold lock to prevent races between main thread and config watcher
@@ -710,6 +713,11 @@ impl Config {
             }
         }
 
+        // ── Migration 6: five notification keys → two (#3118) ──
+        if Self::migrate_notification_flags_value(&mut doc) {
+            changed = true;
+        }
+
         if !changed {
             // Migration 3: inject commented subagent defaults into [agent] section
             // Uses text-level injection (comments can't survive toml::Value round-trip)
@@ -776,6 +784,13 @@ impl Config {
         for (channel, list_key) in Self::OWNER_SEED_CHANNELS {
             Self::seed_bot_owner_edit(&mut edit_doc, channel, list_key);
         }
+
+        // Migration 6: five notification keys → two (#3118). Written here as
+        // well as on the value pass: this branch is the one that reaches disk,
+        // and the value-pass edits never touch the file. A migration applied
+        // only there leaves the dead keys in place while the loaded config
+        // says they are gone.
+        Self::migrate_notification_flags_edit(&mut edit_doc);
 
         Self::backup_config(path, 7);
         if crate::config::types::io::atomic_write(path, &edit_doc.to_string()).is_ok() {
@@ -927,6 +942,111 @@ impl Config {
         t.insert("bot_owner", toml_edit::value(owner));
     }
 
+    /// Migration 6, value pass (#3118): collapse the five completion keys into
+    /// the two that survive.
+    ///
+    /// `completion_notification_enabled` read as an enable and behaved as a
+    /// kill switch: `config_allows` returned on it before it ever looked at the
+    /// event key, so `notify_on_turn_failed = true` beside a false master asked
+    /// for failure banners and got silence. The master is gone.
+    /// `notify_on_plan_completed` now enables completion feedback by itself (the
+    /// plan banner and the chime) and `notify_on_turn_failed` stands alone.
+    ///
+    /// - `notify_on_plan_completed` takes the master's value: the master WAS the
+    ///   enable for completion feedback, and the plan banner is the surviving
+    ///   completion event.
+    /// - `notify_on_turn_failed` is ANDed with the master, so a key that never
+    ///   fired cannot switch a banner on after the upgrade.
+    /// - `notify_on_task_completed` and `notify_on_turn_completed` are deleted
+    ///   with no successor: one banner per task and one per turn is the spam
+    ///   this migration exists to stop.
+    ///
+    /// Returns true only when the document actually changed, so a migrated file
+    /// stops being rewritten on every launch.
+    fn migrate_notification_flags_value(doc: &mut toml::Value) -> bool {
+        let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut()) else {
+            return false;
+        };
+        let master = agent
+            .get("completion_notification_enabled")
+            .and_then(|v| v.as_bool());
+        let plan_before = agent
+            .get("notify_on_plan_completed")
+            .and_then(|v| v.as_bool());
+        let failed_before = agent
+            .get("notify_on_turn_failed")
+            .and_then(|v| v.as_bool());
+
+        let mut changed = agent.remove("notify_on_task_completed").is_some();
+        changed |= agent.remove("notify_on_turn_completed").is_some();
+
+        let Some(master) = master else {
+            // No master in the file: already migrated, or the config never
+            // carried the pack. The removals above are all that can have
+            // changed.
+            return changed;
+        };
+        agent.remove("completion_notification_enabled");
+        changed = true;
+
+        // Absent key plus a false master stays absent: writing `false` there
+        // would be a no-op line in every config that never opted in.
+        if plan_before != Some(master) && (plan_before.is_some() || master) {
+            agent.insert(
+                "notify_on_plan_completed".to_string(),
+                toml::Value::Boolean(master),
+            );
+        }
+        if let Some(old) = failed_before {
+            let new = master && old;
+            if new != old {
+                agent.insert(
+                    "notify_on_turn_failed".to_string(),
+                    toml::Value::Boolean(new),
+                );
+            }
+        }
+        changed
+    }
+
+    /// Migration 6, disk pass (#3118): the same edit on the `toml_edit`
+    /// document, which is the one that reaches the file.
+    ///
+    /// Both passes are required. The `toml::Value` pass only decides that the
+    /// file needs rewriting; the structural branch re-applies every migration by
+    /// hand, so a migration written only there leaves the dead keys on disk
+    /// while the loaded config says they are gone.
+    fn migrate_notification_flags_edit(doc: &mut toml_edit::DocumentMut) {
+        let Some(agent) = doc.get_mut("agent").and_then(|a| a.as_table_mut()) else {
+            return;
+        };
+        let master = agent
+            .get("completion_notification_enabled")
+            .and_then(|i| i.as_bool());
+        let plan_before = agent
+            .get("notify_on_plan_completed")
+            .and_then(|i| i.as_bool());
+        let failed_before = agent.get("notify_on_turn_failed").and_then(|i| i.as_bool());
+
+        agent.remove("notify_on_task_completed");
+        agent.remove("notify_on_turn_completed");
+
+        let Some(master) = master else {
+            return;
+        };
+        agent.remove("completion_notification_enabled");
+
+        if plan_before != Some(master) && (plan_before.is_some() || master) {
+            agent.insert("notify_on_plan_completed", toml_edit::value(master));
+        }
+        if let Some(old) = failed_before {
+            let new = master && old;
+            if new != old {
+                agent.insert("notify_on_turn_failed", toml_edit::value(new));
+            }
+        }
+    }
+
     /// Get the system config path: ~/.opencrabs/config.toml
     pub fn system_config_path() -> Option<PathBuf> {
         Some(opencrabs_home().join("config.toml"))
@@ -956,6 +1076,17 @@ impl Config {
                 "Config: folded legacy section(s) {} into their current names — \
                  both spellings configure one feature",
                 folded.join(", ")
+            );
+        }
+        // Fold the retired notification keys before serde sees the document
+        // (#3118). The disk migration only rewrites the system config, and a
+        // repo-local `opencrabs.toml` is never migrated, so without this a
+        // legacy `notify_on_turn_failed = true` beside a false master would
+        // start raising banners the user never had.
+        if Self::migrate_notification_flags_value(&mut doc) {
+            tracing::debug!(
+                "Config: folded the retired notification keys in {} into the two that remain (#3118)",
+                path.display()
             );
         }
         let file_config: Self = doc

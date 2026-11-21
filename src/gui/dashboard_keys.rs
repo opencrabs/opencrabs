@@ -1110,15 +1110,18 @@ impl Dashboard {
         }
     }
 
-    /// Ring for plan tasks that settled since the last frame (#2691).
+    /// Settle plan tasks finished since the last frame: pulse the rail, no
+    /// sound (#2691, #3118).
     ///
     /// The terminal does this from its tick (`tui::app::state`), reading the
     /// plan file the tool writes. A gpui window has no tick, so the render
     /// path is the equivalent place: it already re-reads the strips by
-    /// mtime, and this pass turns the settled tasks into one chime. The
+    /// mtime, and this pass turns the settled tasks into one rail flash. The
     /// window strip and every pane strip share one seen set, so a plan drawn
-    /// twice rings once, and a reload of an unchanged file rings not at all.
-    pub(crate) fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {
+    /// twice flashes once, and a reload of an unchanged file does nothing at
+    /// all. The one completion sound is the plan-finished chime, raised from
+    /// `ProgressEvent::PlanCompleted`.
+    pub(crate) fn settle_plan_tasks(&mut self, cx: &mut Context<Self>) {
         // Four passes a second, not one per frame (#2899). The pass clones
         // every plan document, resolves the settled ids in each and asks the
         // notification layer about them, and a frame can arrive as often as
@@ -1185,16 +1188,16 @@ impl Dashboard {
             });
         }
 
-        // #2729: the same set drives the OS banner, so a task that rings also
-        // reaches the Notification Center, and neither can fire twice for one
-        // settle.
+        // #2729: the same seen set keeps one settle from flashing twice. No
+        // banner is raised here any more (#3118): the rail flash is the whole
+        // per-task signal.
         let borrowed: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
             plans.iter().map(Option::as_ref).collect();
-        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &borrowed) == 0 {
+        if opencrabs::utils::desktop_notify::record_settled_tasks(seen, &borrowed) == 0 {
             return;
         }
-        // One flash per settled session, on the same instant the chime rings:
-        // the sound and the blink are two surfaces of one event.
+        // One flash per settled session: the blink is the per-task signal, and
+        // the plan-finished chime is the only sound.
         for session in settled {
             if session == Uuid::nil() {
                 continue;
@@ -1204,7 +1207,6 @@ impl Dashboard {
                 now + opencrabs::utils::completion_sound::FLASH_WINDOW,
             );
         }
-        Self::play_task_chime();
     }
 
     /// Whether any rail flash window is still open, dropping the expired ones.
@@ -1218,14 +1220,14 @@ impl Dashboard {
         !self.plan_flash_until.is_empty()
     }
 
-    /// The chime itself, honouring the operator's opt-in and the build
-    /// feature (#2691). The flag is read at the moment of the chime, so
-    /// flipping `[agent] completion_notification_enabled` in a live session
-    /// takes effect without a restart, exactly as the terminal's arm does.
+    /// The plan-finished chime, honouring the operator's opt-in and the build
+    /// feature (#2691, #3118). The flag is read at the moment of the chime, so
+    /// flipping `[agent] notify_on_plan_completed` in a live session takes
+    /// effect without a restart, exactly as the terminal's arm does.
     #[cfg(feature = "notification-sound")]
-    pub(crate) fn play_task_chime() {
+    pub(crate) fn play_plan_chime() {
         let enabled = opencrabs::config::Config::load()
-            .map(|c| c.agent.completion_notification_enabled)
+            .map(|c| c.agent.notify_on_plan_completed)
             .unwrap_or(false);
         if enabled {
             opencrabs::utils::completion_sound::play_completion_sound();
@@ -1233,5 +1235,5 @@ impl Dashboard {
     }
 
     #[cfg(not(feature = "notification-sound"))]
-    pub(crate) fn play_task_chime() {}
+    pub(crate) fn play_plan_chime() {}
 }

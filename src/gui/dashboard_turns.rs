@@ -1508,11 +1508,11 @@ impl Dashboard {
                 }
                 // A plan just closed (#2255, #2691). The settle emits this
                 // before the plan file is archived, so it is the one signal
-                // that cannot be missed by a file read. The chime is opt-in
-                // and feature-gated, and no toast or desktop notification is
-                // raised, exactly as the terminal's arm.
+                // that cannot be missed by a file read. This is the ONLY
+                // completion sound: one chime per plan, never one per task
+                // (#3118), and it is gated on `notify_on_plan_completed`.
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }, _) => {
-                    Self::play_task_chime();
+                    Self::play_plan_chime();
                 }
                 // The service discarded text it had already streamed, so the
                 // card drops it now instead of waiting for the reload (#3021).
