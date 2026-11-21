@@ -65,7 +65,10 @@ fn without_a_tunnel_the_bind_address_decides() {
 
 #[test]
 fn an_advertised_address_needs_no_tunnel_and_no_warning() {
+    // A machine already published on the LAN (or through tailscale) has nothing
+    // left to warn about: the owner said how to reach it, and the bind agrees.
     let a2a = A2aConfig {
+        bind: "0.0.0.0".to_string(),
         advertise_url: Some("http://192.168.1.114:18790".to_string()),
         ..loopback()
     };
@@ -73,5 +76,31 @@ fn an_advertised_address_needs_no_tunnel_and_no_warning() {
 
     assert_eq!(url, "http://192.168.1.114:18790");
     assert!(warning.is_none(), "the owner already said how to reach it");
-    assert!(snippet.is_none());
+    // A block may still be there for an unrelated missing key; what must not be
+    // there is a bind instruction for a bind that is already open.
+    if let Some(snippet) = snippet {
+        assert!(
+            !snippet.contains("bind ="),
+            "the bind is already 0.0.0.0: {snippet}"
+        );
+    }
+}
+
+#[test]
+fn an_advertised_address_over_a_loopback_bind_is_still_a_lie() {
+    // The one case that matters on a real machine: `advertise_url` written
+    // before `bind` was changed. The card hands the address out, but the
+    // listener is still on 127.0.0.1, so the block that fixes it must stay.
+    let a2a = A2aConfig {
+        advertise_url: Some("http://192.168.1.114:18790".to_string()),
+        ..loopback()
+    };
+    let (url, _warning, snippet) = share_address(&a2a, None);
+
+    assert_eq!(url, "http://192.168.1.114:18790");
+    let snippet = snippet.expect("the bind still has to be opened");
+    assert!(
+        snippet.contains("bind ="),
+        "the block is the thing that names the key: {snippet}"
+    );
 }
