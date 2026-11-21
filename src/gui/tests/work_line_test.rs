@@ -58,10 +58,7 @@ fn the_bar_is_gated_on_the_chat_screen() {
         if let Some(rest) = trimmed.strip_prefix("Screen::")
             && let Some(name) = rest.split_whitespace().next()
         {
-            arm = Some(
-                name.trim_end_matches(|c: char| matches!(c, '=' | ',' | '{' | ' '))
-                    .to_string(),
-            );
+            arm = Some(name.trim_end_matches(['=', ',', '{', ' ']).to_string());
         }
         if trimmed.contains("self.work_line()") {
             found = arm.clone();
