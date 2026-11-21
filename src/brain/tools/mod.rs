@@ -38,6 +38,7 @@ pub mod code_exec;
 pub mod doc_gen;
 pub mod doc_parser;
 pub mod exa_search;
+pub mod keenable_search;
 pub mod notebook;
 pub mod pdf_to_images;
 pub mod serper_search;

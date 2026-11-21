@@ -3274,6 +3274,10 @@ pub struct WebSearchProviders {
     /// Serper (Google SERP) search configuration (#1731)
     #[serde(default)]
     pub serper: Option<ProviderConfig>,
+
+    /// Keenable search configuration (#2939). Off unless enabled; a key is optional.
+    #[serde(default)]
+    pub keenable: Option<ProviderConfig>,
 }
 
 /// Image provider configurations (e.g. Gemini for generation/vision)

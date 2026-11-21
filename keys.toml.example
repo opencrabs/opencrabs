@@ -153,3 +153,8 @@ api_key = ""
 [providers.web_search.brave]
 # Get from: brave.com/search/api/
 api_key = ""
+
+[providers.web_search.keenable]
+# Optional. Leave empty for the keyless public endpoint (still requires
+# enabled = true in config.toml). Get a key from: https://keenable.ai
+api_key = ""

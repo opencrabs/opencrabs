@@ -126,7 +126,7 @@ Compiled into the binary as Rust `Tool` trait implementations. Registered in the
 
 The agent calls `tool_search("send a telegram photo")` to discover and activate an extended tool. The tool's schema is then included in all subsequent requests for that session. This mirrors how contextual brain files work: core tools are always available, extended tools are loaded on demand.
 
-Search-backed turns are deterministic about sources: when a turn calls any search engine (`web_search`, `exa_search`, `brave_search`, `serper_search`), the delivered answer gets a bounded **Sources** footer harvested from that turn's tool output, appended at the settle point even when the model cited nothing.
+Search-backed turns are deterministic about sources: when a turn calls any search engine (`web_search`, `exa_search`, `brave_search`, `serper_search`, `keenable_search`), the delivered answer gets a bounded **Sources** footer harvested from that turn's tool output, appended at the settle point even when the model cited nothing.
 
 #### 2.6.2 Dynamic Tools (`tools.toml`)
 

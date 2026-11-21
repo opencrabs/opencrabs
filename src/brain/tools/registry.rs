@@ -39,6 +39,7 @@ const PARAM_ALIASES: &[(&str, &str, &str)] = &[
     ("web_search", "pattern", "query"),
     ("exa_search", "pattern", "query"),
     ("brave_search", "pattern", "query"),
+    ("keenable_search", "pattern", "query"),
     ("memory_search", "pattern", "query"),
 ];
 

@@ -14,8 +14,13 @@ use crate::brain::tools::web_search::{entry_url, is_entry_start, normalize_url};
 /// Tools whose rendered output carries harvestable source URLs. Scoped to the
 /// search engines: `http_request` / `web_scrape` / `browser_navigate` handle
 /// user-supplied URLs the model already knows, out of scope by design.
-pub(crate) const SEARCH_TOOLS: &[&str] =
-    &["web_search", "exa_search", "brave_search", "serper_search"];
+pub(crate) const SEARCH_TOOLS: &[&str] = &[
+    "web_search",
+    "exa_search",
+    "brave_search",
+    "serper_search",
+    "keenable_search",
+];
 
 /// Bounded footer: five links max, in engine-result order, first engine wins.
 pub(crate) const MAX_SOURCES: usize = 5;
