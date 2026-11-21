@@ -247,13 +247,11 @@ impl PlanStripState {
                     .child(action_chip(
                         format!("plan-approve-{}", plan.id),
                         APPROVE_LABEL,
-                        true,
                         actions.on_approve.clone(),
                     ))
                     .child(action_chip(
                         format!("plan-discard-{}", plan.id),
                         DISCARD_LABEL,
-                        false,
                         actions.on_discard.clone(),
                     )),
             );
@@ -442,15 +440,13 @@ pub fn editing_lines(plan: &PlanDocument) -> Vec<(LineKind, String)> {
 /// decisions read as lines flying loose inside the card, not as the buttons
 /// they are, and the card was the only place in the window that asked for a
 /// click without showing an edge to click.
-fn action_chip(id: String, label: &str, accent: bool, handler: ClickHandler) -> Stateful<Div> {
+fn action_chip(id: String, label: &str, handler: ClickHandler) -> Stateful<Div> {
     let p = palette::current();
-    // The accent wash for the decision the card is asking for, the quiet one
-    // for the way out, exactly as an offer row splits primary from default.
-    let (ink, wash) = if accent {
-        (p.accent, rgba((p.accent << 8) | 0x1c))
-    } else {
-        (p.text_normal, rgba(0xffffff0d))
-    };
+    // Both chips wear the plain offer row: the quiet wash, the quiet edge and
+    // the same lift on hover. The accent belongs to an offer row the keyboard
+    // is already on, and a plan card has no such row, so painting Approve
+    // accent made it look chosen before anything had been chosen and left
+    // Discard reading as a different kind of control (#3124).
     div()
         .id(SharedString::from(id))
         .flex_none()
@@ -458,26 +454,14 @@ fn action_chip(id: String, label: &str, accent: bool, handler: ClickHandler) -> 
         .py_1p5()
         .rounded(px(MESSAGE_RADIUS - 4.0))
         .border_1()
-        // Approve keeps the accent edge, the way the offer row the keyboard is
-        // on does: it is the one the card is asking for. Discard carries the
-        // quiet edge every offer row starts with.
-        .border_color(if accent {
-            rgba((ink << 8) | 0x88)
-        } else {
-            rgba(0xffffff1a)
-        })
-        .bg(wash)
-        .when(accent, |d| {
-            d.hover(|d| d.border_color(rgba((ink << 8) | 0xbb)))
-        })
-        .when(!accent, |d| {
-            d.hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
-        })
+        .border_color(rgba(0xffffff1a))
+        .bg(rgba(0xffffff0d))
+        .hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
         .cursor_pointer()
         // The answer's body size, not the small print: the same reason the
         // offer rows took it in #3124.
         .text_size(px(PLAIN_TEXT_SIZE))
-        .text_color(rgb(ink))
+        .text_color(rgb(p.text_normal))
         .child(SharedString::from(label.to_string()))
         // A tap on a chip is not a tap on the card it sits in: the pane's card
         // toggles its checklist on a press, and approving a plan must not also
