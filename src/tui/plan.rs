@@ -492,17 +492,6 @@ impl PlanDocument {
         true
     }
 
-    /// Whether this plan is done, or is done apart from the trailing delivery
-    /// step the turn settle completes (#737).
-    ///
-    /// The settled-task banner reads this to recognise the moment a plan
-    /// finishes. Its last real task settles in the same pass that the plan
-    /// banner goes out for the same finish, so a task banner for that pass is
-    /// a second card for one piece of news (#2752).
-    pub fn finishes_on_this_settle(&self) -> bool {
-        self.is_complete() || self.trailing_delivery_pending()
-    }
-
     /// Every task before the last is resolved, the last is `Pending`, and it
     /// declares no criteria contract (#1932).
     ///

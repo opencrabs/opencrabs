@@ -103,6 +103,11 @@ pub struct WhatsAppState {
     /// lockstep with `session_jids` at `register_session_jid` (the ONLY
     /// write site for both). Last writer wins — mirrors the forward map.
     pub(super) jid_sessions: Mutex<HashMap<String, Uuid>>,
+    /// LID → PN twin mirror (#2928), so a chat keyed by one id resolves to the
+    /// same `channel_chat_id` as the other. Seeded from `wa_lid_pn_mapping` at
+    /// connect and taught by every stanza that carries both ids. See
+    /// `chat_key.rs`.
+    pub(super) lid_pn: Mutex<HashMap<String, String>>,
     /// Local mirror of the server blocklist (#1487), so the inbound guard
     /// can drop a blocked sender without a server round trip per message.
     /// See `blocklist.rs`.
@@ -158,6 +163,7 @@ impl WhatsAppState {
             photo_debounce: Mutex::new(HashMap::new()),
             session_jids: Mutex::new(HashMap::new()),
             jid_sessions: Mutex::new(HashMap::new()),
+            lid_pn: Mutex::new(HashMap::new()),
             polls: super::poll::PollOptions::default(),
             recent: super::recent::RecentMessages::default(),
             blocklist: super::blocklist::Blocklist::default(),

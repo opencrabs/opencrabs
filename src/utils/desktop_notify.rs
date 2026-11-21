@@ -43,7 +43,7 @@ use std::sync::{Mutex, OnceLock};
 
 use uuid::Uuid;
 
-use crate::tui::plan::{PlanDocument, TaskStatus};
+use crate::tui::plan::PlanDocument;
 
 /// Set to a non-empty value other than `0` to disable desktop notifications.
 ///
@@ -61,10 +61,11 @@ const MAX_BODY_CHARS: usize = 200;
 
 /// The completion facts worth carrying to the OS.
 ///
-/// One variant per seam that raises: a plan finishing, a single plan task
-/// settling, a turn ending normally, and a turn dying. Every variant is plain
-/// data with no handle to the app, so the transport stays callable from the
-/// agent loop, the TUI and the GUI without any of them owning a window.
+/// One variant per event that still exists (#3118): a plan finishing, and a
+/// turn dying. Per-task and per-turn banners were retired as spam. Every
+/// variant is plain data with no handle to the app, so the transport stays
+/// callable from the agent loop, the TUI and the GUI without any of them
+/// owning a window.
 ///
 /// Every variant also names the session it is about (#2751). A banner you can
 /// click is only worth raising if the click can land somewhere: the id travels
@@ -77,19 +78,6 @@ pub enum NotificationEvent {
     PlanCompleted {
         title: String,
         tasks: usize,
-        session: Option<Uuid>,
-    },
-    /// One plan task settled. `success` is false when the task was skipped or
-    /// failed, so the banner never claims work that was abandoned.
-    TaskCompleted {
-        label: String,
-        success: bool,
-        elapsed_secs: u64,
-        session: Option<Uuid>,
-    },
-    /// The turn ended with an answer.
-    TurnCompleted {
-        summary: String,
         session: Option<Uuid>,
     },
     /// The turn ended in an error the user might have walked away from.
@@ -110,16 +98,6 @@ impl NotificationEvent {
             Self::PlanCompleted { title, .. } => {
                 format!("Plan complete: {}", truncate(title, 60))
             }
-            Self::TaskCompleted { label, success, .. } => format!(
-                "{}: {}",
-                if *success {
-                    "Task complete"
-                } else {
-                    "Task stopped"
-                },
-                truncate(label, 60)
-            ),
-            Self::TurnCompleted { .. } => "Turn complete".to_string(),
             Self::TurnFailed { .. } => "Turn failed".to_string(),
         }
     }
@@ -128,19 +106,6 @@ impl NotificationEvent {
     pub fn body(&self) -> String {
         match self {
             Self::PlanCompleted { tasks, .. } => format!("{tasks} tasks finished"),
-            Self::TaskCompleted { success: false, .. } => "Stopped before finishing".to_string(),
-            Self::TaskCompleted { elapsed_secs, .. } if *elapsed_secs > 0 => {
-                format!("Finished in {elapsed_secs}s")
-            }
-            Self::TaskCompleted { .. } => "Finished".to_string(),
-            Self::TurnCompleted { summary, .. } => {
-                let line = truncate(summary, MAX_BODY_CHARS);
-                if line.trim().is_empty() {
-                    "Done.".to_string()
-                } else {
-                    line
-                }
-            }
             Self::TurnFailed { reason, .. } => truncate(reason, MAX_BODY_CHARS),
         }
     }
@@ -151,23 +116,19 @@ impl NotificationEvent {
     /// it is the single place a variant says which session it belongs to.
     pub fn session(&self) -> Option<Uuid> {
         match self {
-            Self::PlanCompleted { session, .. }
-            | Self::TaskCompleted { session, .. }
-            | Self::TurnCompleted { session, .. }
-            | Self::TurnFailed { session, .. } => *session,
+            Self::PlanCompleted { session, .. } | Self::TurnFailed { session, .. } => *session,
         }
     }
 
     /// Identity of the fact, for suppressing a repeat of the same one.
     ///
-    /// Only settled plans and settled tasks carry a key. A turn is not a
-    /// durable object: the same turn asked twice legitimately deserves two
-    /// banners, so turns never dedupe.
+    /// Only a settled plan carries a key. A failed turn is not a durable
+    /// object: the same turn asked twice legitimately deserves two banners, so
+    /// it never dedupes.
     pub(crate) fn dedupe_key(&self) -> Option<String> {
         match self {
             Self::PlanCompleted { title, .. } => Some(format!("plan:{title}")),
-            Self::TaskCompleted { label, .. } => Some(format!("task:{label}")),
-            Self::TurnCompleted { .. } | Self::TurnFailed { .. } => None,
+            Self::TurnFailed { .. } => None,
         }
     }
 }
@@ -258,84 +219,44 @@ pub(crate) fn should_raise(
 
 /// Whether the operator's config wants a banner for this event.
 ///
-/// The four switches live beside `completion_notification_enabled`, which
-/// arms them, so an unset master switch means no banners whatever the rest
-/// say. A config that fails to load also means no banner: an unreadable config
-/// is not consent.
+/// Each surviving switch enables its own event (#3118): there is no master key
+/// any more, because the master made the per-event keys dead whenever it was
+/// false. A config that fails to load means no banner: an unreadable config is
+/// not consent.
 fn config_allows(event: &NotificationEvent) -> bool {
     let Ok(config) = crate::config::Config::load() else {
         return false;
     };
     let agent = &config.agent;
-    if !agent.completion_notification_enabled {
-        return false;
-    }
     match event {
         NotificationEvent::PlanCompleted { .. } => agent.notify_on_plan_completed,
-        NotificationEvent::TaskCompleted { .. } => agent.notify_on_task_completed,
-        NotificationEvent::TurnCompleted { .. } => agent.notify_on_turn_completed,
         NotificationEvent::TurnFailed { .. } => agent.notify_on_turn_failed,
     }
-}
-
-/// Whether a banner will be raised when a whole plan finishes.
-///
-/// Read on its own because the settled-task path needs the answer for an event
-/// it is not raising: when the plan banner covers the finish, the task banner
-/// for that same finish stands down (#2752). Mirrors the `PlanCompleted` arm of
-/// [`config_allows`], including the master switch.
-fn plan_completed_allowed() -> bool {
-    let Ok(config) = crate::config::Config::load() else {
-        return false;
-    };
-    let agent = &config.agent;
-    agent.completion_notification_enabled && agent.notify_on_plan_completed
 }
 
 /// Settled tasks in `plans` that `seen` had not recorded yet, adding them as
 /// it goes.
 ///
-/// Split out from [`announce_settled_tasks`] so the bookkeeping is testable
-/// without touching the config file or an OS transport.
-pub(crate) fn fresh_settled_tasks<'a>(
+/// This is the bookkeeping primitive, not a surface: the durable per-session
+/// record in [`crate::utils::settle_ledger`] owns what each launch has already
+/// announced (#3004), and the TUI and GUI both ask it rather than keeping a
+/// seen set of their own. Kept here because it is pure, needs no config file
+/// and no OS transport, and reads the settled ids through the same
+/// [`crate::utils::completion_sound::resolved_task_ids`] the chime pack used.
+pub(crate) fn fresh_settled_tasks(
     seen: &mut HashSet<Uuid>,
-    plans: &[Option<&'a PlanDocument>],
-) -> Vec<(Uuid, &'a str, bool)> {
-    let mut fresh: Vec<(Uuid, &'a str, bool)> = Vec::new();
+    plans: &[Option<&PlanDocument>],
+) -> Vec<Uuid> {
+    let mut fresh: Vec<Uuid> = Vec::new();
     for entry in plans {
         // `Option<&T>` is Copy, so this moves the reference out of the slice
         // instead of borrowing the slot.
         let Some(plan) = *entry else { continue };
         for id in crate::utils::completion_sound::resolved_task_ids(Some(plan)) {
-            if !seen.insert(id) {
-                continue;
+            if seen.insert(id) {
+                fresh.push(id);
             }
-            let Some(task) = plan.tasks.iter().find(|task| task.id == id) else {
-                continue;
-            };
-            let success = matches!(task.status, TaskStatus::Completed);
-            fresh.push((id, task.title.as_str(), success));
         }
-    }
-    fresh
-}
-
-/// The settled tasks from `fresh` that deserve a banner of their own.
-///
-/// A plan that has nothing left to run settles its final task in the same pass
-/// that the plan itself finishes, and the plan banner carries that news from
-/// the turn-settle seam. Raising the task banner for that pass put two cards on
-/// screen for one finish (#2752), so it stands down. A task that settles while
-/// the plan is still running keeps its banner: that is the case the task
-/// switch exists for. With plan banners turned off the task banner is the only
-/// one left, so it still fires.
-pub(crate) fn bannerable_settles<'a>(
-    plan: &PlanDocument,
-    fresh: &'a [(Uuid, &'a str, bool)],
-    plan_banners_enabled: bool,
-) -> &'a [(Uuid, &'a str, bool)] {
-    if plan_banners_enabled && plan.finishes_on_this_settle() {
-        return &[];
     }
     fresh
 }
@@ -425,43 +346,6 @@ where
     posted
 }
 
-/// Record settled plan tasks in `seen` and announce each new one.
-///
-/// Returns the number of tasks this call recorded, which is exactly the count
-/// the completion chime uses. The caller hands over the very set it keeps for
-/// the chime, so a task settles for both or for neither, and a plan file that
-/// is re-read twice cannot announce twice.
-///
-/// A skipped task counts as settled for the chime but is announced as a stop,
-/// never a success: the banner must not claim work that was abandoned.
-///
-/// The count is the raw settle count even when a banner stands down, because
-/// the chime and the rail flash still mark the moment.
-pub fn announce_settled_tasks(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDocument>]) -> usize {
-    let plan_banners = plan_completed_allowed();
-    let mut recorded = 0;
-    for entry in plans {
-        let Some(plan) = *entry else { continue };
-        let fresh = fresh_settled_tasks(seen, &[Some(plan)]);
-        recorded += fresh.len();
-        // The session comes off the plan itself (#2751): the plan file is
-        // written by the turn that owns the conversation, so the banner points
-        // at the row the user would have clicked. A plan written before the
-        // hook stamped its session carries the nil id, which is not a session
-        // and must never become a click target.
-        let session = (plan.session_id != Uuid::nil()).then_some(plan.session_id);
-        for (_, label, success) in bannerable_settles(plan, &fresh, plan_banners) {
-            let _ = raise(NotificationEvent::TaskCompleted {
-                label: (*label).to_string(),
-                success: *success,
-                elapsed_secs: 0,
-                session,
-            });
-        }
-    }
-    recorded
-}
-
 /// Raise one desktop notification. Returns `true` when a transport was
 /// dispatched, `false` when the feature is opted out or no transport worked.
 ///
@@ -534,21 +418,6 @@ pub(crate) fn truncate(text: &str, limit: usize) -> String {
     let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
     out.push('…');
     out
-}
-
-/// Compress a whole response into the one summary line a banner can show.
-///
-/// A turn's final text is markdown, often several hundred lines. A toast has
-/// room for a single line, so take the first non-empty one, drop the heading
-/// or list marker that would otherwise lead it, and let [`truncate`] cut the
-/// rest. Empty text (a turn that only called tools) yields an empty string and
-/// the event's title carries the message on its own.
-pub(crate) fn summary_line(text: &str) -> String {
-    let Some(first) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return String::new();
-    };
-    let stripped = first.trim_start_matches(['#', '>', '*', '-', ' ']);
-    truncate(stripped, MAX_BODY_CHARS)
 }
 
 /// Escape the five XML metacharacters. Only the Windows toast builds XML, but

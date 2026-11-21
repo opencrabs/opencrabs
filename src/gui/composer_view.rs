@@ -11,11 +11,12 @@
 //! new. The slash list's doc comment sat above the emoji list's and now sits
 //! on the function it describes.
 
-use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px, rgb, rgba};
 
 use opencrabs::brain::tools::suggest_options::{SuggestionItem, SuggestionStyle};
-use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::commands as slash;
+use opencrabs::ui_core::hints::{Hint, HintState, task_line_hint};
 
 use std::ops::Range;
 
@@ -39,9 +40,16 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
         .flex()
         .flex_col()
         .gap_1()
+        // The message card's curve and fill, like the plan card above it
+        // (#3114): the queue stands in the conversation's column, so it is one
+        // family with the bubbles rather than a rounder, lighter panel dropped
+        // in among them. The inset stays at 12, the step the plan card above it
+        // uses: both are strips over the composer, and they pad alike.
         .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .bg(glass_fill(transcript::message_card_surface()))
+        .border_1()
+        .border_color(session_edge(palette::current().panel_hi))
         .child(
             div()
                 .text_xs()
@@ -77,47 +85,112 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
 }
 
 /// The follow-up options `suggest_options` offered, above the composer where
-/// the queued list sits. One numbered row per label, styled the way the
-/// channel buttons are: primary in the accent, danger in the red, default
-/// quiet. A click sends that exact label as the next turn (#2708).
+/// the queued list sits. One button per label, styled the way the channel
+/// buttons are: primary in the accent, danger in the red, default quiet. A
+/// click sends that exact label as the next turn (#2708).
+///
+/// The buttons are the whole object (#3124). They sat in a card of the message
+/// family (#3114), and a card is a box: the column stretched it to the window's
+/// width, so three short offers painted a slab with most of its surface empty
+/// and the words bunched at the left. The owner read it as "80% of the width is
+/// empty card background" and asked for the buttons on their own. There is no
+/// card now: no fill, no border, no shadow, no padding, so there is nothing
+/// that can be wider than its words. The rows still stack one above the other
+/// (#3114), because a label sharing its line with a neighbour is cut while a
+/// row of its own has room for all of it.
+///
+/// `focused` is the row the keyboard stands on, `None` while the field has the
+/// caret. Up from the composer hands the keyboard here instead of walking
+/// history (#3101), which is what the focus ring exists to show.
 ///
 /// The rows arrive with their handlers already minted by the window, because
 /// only it knows which session the offer belongs to. Nothing here reaches the
 /// database: see `agent_bridge::SUGGESTIONS` for why there is nothing to
 /// persist.
-pub(crate) fn options_strip(rows: &[(SuggestionItem, transcript::ClickHandler)]) -> Div {
-    let mut col = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(palette::current().text_muted))
-                .child(SharedString::from("suggested")),
-        );
+pub(crate) fn options_strip(
+    rows: &[(SuggestionItem, transcript::ClickHandler)],
+    focused: Option<usize>,
+) -> Div {
+    let p = palette::current();
+    // The card is the buttons alone, with no title row (#3103). A heading
+    // repeating "suggested" said what the buttons already say, it cost a line
+    // of height directly above the composer, and its text sat tight against
+    // the card's own curve. The keys went with it and lost nothing:
+    // `ui_core::hints` already prints the arrows, enter and the way back out on
+    // the hint row above the composer whenever an offer is waiting, so the
+    // legend was being drawn twice.
+    //
+    // `items_start` is what keeps a button the size of its label (#3114): a
+    // column stretches its children to its own width by default, so every row
+    // would be a full-width bar with an empty half that reads as part of the
+    // button.
+    let mut buttons = div().flex().flex_col().items_start().gap_1();
     for (i, (item, pick)) in rows.iter().enumerate() {
-        let color = match item.style {
-            SuggestionStyle::Primary => palette::current().accent,
-            SuggestionStyle::Danger => palette::current().red,
-            SuggestionStyle::Default => palette::current().text_muted,
+        let (ink, wash) = match item.style {
+            SuggestionStyle::Primary => (p.accent, rgba((p.accent << 8) | 0x1c)),
+            SuggestionStyle::Danger => (p.red, rgba((p.red << 8) | 0x1c)),
+            SuggestionStyle::Default => (p.text_normal, rgba(0xffffff0d)),
         };
+        let on = focused == Some(i);
         let pick = pick.clone();
-        col = col.child(
+        // The keyboard's row is the one Enter would send, so it carries the
+        // accent edge and the return mark. A pointer row lifts on hover
+        // instead: the same wash, one step quieter, so two rows can never look
+        // equally armed.
+        buttons = buttons.child(
             div()
                 .id(SharedString::from(format!("option-row-{i}")))
-                .text_xs()
-                .text_color(rgb(color))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                // One step inside the message card's 12, so a button reads as
+                // the same family as the bubbles it stands under without
+                // being a card itself (#3124).
+                .rounded(px(transcript::MESSAGE_RADIUS - 4.0))
+                .border_1()
+                .border_color(if on {
+                    rgba((ink << 8) | 0x88)
+                } else {
+                    rgba(0xffffff1a)
+                })
+                .when(on, |d| d.bg(wash))
+                .when(!on, |d| {
+                    d.hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
+                })
+                // The answer's body size, not the small print (#3124): an
+                // offer is the one control on screen that wants a click, and
+                // at the small print size it read smaller than the words above
+                // it.
+                .text_size(px(transcript::PLAIN_TEXT_SIZE))
+                .text_color(rgb(ink))
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(palette::current().panel_hi)))
-                .child(SharedString::from(format!("{}. {}", i + 1, item.label)))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(p.text_faint))
+                        .child(SharedString::from(format!("{}", i + 1))),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(item.label.clone())),
+                )
+                .when(on, |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(p.text_faint))
+                            .child(SharedString::from("↵")),
+                    )
+                })
                 .on_click(move |ev, window, app| pick(ev, window, app)),
         );
     }
-    col
+    buttons
 }
 
 /// Whether a speech-to-text engine is configured, which decides what the
@@ -134,24 +207,38 @@ pub(crate) fn voice_ready() -> bool {
         .stt_enabled
 }
 
-/// The composer's hint line for a state. Grey and quiet, it names the keys
-/// that work right now: stopping the turn, recalling a queued message, and
-/// queueing another (#2630).
+/// What the empty field says: the product's prompt plus the keys that act on
+/// the field itself (#3102).
 ///
-/// An idle field also says how to reach the microphone (#3044): the chord that
-/// records when an engine is configured, and the one command that configures it
-/// when there is none. A promise the window cannot keep is worse than silence,
-/// so the two never show at once.
+/// These stay in the field rather than moving to the card above the composer,
+/// because they are about the field: Esc stops the turn being written into it,
+/// the chord records a message into it. The card speaks about the work.
+///
+/// `/voice` is the STT/TTS settings screen, not a switch that turns a mic on,
+/// so the cold line names it as setup rather than as the way to record
+/// (#3102). Recording itself has two doors, the chord and the mic button.
 pub(crate) fn composer_hint_for(busy: bool, queued: usize, voice: bool) -> SharedString {
     match (busy, queued) {
         (true, 0) => SharedString::from("esc stops · typing queues"),
         (true, n) => SharedString::from(format!("queued {n} · ↑ recalls · esc stops")),
         (false, 0) if voice => {
-            SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to stop")
+            SharedString::from("Talk to the crab… · ctrl+alt+r to record, same key to send")
         }
-        (false, 0) => SharedString::from("Talk to the crab… · /voice sets up the mic"),
+        (false, 0) => SharedString::from("Talk to the crab… · /voice opens the voice settings"),
         (false, n) => SharedString::from(format!("{n} queued · sending now")),
     }
+}
+
+/// The same line with its id, for the card that can act on it (#3121).
+///
+/// The window needs the id and not just the words: hiding a hint means
+/// remembering which one, and the text is reworded between releases. The
+/// support gate is the window's own, so a card never names a command this
+/// surface cannot run.
+pub(crate) fn task_hint_for(state: &HintState) -> Option<Hint> {
+    task_line_hint(state, |command| {
+        slash::support_gui(command) == slash::Support::Runs
+    })
 }
 
 /// How many queued messages stay on screen. Two, until the user opens the

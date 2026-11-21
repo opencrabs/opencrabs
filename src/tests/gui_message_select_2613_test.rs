@@ -111,8 +111,12 @@ fn right_press_is_on_the_outer_message_row() {
 /// destination picker (#2924).
 #[test]
 fn the_unsplit_chat_renders_the_forward_picker() {
+    // The unsplit arm is the `else` of the split gate (#3110 turned the old
+    // `!window_is_split()` wrapper into the branch itself).
     let chat = MAIN
-        .split("if !self.window_is_split() {\n                    let open = self.chat_session;")
+        .split(
+            "if self.window_is_split() {\n                    col = col.child(middle);\n                } else {",
+        )
         .nth(1)
         // The picker swap is built after the bottom topic row now (#2924), so
         // the region runs to the composer itself rather than stopping at the

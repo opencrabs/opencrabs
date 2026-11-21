@@ -234,7 +234,7 @@ fn pause_mark() -> Div {
         )
 }
 
-fn fallback_peaks(levels: &[f32]) -> Vec<f32> {
+pub(crate) fn fallback_peaks(levels: &[f32]) -> Vec<f32> {
     if levels.is_empty() {
         return vec![0.0; voice_media::WAVE_BARS];
     }
@@ -296,6 +296,6 @@ fn waveform(
     .h_full()
 }
 
-fn clip_length(seconds: u64) -> String {
+pub(crate) fn clip_length(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }

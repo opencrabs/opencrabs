@@ -21,6 +21,9 @@ pub mod composer;
 pub mod copy_select;
 pub mod docs;
 pub mod help_keys;
+// The line under the composer that says what to do next, shared so the
+// terminal and the desktop app cannot recommend different things (#2279).
+pub mod hints;
 pub mod input_history;
 pub mod keys;
 pub mod links;
@@ -48,3 +51,8 @@ pub mod usage;
 // `card`.
 #[cfg(feature = "gui")]
 pub mod window_controls;
+// Where a window's frame lands when it opens (#3082). Same gating: the frame
+// is arithmetic over `gpui` rectangles, and the platform call that supplies the
+// work area lives in the GUI binary.
+#[cfg(feature = "gui")]
+pub mod window_geometry;

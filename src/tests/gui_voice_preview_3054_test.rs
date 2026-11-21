@@ -23,8 +23,11 @@ fn region(source: &'static str, start: &str, end: &str) -> &'static str {
 #[test]
 fn every_audio_surface_uses_the_same_horizontal_player() {
     let history = region(TRANSCRIPT, "fn history_attachments(", "fn attachment_cell(");
-    assert!(history.contains("crate::voice_preview::player("));
-    assert!(history.contains(".max_w(px(420.0))"));
+    assert!(history.contains("crate::composer_orb::player_plain("));
+    assert!(
+        history.contains("crate::composer_orb::label(path, None)"),
+        "the block is a fixed size, so the row keeps the length under it"
+    );
     assert!(
         history.contains("attachment_view::plan(files.len(), content_width)"),
         "only non-audio files enter the square tile plan"
@@ -45,7 +48,7 @@ fn every_audio_surface_uses_the_same_horizontal_player() {
         "fn voice_strip(",
         "/// The keybindings the editor needs",
     );
-    assert!(draft.contains("crate::voice_preview::player("));
+    assert!(draft.contains("crate::composer_orb::player("));
     assert!(draft.contains("Some(draft.seconds)"));
     assert!(draft.contains("&draft.levels"));
 }

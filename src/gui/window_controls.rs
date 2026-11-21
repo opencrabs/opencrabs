@@ -83,8 +83,8 @@ pub fn inside_drag_handle<E: InteractiveElement>(element: E) -> E {
     element.on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
-/// A control's click, type-erased so a window whose platform runs the buttons
-/// itself can pass `None` without naming a closure type.
+/// A control's click, type-erased, so a caller that draws a cluster the
+/// platform runs itself can pass `None` without naming a closure type.
 pub type Handler = Rc<dyn Fn(Control, &ClickEvent, &mut Window, &mut App)>;
 
 /// The cluster for a window, or `None` when the platform draws its own.
@@ -93,15 +93,13 @@ pub type Handler = Rc<dyn Fn(Control, &ClickEvent, &mut Window, &mut App)>;
 /// header is a row of the window and the controls belong to the frame, so they
 /// do not take a slot in any screen's layout.
 ///
-/// `on_control` is `None` where the platform runs the buttons itself. On
-/// Windows a control area answers the non-client hit test and the platform
-/// clicks the button from `WM_NCLBUTTONUP`: `HTMINBUTTON` minimises,
-/// `HTMAXBUTTON` toggles between `SW_MAXIMIZE` and `SW_NORMAL` and `HTCLOSE`
-/// posts `WM_CLOSE` (`gpui-0.2.2/src/platform/windows/events.rs:1033`). A
-/// listener here would consume the mouse-up before that runs, and gpui's
-/// `zoom()` on Windows only ever maximises
-/// (`gpui-0.2.2/src/platform/windows/window.rs:782`), so the app could not
-/// restore a zoomed window (#2966).
+/// `on_control` is `None` only for a platform that runs the buttons from its
+/// own non-client hit test. Windows does that when the app keeps the frame:
+/// a control area answers `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE`, and
+/// `WM_NCLBUTTONUP` clicks the button (`gpui-0.2.2/src/platform/windows/events.rs:1033`).
+/// A listener there would consume the mouse-up before that runs. That path is
+/// only reachable for a window with a transparent title bar, and the GUI does
+/// not create one, so in practice the caller always passes a handler (#3083).
 pub fn cluster(decorations: Decorations, on_control: Option<Handler>) -> Option<Div> {
     let list = controls(decorations);
     if list.is_empty() {

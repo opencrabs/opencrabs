@@ -741,7 +741,7 @@ History is one list, shared in real time. The terminal and the window read and w
 
 The microphone sits at the right end of the composer and records a real message, not a dictation draft: click it, or press `ctrl+alt+r`, or pick `start dictation` in Seeker, and one control takes over the row. While the microphone is open it counts the take, draws a wave of what the device is actually hearing, and turns its mark into the stop square, so the thing that started the recording is the thing that ends it. Escape stops it too, and a click on the square; every way out of a take goes through the same stop (#3044).
 
-A finished take is transcribed through whichever STT engine the profile is configured with, the same chain every channel uses, so nothing new to set up. The recording is encoded to OGG/Opus and written to `~/.opencrabs/voice/` as `voice-<milliseconds>.ogg`. The take then waits in its own preview above the input row instead of dropping words into the field: a play control with the clip's real length, the wave it was recorded with, and the transcript beneath both, so what the microphone thinks it heard can be read before it becomes a message. The ✕ throws the whole take away, and it never rides the next message: a sent take is spent, and switching conversations drops it with the draft. Enter is the one thing that puts it on the wire. The words then go to the agent with a `[voice note]` prefix, because a transcript handed over as ordinary prose gets an ordinary answer, and the clip rides along as `<<AUD:path>>`, which is how an image or a video already travels. The transcript strips the marker into a card that plays where it sits, with the clip's real length under the play glyph; while it plays the glyph becomes the stop square and the bars take the accent colour.
+A finished take is transcribed through whichever STT engine the profile is configured with, the same chain every channel uses, so nothing new to set up. The recording is encoded to OGG/Opus and written to `~/.opencrabs/voice/` as `voice-<milliseconds>.ogg`. The take then waits in its own preview above the input row instead of dropping words into the field: a play control with the clip's real length, the wave it was recorded with, and the transcript beneath both, so what the microphone thinks it heard can be read before it becomes a message. The ✕ throws the whole take away, and it never rides the next message: a sent take is spent, and switching conversations drops it with the draft. Enter is the one thing that puts it on the wire. The words then go to the agent with a `[voice note]` prefix, because a transcript handed over as ordinary prose gets an ordinary answer, and the clip rides along as `<<AUD:path>>`, which is how an image or a video already travels. A stored voice note leads its row with that player, twice the height of the strip it replaced, and the words the microphone heard sit under it behind a `▸ Transcript` line, folded until the reader opens it: the clip is the message and the transcription is its reference. The player carries the clip's real length under the play mark, and while it plays the mark becomes the stop square and the bars take the accent colour.
 
 When the answer settles, a turn that began as a recording is answered out loud. The reply goes through the same `synthesize` the channels call, the audio is saved beside the take as `reply-<milliseconds>.ogg`, and the marker goes on the answer row, so the same card plays the agent's voice back. Both are ordinary OGG/Opus files you can open from disk. Two things keep the loop honest: the reply and the take never share a name, so the player can tell them apart, and the marker is stripped before a stored row becomes model context, so the agent never reads a path it wrote itself.
 
@@ -793,7 +793,7 @@ The window runs the terminal's whole slash-command surface, not a subset, and ad
 
 `/whisper` installs and launches the same WhisperCrabs binary the terminal uses (the install path is not reimplemented here), and `/cowork` composes the tool turn, so neither one asks the model to guess at a shell command.
 
-`ctrl+k` opens the command palette: every command the window knows, plus every channel, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles. The chat, usage and files footers name the Seeker door and `ctrl+s · sidebar`, so both are discoverable without reading anything. Both sidebar states use the same 24px filled OpenCrabs app icon with 5px rounded corners. Closing the sidebar leaves a 32px rail with that icon above a reopen button; session rows, filters and the resize handle stay hidden until the rail expands again. Opening All or any topic keeps the parent session's orange left bar visible, while the active topic keeps its own thin accent outline and standard vertical padding. In split view, moving the caret to another pane moves both focus marks to that pane's conversation. A card's `+N` pill opens the rest of its topics, and that disclosure is temporary: picking a topic or a session row folds it at once, and an untouched strip folds itself after 30 seconds, so an abandoned strip never leaves the rail several screens tall. Folding never hides a topic with work in flight: a running turn, a plan waiting for approval or a plan with tasks open keeps its chip on the card, and idle chips are the ones that go behind the `+N` pill.
+`ctrl+k` opens the command palette: every command the window knows, plus every channel, session, skill and screen, filtered as you type. `ctrl+g` opens the session files browser. Picking a row and pressing the key land in the same place, because the palette routes through the same toggles. The chat, usage and files footers name the Seeker door and `ctrl+s · sidebar`, so both are discoverable without reading anything. Both sidebar states use the same 24px filled OpenCrabs app icon with 5px rounded corners. Closing the sidebar leaves a 32px rail with that icon above a reopen button; session rows, filters and the resize handle stay hidden until the rail expands again. That open-or-closed state is part of the saved layout, so a sidebar closed before a restart opens closed, the same way the split panes and the window frame already come back. Starting a split opens the rail to name the session, and the pick puts it back the way it found it: a rail the pick opened closes when the session lands or the pick is cancelled, and a rail the user had open stays open. Opening All or any topic keeps the parent session's orange left bar visible, while the active topic keeps its own thin accent outline and standard vertical padding. In split view, moving the caret to another pane moves both focus marks to that pane's conversation. A card's `+N` pill opens the rest of its topics, and that disclosure is temporary: picking a topic or a session row folds it at once, and an untouched strip folds itself after 30 seconds, so an abandoned strip never leaves the rail several screens tall. Folding never hides a topic with work in flight: a running turn, a plan waiting for approval or a plan with tasks open keeps its chip on the card, and idle chips are the ones that go behind the `+N` pill.
 
 #### Skills screen
 
@@ -2393,7 +2393,7 @@ cargo install opencrabs --no-default-features --features "telegram,whatsapp,disc
 | `code-graph` | tree-sitter | Symbol/call-graph index for structural code queries (see [Structural code search](#-benchmarks)) |
 | `rtk` | — | Bash output filtering via RTK, cutting tokens on supported commands |
 | `pdfium` | pdfium-render | PDF page rendering, the primary renderer; falls back to `pdftoppm` when the system Pdfium library is absent |
-| `notification-sound` | rodio | Plan chime: plays the embedded notification WAV when a plan task settles and when the plan reaches 100% at turn settle. Opt-in via `[agent] completion_notification_enabled` (default false), TUI and GUI. OS banners are a separate, always-compiled transport (`src/utils/desktop_notify.rs`, #2729) with its own four keys |
+| `notification-sound` | rodio | Plan chime: plays the embedded notification WAV once when a plan finishes, TUI and GUI. Opt-in via `[agent] notify_on_plan_completed` (default false). Per-task chimes were retired in #3118: one sound per plan. OS banners are a separate, always-compiled transport (`src/utils/desktop_notify.rs`, #2729) with two keys of its own |
 | `gui` | gpui | Builds the desktop app (`opencrabs-gui`). A build toggle, not a capability: the terminal app and the desktop app are peers, and either one owns the profile, serves channels, runs cron and keeps background work alive. Off by default so a plain build stays free of the gpui tree |
 
 ### Option 4: Build from Source (full control)
@@ -3108,19 +3108,18 @@ plan_auto_start = false          # default false: completing a plan task NEVER s
 plan_worker_allow_nested = false # default false: isolated plan workers are pure - they cannot spawn further sub-agents
 plan_worker_allow_write = false  # default false: isolated plan workers run READ-ONLY (#1173 grant) - they verify/report; mutations stay with the parent
                                  # or background tasks (their long bash runs attached). true lets them nest.
-completion_notification_enabled = false # default false (#2255): play src/assets/sound/notification.wav when a
-                                 # plan task settles and when the plan reaches 100% at turn settle. TUI and
-                                 # GUI (#2691). Opt-in, because an agent that chirps unasked is noise.
-                                 # This switch also ARMS the four desktop-notification keys below; they
-                                 # stay independent of each other, so a banner is possible without the chime.
-notify_on_plan_completed = false # default false (#2729): raise an OS notification when a whole plan finishes.
-notify_on_task_completed = false # default false (#2729): raise one when a single plan task settles.
-notify_on_turn_completed = false # default false (#2729): raise one when a turn finishes and the agent waits.
-notify_on_turn_failed = false    # default false (#2729): raise one when a turn stops on an error.
-                                 # All four require completion_notification_enabled. They are suppressed
-                                 # while the window or terminal holds focus, and a settle never announces
-                                 # twice. Set OPENCRABS_NO_DESKTOP_NOTIFY=1 (or true/yes/on) in the
-                                 # environment to mute banners for one process without editing this file.
+notify_on_plan_completed = false # default false (#3118): the one completion signal, and its own enable.
+                                 # Plays src/assets/sound/notification.wav and raises an OS banner when a
+                                 # whole plan finishes, once per plan, TUI and GUI (#2691). Never per task:
+                                 # a six-task plan chimes at the finish, not six times. Opt-in, because an
+                                 # agent that chirps unasked is noise.
+notify_on_turn_failed = false    # default false (#2729): raise an OS notification when a turn stops on an
+                                 # error. Independent of the switch above: a failure is news even when
+                                 # you never asked to hear about plans.
+                                 # Both are suppressed while the window or terminal holds focus, and a
+                                 # finished plan never announces twice. Set OPENCRABS_NO_DESKTOP_NOTIFY=1
+                                 # (or true/yes/on) in the environment to mute banners for one process
+                                 # without editing this file.
 subagent_session_ttl_days = 7    # days a spawned sub-agent's session is kept before pruning. Nothing revisits
                                  # them, so they accumulate with their messages, tool rows and plan files. 0 keeps forever
 
@@ -5360,7 +5359,7 @@ cargo clippy -- -D warnings
 | `rtk` | Bash output filtering via RTK (default: enabled) |
 | `code-graph` | tree-sitter symbol/call-graph index behind `memory_search`'s structural lane (default: enabled) |
 | `pdfium` | PDF page rendering via the system Pdfium library, ahead of the `pdftoppm` fallback (default: enabled) |
-| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] completion_notification_enabled` (default: enabled feature, sound itself off by default). Desktop banners do not need this feature |
+| `notification-sound` | Plan-finished chime from the embedded notification WAV, behind `[agent] notify_on_plan_completed` (default: enabled feature, sound itself off by default). Desktop banners do not need this feature |
 | `profiling` | Enable pprof flamegraph profiling (Unix only) |
 | `eval` | Offline + live evaluation harness. Compiled automatically under `cfg(test)`, and present in release binaries, which are built with `--all-features` |
 

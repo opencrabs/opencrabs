@@ -3,11 +3,19 @@
 //! code; `nm` on the GUI binary showed `play_completion_sound` was not even
 //! linked in. These checks read source because the window has no headless
 //! harness, and each one pins a call site whose absence IS the bug: drop the
-//! event arm, drop the render hook, or give each strip its own seen set, and
-//! the notification goes back to silence or starts ringing twice.
+//! event arm, drop the render hook, or give each strip its own record, and the
+//! notification goes back to silence or starts ringing twice.
+//!
+//! #3118 adds the other half: one chime per plan, never one per task. The
+//! settle pass still walks every strip, but all it does is flash the rail.
+//!
+//! #3004 moves what counts as already-announced off the window and into a
+//! durable per-session ledger, so a relaunch does not replay every settle the
+//! last process flashed. The pass must still read every strip, and must do it
+//! through that one ledger.
 //!
 //! The chime decision itself is behavioural and lives in
-//! `gui::plan_strip::tests`, over a real plan file. No audio is asserted here:
+//! `gui/tests/plan_strip_test.rs`, over a real plan file. No audio is asserted here:
 //! CI has no output device.
 
 const GUI_MAIN: &str = concat!(
@@ -18,7 +26,7 @@ const GUI_MAIN: &str = concat!(
 );
 /// The event arms moved into a module of their own (#2822).
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
-/// So did the chime pass and the player it calls.
+/// So did the settle pass and the player it calls.
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 
 /// The body of one function, from its signature to the next top-level item.
@@ -55,16 +63,16 @@ fn the_gui_arms_plan_completed_before_the_catch_all() {
         .and_then(|tail| tail.split("TurnEvent::ProgressFor(_, _, _) => {}").next())
         .expect("the arm body sits between the event and the catch-all");
     assert!(
-        body.contains("Self::play_task_chime()"),
+        body.contains("Self::play_plan_chime()"),
         "the arm has to reach the player, not just name the event: {body}"
     );
 }
 
 /// A gpui window has no tick, so the render path is where the terminal's
-/// per-task chime belongs. It has to run AFTER the strip re-reads its file,
+/// settle pass belongs. It has to run AFTER the strip re-reads its file,
 /// otherwise it decides against the previous frame's plan.
 #[test]
-fn the_render_path_chimes_after_the_strip_refresh() {
+fn the_render_path_settles_after_the_strip_refresh() {
     let render = GUI_MAIN
         .split("impl Render for Dashboard {")
         .nth(1)
@@ -72,27 +80,28 @@ fn the_render_path_chimes_after_the_strip_refresh() {
     let refresh = render
         .find("self.plan.refresh();")
         .expect("render re-reads the window plan");
-    let chime = render
-        .find("self.chime_settled_plan_tasks(cx);")
-        .expect("render runs the chime pass");
+    let settle = render
+        .find("self.settle_plan_tasks(cx);")
+        .expect("render runs the settle pass");
     assert!(
-        refresh < chime,
-        "the chime pass reads the plan the refresh just loaded, so it runs second"
+        refresh < settle,
+        "the settle pass reads the plan the refresh just loaded, so it runs second"
     );
 }
 
-/// One seen set for the whole window. A plan can be drawn by the window strip
-/// and by a pane strip at once, so a per-strip set would ring twice for one
-/// task, and a count instead of a set would ring on every re-read.
+/// One ledger for the whole window, durable per session (#3004). A plan can be
+/// drawn by the window strip and by a pane strip at once, so a per-strip record
+/// would flash twice for one task, and a count instead of a set would flash on
+/// every re-read.
 #[test]
-fn the_chime_pass_walks_every_strip_through_one_seen_set() {
+fn the_settle_pass_walks_every_strip_through_one_ledger() {
     let body = fn_body(
         DASHBOARD_KEYS,
-        "pub(crate) fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {",
+        "pub(crate) fn settle_plan_tasks(&mut self, cx: &mut Context<Self>) {",
     );
     assert!(
-        body.contains("&mut self.announced_task_completions"),
-        "the pass uses the window's single seen set: {body}"
+        body.contains("self.settle_ledger.record("),
+        "the pass records through the window's one ledger: {body}"
     );
     assert!(
         body.contains("self.plan.document()"),
@@ -105,17 +114,19 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
         body.contains("in &self.pane_states") && body.contains("pane.read(cx).plan.document()"),
         "every pane strip is walked too, read through its own handle: {body}"
     );
-    // The settle count and the OS banner share one dedupe: the helper reports
-    // how many of these plans newly resolved into the one window seen set, and
-    // its count is what arms the flash and the chime. A local count would drift
-    // from the banner and ring twice for one task.
+    // The freshness answer comes from the ledger, which folds in what a
+    // previous process already flashed, so a plan drawn twice flashes once and
+    // a relaunch on an unchanged file flashes not at all. A local count would
+    // drift and blink on every frame.
     assert!(
-        body.contains("announce_settled_tasks(seen, &borrowed)"),
-        "the dedupe is the shared helper over one seen set, not a local count: {body}"
+        body.contains("self.settle_ledger.record(*session, Some(doc))"),
+        "the dedupe is the durable ledger per session, not a local count: {body}"
     );
+    // #3118: the pass is bookkeeping only. The per-task chime is gone, so a
+    // plan that settles six tasks rings once, at the finish.
     assert!(
-        body.contains("Self::play_task_chime()"),
-        "a fresh settle reaches the player: {body}"
+        !body.contains("Self::play_") && !body.contains("play_completion_sound"),
+        "the settle pass must not ring, only flash: {body}"
     );
 }
 
@@ -125,12 +136,12 @@ fn the_chime_pass_walks_every_strip_through_one_seen_set() {
 #[test]
 fn the_player_stays_behind_the_opt_in_and_the_feature() {
     let gated = DASHBOARD_KEYS
-        .split("#[cfg(feature = \"notification-sound\")]\n    pub(crate) fn play_task_chime() {")
+        .split("#[cfg(feature = \"notification-sound\")]\n    pub(crate) fn play_plan_chime() {")
         .nth(1)
-        .expect("play_task_chime is feature-gated");
+        .expect("play_plan_chime is feature-gated");
     let body = gated.split("\n    }").next().expect("the player body");
     assert!(
-        body.contains("completion_notification_enabled"),
+        body.contains("notify_on_plan_completed"),
         "the operator's opt-in is honoured: {body}"
     );
     assert!(
@@ -139,7 +150,7 @@ fn the_player_stays_behind_the_opt_in_and_the_feature() {
     );
     assert!(
         DASHBOARD_KEYS.contains(
-            "#[cfg(not(feature = \"notification-sound\"))]\n    pub(crate) fn play_task_chime() {}"
+            "#[cfg(not(feature = \"notification-sound\"))]\n    pub(crate) fn play_plan_chime() {}"
         ),
         "a build without the feature still compiles, with a silent no-op"
     );

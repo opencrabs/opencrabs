@@ -15,18 +15,6 @@ use gpui::{Background, Hsla, linear_color_stop, linear_gradient, rgba};
 /// cannot resize every chat card with it (#2532).
 pub const CARD_RADIUS: f32 = 24.0;
 
-/// The composer dock, in px: the single-session card that holds the input
-/// and the key hints as one surface.
-///
-/// A composer box is 44 px tall at its smallest, so any radius past 22 px is
-/// clamped to half the height and both ends come out as full semicircles:
-/// that is the flying pill the owner called out. 12 px is half the box's own
-/// padding step (`p_3`), so the corners read as a text field docked to the
-/// footer instead of a capsule floating over it. The dim composer an
-/// unfocused pane draws shares the token, because it is the same box at the
-/// same height and must not change shape when the keyboard leaves (#2987).
-pub const COMPOSER_RADIUS: f32 = 12.0;
-
 /// The Seeker results card, in px. Its rows derive their nesting curve from
 /// this token rather than the chat card radius (#2532).
 pub const SEEKER_RADIUS: f32 = 32.0;
@@ -64,6 +52,20 @@ pub fn glass_fill(base: u32) -> Background {
         linear_color_stop(top, 0.0),
         linear_color_stop(bottom, 1.0),
     )
+}
+
+/// The hairline a card carries when it sits on the session surface (#3110).
+///
+/// The composer already drew one and the cards around it drew none, so on the
+/// session fill the plan card, the queue strip and the suggested options had no
+/// edge at all and read as bands of the background instead of as cards resting
+/// on it. One colour for all of them, so wherever two of the four meet the seam
+/// is the same seam.
+///
+/// `base` is the theme's raised panel tone, never a literal: the edge follows
+/// whichever theme the reader picked.
+pub fn session_edge(base: u32) -> Hsla {
+    Hsla::from(rgba((base << 8) | 0xff))
 }
 
 /// The concentric rule (#2513): a card nested `edge_inset` px inside a

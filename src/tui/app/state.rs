@@ -513,11 +513,13 @@ pub struct App {
     /// Animation state
     pub animation_frame: usize,
 
-    /// Plan tasks whose completion has already been announced with a chime
-    /// (#2574). Plan documents are re-read from disk on every plan tool call,
-    /// so the same finished task arrives repeatedly; this set is what keeps
-    /// the sound once-per-completion instead of once-per-read.
-    pub(crate) announced_task_completions: std::collections::HashSet<uuid::Uuid>,
+    /// Plan tasks whose settle already reached the pane ring (#2574),
+    /// durable across launches and keyed by session (#3004). Plan documents
+    /// are re-read from disk on every plan tool call, so the same finished
+    /// task arrives repeatedly; this ledger is what keeps the ring
+    /// once-per-completion instead of once-per-read, and what stops a restart
+    /// from replaying every settle the previous process already announced.
+    pub(crate) settle_ledger: crate::utils::settle_ledger::SettleLedger,
 
     /// Sessions whose plan just finished a task, and when (#2593). The pane
     /// ring pulses in a colour the focused pane does not use, so the chime has
@@ -796,6 +798,14 @@ pub struct App {
 
     /// Version string when an update is available (shown in update prompt dialog)
     pub update_available_version: Option<String>,
+
+    /// Hint ids the reader has hidden with `alt+h`, while still inside their
+    /// window (#3122).
+    ///
+    /// Read once at startup and appended to on each dismissal. The engine asks
+    /// on every frame which lines may print, and a query behind a redraw is a
+    /// stutter the reader would feel as the terminal thinking.
+    pub hint_dismissed: Vec<String>,
 
     /// Session to resume after restart (set via --session CLI arg)
     pub resume_session_id: Option<Uuid>,
@@ -1163,7 +1173,7 @@ impl App {
             build_lines: Vec::new(),
             build_msg_idx: None,
             animation_frame: 0,
-            announced_task_completions: std::collections::HashSet::new(),
+            settle_ledger: crate::utils::settle_ledger::SettleLedger::open(),
             plan_completion_flash: HashMap::new(),
 
             escape_pending_at: None,
@@ -1251,6 +1261,7 @@ impl App {
             tps_tracker: StreamingTpsTracker::default(),
             active_tool_group: None,
             update_available_version: None,
+            hint_dismissed: Vec::new(),
             resume_session_id: None,
             start_fresh: false,
             render_cache: HashMap::new(),
@@ -1676,27 +1687,23 @@ impl App {
         self.pane_manager.focused_plan()
     }
 
-    /// Chime once for every plan task that settled since the last tick (#2574).
-    ///
-    /// Covers the focused plan and every pane's plan: a split can hold several
-    /// live checklists, and the pane that just finished a task is not
-    /// necessarily the one holding the keyboard. The config flag is read at the
-    /// moment of the chime, so flipping
-    /// `[agent] completion_notification_enabled` takes effect without a restart.
-    async fn chime_settled_plan_tasks(&mut self) {
-        if self.settle_plan_tasks().await == 0 {
-            return;
-        }
-        Self::play_task_chime();
-    }
-
     /// Record the plan tasks that settled since the last tick and pulse the
-    /// pane that owns each one. Returns the count the chime responds to.
+    /// pane that owns each one. Returns the count the caller flashes on.
+    ///
+    /// This is bookkeeping, not sound: the per-task chime was retired in #3118
+    /// because a plan that settles six tasks rang six times. The one sound is
+    /// the plan-finished chime, raised from the `PlanCompleted` progress event.
     ///
     /// Every pane is refreshed from its own file first. Reloading only the
     /// focused pane left a background session's checklist frozen at the
-    /// moment it was opened, so its settle chimed minutes later, on the click
+    /// moment it was opened, so its settle flashed minutes later, on the click
     /// that finally reloaded it (#2733).
+    ///
+    /// What counts as already flashed lives in the durable per-session ledger
+    /// (#3004), not in a set on the app. A relaunch after a clean exit, a
+    /// panic or a machine restart resumes where the last process stopped
+    /// instead of flashing every settled task again, and one session's
+    /// settles never suppress another's.
     pub(crate) async fn settle_plan_tasks(&mut self) -> usize {
         self.pane_manager.bind_missing_plan_paths().await;
         self.pane_manager.refresh_plans_changed_on_disk();
@@ -1716,44 +1723,44 @@ impl App {
             .collect();
         let window_plan = self.pane_manager.focused_plan().cloned();
 
+        // Record each plan against its own session's durable ledger (#3004).
+        // The first pass after a launch folds in what a previous process
+        // already flashed, so a plan that has not moved does not blink again;
+        // a task that settled while the TUI was closed is still new, so it
+        // blinks once. The ledger is the one record of what was fresh, so the
+        // flash and the record cannot disagree.
         let mut settled = 0usize;
         let mut flashes: Vec<Uuid> = Vec::new();
         for (session_id, plan) in &per_pane {
-            let count = crate::utils::desktop_notify::announce_settled_tasks(
-                &mut self.announced_task_completions,
-                &[plan.as_ref()],
-            );
-            settled += count;
-            if count > 0
-                && let Some(session_id) = session_id
-            {
-                flashes.push(*session_id);
+            // A plan document names the session that owns it; the pane's own
+            // session is the fallback for a pre-init plan that still writes the
+            // nil id. A pane with neither key is skipped rather than bucketed
+            // under nil, so two unbound panes cannot share one record.
+            let session = plan
+                .as_ref()
+                .map(|doc| doc.session_id)
+                .filter(|id| *id != Uuid::nil())
+                .or(*session_id);
+            let Some(session) = session else {
+                continue;
+            };
+            let fresh = self.settle_ledger.record(session, plan.as_ref());
+            settled += fresh.len();
+            if !fresh.is_empty() {
+                flashes.push(session);
             }
         }
-        settled += crate::utils::desktop_notify::announce_settled_tasks(
-            &mut self.announced_task_completions,
-            &[window_plan.as_ref()],
-        );
+        if let Some(doc) = &window_plan
+            && doc.session_id != Uuid::nil()
+        {
+            settled += self.settle_ledger.record(doc.session_id, Some(doc)).len();
+        }
         let now = std::time::Instant::now();
         for session_id in flashes {
             self.plan_completion_flash.insert(session_id, now);
         }
         settled
     }
-
-    /// The chime itself, honouring the operator's opt-in and the build feature.
-    #[cfg(feature = "notification-sound")]
-    fn play_task_chime() {
-        let enabled = crate::config::Config::load()
-            .map(|c| c.agent.completion_notification_enabled)
-            .unwrap_or(false);
-        if enabled {
-            crate::utils::completion_sound::play_completion_sound();
-        }
-    }
-
-    #[cfg(not(feature = "notification-sound"))]
-    fn play_task_chime() {}
 
     /// The focused pane's resolved plan JSON path.
     pub fn plan_file_path(&self) -> Option<&std::path::PathBuf> {
@@ -1831,6 +1838,15 @@ impl App {
 
     /// Initialize the app by loading or creating a session
     pub async fn initialize(&mut self) -> Result<()> {
+        // Which hints the reader has hidden, read before the first frame so a
+        // dismissed line never flashes in and out (#3122). A read that fails
+        // shows every hint rather than none: a repeated tip is a small
+        // annoyance, an empty row is a feature that looks broken.
+        self.hint_dismissed = self
+            .session_service
+            .hint_dismissals()
+            .await
+            .unwrap_or_default();
         // Resume a specific session (e.g. after a restart) or load the most recent
         if let Some(session_id) = self.resume_session_id.take() {
             self.load_session(session_id).await?;
@@ -2768,11 +2784,12 @@ impl App {
                 // shares the notice slot inline in the input area (#1816).
                 self.refresh_clipboard_hint(false);
 
-                // A plan task that just settled gets its own chime (#2574).
-                // The tick is the right place: the plan file is written by
-                // the tool and re-read here, so no tool path has to know
-                // whether a sound is wanted.
-                self.chime_settled_plan_tasks().await;
+                // A plan task that just settled pulses its pane. No sound: the
+                // per-task chime was retired in #3118, the plan-finished chime
+                // is the only completion sound. The tick is the right place to
+                // notice the settle, since the plan file is written by the tool
+                // and re-read here.
+                self.settle_plan_tasks().await;
 
                 // Plan rows are live, not a snapshot of when the list opened:
                 // a task settles while the owner stares at the cards, and the
@@ -5007,6 +5024,38 @@ impl App {
     pub(crate) fn abort_session_task(&mut self, session_id: Uuid) {
         if let Some(handle) = self.task_abort_handles.remove(&session_id) {
             handle.abort();
+        }
+    }
+
+    /// Hide the hint the row is showing, for `DISMISS_DAYS` (#3122).
+    ///
+    /// It asks the same function the paint path asks, so the chord can only
+    /// hide the line that is actually on screen. A warning is never hidden: the
+    /// class comes from the engine, which keeps the lines that protect work (a
+    /// context about to overflow) out of it, and pressing the chord on one of
+    /// those does nothing, which is the honest answer because the row does not
+    /// print the chord for them either.
+    ///
+    /// The id is pushed before the write, so the row disappears on the next
+    /// frame rather than after a database round trip. A write that fails costs
+    /// the reader the line coming back on the next launch, which is the safe
+    /// direction.
+    pub(crate) async fn dismiss_current_hint(&mut self) {
+        let Some(hint) = crate::tui::render::tips::current(self) else {
+            return;
+        };
+        if !crate::ui_core::hints::dismissible(hint.id) {
+            return;
+        }
+        if !self.hint_dismissed.iter().any(|id| id == hint.id) {
+            self.hint_dismissed.push(hint.id.to_string());
+        }
+        if let Err(e) = self
+            .session_service
+            .dismiss_hint(hint.id, crate::ui_core::hints::DISMISS_DAYS)
+            .await
+        {
+            tracing::warn!("hint dismissal write failed: {e}");
         }
     }
 

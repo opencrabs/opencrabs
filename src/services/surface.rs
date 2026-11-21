@@ -77,6 +77,19 @@ pub struct SurfaceServices {
     _config_tx: watch::Sender<Config>,
 }
 
+/// Whether the holder the lock reports is this very process (#2974).
+///
+/// A second claim inside one process reports `Held` because the lock is held by
+/// this process's own first handle: `LockFileEx` takes it per handle rather than
+/// per process, and `SURFACE_STACK` keeps that handle for the whole life of the
+/// process on purpose (#2452, #2607). Read as a rival, that made a re-bootstrap
+/// wait out the full two seconds and then refuse to start, and the refusal named
+/// the very process that printed it, so the user was told to kill the desktop app
+/// they were looking at.
+fn is_self_claim(held: Option<u32>, self_pid: u32) -> bool {
+    held == Some(self_pid)
+}
+
 /// Claim this profile, or refuse to boot (#1072).
 ///
 /// Branches on `headless` because BOOT.md documents that the TUI takes
@@ -104,6 +117,19 @@ pub async fn claim_profile(
         InstanceGuard::Unavailable => return Ok((None, Vec::new())),
         InstanceGuard::Held { pid } => pid,
     };
+
+    // This process already holds the lock, so there is nothing to claim and
+    // nothing to hand back (#2974). Without this the claim fell through to
+    // preemption, which skips its own pid by design, so nothing was stopped,
+    // the retry loop read the same `Held` twenty times, and the start failed
+    // with a message naming this very process as the one to stop.
+    if is_self_claim(held_by, std::process::id()) {
+        tracing::info!(
+            "Instance lock for profile '{profile}' is already held by this process; \
+             continuing without a second handle"
+        );
+        return Ok((None, Vec::new()));
+    }
 
     if headless {
         let who = held_by
@@ -644,6 +670,21 @@ mod tests {
             channels: channels.iter().map(|c| (*c).to_string()).collect(),
             stopped,
         }
+    }
+
+    /// The holder a second bootstrap inside this process sees is itself, not a
+    /// rival (#2974). Read as a rival, the claim waited two seconds for a stop
+    /// that preemption had skipped by design, then refused to start and named
+    /// the process asking as the one to kill.
+    #[test]
+    fn a_holder_with_our_own_pid_is_this_process() {
+        let me = std::process::id();
+        assert!(is_self_claim(Some(me), me));
+        assert!(!is_self_claim(Some(me.wrapping_add(1)), me));
+        assert!(
+            !is_self_claim(None, me),
+            "a holder with no pid is not a self claim"
+        );
     }
 
     /// A stop that worked reads as done, names the channels it freed, and says

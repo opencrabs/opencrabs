@@ -628,3 +628,52 @@ async fn clear_of_an_absent_row_reports_zero_and_deletes_nothing() {
     assert_eq!(retired, 0, "nothing matched, so nothing may be deleted");
     assert_eq!(repo.all().await.expect("all").len(), 1);
 }
+
+/// A redelivered push must say how old it is once it has been parked a while
+/// (#2926).
+///
+/// The redelivery pass is age-blind by design, so an hours-old row is still
+/// delivered. Without a marker it lands in a conversation that has moved on and
+/// reads as the answer to whatever the user just sent. The marker is the whole
+/// fix: the row is delivered, and it says it is late.
+#[test]
+fn a_redelivered_push_says_its_age_once_it_is_late() {
+    use crate::brain::agent::service::notify_queue::{STALE_NOTICE_SECS, mark_delayed};
+
+    let body = "LAPORAN SINKRON QTY 3 FILE";
+
+    // Fresh enough: handed over exactly as it was parked, no framing added.
+    assert_eq!(
+        mark_delayed(body, 0),
+        body,
+        "a just-parked row must not carry a delay marker"
+    );
+    assert_eq!(
+        mark_delayed(body, STALE_NOTICE_SECS),
+        body,
+        "the threshold itself is not late"
+    );
+
+    // Past it: the age is named, in hours and zero-padded minutes, and the
+    // original body is still there verbatim so nothing is lost.
+    let marked = mark_delayed(body, 22 * 3600 + 5 * 60);
+    assert!(
+        marked.contains("22h05m"),
+        "the marker must name the queue age, got: {marked}"
+    );
+    assert!(
+        marked.contains("not a reply"),
+        "the marker must say it is not a reply to recent traffic, got: {marked}"
+    );
+    assert!(
+        marked.ends_with(body),
+        "the parked text must survive intact after the marker, got: {marked}"
+    );
+
+    // Sub-hour minutes still read as minutes, not as "0h".
+    let recent_late = mark_delayed(body, STALE_NOTICE_SECS + 90);
+    assert!(
+        recent_late.contains("1h01m"),
+        "an hour and a half past the threshold reads as 1h01m, got: {recent_late}"
+    );
+}

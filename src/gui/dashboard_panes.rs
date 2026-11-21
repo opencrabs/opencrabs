@@ -37,6 +37,9 @@ impl Dashboard {
         };
         if !self.rail_open {
             self.toggle_rail(cx);
+            // The pick is what opened it, so the pick is what closes it
+            // (#3104). A rail the user opened before the chord stays theirs.
+            self.split_opened_rail = true;
         }
         self.split_pick = Some(layout);
         self.split_target = Some(target);
@@ -96,11 +99,30 @@ impl Dashboard {
 
     /// Esc during the pick: the split is dropped and the chat keeps focus.
     pub(crate) fn cancel_split_pick(&mut self, cx: &mut Context<Self>) {
-        self.split_pick = None;
-        self.split_target = None;
         self.rail_focused = false;
+        self.end_split_pick(cx);
         self.refocus_screen();
         cx.notify();
+    }
+
+    /// End the pick and put the rail back the way it was found (#3104).
+    ///
+    /// The pick opens the rail when it was closed, because naming a session
+    /// needs the list. Once the pick lands or is cancelled, that opening is
+    /// undone: a rail left standing was never asked for. A rail the user
+    /// opened themselves, or one a row menu and the Seeker split into, is left
+    /// exactly as it is, so the flag says who opened it rather than whether it
+    /// is up.
+    ///
+    /// The callers keep their own `rail_focused` hand-back: letting the rail go
+    /// before focus is derived is the rule every pick door follows, and it
+    /// reads at the call site.
+    fn end_split_pick(&mut self, cx: &mut Context<Self>) {
+        self.split_pick = None;
+        self.split_target = None;
+        if std::mem::take(&mut self.split_opened_rail) {
+            self.set_rail_open(false, cx);
+        }
     }
 
     /// The session holding the caret: the chat's own session when no pane
@@ -167,16 +189,64 @@ impl Dashboard {
     /// Write the split the window is showing, so the next launch puts the same
     /// panes back in the same slots at the same sizes (#2675). Called wherever
     /// the layout can change under the user's hand: a split, a close, a
-    /// divider drag, a caret move, a conversation switch. The chat's own leaf
-    /// goes with it, so a launch knows which pane was the window's transcript
-    /// (#2689).
+    /// divider drag, a caret move, a conversation switch, a rail toggle. The
+    /// chat's own leaf goes with it, so a launch knows which pane was the
+    /// window's transcript (#2689), the frame goes with it too, so a restart
+    /// does not re-centre a window the user placed (#3082), and the rail goes
+    /// with it, so a sidebar closed before a restart opens closed (#3105).
     pub(crate) fn persist_layout(&self) {
         layout_store::save(
             &layout_store::path(),
             self.panes.as_ref(),
             self.pane_focus,
             self.chat_session,
+            self.window_frame,
+            self.rail_open,
         );
+    }
+
+    /// Record the frame the window is showing (#3082). `render` is the only
+    /// place the window is in hand, and it runs on every paint, so recording it
+    /// costs a comparison.
+    ///
+    /// A maximized window reports the maximized bounds, so only a windowed
+    /// frame moves the numbers: the size kept is the one the window restores
+    /// to, and un-maximizing must not land on the full screen.
+    pub(crate) fn observe_window(&mut self, window: &Window) {
+        let bounds = window.bounds();
+        let maximized = window.is_maximized();
+        let mut frame = self.window_frame.unwrap_or(layout_store::WindowState {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            maximized,
+        });
+        if !maximized {
+            frame.x = f32::from(bounds.origin.x);
+            frame.y = f32::from(bounds.origin.y);
+            frame.width = f32::from(bounds.size.width);
+            frame.height = f32::from(bounds.size.height);
+        }
+        frame.maximized = maximized;
+        if self.window_frame != Some(frame) {
+            self.window_frame = Some(frame);
+        }
+    }
+
+    /// Write the frame once it stops moving (#3082). A drag paints a new frame
+    /// on every tick, so the write waits for two ticks to agree: one write at
+    /// the end of a drag instead of twenty a second.
+    pub(crate) fn settle_window_frame(&mut self) {
+        if self.window_frame != self.window_frame_seen {
+            self.window_frame_seen = self.window_frame;
+            return;
+        }
+        if self.window_frame.is_none() || self.window_frame == self.window_frame_saved {
+            return;
+        }
+        self.window_frame_saved = self.window_frame;
+        self.persist_layout();
     }
 
     /// Put back the split the last run left (#2675). Runs once, after the boot
@@ -529,6 +599,7 @@ impl Dashboard {
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
             editor::EditorEvent::Below => this.focus_tasks(id, cx),
+            editor::EditorEvent::Above => this.focus_options(id, cx),
         })
         .detach();
         // The pane's own drag-to-copy (#2623). The transcript cannot reach a
@@ -659,7 +730,7 @@ impl Dashboard {
             return;
         };
         let Some(target) = self.split_target else {
-            self.split_pick = None;
+            self.end_split_pick(cx);
             return;
         };
         if self.chat_session == Some(id)
@@ -672,9 +743,10 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        self.split_pick = None;
-        self.split_target = None;
+        // The pick is answered, so the rail goes back to how it was found
+        // before the split grew from it (#3104).
         self.rail_focused = false;
+        self.end_split_pick(cx);
         // The pane just picked is the one the caret and ctrl+x land on, so a
         // split opens ready to act on what was clicked (#2474).
         self.pane_focus = Some(id);
@@ -974,6 +1046,7 @@ impl Dashboard {
         chat: AnyElement,
         content: f32,
         interactive: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Shares are clamped to the pixel floor against the area the last
@@ -1127,13 +1200,18 @@ impl Dashboard {
                     self.plan.refresh();
                     (
                         self.plan
-                            .editing_view(Some(&actions))
-                            .or_else(|| self.plan.pane_view(density, expanded)),
+                            .editing_view(Some(&actions), window)
+                            .or_else(|| self.plan.pane_view(density, expanded, window)),
                         self.queued_for_strip(),
                         self.composer.editor.clone(),
                     )
                 };
-                let mut col = div().flex().flex_col().flex_none().gap_2();
+                // The strips are cards in the conversation's column, not bands
+                // of the pane (#3117): the transcript pads half a rem on each
+                // side, so a card drawn flush to the pane's edge came out wider
+                // than every message above it. The box spends that step once,
+                // the same one `session_row` takes in the unsplit chat.
+                let mut col = div().flex().flex_col().flex_none().min_w_0().px_2().gap_2();
                 if let Some(view) = plan_view {
                     // A click trades the conversation's room for the whole
                     // checklist, per pane (#2624). The handler stops the event
@@ -1176,7 +1254,11 @@ impl Dashboard {
                 let offers = agent_bridge::options_snapshot(*session);
                 if !offers.is_empty() {
                     let rows = self.option_rows(*session, offers, cx);
-                    col = col.child(options_strip(&rows));
+                    let focus = self
+                        .options_focus
+                        .filter(|(s, _)| s == session)
+                        .map(|(_, at)| at);
+                    col = col.child(options_strip(&rows, focus));
                 }
                 // The same line the walk resolved above (#2805): asking for
                 // it again here took the manager's lock a second time for a

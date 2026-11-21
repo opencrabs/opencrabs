@@ -14,8 +14,9 @@
 //!   `old/path.md`, is inert: the same no-phantom-launch rule `dropped_path`
 //!   follows for pasted paths (#1288).
 //! - A token ends at whitespace and at quote/control boundaries, so a click
-//!   can never grab a whole sentence. Paths containing spaces are out of
-//!   scope for a click (`dropped_path` owns those for paste).
+//!   can never grab a whole sentence. A name that holds a space is read as a
+//!   bounded span of adjacent words, and only when the joined text exists on
+//!   disk, so prose stays inert (#2846).
 //!
 //! Offsets differ by client. A terminal cell is a CHARACTER, while a shaped
 //! text index in the window is a BYTE, so both entry points exist and share
@@ -66,8 +67,32 @@ pub fn target_at_with(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<ClickTarget> {
-    let token = token_at(line, col)?;
-    classify(token, cwd, home)
+    target_at_roots(line, col, &[cwd], home)
+}
+
+/// Resolve a click against an ordered list of roots (#2846).
+///
+/// The first root is the session's working directory, which a window does not
+/// own: a desktop launch has no shell cwd, so every relative name in the
+/// transcript resolved against `/tmp` and the click was a silent no-op. The
+/// process cwd stays available to the terminal as its own root.
+///
+/// A file the transcript names can hold a space, and a space ends a token, so
+/// the single-token read is tried first and a bounded span of adjacent words
+/// second. A span only wins when the joined text exists on disk, which is what
+/// keeps ordinary prose inert.
+pub fn target_at_roots(
+    line: &str,
+    col: usize,
+    roots: &[&Path],
+    home: Option<&Path>,
+) -> Option<ClickTarget> {
+    if let Some(target) = token_at(line, col).and_then(|token| classify_in(token, roots, home)) {
+        return Some(target);
+    }
+    joined_spans(line, col)
+        .into_iter()
+        .find_map(|span| classify_in(span, roots, home))
 }
 
 /// The same, for a byte offset into `text`: the unit a shaped text layout
@@ -126,29 +151,43 @@ pub fn target_for_click_with(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<ClickTarget> {
+    target_for_click_roots(text, links, offset, &[cwd], home)
+}
+
+/// Resolve the target of a click against an ordered list of roots (#2846).
+///
+/// The label read comes first and uses the same roots, so a markdown
+/// destination that names a local file resolves exactly as a bare token does.
+pub fn target_for_click_roots(
+    text: &str,
+    links: &[(Range<usize>, String)],
+    offset: usize,
+    roots: &[&Path],
+    home: Option<&Path>,
+) -> Option<ClickTarget> {
     for (span, dest) in links {
         if span.contains(&offset) {
-            return classify_link(dest, cwd, home);
+            return classify_link(dest, roots, home);
         }
     }
-    target_at_byte_with(text, offset, cwd, home)
+    target_at_roots(text, char_col(text, offset), roots, home)
 }
 
 /// Classify an explicit Markdown destination. Non-file URI schemes retain the
 /// existing external-handler behavior; only a verified local path becomes a
 /// file target.
-fn classify_link(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
+fn classify_link(raw: &str, roots: &[&Path], home: Option<&Path>) -> Option<ClickTarget> {
     let token = clean_token(raw);
     if token.is_empty() {
         return None;
     }
     if token.to_ascii_lowercase().starts_with("file://") {
-        return resolve_path(token.get("file://".len()..)?, cwd, home);
+        return resolve_path_in(token.get("file://".len()..)?, roots, home);
     }
     if has_uri_scheme(token) {
         return Some(ClickTarget::Url(token.to_string()));
     }
-    resolve_path(token, cwd, home)
+    resolve_path_in(token, roots, home)
 }
 
 /// A URI scheme is `alpha *( alpha / digit / "+" / "-" / "." )` followed by
@@ -188,6 +227,58 @@ fn token_at(line: &str, col: usize) -> Option<&str> {
     line.get(start..end)
 }
 
+/// How many adjacent words one click may join when it names a file that holds
+/// a space (#2846). Six covers the shape the agent writes most: a generated
+/// artifact whose name is separated from its timestamp by one space.
+const MAX_JOINED_WORDS: usize = 6;
+
+/// Candidate spans around `col`, longest first, each joining adjacent
+/// non-break runs across their original gaps.
+///
+/// A space ends a token, so `AUDIT-GUI-BEBAN 121126-1837.md` reads as two
+/// tokens and neither of them exists on disk. The joined span is the whole
+/// name. Every span still has to survive `classify_in`, which probes the disk,
+/// so prose that merely contains spaces never becomes a click target.
+fn joined_spans(line: &str, col: usize) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    if col >= chars.len() || is_break(chars[col].1) {
+        return Vec::new();
+    }
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_break(chars[i].1) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !is_break(chars[i].1) {
+            i += 1;
+        }
+        runs.push((start, i - 1));
+    }
+    let Some(hit) = runs.iter().position(|(a, b)| *a <= col && col <= *b) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    for width in (2..=MAX_JOINED_WORDS).rev() {
+        for back in 0..width {
+            let forward = width - 1 - back;
+            if hit < back || hit + forward >= runs.len() {
+                continue;
+            }
+            let (first, _) = runs[hit - back];
+            let (_, last) = runs[hit + forward];
+            let start = chars[first].0;
+            let end = chars[last].0 + chars[last].1.len_utf8();
+            if let Some(span) = line.get(start..end) {
+                spans.push(span);
+            }
+        }
+    }
+    spans
+}
+
 /// Strip rendering wrapper noise around a token.
 ///
 /// `[text](url)` renders as `text (url)`, inline code keeps its backticks as
@@ -220,7 +311,7 @@ fn clean_token(raw: &str) -> &str {
 }
 
 /// Classify a token as URL / existing path / nothing.
-fn classify(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
+fn classify_in(raw: &str, roots: &[&Path], home: Option<&Path>) -> Option<ClickTarget> {
     let token = clean_token(raw);
     if token.is_empty() {
         return None;
@@ -238,17 +329,18 @@ fn classify(raw: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
     }
     if lower.starts_with("file://") {
         let path = token.get("file://".len()..)?;
-        return resolve_path(path, cwd, home);
+        return resolve_path_in(path, roots, home);
     }
     if lower.starts_with("mailto:") && token.contains('@') {
         return Some(ClickTarget::Url(token.to_string()));
     }
-    resolve_path(token, cwd, home)
+    resolve_path_in(token, roots, home)
 }
 
 /// Try the token as a local path: expand `~`, drop any `:line[:col]`
-/// reference suffix, resolve relative to `cwd`, and require existence.
-fn resolve_path(token: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTarget> {
+/// reference suffix, resolve relative to each root in turn, and require
+/// existence.
+fn resolve_path_in(token: &str, roots: &[&Path], home: Option<&Path>) -> Option<ClickTarget> {
     // Line references are not part of the name, and leaving them on blinds
     // the extension check below: `chat.rs:1618` would read as extension
     // `rs:1618` and never get probed.
@@ -256,7 +348,7 @@ fn resolve_path(token: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTar
     // Only forms that plausibly name a file get a disk probe. Bare prose
     // words without a dot have no chance of resolving anyway; bare dotted
     // names ("README.md") DO get probed because clicking exactly the word
-    // that names a real file in cwd is the point.
+    // that names a real file in the root is the point.
     let path_like = token.starts_with('/')
         || token.starts_with('~')
         || token.starts_with('.')
@@ -267,16 +359,16 @@ fn resolve_path(token: &str, cwd: &Path, home: Option<&Path>) -> Option<ClickTar
         return None;
     }
     let expanded = expand_tilde(token, home)?;
-    let candidate = if Path::new(&expanded).is_absolute() {
-        PathBuf::from(&expanded)
-    } else {
-        cwd.join(&expanded)
-    };
-    if candidate.exists() {
-        Some(ClickTarget::File(candidate))
-    } else {
-        None
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        return path.exists().then(|| ClickTarget::File(path.to_path_buf()));
     }
+    // Roots are tried in order, so the session's directory wins over the
+    // process cwd when both hold a file of the same name (#2846).
+    roots.iter().find_map(|root| {
+        let candidate = root.join(&expanded);
+        candidate.exists().then_some(ClickTarget::File(candidate))
+    })
 }
 
 /// `chat.rs:1618` and `chat.rs:1618:5` reference a line in a file; the

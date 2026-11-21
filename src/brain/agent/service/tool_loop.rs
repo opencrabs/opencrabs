@@ -8539,10 +8539,6 @@ impl AgentService {
         // in-progress plans are untouched; `load_plan` is a fast no-op when the
         // session has no live plan.
         let mut completed_plan = None;
-        // True when this turn's plan completed and the OS banner went out from
-        // the seam below, so the turn-completion banner further down stays
-        // silent instead of announcing the same finish twice (#2729).
-        let mut plan_announced = false;
         if let Some(mut finished) = crate::utils::plan_files::load_plan(session_id).await {
             // A plan whose only remaining task is the trailing delivery step
             // never reaches is_complete() on its own — delivering the answer is
@@ -8557,8 +8553,8 @@ impl AgentService {
             }
             // #2255: a finished plan announces itself. The event carries the
             // fact to every surface from this one place; whether anything
-            // makes noise about it is the surface's call (the TUI gates the
-            // completion sound on `[agent] completion_notification_enabled`).
+            // makes noise about it is the surface's call (the TUI and the GUI
+            // gate the completion sound on `[agent] notify_on_plan_completed`).
             // Emitted on the MERGED per-turn callback, not `self.progress_callback`:
             // a channel turn carries its own callback as an override, and
             // reading the service field alone would drop the event for it.
@@ -8577,7 +8573,6 @@ impl AgentService {
                             session: Some(session_id),
                         },
                     );
-                    plan_announced = true;
                 }
                 if let Some(cb) = progress_callback.as_ref() {
                     cb(
@@ -8630,18 +8625,6 @@ impl AgentService {
             {
                 tracing::warn!("Failed to persist Sources footer to DB: {}", e);
             }
-        }
-
-        // #2729: the turn settled. A turn that already closed its plan raised
-        // PlanCompleted above, so it does not also raise a generic completion
-        // banner for the same finish.
-        if !plan_announced && notifications_for_human(&session) {
-            crate::utils::desktop_notify::raise(
-                crate::utils::desktop_notify::NotificationEvent::TurnCompleted {
-                    summary: crate::utils::desktop_notify::summary_line(&final_text),
-                    session: Some(session_id),
-                },
-            );
         }
 
         Ok(AgentResponse {

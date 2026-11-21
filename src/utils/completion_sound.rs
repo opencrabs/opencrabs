@@ -54,7 +54,8 @@ pub fn announcement_pending(plan: Option<&PlanDocument>) -> Option<usize> {
 /// Never blocks the turn and never panics: a machine with no output device
 /// (a server, a container, a Mac with no audio route) logs a warning and
 /// carries on. The TUI and the GUI call this, and only when
-/// `[agent] completion_notification_enabled = true`.
+/// `[agent] notify_on_plan_completed = true` (#3118: one chime per plan, never
+/// one per task).
 #[cfg(feature = "notification-sound")]
 pub fn play_completion_sound() {
     std::thread::spawn(|| {

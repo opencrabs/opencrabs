@@ -26,6 +26,7 @@ use super::projects::render_projects;
 use super::session_files::render_session_files;
 use super::sessions::render_sessions;
 use super::theme;
+use super::tips;
 use super::title::{render_app_title, split_title_area};
 use super::{mission_control, panes, plan_overlay, profiles_dialog, skills_dialog, tasks_overlay};
 
@@ -74,8 +75,12 @@ pub(crate) fn plan_card_height(
     queue_height: u16,
 ) -> u16 {
     const CARD_MIN: u16 = 3; // header + one windowed task row + footer
-    const STATUS_BAR: u16 = 1;
-    let reserved = STATUS_BAR
+    // Status bar plus the hint row (#2279). Both are fixed chrome under the
+    // chat, so both come out of the card's budget before the card is sized:
+    // reserving only the status bar here is how #1750/#2165 came back, with
+    // the solver starving the transcript to pay for a row it never counted.
+    const BOTTOM_CHROME: u16 = 2;
+    let reserved = BOTTOM_CHROME
         .saturating_add(input_height)
         .saturating_add(queue_height)
         .saturating_add(CHAT_FLOOR);
@@ -190,6 +195,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // panel, so the window-level bar yields its row instead of spanning the
     // split (#2575).
     let status_height = u16::from(!app.pane_manager.is_split());
+    // The hint row (#2279, #3102) follows the status bar's rule: in split view
+    // each pane already carries its own footer, so a window-level hint row
+    // would be a dead line under two sessions.
+    let hint_height = u16::from(!app.pane_manager.is_split()) * tips::HINT_ROW;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -197,8 +206,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Constraint::Min(CHAT_FLOOR),       // [0] Chat messages
             Constraint::Length(plan_height),   // [1] Plan checklist (0 when no plan)
             Constraint::Length(queue_height),  // [2] Queue preview (0 when no queue)
-            Constraint::Length(input_height),  // [3] Input (dynamic)
-            Constraint::Length(status_height), // [4] Status bar (0 in split view)
+            Constraint::Length(hint_height),   // [3] Hint row (0 in split view)
+            Constraint::Length(input_height),  // [4] Input (dynamic)
+            Constraint::Length(status_height), // [5] Status bar (0 in split view)
         ])
         .split(f.area());
 
@@ -208,7 +218,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
         x: chunks[0].x,
         y: chunks[0].y,
         width: chunks[0].width,
-        height: chunks[0].height + chunks[1].height + chunks[2].height + chunks[3].height,
+        // Chat, plan, queue, hint and input: everything above the status bar,
+        // which is what a full-screen mode replaces (#3102 reordered these so
+        // the hint sits over the input).
+        height: chunks[0].height
+            + chunks[1].height
+            + chunks[2].height
+            + chunks[3].height
+            + chunks[4].height,
     };
 
     match app.mode {
@@ -372,7 +389,12 @@ fn render_chat_surface(
         if queue_height > 0 {
             render_queue(f, app, chunks[2]);
         }
-        (chunks[3], render_input(f, app, chunks[3]))
+        // The hint sits above the field it describes, under the conversation
+        // (#3102): below the input it read as part of the status bar.
+        if chunks[3].height > 0 {
+            tips::render_hint(f, app, chunks[3]);
+        }
+        (chunks[4], render_input(f, app, chunks[4]))
     };
     // Store input area coordinates for mouse event mapping. In split mode
     // this is the focused pane's own input box, not the zeroed window slot.
@@ -384,7 +406,7 @@ fn render_chat_surface(
     // click and drag map the row the user sees, not the row the buffer
     // starts at.
     app.input_scroll_y = scroll_y;
-    render_status_bar(f, app, chunks[4]);
+    render_status_bar(f, app, chunks[5]);
     input_rect
 }
 

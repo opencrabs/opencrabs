@@ -9,27 +9,28 @@
 
 use crate::tui::render::{CHAT_FLOOR, plan_card_height};
 
-/// Rows left for the transcript once the card, queue, input and status bar are
-/// paid for.
+/// Rows left for the transcript once the card, queue, input and the bottom
+/// chrome are paid for. The chrome is the status bar plus the hint row
+/// (#2279), which is why this subtracts two and not one.
 fn chat_rows(card: u16, area: u16, input: u16, queue: u16) -> u16 {
     area.saturating_sub(card)
         .saturating_sub(queue)
         .saturating_sub(input)
-        .saturating_sub(1)
+        .saturating_sub(2)
 }
 
 #[test]
 fn tall_terminal_keeps_full_card() {
-    // 40 rows: status 1 + input 10 + queue 2 + chat floor = 13 + floor,
+    // 40 rows: status 1 + hint 1 + input 10 + queue 2 + chat floor 10 = 24,
     // so a 12-row card fits whole.
     assert_eq!(plan_card_height(12, 40, 10, 2), 12);
 }
 
 #[test]
 fn short_pane_shrinks_card_to_budget() {
-    // 30 rows, input 3, no queue: budget is 30 - 1 - 3 - CHAT_FLOOR = 16,
+    // 30 rows, input 3, no queue: budget is 30 - 2 - 3 - CHAT_FLOOR = 15,
     // so a 12-row card is not what gets cut here; a taller desired is.
-    assert_eq!(plan_card_height(20, 30, 3, 0), 16);
+    assert_eq!(plan_card_height(20, 30, 3, 0), 15);
 }
 
 #[test]
@@ -80,7 +81,10 @@ fn seed_strip_survives_normal_panes() {
 
 #[test]
 fn seed_strip_degrades_to_card_min_on_a_tight_pane() {
-    // 17 rows, input 3: budget 17 - 1 - 3 - CHAT_FLOOR = 3, the card min,
-    // so the strip renders tight instead of vanishing.
-    assert_eq!(plan_card_height(5, 17, 3, 0), 3);
+    // 18 rows, input 3: budget 18 - 2 - 3 - CHAT_FLOOR = 3, the card min,
+    // so the strip renders tight instead of vanishing. At 17 rows the budget
+    // is 2, under the min, and the card goes away rather than taking a row the
+    // transcript needs.
+    assert_eq!(plan_card_height(5, 18, 3, 0), 3);
+    assert_eq!(plan_card_height(5, 17, 3, 0), 0);
 }

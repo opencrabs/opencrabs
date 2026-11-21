@@ -5,7 +5,8 @@
 use crate::db::{
     models::{Session, TitleSource},
     repository::{
-        SessionFavoritesRepository, SessionListOptions, SessionRepository, UsageLedgerRepository,
+        HintDismissalRepository, SessionFavoritesRepository, SessionListOptions, SessionRepository,
+        UsageLedgerRepository,
     },
 };
 use crate::services::ServiceContext;
@@ -187,6 +188,24 @@ impl SessionService {
     pub async fn session_favorites(&self) -> Result<Vec<String>> {
         SessionFavoritesRepository::new(self.context.pool())
             .all()
+            .await
+    }
+
+    /// Hint ids the reader has hidden, while still inside their window (#3120).
+    ///
+    /// The hint engine has no database of its own: it decides from state handed
+    /// to it, so this is where a frontend gets that state. An error is not fatal
+    /// to the caller, which shows every hint rather than none.
+    pub async fn hint_dismissals(&self) -> Result<Vec<String>> {
+        HintDismissalRepository::new(self.context.pool())
+            .active()
+            .await
+    }
+
+    /// Hide one hint for `days`, so the row stops printing it.
+    pub async fn dismiss_hint(&self, hint_id: &str, days: i64) -> Result<()> {
+        HintDismissalRepository::new(self.context.pool())
+            .dismiss(hint_id, days)
             .await
     }
 

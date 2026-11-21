@@ -75,8 +75,11 @@ fn a_pane_draws_its_own_topic_strip() {
         PANE_VIEW.contains("win.pane_topics(session, cx)"),
         "each pane asks for its own topic row, keyed by its own session"
     );
+    // `owner` is the dashboard handle the pane upgrades from `self.window`;
+    // `window` in that render is the frame it is handed, which has no
+    // `pane_topics` of its own.
     assert!(
-        PANE_VIEW.contains("let topics = window.update(cx,"),
+        PANE_VIEW.contains("let topics = owner.update(cx,"),
         "the row is rebuilt in the pane's own render, so a pane that only redraws itself keeps it"
     );
     assert!(

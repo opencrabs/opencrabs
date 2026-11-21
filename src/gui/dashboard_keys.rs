@@ -1,4 +1,5 @@
-//! Key handling for the whole window, and the chime a settled plan plays.
+//! Key handling for the whole window, and the settle pass a plan's tasks run
+//! through, plus the one chime a finished plan plays.
 //!
 //! Part of the dashboard split (#2822): the same inherent impl, moved out of
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
@@ -109,6 +110,15 @@ impl Dashboard {
         // task never stops the whole turn.
         if self.task_detail.is_some() {
             self.task_detail_key(&ev.keystroke, cx);
+            return;
+        }
+        // The follow-up offer holds the keyboard after Up from the composer
+        // (#3101): the arrows walk it, Enter sends the row the ring stands on,
+        // Esc hands the keys back without sending anything. It reads here, in
+        // front of the task list, because only one of the two can be armed and
+        // this one is the direction the user just pressed.
+        if self.options_focus.is_some() {
+            self.options_key(&ev.keystroke, cx);
             return;
         }
         if let Some(session) = self.task_focus
@@ -779,8 +789,7 @@ impl Dashboard {
                     .push("Operation cancelled.".to_string());
             }
             logging::info("turn cancelled by Esc");
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -1102,15 +1111,21 @@ impl Dashboard {
         }
     }
 
-    /// Ring for plan tasks that settled since the last frame (#2691).
+    /// Settle plan tasks finished since the last frame: pulse the rail, no
+    /// sound (#2691, #3118).
     ///
     /// The terminal does this from its tick (`tui::app::state`), reading the
     /// plan file the tool writes. A gpui window has no tick, so the render
     /// path is the equivalent place: it already re-reads the strips by
-    /// mtime, and this pass turns the settled tasks into one chime. The
-    /// window strip and every pane strip share one seen set, so a plan drawn
-    /// twice rings once, and a reload of an unchanged file rings not at all.
-    pub(crate) fn chime_settled_plan_tasks(&mut self, cx: &mut Context<Self>) {
+    /// mtime, and this pass turns the settled tasks into one rail flash. The
+    /// window strip and every pane strip share one ledger, so a plan drawn
+    /// twice flashes once, and a reload of an unchanged file does nothing at
+    /// all. That ledger is durable per session (#3004): a relaunch after a
+    /// clean exit, a panic or a machine restart resumes where the last
+    /// process stopped instead of flashing every settled task again. The one
+    /// completion sound is the plan-finished chime, raised from
+    /// `ProgressEvent::PlanCompleted`.
+    pub(crate) fn settle_plan_tasks(&mut self, cx: &mut Context<Self>) {
         // Four passes a second, not one per frame (#2899). The pass clones
         // every plan document, resolves the settled ids in each and asks the
         // notification layer about them, and a frame can arrive as often as
@@ -1134,69 +1149,61 @@ impl Dashboard {
             pane.update(cx, |pane, _| pane.plan.refresh());
         }
 
-        // Every plan in this frame, each paired with the row that draws it, in
-        // one order so a settled task reaches the chime, the banner, and the
-        // flash from a single pass. A pre-init plan writes the nil session
+        // Every plan in this frame, each paired with the session that owns it,
+        // so a settled task is recorded against the right conversation and
+        // flashed from a single pass. A pre-init plan writes the nil session
         // until the hook stamps it, so the drawing row is the honest fallback.
         // Owned snapshots: a pane is an entity now (#2805), so a borrowed
-        // document would keep its handle borrowed across the announce. One
+        // document would keep its handle borrowed across the record. One
         // snapshot per pane per frame, and a plan is a handful of tasks.
-        let mut plans: Vec<Option<opencrabs::tui::plan::PlanDocument>> =
+        let mut plans: Vec<(Uuid, opencrabs::tui::plan::PlanDocument)> =
             Vec::with_capacity(1 + self.pane_states.len());
-        let mut owners: Vec<Uuid> = Vec::with_capacity(1 + self.pane_states.len());
 
-        plans.push(self.plan.document().cloned());
-        owners.push(self.chat_session.unwrap_or(Uuid::nil()));
-        for (pane_id, pane) in &self.pane_states {
-            plans.push(pane.read(cx).plan.document().cloned());
-            owners.push(*pane_id);
-        }
-
-        let seen = &mut self.announced_task_completions;
-
-        // Which sessions settle in this pass. Read before the announce, because
-        // the announce is what writes them into `seen`, the only record of what
-        // already rang. Asking `contains` rather than `insert` keeps that write
-        // in one place, so the flash and the chime cannot disagree about which
-        // task was fresh.
-        let mut settled: Vec<Uuid> = Vec::new();
-        for (slot, owner) in plans.iter().zip(owners.iter()) {
-            let Some(doc) = slot else {
-                continue;
-            };
-            let fresh = opencrabs::utils::completion_sound::resolved_task_ids(Some(doc))
-                .into_iter()
-                .any(|id| !seen.contains(&id));
-            if !fresh {
-                continue;
-            }
-            settled.push(if doc.session_id == Uuid::nil() {
-                *owner
+        if let Some(doc) = self.plan.document().cloned() {
+            let session = if doc.session_id == Uuid::nil() {
+                self.chat_session.unwrap_or(Uuid::nil())
             } else {
                 doc.session_id
-            });
+            };
+            plans.push((session, doc));
+        }
+        for (pane_id, pane) in &self.pane_states {
+            let Some(doc) = pane.read(cx).plan.document().cloned() else {
+                continue;
+            };
+            let session = if doc.session_id == Uuid::nil() {
+                *pane_id
+            } else {
+                doc.session_id
+            };
+            plans.push((session, doc));
         }
 
-        // #2729: the same set drives the OS banner, so a task that rings also
-        // reaches the Notification Center, and neither can fire twice for one
-        // settle.
-        let borrowed: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
-            plans.iter().map(Option::as_ref).collect();
-        if opencrabs::utils::desktop_notify::announce_settled_tasks(seen, &borrowed) == 0 {
-            return;
-        }
-        // One flash per settled session, on the same instant the chime rings:
-        // the sound and the blink are two surfaces of one event.
-        for session in settled {
-            if session == Uuid::nil() {
+        // Record each plan against its own session's durable ledger (#3004).
+        // The first pass after a launch folds in what a previous process
+        // already flashed, so a plan that has not moved does not blink again;
+        // a task that settled while the window was closed is still new, so it
+        // blinks once. The ledger is the one record of what was fresh, so the
+        // flash and the record cannot disagree.
+        let mut settled: Vec<Uuid> = Vec::new();
+        for (session, doc) in &plans {
+            let fresh = self.settle_ledger.record(*session, Some(doc));
+            if fresh.is_empty() || *session == Uuid::nil() {
                 continue;
             }
+            settled.push(*session);
+        }
+        if settled.is_empty() {
+            return;
+        }
+        // One flash per settled session: the blink is the per-task signal, and
+        // the plan-finished chime is the only sound.
+        for session in settled {
             self.plan_flash_until.insert(
                 session,
                 now + opencrabs::utils::completion_sound::FLASH_WINDOW,
             );
         }
-        Self::play_task_chime();
     }
 
     /// Whether any rail flash window is still open, dropping the expired ones.
@@ -1210,14 +1217,14 @@ impl Dashboard {
         !self.plan_flash_until.is_empty()
     }
 
-    /// The chime itself, honouring the operator's opt-in and the build
-    /// feature (#2691). The flag is read at the moment of the chime, so
-    /// flipping `[agent] completion_notification_enabled` in a live session
-    /// takes effect without a restart, exactly as the terminal's arm does.
+    /// The plan-finished chime, honouring the operator's opt-in and the build
+    /// feature (#2691, #3118). The flag is read at the moment of the chime, so
+    /// flipping `[agent] notify_on_plan_completed` in a live session takes
+    /// effect without a restart, exactly as the terminal's arm does.
     #[cfg(feature = "notification-sound")]
-    pub(crate) fn play_task_chime() {
+    pub(crate) fn play_plan_chime() {
         let enabled = opencrabs::config::Config::load()
-            .map(|c| c.agent.completion_notification_enabled)
+            .map(|c| c.agent.notify_on_plan_completed)
             .unwrap_or(false);
         if enabled {
             opencrabs::utils::completion_sound::play_completion_sound();
@@ -1225,5 +1232,5 @@ impl Dashboard {
     }
 
     #[cfg(not(feature = "notification-sound"))]
-    pub(crate) fn play_task_chime() {}
+    pub(crate) fn play_plan_chime() {}
 }

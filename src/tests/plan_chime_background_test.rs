@@ -1,17 +1,18 @@
 //! #2733: a plan task that settles in a session the user is NOT looking at
-//! must chime when it settles, not when that pane is finally focused.
+//! must be noticed when it settles, not when that pane is finally focused.
 //!
 //! The defect was a stale cache, not a missing signal. Only the focused pane
 //! reloaded its plan document, so a background pane compared against the
 //! checklist it held at the moment it was opened: `newly_resolved` saw
-//! nothing, nothing chimed, and the settle rang minutes later on the click
+//! nothing, nothing flashed, and the settle surfaced minutes later on the click
 //! that loaded the file again.
 //!
 //! The tests drive the two seams the tick uses: the per-pane mtime reload and
 //! the settled-task counter (`fresh_settled_tasks`, which is exactly the
-//! number the chime responds to). They stop short of `announce_settled_tasks`
-//! because that one raises an OS banner, and a test must never pop a
-//! notification on the machine running it.
+//! freshness the rail flash responds to). They stop short of the durable
+//! per-session ledger only because it needs a file on disk; the counter it
+//! wraps is the whole decision. No banner is raised by either since #3118, and
+//! no sound: the settle pass flashes, it does not ring.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
@@ -124,10 +125,9 @@ fn a_background_pane_counts_its_settle_without_focus() {
     assert_eq!(
         fresh.len(),
         1,
-        "the chime counter has to reach 1 for a settle in an unfocused pane"
+        "the settle counter has to reach 1 for a settle in an unfocused pane"
     );
-    assert_eq!(fresh[0].0, task_id, "the settle is the task that finished");
-    assert!(fresh[0].2, "a completed task rings as a success");
+    assert_eq!(fresh[0], task_id, "the settle is the task that finished");
 }
 
 /// The reload is gated on the mtime, and it has to be: `load_plan_from_path`
@@ -179,7 +179,10 @@ fn the_tick_refreshes_every_pane_before_counting() {
     let body = STATE_SRC
         .split("pub(crate) async fn settle_plan_tasks(&mut self) -> usize {")
         .nth(1)
-        .and_then(|tail| tail.split("\n    /// The chime itself").next())
+        .and_then(|tail| {
+            tail.split("\n    /// The focused pane's resolved plan")
+                .next()
+        })
         .expect("settle_plan_tasks exists in the tick");
     assert!(
         body.contains("refresh_plans_changed_on_disk()"),

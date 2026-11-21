@@ -272,6 +272,10 @@ impl Composer {
     ///
     /// The panes come in as an argument: this leaf owns the window's field, not
     /// the split tree, so the window hands it the fields it cannot reach.
+    ///
+    /// These are the field's own keys, not the task's (#3102). What the
+    /// conversation needs is a card above the composer; what the field does is
+    /// written where the caret is.
     pub(crate) fn sync_composer_hint(
         &mut self,
         hint: SharedString,

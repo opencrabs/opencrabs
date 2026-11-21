@@ -48,7 +48,6 @@ const FROZEN_INLINE_TESTS: &[&str] = &[
     "models.rs:tests",
     "onboard.rs:tests",
     "pane_chrome.rs:window_footer_tests",
-    "plan_strip.rs:tests",
     "platform_icons.rs:tests",
     "preview.rs:tests",
     "rail_activity.rs:tests",

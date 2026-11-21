@@ -639,7 +639,17 @@ pub(crate) async fn handle_message(
     if let Some(ref t) = text
         && !t.is_empty()
     {
-        let chat_id = format!("{}", info.source.chat);
+        // #2928: key the row on the conversation, not on the address this
+        // stanza happened to arrive on. One contact addressed by PN one minute
+        // and by LID the next used to produce two threads, and the reply
+        // recorded in the one the next turn does not read.
+        let chat_id = wa_state
+            .canonical_chat_id(
+                &info.source.chat,
+                info.source.is_group,
+                info.source.sender_alt.as_ref().map(|j| j.user.as_str()),
+            )
+            .await;
         let is_group = info.source.is_group;
         let push_name = info.push_name.clone();
         let cm = DbChannelMessage::new(
@@ -1107,7 +1117,20 @@ pub(crate) async fn handle_message(
         // and is only that for a LID-addressed sender; for a PN-addressed one
         // it prefers the LID, so the session was keyed by an opaque id and its
         // label read "WhatsApp: 83911178752119" (#1533).
-        _ => canonical_phone.clone(),
+        //
+        // #2928: when the stanza names only the LID, the mapping mirror still
+        // answers with the PN the contact was first seen under, so one human
+        // keeps one session even on a stanza that carries no twin.
+        _ => {
+            if info.source.sender.server.is_lid_family() {
+                match wa_state.lid_pn_twin(&canonical_phone).await {
+                    Some(pn) => pn,
+                    None => canonical_phone.clone(),
+                }
+            } else {
+                canonical_phone.clone()
+            }
+        }
     };
 
     // Where ALL agent output for this turn is sent. For the owner self-chat the
@@ -2128,8 +2151,13 @@ pub(crate) async fn handle_message(
             // `reply_target` above.
             let reply_jid = reply_target.clone();
 
+            // A voice turn answers twice: the report in text, one short block
+            // for the ear (#3092). Splitting first keeps the block out of the
+            // message body.
+            let (answer, spoken) = crate::channels::voice::spoken::split(&response.content);
+
             // Extract <<IMG:path>> markers — send each as a real WhatsApp image message.
-            let (text_content, img_paths) = crate::utils::extract_img_markers(&response.content);
+            let (text_content, img_paths) = crate::utils::extract_img_markers(&answer);
             let text_content = crate::utils::sanitize::strip_llm_artifacts(&text_content);
             let text_content = redact_secrets(&text_content);
             let text_content = crate::utils::slack_fmt::markdown_to_mrkdwn(&text_content);
@@ -2290,7 +2318,15 @@ pub(crate) async fn handle_message(
             // and Discord. Applies to both group and DM threads — WhatsApp
             // stores user messages for both, so we stay symmetric.
             if !text_content.trim().is_empty() {
-                let chat_id = format!("{}", info.source.chat);
+                // #2928: same key the inbound rows use, so the reply and the
+                // question it answers live in one thread.
+                let chat_id = wa_state
+                    .canonical_chat_id(
+                        &info.source.chat,
+                        info.source.is_group,
+                        info.source.sender_alt.as_ref().map(|j| j.user.as_str()),
+                    )
+                    .await;
                 let is_group = info.source.is_group;
                 let cm = DbChannelMessage::new(
                     "whatsapp".into(),
@@ -2332,6 +2368,15 @@ pub(crate) async fn handle_message(
 
             // If input was voice AND TTS is enabled, also send voice note after text
             if has_aud && voice_config.tts_enabled {
+                let speech = match spoken {
+                    Some(text) => text,
+                    None => {
+                        tracing::warn!(
+                            "WhatsApp: voice turn carried no spoken block, reading the first paragraph"
+                        );
+                        crate::channels::voice::spoken::first_paragraph(&answer)
+                    }
+                };
                 // Show "recording..." across synthesis and upload, the way a
                 // human preparing a voice note appears (#1486). Cleared on
                 // every exit path below, success or failure, so the chat is
@@ -2339,7 +2384,7 @@ pub(crate) async fn handle_message(
                 if let Err(e) = client.chatstate().send_recording(&reply_jid).await {
                     tracing::warn!(error = %e, "WhatsApp: recording indicator failed");
                 }
-                match crate::channels::voice::synthesize(&response.content, &voice_config).await {
+                match crate::channels::voice::synthesize(&speech, &voice_config).await {
                     Ok(audio_bytes) => {
                         // WhatsApp requires uploading media to its servers first,
                         // then sending the message with the returned URL + crypto keys.

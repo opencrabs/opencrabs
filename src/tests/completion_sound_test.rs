@@ -33,19 +33,19 @@ fn active_plan(statuses: &[TaskStatus]) -> PlanDocument {
 }
 
 #[test]
-fn completion_notification_enabled_defaults_to_false() {
+fn notify_on_plan_completed_defaults_to_false() {
     assert!(
-        !AgentConfig::default().completion_notification_enabled,
+        !AgentConfig::default().notify_on_plan_completed,
         "an agent that chimes unasked is noise, so the key must default off"
     );
     let empty: AgentConfig = serde_json::from_str("{}").expect("empty agent section parses");
     assert!(
-        !empty.completion_notification_enabled,
+        !empty.notify_on_plan_completed,
         "a config that never names the key stays silent"
     );
-    let on: AgentConfig = serde_json::from_str(r#"{"completion_notification_enabled": true}"#)
-        .expect("explicit key parses");
-    assert!(on.completion_notification_enabled, "the opt-in must stick");
+    let on: AgentConfig =
+        serde_json::from_str(r#"{"notify_on_plan_completed": true}"#).expect("explicit key parses");
+    assert!(on.notify_on_plan_completed, "the opt-in must stick");
 }
 
 #[test]

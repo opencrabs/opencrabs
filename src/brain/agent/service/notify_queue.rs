@@ -37,6 +37,32 @@ const STALE_ROW_SECS: i64 = 24 * 60 * 60;
 /// and only after the current boot has made its own offer.
 pub(crate) const MAX_ROW_AGE_SECS: i64 = 3 * STALE_ROW_SECS; // 72h (259,200s)
 
+/// Age past which a redelivered push is marked as a delayed delivery (#2926).
+///
+/// The redelivery pass is age-blind on purpose: dropping an old row would lose
+/// a push for a session that was simply asleep, which this module forbids. But
+/// an unmarked row that is hours old lands in a conversation that has moved on
+/// and reads as the answer to whatever the user just sent. Marking keeps the
+/// never-lose contract and removes the misreading.
+pub(crate) const STALE_NOTICE_SECS: i64 = 60 * 60;
+
+/// Prefix a redelivered context with its queue age once it is older than
+/// [`STALE_NOTICE_SECS`] (#2926).
+///
+/// Only `context_text` is marked. `display_text`, `origin` and `bg_meta` stay
+/// untouched so the echo rendering and the receipt path are unaffected.
+pub(crate) fn mark_delayed(context_text: &str, age_secs: i64) -> String {
+    if age_secs <= STALE_NOTICE_SECS {
+        return context_text.to_string();
+    }
+    let hours = age_secs / 3600;
+    let minutes = (age_secs % 3600) / 60;
+    format!(
+        "[DELAYED PUSH] queued {hours}h{minutes:02}m ago, before the current \
+         conversation. This is not a reply to anything just received.\n\n{context_text}"
+    )
+}
+
 /// The busy-lane framing prepended to a push that lands while its target is
 /// mid-turn (fork #13). It lives here, beside the durable-queue text
 /// normalisation it has to survive, because the two are one contract.
@@ -212,10 +238,14 @@ pub(crate) async fn redeliver_persisted() -> usize {
     };
     let mut count = 0usize;
     for row in rows {
+        // A row that survived a long downtime is delivered, never dropped, but
+        // it says how old it is so it cannot read as a reply to newer traffic
+        // (#2926).
+        let age_secs = now_unix().saturating_sub(row.created_at);
         // Origin and bg_meta are preserved: the echo rendering and the
         // receipt path depend on them, and the row IS the message.
         let msg = QueuedUserMessage {
-            context_text: row.context_text.clone(),
+            context_text: mark_delayed(&row.context_text, age_secs),
             display_text: row.display_text.clone(),
             origin: row.origin,
             bg_meta: row.bg_meta.clone(),

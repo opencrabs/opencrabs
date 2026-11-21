@@ -91,13 +91,17 @@ fn a_folded_turn_bounds_working_out_without_cutting_the_answer() {
         view.contains("visible_when_folded(block, turn.final_idx, i)"),
         "the final answer and deliverable reports use the same visibility decision as the fold"
     );
-    assert!(
-        view.contains("Some(&selection),\n                            full_body,"),
-        "the selectable answer path receives the answer-aware fullness"
+    // Fullness travels in a `RowMode` now, not as a bare bool (#3114): both the
+    // selectable and the plain row path hand it the answer-aware value, so a
+    // persisted row is never drawn without its fold state.
+    assert_eq!(
+        view.matches("full: full_body,").count(),
+        2,
+        "both row paths receive the answer-aware fullness"
     );
     assert!(
-        view.contains("&attachment_handlers,\n                        None,\n                        full_body,"),
-        "the plain answer path receives the answer-aware fullness"
+        view.contains("Some(&selection),"),
+        "the selectable path is still the one that carries the drag context"
     );
     assert!(
         !view.contains("attachment_handlers, None)"),

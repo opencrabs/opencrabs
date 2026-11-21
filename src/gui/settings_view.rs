@@ -130,20 +130,11 @@ pub const SPECS: &[SettingSpec] = &[
     },
     SettingSpec {
         section: "agent",
-        key: "completion_notification_enabled",
-        label: "Completion feedback",
+        key: "notify_on_plan_completed",
+        label: "Notify when a plan finishes",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "master switch for sound and OS notifications; the four below need it on",
-        group: SettingsSection::Notifications,
-    },
-    SettingSpec {
-        section: "agent",
-        key: "notify_on_turn_completed",
-        label: "Notify when a turn finishes",
-        kind: SettingKind::Toggle,
-        restart: false,
-        blurb: "",
+        blurb: "plays the completion chime and raises an OS banner; one per plan",
         group: SettingsSection::Notifications,
     },
     SettingSpec {
@@ -152,25 +143,7 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Notify when a turn fails",
         kind: SettingKind::Toggle,
         restart: false,
-        blurb: "",
-        group: SettingsSection::Notifications,
-    },
-    SettingSpec {
-        section: "agent",
-        key: "notify_on_task_completed",
-        label: "Notify when a plan task settles",
-        kind: SettingKind::Toggle,
-        restart: false,
-        blurb: "",
-        group: SettingsSection::Notifications,
-    },
-    SettingSpec {
-        section: "agent",
-        key: "notify_on_plan_completed",
-        label: "Notify when a plan finishes",
-        kind: SettingKind::Toggle,
-        restart: false,
-        blurb: "",
+        blurb: "raises an OS banner when a turn ends in an error",
         group: SettingsSection::Notifications,
     },
     SettingSpec {
@@ -377,13 +350,8 @@ pub fn current_values(config: &Config) -> Vec<RowValue> {
         .iter()
         .map(|spec| match (spec.section, spec.key) {
             ("agent", "approval_policy") => RowValue::Choice(a.approval_policy.clone()),
-            ("agent", "completion_notification_enabled") => {
-                RowValue::Bool(a.completion_notification_enabled)
-            }
-            ("agent", "notify_on_turn_completed") => RowValue::Bool(a.notify_on_turn_completed),
-            ("agent", "notify_on_turn_failed") => RowValue::Bool(a.notify_on_turn_failed),
-            ("agent", "notify_on_task_completed") => RowValue::Bool(a.notify_on_task_completed),
             ("agent", "notify_on_plan_completed") => RowValue::Bool(a.notify_on_plan_completed),
+            ("agent", "notify_on_turn_failed") => RowValue::Bool(a.notify_on_turn_failed),
             ("agent", "redact_sensitive_data") => RowValue::Bool(a.redact_sensitive_data),
             ("agent", "redact_group") => RowValue::OptBool(a.redact_group),
             ("agent", "redact_dm") => RowValue::OptBool(a.redact_dm),

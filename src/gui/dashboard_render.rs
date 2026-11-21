@@ -5,12 +5,16 @@
 //! earlier (#2690).
 
 use super::*;
+use opencrabs::ui_core::hints::{CONTEXT_TIGHT, Hint, HintState, dismissible};
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Advance from whatever repaint came in. The animation receipt is
         // cleared only by its own callback, not by an unrelated repaint.
         self.tick_middle_scroll(cx);
+        // The frame the window is showing, read where the window is in hand
+        // (#3082). Cheap: one comparison unless a drag moved it.
+        self.observe_window(window);
         // Native alpha and the root's opacity are two halves of the same
         // setting (#2922). Change the platform mode only when it flips; the
         // opacity itself is cheap to paint on every frame.
@@ -173,7 +177,7 @@ impl Render for Dashboard {
         // tick: the strip was re-read by mtime just above, and the pane
         // strips are re-read again when the split body is built below, so a
         // pane that settles between frames is caught on the next one.
-        self.chime_settled_plan_tasks(cx);
+        self.settle_plan_tasks(cx);
 
         // The expanded rail is a cached view of its own (#2933). The closed
         // rail never resolves that frame: it keeps only the logo and reopen
@@ -495,9 +499,24 @@ impl Render for Dashboard {
         // actually has, read from the live viewport rather than a constant, so
         // a row can never be planned wider than the box it is drawn into
         // (#2395). The usage screen loses its side panel from the same number.
-        let pane_width = attachment_view::content_width(
+        //
+        // The width the conversation's column really has (#3119): the viewport
+        // less the rail and the gutter the column spends on its own sides. The
+        // column is padded with `px_4`, one rem a side, in a split and on every
+        // screen but the unsplit chat; the unsplit chat runs edge to edge
+        // (#3112). A fixed 48 points of chrome, the safe side for a plan, was
+        // 16 too many here, and in a split those points made every planned pane
+        // narrower than the box it was drawn into: the rows stopped short of
+        // the plan card under them, which the pane sizes from the box itself.
+        let column_gutter = if self.screen == Screen::Chat && !self.window_is_split() {
+            0.0
+        } else {
+            2.0 * self.rem
+        };
+        let pane_width = attachment_view::column_width(
             f32::from(window.viewport_size().width),
             self.visible_rail_width() * self.rem,
+            column_gutter,
         );
         let picker_layout = model_layout::model_layout(
             pane_width,
@@ -551,6 +570,19 @@ impl Render for Dashboard {
                 // Minted before the view borrows the transcript (#2826): the
                 // two clicks are listeners, so they need `self` mutably.
                 let inline_edit = self.inline_edit_hooks(cx);
+                // Click resolution needs the conversation's own directory
+                // (#2846). A window launched from a desktop entry has no
+                // shell cwd, so a relative name in the transcript had no base
+                // and the click did nothing.
+                let click_roots = self
+                    .chat_session
+                    .and_then(|id| {
+                        agent_bridge::bridge()
+                            .map(|b| b.service.get_working_directory_for_session(id))
+                    })
+                    .into_iter()
+                    .collect();
+                self.copy_drag.set_roots(click_roots);
                 let primary = transcript::view(
                     &self.chat_state.transcript,
                     &self.chat_state.scroll,
@@ -593,6 +625,13 @@ impl Render for Dashboard {
                         // row that runs past the box is a frame to correct or
                         // a place they chose to be.
                         following: self.chat_state.follow.is_following(),
+                        // Whether a clip is being made for this conversation
+                        // right now (#3092). The set is the window's, keyed by
+                        // session, so a split leaf and the chat can never
+                        // disagree about which answer is being spoken.
+                        voice_pending: self
+                            .chat_session
+                            .is_some_and(|id| self.voice_pending.contains(&id)),
                     },
                 );
                 // The conversation takes the measure and the column centres it
@@ -611,7 +650,7 @@ impl Render for Dashboard {
                 // The panes come from the tree (#2472): one leaf is the
                 // window as it was, and each split adds a divider and the
                 // panes its children hold.
-                let body = self.panes_body(primary, pane_width, true, cx);
+                let body = self.panes_body(primary, pane_width, true, window, cx);
                 (
                     div()
                         .flex()
@@ -697,7 +736,16 @@ impl Render for Dashboard {
                             // on the card's rounded bottom edge. The split
                             // arm above yields an empty row, so a pane footer
                             // keeps the chrome it already had.
-                            .px_3()
+                            //
+                            // The row pads the card's column minus the hover
+                            // pill's inset, and each label pads the rest, so
+                            // every first glyph starts on
+                            // `CONVERSATION_INSET_REM` (#3114). That is the
+                            // column the field's own pad and the transcript's
+                            // gutter + bubble put their words on; the card is
+                            // already half a rem in from the session's edge, so
+                            // this row's step is the card's, not the pane's.
+                            .px(transcript::card_row_inset())
                             .py_2()
                             // The Seeker opens with a chord nothing on
                             // screen named (#2747). The hint is permanent and
@@ -713,7 +761,7 @@ impl Render for Dashboard {
                                     .items_center()
                                     .gap_1()
                                     .rounded_sm()
-                                    .px_1()
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
                                     .cursor_pointer()
@@ -730,6 +778,9 @@ impl Render for Dashboard {
                             )
                             .child(
                                 div()
+                                    // The pill's own 4, so the label lands on
+                                    // the row's 24 column (#3114).
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_muted))
                                     .child("ctrl+s · sidebar"),
@@ -739,6 +790,11 @@ impl Render for Dashboard {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
+                                    // Same 4 as the row's other labels: the
+                                    // truncated text starts and ends on the
+                                    // composer's column, not on the raw pad
+                                    // (#3114).
+                                    .px(transcript::hover_pill_inset())
                                     .text_xs()
                                     .text_color(rgb(palette::current().text_faint))
                                     .child(SharedString::from(identity)),
@@ -2236,9 +2292,67 @@ impl Render for Dashboard {
                 tabs,
                 self.chat_topics_expanded,
                 pill,
-            );
+            )
+            // Where the row actually landed, recorded for the pick's scrim
+            // (#3097). Measured from the strip's own children, because a side
+            // row is centred beside the conversation and no constant knows
+            // where that puts it. The value read this frame is the last
+            // paint's: prepaint runs after the tree is built, and the row
+            // does not move between frames.
+            .on_children_prepainted({
+                let slot = self.topic_strip_rect.clone();
+                let edge = self.topic_edge;
+                move |bounds, _window, _cx| {
+                    // The union of every child, not the first and the last: a
+                    // fold pill is shorter than the cells beside it, and a
+                    // band cut to the last child's edge would dim the bottom
+                    // of the row it exists to leave bright.
+                    let mut start = f32::INFINITY;
+                    let mut end = f32::NEG_INFINITY;
+                    for child in &bounds {
+                        let (near, far) = if edge.is_vertical() {
+                            (
+                                f32::from(child.origin.x),
+                                f32::from(child.origin.x + child.size.width),
+                            )
+                        } else {
+                            (
+                                f32::from(child.origin.y),
+                                f32::from(child.origin.y + child.size.height),
+                            )
+                        };
+                        start = start.min(near);
+                        end = end.max(far);
+                    }
+                    if start.is_finite() && end > start {
+                        *slot.borrow_mut() = Some(topic_tabs::StripRect { edge, start, end });
+                    }
+                }
+            });
             topic_row = Some((self.topic_edge, strip.into_any_element()));
         }
+        // Where a split pick's scrim leaves the chat bright (#3097). The row
+        // is the shortest way to the topic a split wants, and the scrim blocks
+        // the mouse for everything behind it, so a row under the scrim cannot
+        // answer the pick at all. No row means the chat dims whole.
+        //
+        // A split draws no window row (#2687), but every pane draws its own
+        // strip on the top edge at one height, so a constant covers all of
+        // them. The window's row is measured instead of derived: a side strip
+        // is centred beside the conversation, so its distance from the rail
+        // moves with the window's width and the text measure, and a constant
+        // put the band in the wrong place for every edge but the top.
+        let pick_hole = if split_draws_its_own {
+            Some(topic_tabs::StripRect {
+                edge: topic_tabs::Edge::Top,
+                start: 0.0,
+                end: topic_tabs::CELL_REMS * self.rem + 14.0,
+            })
+        } else if topic_row.is_some() {
+            *self.topic_strip_rect.borrow()
+        } else {
+            None
+        };
         // The dock owns the chrome, so the field must not paint a second card
         // inside it. A split pane renders the same editor bare and keeps its own
         // card, which is why this is a flag on the field and not a deleted style
@@ -2257,13 +2371,21 @@ impl Render for Dashboard {
             .h_full()
             .min_w_0()
             .min_h_0()
-            .gap_3()
-            // Less top and bottom room than the old 24px on every side: the
-            // header lines up with the sessions title, and the input is not
-            // floating in empty space above the window edge.
-            .px_6()
-            .pt_3()
-            .pb_4();
+            .gap_3();
+        // The unsplit chat's ground IS the shot (#3112): it runs edge to edge
+        // and top to bottom, with no gutter around it and no corner of its own.
+        // The owner's read was that the screen kept a band of empty background
+        // above the first row and below the field, and a rounded box floating
+        // in the middle of the pane. Every other screen keeps the window's
+        // gutter, and so does a split: those panes are cards with a focus ring,
+        // and a ring needs room around it.
+        if self.screen != Screen::Chat || self.window_is_split() {
+            // Less room on every side than the old 24px: the header lines up
+            // with the sessions title, the input is not floating in empty
+            // space above the window edge, and the sides drop to 16px so the
+            // gutter stops reading as a band beside the rail (#3001).
+            right = right.px_4().pt_3().pb_4();
+        }
         // The chat screen draws no title row (#2596). The conversation's
         // name already prints in the footer, so a second copy across the top
         // only cost a band of the window to repeat it. Every other screen
@@ -2283,14 +2405,15 @@ impl Render for Dashboard {
                 }
             }
         }
-        if let Some(bar) = topic_top {
-            // The topic bar is a row of the chat's own stack, so it takes the
-            // same measure as the text under it (#2590). It is drawn above the
-            // screen match, which is why the wrapper is a named function and
-            // not a closure: the same two values have to reach it here.
-            right = right.child(central(bar, centred_chat, chat_measure_px));
-        }
-        right = right.child(middle);
+        // The topic bar is a row of the chat's own stack, so it takes the same
+        // measure as the text under it (#2590). It is not attached here: the
+        // chat arm places it inside the session surface, above the history, so
+        // the whole session is one card (#3110). It is only ever built for the
+        // chat screen, which is why no other arm needs it.
+        // The conversation joins the column inside the arms below, not here:
+        // the chat puts it inside the session surface (#3110), which has to own
+        // the history, the strips and the composer together, and every other
+        // screen takes it as the plain body it always was.
         right = match self.screen {
             Screen::Chat => {
                 // The running checklist sits between the conversation and the
@@ -2312,23 +2435,111 @@ impl Render for Dashboard {
                     .flex_shrink()
                     .min_h_0()
                     .overflow_hidden()
-                    .gap_3();
+                    // The same 8 the session uses (#3114): the strips between
+                    // the history and the field are steps of one stack, not a
+                    // second, tighter grid parked inside it.
+                    .gap_2();
                 let mut above_used = false;
-                // In a split every pane carries its own plan, queue and
-                // composer (#2530), so the window-level copies stand down:
-                // drawing both would give the chat two composers. An unsplit
-                // window keeps exactly the layout it has always had, measure
-                // wrapper included (#2594).
-                if !self.window_is_split() {
+                // A split already is one card per pane, and each pane's leaf
+                // box paints its own fill, its own radius and the clip that
+                // keeps a scrolled row off the corner (#2612). A second wrapper
+                // around the arrangement would round the whole thing and leave
+                // the panes square inside it, so a split keeps the panes bare.
+                if self.window_is_split() {
+                    col = col.child(middle);
+                } else {
+                    // The session is one surface (#3110). The history, the plan
+                    // card, the queue strip, the suggested options, the
+                    // running-task row, the bottom topic row and the composer all
+                    // live inside a single surface, so the lower half of the
+                    // window reads as one session instead of a stack of unrelated
+                    // strips parked under the chat. The cards inside it stay cards,
+                    // because they are still separate objects, but they sit on this
+                    // fill rather than beside it, and the composer stops floating
+                    // over the gap with a surface of its own.
+                    //
+                    // The fill is the transcript's, so the two agree to the pixel
+                    // where the inner surface ends and no seam shows between them.
+                    // The clip stays here too: the transcript scrolls, so it cannot
+                    // clip its own rows without losing the scroll, and one scrolled
+                    // row painted past the surface's edge before the clip moved up.
+                    //
+                    // Built here, before the strips, because it is the ground they
+                    // sit on: `middle` is its first child and everything that rides
+                    // between the history and the field is appended in the order it
+                    // stacks.
+                    // The ground is the shot (#3112). It used to be a card the
+                    // size of the conversation's measure, rounded like the
+                    // bubbles and parked inside the window's gutter, which left
+                    // a band of empty background above the first row and below
+                    // the field. The owner's read: the background should take
+                    // the full height and the full width with no radius at all,
+                    // so the screen is one surface top to bottom. What keeps its
+                    // measure is the CONTENT, not the ground: the transcript
+                    // caps itself and centres, and every strip inside goes
+                    // through `session_row`, which does the same.
+                    let mut session = div()
+                        .flex()
+                        .flex_col()
+                        // One rhythm for the whole lower half (#3114): 8, the
+                        // step the transcript already gives between two of its
+                        // own rows. It was 12 here on top of the transcript's
+                        // own bottom 8, so the gap under the last card came to
+                        // 20 against 8 between the cards above it, and the
+                        // conversation closed on a band twice as wide as the
+                        // conversation. The cards inside still keep their own
+                        // shape; only the step between them changed.
+                        .gap_2()
+                        // Height, not `flex_1`: the card is a child of a row
+                        // (see the wrapper below), and in a row `flex_1` grows
+                        // the width, which would cancel the measure it is
+                        // about to be given (#3110).
+                        .h_full()
+                        .min_h_0()
+                        .w_full()
+                        .bg(rgb(transcript::surface_fill(palette::current().bg)))
+                        .overflow_hidden();
+                    // The topic bar opens the card, then the history. Both are
+                    // rows of the session, so the strip stops floating over a
+                    // surface it does not belong to (#3110).
+                    if let Some(bar) = topic_top {
+                        session = session.child(central(bar, centred_chat, chat_measure_px));
+                    }
+                    session = session.child(middle);
+                    // The hint card opens the stack, directly under the last
+                    // card of the conversation (#3124). It used to close the
+                    // stack, under the plan, the queue and the offers, and the
+                    // owner read that as a tip answering a plan it has nothing
+                    // to do with: the line comments on the turn that just
+                    // finished, so it belongs under that turn. Everything below
+                    // it is about what is waiting to happen next.
+                    if let Some(hint) = self.task_hint() {
+                        above = above.child(session_row(
+                            hint_card(&hint, cx).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
+                        above_used = true;
+                    }
+                    // In a split every pane carries its own plan, queue and
+                    // composer (#2530), so the window-level copies stand down:
+                    // drawing both would give the chat two composers. An unsplit
+                    // window keeps exactly the layout it has always had, measure
+                    // wrapper included (#2594).
                     let open = self.chat_session;
                     let actions = open.map(|session| self.plan_actions(session, cx));
                     self.plan.refresh();
                     let card = self
                         .plan
-                        .editing_view(actions.as_ref())
-                        .or_else(|| self.plan.view());
+                        .editing_view(actions.as_ref(), window)
+                        .or_else(|| self.plan.view(window));
                     if let Some(plan_view) = card {
-                        above = above.child(central(
+                        // The session is already capped to the conversation's
+                        // measure and centred as a whole, so a child of it is
+                        // on that axis by construction: `central` here would
+                        // wrap a width it already has. What the strips were
+                        // missing is the bubbles' side gutter (#3110).
+                        above = above.child(session_row(
                             plan_view.into_any_element(),
                             centred_chat,
                             chat_measure_px,
@@ -2337,7 +2548,7 @@ impl Render for Dashboard {
                     }
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
-                        above = above.child(central(
+                        above = above.child(session_row(
                             queue_strip(&waiting, self.composer.queue_expanded)
                                 .id("queue-strip-chat")
                                 .on_mouse_down(
@@ -2362,8 +2573,12 @@ impl Render for Dashboard {
                         let offers = agent_bridge::options_snapshot(sid);
                         if !offers.is_empty() {
                             let rows = self.option_rows(sid, offers, cx);
-                            above = above.child(central(
-                                options_strip(&rows).into_any_element(),
+                            let focus = self
+                                .options_focus
+                                .filter(|(session, _)| *session == sid)
+                                .map(|(_, at)| at);
+                            above = above.child(session_row(
+                                options_strip(&rows, focus).into_any_element(),
                                 centred_chat,
                                 chat_measure_px,
                             ));
@@ -2377,14 +2592,27 @@ impl Render for Dashboard {
                         && let Some(sid) = self.chat_session
                         && let Some(area) = self.task_area(sid, &label, cx)
                     {
-                        above = above.child(central(area, centred_chat, chat_measure_px));
+                        // An open list is a card of the messages' size, so it
+                        // takes the strips' half-rem gutter. A closed list is
+                        // one bare line, like the hint strip and the footer, and
+                        // it already pads its own: handing it the gutter as well
+                        // put its right edge a second 8 in from the column every
+                        // other row ends on, which is the misalignment the owner
+                        // predicted for the detached-task row before he saw it
+                        // (#3114). `central` only centres and caps; it adds no
+                        // inset of its own.
+                        above = above.child(if self.tasks_open.contains(&sid) {
+                            session_row(area, centred_chat, chat_measure_px)
+                        } else {
+                            central(area, centred_chat, chat_measure_px)
+                        });
                         above_used = true;
                     }
                     // The strips take their room from the conversation before
                     // the composer does: the box goes in above the input, and
                     // an empty box adds no row at all.
                     if above_used {
-                        col = col.child(above);
+                        session = session.child(above);
                     }
                     // The unsplit chat uses the same composer swap as a split
                     // leaf (#2924). Without this arm the forward state changed
@@ -2394,7 +2622,7 @@ impl Render for Dashboard {
                     // the composer and the footer, because the footer now
                     // lives inside the same card as the composer.
                     if let Some(strip) = topic_bottom {
-                        col = col.child(central(strip, centred_chat, chat_measure_px));
+                        session = session.child(central(strip, centred_chat, chat_measure_px));
                     }
                     let composer_replacement =
                         if self.forward_pick.is_some() && self.forward_leaf.is_none() {
@@ -2419,7 +2647,7 @@ impl Render for Dashboard {
                         if self.topic_draft.is_none() {
                             let popup = self.composer.editor.read(cx).command_popup();
                             if let Some((names, selected)) = popup {
-                                col = col.child(central(
+                                session = session.child(session_row(
                                     command_popup_view(&names, selected).into_any_element(),
                                     centred_chat,
                                     chat_measure_px,
@@ -2427,7 +2655,7 @@ impl Render for Dashboard {
                             } else if let Some((items, selected)) =
                                 self.composer.editor.read(cx).emoji_popup()
                             {
-                                col = col.child(central(
+                                session = session.child(session_row(
                                     emoji_popup_view(&items, selected).into_any_element(),
                                     centred_chat,
                                     chat_measure_px,
@@ -2436,46 +2664,88 @@ impl Render for Dashboard {
                         }
                         self.composer.editor.clone().into_any_element()
                     };
-                    // The dock owns the composer: surface, border, radius and
-                    // the hairline above the key hints. The composer itself
-                    // paints none of them any more, so a single session reads
-                    // as one card instead of a floating pill parked above a
-                    // separate footer row (#2987). The column has no gap: the only
-                    // separation inside the card is the 1px hairline.
-                    col = col.child(central(
-                        div()
-                            .id("composer-dock")
-                            .flex()
-                            .flex_col()
-                            .gap_0()
-                            .bg(glass_fill(palette::current().panel))
-                            .border_1()
-                            .border_color(rgb(palette::current().panel_hi))
-                            .rounded(px(COMPOSER_RADIUS))
-                            .overflow_hidden()
-                            .child(composer)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(1.))
-                                    .bg(rgb(palette::current().panel_hi)),
-                            )
-                            .child(footer.into_any_element())
-                            .into_any_element(),
+                    // The dock is the composer's column: the field, the
+                    // hairline, and the key hints under it. The surface, border
+                    // and radius live on the shell around it, so the field and
+                    // its footer read as one box instead of two stacked flush,
+                    // which would each round their own corners and leave a
+                    // notch where they meet.
+                    //
+                    // The card is the messages' size again (#3114). It ran edge
+                    // to edge after #3112, and the owner called that out on a
+                    // single pane: a full-bleed band under measure-wide cards
+                    // read as a slab from another window, and its words had to
+                    // be pushed back onto the conversation's column by hand.
+                    // The width comes from `session_row` below, the helper the
+                    // plan card and the queue already use, so the card's edge
+                    // lands where a message's edge lands and the rows inside it
+                    // pad the card's own column (`card_inset`) instead of the
+                    // pane's.
+                    let dock = div()
+                        .id("composer-dock")
+                        .flex()
+                        .flex_col()
+                        .gap_0()
+                        .child(composer)
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(1.))
+                                .bg(rgb(palette::current().panel_hi)),
+                        );
+                    // The composer's shell is the field and the footer, and
+                    // nothing else (#3102). The hint that used to ride on top
+                    // of it as a strip is now a card of its own above the
+                    // composer, where it can be read and dismissed instead of
+                    // being welded to the thing you type into.
+                    let shell = div()
+                        .flex()
+                        .flex_col()
+                        .gap_0()
+                        .w_full()
+                        .min_w_0()
+                        .bg(glass_fill(palette::current().panel))
+                        .border_1()
+                        .border_color(rgb(palette::current().panel_hi))
+                        .rounded(px(transcript::MESSAGE_RADIUS))
+                        .overflow_hidden();
+                    // The composer closes the session as its last row, a card of
+                    // the conversation's own size (#3110, #3114). `session_row`
+                    // spends the half rem on each side, so the card's edge is
+                    // where a message's edge is, and `pb_2` is that same step
+                    // below: a rounded card flush on the window's bottom edge is
+                    // a card whose bottom you cannot see.
+                    //
+                    // The footer is the last row of the card and it takes the
+                    // card's column like the field above it (#3114).
+                    session = session.child(div().w_full().min_w_0().pb_2().child(session_row(
+                        shell.child(dock.child(footer)).into_any_element(),
                         centred_chat,
                         chat_measure_px,
-                    ));
+                    )));
+                    // The session card takes the conversation's measure and
+                    // centres as a whole, so its own edges line up with the
+                    // text instead of the card being full width with the text
+                    // inset (#2586). `central` cannot do this job: its row is
+                    // `flex_none`, so a card that has to fill the height would
+                    // collapse inside it. This row grows, and the card is what
+                    // it centres.
+                    col = col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .justify_center()
+                            .child(session),
+                    );
                 }
                 col
             }
-            Screen::Usage => right.child(footer),
-            Screen::Files => right.child(footer),
-            Screen::Models => right.child(footer),
-            Screen::Skills => right.child(footer),
-            Screen::Projects => right.child(footer),
-            Screen::DirectoryPicker => right.child(footer),
-            Screen::Onboard => right.child(footer),
-            Screen::MissionControl => right.child(footer),
+            // Every other screen is the body and then its footer, unchanged:
+            // only the chat has a session surface to build (#3110).
+            _ => right.child(middle).child(footer),
         };
 
         let mut root = div()
@@ -2518,6 +2788,12 @@ impl Render for Dashboard {
                     // take the keyboard, so the composer needed an Esc before
                     // it would type again.
                     this.rail_hands_back();
+                    // A press anywhere but the card is a press on the
+                    // conversation, so the offer's ring steps aside and the
+                    // keyboard goes back to wherever the press landed (#3101).
+                    if this.options_focus.take().is_some() {
+                        cx.notify();
+                    }
                     if this.sessions.rail_menu.take().is_some() {
                         cx.notify();
                     }
@@ -2679,10 +2955,10 @@ impl Render for Dashboard {
         // the conversation they belong to and the slack falls outside both.
         match topic_side {
             Some((edge, strip)) => {
-                // The column pads itself with `px_6` on each side, so its own
-                // width is the measure plus 3rem. Capping it there puts its
+                // The column pads itself with `px_4` on each side, so its own
+                // width is the measure plus 2rem. Capping it there puts its
                 // children back on the axis they always centred on.
-                let pane_px = chat_measure_px + 3.0 * self.rem;
+                let pane_px = chat_measure_px + 2.0 * self.rem;
                 let pane = div()
                     .flex()
                     .flex_col()
@@ -3121,10 +3397,12 @@ impl Render for Dashboard {
             root = root.child(topic_info_overlay(&info, close));
         }
         // While a split waits for its session the chat dims, and a card says what
-        // to do. The sidebar is left bright so its rows can be picked (#2438).
+        // to do. The sidebar is left bright so its rows can be picked (#2438),
+        // and so is the topic row, on whichever edge it sits, for the same
+        // reason (#3097).
         if let Some(layout) = self.split_pick {
             let rail_px = px(self.visible_rail_width() * self.rem);
-            root = root.child(split_pick_overlay(layout, rail_px));
+            root = root.child(split_pick_overlay(layout, rail_px, pick_hole));
         }
         // The name prompt takes the whole window: the scrim darkens everything
         // else, and a click outside the panel cancels, as Esc does (#2398).
@@ -3355,13 +3633,16 @@ impl Render for Dashboard {
         // The window controls are the frame's, not a screen's (#2813): drawn
         // over the top-right corner so no screen's layout owns them, and before
         // the menus and modals below so a scrim that owns the pointer also owns
-        // the buttons. Windows has no caption to inherit, so the same cluster
-        // is drawn there and the platform runs its clicks (#2966).
-        let decorations =
-            effective_decorations(window.window_decorations(), PLATFORM_DRAWS_CAPTION);
-        #[cfg(target_os = "windows")]
-        let on_control: Option<window_controls::Handler> = None;
-        #[cfg(not(target_os = "windows"))]
+        // the buttons. Where the platform draws a caption, the cluster is not
+        // drawn at all: a second set of buttons in the same corner is exactly
+        // the bug #3083 reports, and the app's set was the one that went dead.
+        let decorations = effective_decorations(
+            window.window_decorations(),
+            platform_draws_caption(TITLEBAR_APPEARS_TRANSPARENT),
+        );
+        // Whichever platform draws the cluster also runs it. Only Windows has a
+        // path where the platform runs the buttons instead, and that is the
+        // path where the cluster is not drawn (see `platform_draws_caption`).
         let on_control: Option<window_controls::Handler> =
             Some(Rc::new(|control, _ev, window, cx| match control {
                 window_controls::Control::Minimize => window.minimize_window(),
@@ -3462,4 +3743,206 @@ impl Render for Dashboard {
         self.schedule_middle_scroll_frame(window, cx);
         root
     }
+}
+
+/// The facts the hint row is decided from, read off state the app already
+/// keeps for its own gauge, footer and update badge.
+///
+/// Nothing here is bookkeeping kept only for the hint: `ctx_tokens` and
+/// `ctx_max` are the numbers the context gauge prints, `busy` is what the
+/// composer shows while a turn runs, and `update_available` is the version the
+/// badge already names.
+impl Dashboard {
+    pub(crate) fn hint_state(&self) -> HintState {
+        let mut state = HintState {
+            processing: self.turn.busy,
+            context_used: u64::from(self.turn.ctx_tokens.unwrap_or(0)),
+            context_max: u64::from(self.ctx_max),
+            clear_base: 0,
+            update_version: self.update_available.clone(),
+            turns: self.chat_state.transcript.turns.len(),
+            // An offer waiting above the composer is the most actionable thing
+            // on screen, so the row says how to reach it (#3101). Read from the
+            // session on screen, the same one the card is drawn for.
+            offers: self
+                .chat_session
+                .map(|sid| agent_bridge::options_snapshot(sid).len())
+                .unwrap_or(0),
+            // The rail holding the keyboard changes what a typed character
+            // does, so the row says so instead of naming commands the field
+            // will never receive.
+            rail_focused: self.rail_open && self.rail_focused,
+            // A split waiting for its second session reads the same keys for a
+            // different promise, and one word apart is the difference between a
+            // shortcut and a surprise (#3102).
+            rail_split: self.split_target.is_some(),
+            // Filled from the dismissal store by the window itself; the engine
+            // stays free of the database.
+            dismissed: self.hint_dismissed.clone(),
+            // The same predicate the field's cold line uses, so the tip and the
+            // prompt never disagree about whether there is an engine to record
+            // with.
+            voice: crate::composer_view::voice_ready(),
+        };
+        // What a `/clear` leaves behind is the system prompt and the tool
+        // schemas. Counting it tokenises every tool schema, so it is measured
+        // only when the context rung is live: this runs on every frame, and
+        // the other rungs never print the number.
+        if state.context_percent() >= CONTEXT_TIGHT {
+            state.clear_base = agent_bridge::bridge()
+                .map(|b| u64::from(b.service.base_context_tokens_raw()))
+                .unwrap_or(0);
+        }
+        state
+    }
+}
+
+/// One card, on the bubbles' own column (#3110, #3114).
+///
+/// The ground runs edge to edge now, so the cards cannot simply take its
+/// width: they would be wider than every message above them. What they match is
+/// the CONTENT column, which is the conversation's measure when the pane is
+/// wider than it, and the pane itself when it is not. `px_2` is the transcript's
+/// own padding step, and it is a half rem rather than a pixel count, so the
+/// strip's left and right edges land exactly where a message bubble's do at any
+/// zoom level: both sit half a rem inside that column, and both are as wide as
+/// what the transcript hands its rows (`measure - rem`). That is what makes a
+/// plan card or an options card read as the same size as the messages above it
+/// instead of as a band cut out of the background with only its top and bottom
+/// visible.
+fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .justify_center()
+        .w_full()
+        .min_w_0()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .when(centred, |d| d.w(px(measure)))
+                .child(view),
+        )
+        .into_any_element()
+}
+
+/// The hint card under the conversation (#3102, #3121, #3124).
+///
+/// It carries one line about the work: what the screen is asking for right now.
+/// The keys that act on the field itself stay inside the field, where the caret
+/// is, so the two never compete for the same glance.
+///
+/// It is a card of the conversation's column, not a strip of the composer's
+/// box. A line welded to the top of the field read as part of the input, and it
+/// had no way to be answered: a reader who already knew the tip had to look at
+/// it forever. So it stands on its own, in the message card's fill and curve,
+/// and hovering it offers the one control it needs, a way to make it stop.
+///
+/// The hover state lives in the shared thread-local the player blocks use, so
+/// a repaint costs one map lookup and no view rebuild.
+fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
+    let shown = palette::current();
+    let hover_id = format!("hint-card-{}", hint.id);
+    let over = crate::composer_orb::hovering(&hover_id);
+    // The id is what makes the card stateful, and `on_hover` only exists on a
+    // stateful element (#3121), so the card returns the element it builds
+    // rather than a plain `Div` it can no longer be.
+    let mut card = div()
+        .id("hint-card")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        // The conversation's column, not the strips' 12 (#3124). The card is
+        // placed by `session_row`, which spends half a rem of the gutter on
+        // each side, so a uniform `p_3` left its words at 20 while the messages
+        // above it, the composer's field and the footer's labels all start at
+        // 24. It pads the card's step for the same reason the field does, and
+        // the vertical step stays 12: only the sides were off.
+        .px(transcript::card_inset())
+        .py_3()
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .bg(glass_fill(transcript::message_card_surface()))
+        .border_1()
+        .border_color(session_edge(shown.panel_hi))
+        .on_hover(move |is_over: &bool, window, _cx| {
+            // Only a change is worth a frame: a pointer that rests on the card
+            // would otherwise repaint the window on every mouse move.
+            if crate::composer_orb::note_hover(&hover_id, *is_over) {
+                window.refresh();
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    // The card names itself (#3124). A bare sentence over the
+                    // composer read as the app talking to itself, and the owner
+                    // asked what the line was supposed to be. The label is
+                    // faint and never shrinks, so the tip keeps the row.
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from("Hint")),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        // The theme's accent at full strength shouted for a
+                        // line that is advice, not a warning (#3124). It is
+                        // mixed a quarter of the way into the card it sits on,
+                        // which is the same ink at 75%, and the accent itself
+                        // is untouched: focus rings, the selection wash and
+                        // every other accent surface stay exactly as they were.
+                        .text_color(rgb(gui_theme::mix(
+                            shown.accent,
+                            transcript::message_card_surface(),
+                            25,
+                            100,
+                        )))
+                        .child(SharedString::from(hint.text.clone())),
+                ),
+        );
+    // Only a hint the reader may hide gets the control, and only while the
+    // pointer is on the card: a permanent × on every line would be a button
+    // asking to be pressed by accident. The class comes from the engine, which
+    // keeps the warnings (a context about to overflow) undismissable: hiding
+    // the one line that says the conversation is running out of room is not a
+    // preference, it is a way to lose work.
+    if over && dismissible(hint.id) {
+        let id = hint.id;
+        card = card.child(
+            div()
+                .id("hint-dismiss")
+                .flex_none()
+                .px_1()
+                .rounded(px(4.0))
+                .text_xs()
+                .text_color(rgb(shown.text_muted))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(shown.track)).text_color(rgb(shown.text_normal)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Dashboard, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_hint(id, cx);
+                    }),
+                )
+                .child(SharedString::from("×")),
+        );
+    }
+    card
 }

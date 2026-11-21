@@ -7,6 +7,14 @@
 //! different session row and takes the visible history and title with it
 //! (#1585).
 //!
+//! The same economics arrive earlier, on a provider failure. A session close
+//! to auto-compaction that fails over sends the whole window to the fallback
+//! and pays full input price on it, when the user only wants to keep going.
+//! Clearing first sends the marker alone, an environment snapshot, the plan
+//! state and six capped exchanges, so the fallback picks up from there for a
+//! fraction of that request. Most people hit this before they ever reach a
+//! manual compaction, which is why both paths share one way out (#3125).
+//!
 //! Clearing is one user row starting with the compaction-marker prefix. The
 //! context loader already cuts at the last such row and the TUI already
 //! hides it on reload, so history stays on screen and in the database, the

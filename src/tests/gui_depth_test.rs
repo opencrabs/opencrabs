@@ -32,7 +32,7 @@ fn the_header_has_a_panel_background_and_a_divider() {
 }
 
 #[test]
-fn the_input_has_a_panel_background_and_a_shadow() {
+fn the_input_has_a_panel_background_and_a_hairline() {
     // The chain, not a byte window: the dock comment (#2987) pushed the fill
     // past the 400 bytes a fixed slice used to read.
     let start = EDITOR
@@ -51,7 +51,14 @@ fn the_input_has_a_panel_background_and_a_shadow() {
             || root.contains(".bg(rgb(palette::current().panel))"),
         "the input sits on the panel surface, however that fill is mixed"
     );
-    assert!(root.contains(".shadow_sm()"));
+    // Flat since #3112: the shadow was what made the composer read as a card
+    // floating inside the pane rather than the pane's own bottom edge. The
+    // hairline on top is the only separation it needs.
+    assert!(!root.contains(".shadow_sm()"), "the composer floats again");
+    assert!(
+        root.contains(".border_t(px(1.))"),
+        "the composer lost the hairline that is its only seam"
+    );
 }
 
 /// One leaf's frame, from its box down to its status row (#2472, #2581,

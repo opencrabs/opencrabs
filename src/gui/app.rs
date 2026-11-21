@@ -98,6 +98,11 @@ pub(crate) fn run() {
     }
     let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
     let session_list = futures::executor::block_on(sessions::load_sessions(db_path.clone()));
+    // Which hints the reader has hidden, read before the first frame so a
+    // dismissed line never flashes in and out (#3121). A read that fails shows
+    // every hint rather than none: a repeated hint is a small annoyance, a
+    // silently empty card is a feature that looks broken.
+    let hint_dismissed = hint_dismiss::load(db_path.clone());
     // The pinned set is a sidecar table, so it is its own read. A failure
     // leaves the rail unpinned rather than hiding the conversations.
     let favorites: std::collections::HashSet<uuid::Uuid> =
@@ -195,6 +200,15 @@ pub(crate) fn run() {
     // to exist before the tree can agree with it. Nothing is drawn from it
     // until then, so a stale or unreadable file costs one log line.
     let saved_layout = layout_store::load(&layout_store::path());
+    // The frame that file remembers (#3082). Kept beside the tree because
+    // `restore_layout` consumes the tree, and the boot needs the frame before
+    // the window exists.
+    let saved_window = saved_layout.as_ref().and_then(|saved| saved.window);
+    // Whether the rail was drawn (#3105). Read here for the same reason as the
+    // frame: the first paint already has to know, and a rail the user closed
+    // must not flash open and then shut on every launch.
+    let saved_rail_open = saved_layout.as_ref().and_then(|saved| saved.rail_open);
+
     // Chat is the default screen: the conversation the user was in opens on
     // launch, and a first run opens the newest. The usage ledger is something
     // the user asks for (ctrl+u); the two never share the pane, so a
@@ -223,16 +237,30 @@ pub(crate) fn run() {
         // its generic "exec" icon for the whole session otherwise.
         icon::apply_dock_icon();
         editor::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(980.0), px(760.0)), cx);
+        // The work area, not the whole screen (#3082). A fixed 980x760 asks for
+        // 1470x1140 physical on a 1080p display at 150%, which is taller than
+        // the screen: the input opened under the taskbar with no way to drag it
+        // back. Fitted, the frame always lands inside what the platform lets it
+        // use.
+        //
+        // A frame the last run left wins over the default, as long as it still
+        // sits on a screen this launch can see: a window remembered on a
+        // monitor that is no longer attached would open where nothing can be
+        // clicked.
+        let bounds = window_geometry::boot_window_bounds(saved_window.as_ref(), cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
                 // Below this the single-column grid still fits every card's
                 // 420px minimum, so nothing clips on load.
-                window_min_size: Some(size(px(480.0), px(320.0))),
+                window_min_size: Some(opencrabs::ui_core::window_geometry::MIN_SIZE),
                 titlebar: Some(TitlebarOptions {
                     title: Some("OpenCrabs".into()),
-                    appears_transparent: false,
+                    // One constant, shared with the frame that decides who
+                    // draws the min, max and close buttons (#3083): a window
+                    // created with one answer and drawn with the other ends up
+                    // with two sets of buttons or none.
+                    appears_transparent: TITLEBAR_APPEARS_TRANSPARENT,
                     traffic_light_position: None,
                 }),
                 // The root paints every surface at the matching opacity. The
@@ -297,6 +325,14 @@ pub(crate) fn run() {
                         editor::EditorEvent::Below => {
                             if let Some(session) = this.chat_session {
                                 this.focus_tasks(session, cx);
+                            }
+                        }
+                        // Up off the top of the field reaches the follow-up
+                        // offer above it, the mirror of Below and ahead of
+                        // history (#3101).
+                        editor::EditorEvent::Above => {
+                            if let Some(session) = this.chat_session {
+                                this.focus_options(session, cx);
                             }
                         }
                     })
@@ -448,7 +484,14 @@ pub(crate) fn run() {
                         mc_logs: None,
                         mc_notice: None,
                         rem: BASE_REM,
+                        // The frame the last run left (#3082). Seeded from the
+                        // file so the first paint already knows where the
+                        // window is, and so an untouched window writes nothing.
+                        window_frame: saved_window,
+                        window_frame_seen: saved_window,
+                        window_frame_saved: saved_window,
                         db_path: db_path.clone(),
+                        hint_dismissed,
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),
                         rail_index: rail_activity::PlanIndex::default(),
@@ -464,10 +507,10 @@ pub(crate) fn run() {
                         seeker_find_gen: 0,
                         seeker_scheduled_query: String::new(),
                         rail_chips_expanded: std::collections::HashMap::new(),
-                        voice_turns: std::collections::HashSet::new(),
                         voice_paint: voice_play::PaintState::default(),
                         rail_width: RAIL_DEFAULT_REM,
-                        rail_open: true,
+                        // The rail the last run closed stays closed (#3105).
+                        rail_open: saved_rail_open.unwrap_or(true),
                         rail_focused: false,
                         poll_tick: 0,
                         rail_anim_live: false,
@@ -489,6 +532,7 @@ pub(crate) fn run() {
                         pane_drop: None,
                         copy_drag,
                         split_pick: None,
+                        split_opened_rail: false,
                         split_creating: false,
                         msg_menu: None,
                         msg_menu_row: None,
@@ -545,6 +589,7 @@ pub(crate) fn run() {
                                 .as_deref(),
                         ),
                         chat_topics_expanded: false,
+                        topic_strip_rect: std::rc::Rc::default(),
                         topic_rename: None,
                         topic_info: None,
                         themes_hue: 24.47,
@@ -598,12 +643,13 @@ pub(crate) fn run() {
                         plan_expanded: std::collections::HashSet::new(),
                         tasks_open: std::collections::HashSet::new(),
                         task_focus: None,
+                        options_focus: None,
                         task_open: HashMap::new(),
                         task_tails: HashMap::new(),
                         task_detail: None,
                         task_detail_scroll: ScrollHandle::new(),
                         task_detail_generation: 0,
-                        announced_task_completions: std::collections::HashSet::new(),
+                        settle_ledger: opencrabs::utils::settle_ledger::SettleLedger::open(),
                         plan_flash_until: HashMap::new(),
                         chat_state: chat_leaf::ChatState {
                             transcript: transcript::TranscriptState {
@@ -630,6 +676,7 @@ pub(crate) fn run() {
                         agent_ready: false,
                         turn: chat_leaf::Turn::default(),
                         stashed: HashMap::new(),
+                        voice_pending: std::collections::HashSet::new(),
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
                         footer_dir: None,

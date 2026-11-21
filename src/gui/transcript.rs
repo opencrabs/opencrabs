@@ -30,14 +30,16 @@ use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, ClickEvent, Div, HighlightStyle, MouseButton, MouseDownEvent,
-    Pixels, Point, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout, TextStyle,
-    Window, div, point, prelude::*, px, rems, rgb, rgba,
+    Pixels, Point, Rems, ScrollHandle, SharedString, Stateful, Styled, StyledText, TextLayout,
+    TextStyle, Window, div, point, prelude::*, px, rems, rgb, rgba,
 };
 
+use opencrabs::channels::voice::spoken;
 use opencrabs::db::Database;
 use opencrabs::db::models::Message;
 use opencrabs::db::repository::message::MessageRepository;
@@ -584,7 +586,10 @@ impl LiveTurn {
     /// outlive the failure it described.
     pub fn begin(&mut self, user: String) {
         self.clear();
-        self.user = Some(user);
+        // A card draws the question the reader asked, never the note that told
+        // the model it was spoken (#3092). Stripping here covers both ways a
+        // turn starts, because `resume` is this call plus the ledger flag.
+        self.user = Some(spoken::without_prefix(&user).to_string());
         self.started = Some(std::time::Instant::now());
         self.sent_at = Some(chrono::Local::now());
     }
@@ -1652,7 +1657,7 @@ pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
     else {
         return false;
     };
-    if role != "user" || content.trim() != question {
+    if role != "user" || spoken::without_prefix(content).trim() != question {
         return false;
     }
     let Some(sent) = live.sent_at else {
@@ -1814,6 +1819,21 @@ fn message_surface_for(palette: &palette::Palette, role: &str) -> u32 {
 
 fn message_surface(role: &str) -> u32 {
     message_surface_for(&palette::current(), role)
+}
+
+/// The fill a message card paints, for the strips that share its column
+/// (#3114).
+///
+/// Only the user's bubble carries a surface: the assistant's words sit on the
+/// history's own fill. So there is one message tone in the window, and the
+/// cards that stand in the conversation's column (the suggested options, the
+/// plan waiting on approval, the checklist once it runs, the finished plan in
+/// the transcript) read it from here instead of picking their own tone off the
+/// raised panel. Two tones that close together read as two families of card,
+/// and the owner saw exactly that: the plan card "looks very much mixed with
+/// the background" while the bubbles beside it did not.
+pub(crate) fn message_card_surface() -> u32 {
+    message_surface("user")
 }
 
 fn body_style(size: f32) -> TextStyle {
@@ -2100,8 +2120,79 @@ const RHYTHM_CELL_PAD_X: f32 = 16.0;
 const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 
 /// Message text sits inside the rounded surface, never on its curved edge.
-const MESSAGE_PAD_X: f32 = 16.0;
-const MESSAGE_PAD_Y: f32 = 12.0;
+///
+/// The composer's take preview reads them too (#3114): a recorded clip and the
+/// words the recogniser heard are the same card whether they are still a draft
+/// or already a message, so the inset they put their words at is one number
+/// rather than two that drift apart.
+pub(crate) const MESSAGE_PAD_X: f32 = 16.0;
+pub(crate) const MESSAGE_PAD_Y: f32 = 12.0;
+
+/// The conversation's left column, in rem steps (#3114).
+///
+/// Every row that carries words in this window starts here: a message's text
+/// (the transcript's half-rem gutter plus the bubble's 16), the field the
+/// reader types in, its paperclip and mic, the task strip above it, the key
+/// hints under it and the footer under those. It is one number because it
+/// drifted five times when it was five arithmetic guesses: `p_3` at 12, then
+/// 16, then a gutter that the flat footer took away without telling the rows
+/// that had shared it.
+///
+/// It is rem, not pixels, because the gutter it is built from is a rem step:
+/// the whole column has to scale with the reader's zoom, or the composer would
+/// hold still while the conversation moved under it.
+pub(crate) const CONVERSATION_INSET_REM: f32 = 1.5;
+
+/// The padding a hover pill adds inside a row, in rem steps (#3114).
+///
+/// The task strip and the footer are both rows of clickable labels: the label
+/// sits on the conversation's column, and the clickable box reaches the row's
+/// own padding. So the row pads `CONVERSATION_INSET_REM - HOVER_PILL_INSET_REM`
+/// and each label pads `HOVER_PILL_INSET_REM`.
+pub(crate) const HOVER_PILL_INSET_REM: f32 = 0.25;
+
+/// The conversation's column, resolved for a style call (#3114).
+///
+/// The constants above are the numbers; these are how a call site reads them.
+/// `.px(rems(a - b))` written out at every row was the same subtraction in six
+/// places, and a reader checking whether two rows line up had to do arithmetic
+/// across two files to answer.
+///
+/// They return `Rems` and not `Pixels` on purpose: the conversion happens where
+/// the style is resolved, so a zoom change moves the row with the text instead
+/// of freezing it at whatever the rem was when the view was built.
+pub(crate) fn conversation_inset() -> Rems {
+    rems(CONVERSATION_INSET_REM)
+}
+
+/// The padding a hover pill adds inside such a row (#3114).
+pub(crate) fn hover_pill_inset() -> Rems {
+    rems(HOVER_PILL_INSET_REM)
+}
+
+/// The column inside a card that already sits on the conversation's gutter
+/// (#3114).
+///
+/// A card of the session's own size (the plan, the queue, the composer) is
+/// placed by `session_row`, which spends half a rem on each side to put the
+/// card's edge where a message's edge is. Its words still have to reach the
+/// same column as a message's words, so a row inside such a card pads the
+/// conversation's inset LESS that half rem. Read as a pixel count the two
+/// disagree the moment the reader zooms, which is why the subtraction is here
+/// and in rem steps.
+pub(crate) const CARD_INSET_REM: f32 = CONVERSATION_INSET_REM - 0.5;
+
+/// The card's column, resolved for a style call (#3114).
+pub(crate) fn card_inset() -> Rems {
+    rems(CARD_INSET_REM)
+}
+
+/// The inset of a label row inside such a card (#3114): the card's column less
+/// the pill's own padding, so the label's glyph lands on the column and its
+/// clickable box reaches the card's edge step.
+pub(crate) fn card_row_inset() -> Rems {
+    rems(CARD_INSET_REM - HOVER_PILL_INSET_REM)
+}
 
 /// The shortest the conversation is ever allowed to be (#2980).
 ///
@@ -2138,9 +2229,19 @@ fn message_max_width(content_width: f32) -> f32 {
 const FORWARD_BAR_WIDTH: f32 = 3.0;
 /// The gap between that bar and the forwarded text.
 const FORWARD_BAR_GAP: f32 = 12.0;
-const MESSAGE_RADIUS: f32 = 12.0;
+/// The curve the message bubbles, the session surface and the composer all
+/// share (#3110).
+///
+/// It is the chat history's own radius, not `CARD_RADIUS`: the session
+/// background is the box the bubbles live in, so it has to carry the same
+/// curve they do or the two read as separate objects at the corners. The
+/// session surface in `dashboard_render` reads this same constant.
+pub(crate) const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
-const PLAIN_TEXT_SIZE: f32 = 13.0;
+/// The answer's body size. Public so the strips that stand in the same column
+/// can match it: an offer the user picks should not read smaller than the
+/// answer it follows (#3124).
+pub(crate) const PLAIN_TEXT_SIZE: f32 = 13.0;
 /// Tool calls and card lines: the `text_xs` size the pane draws them at, so a
 /// selectable segment measures exactly the box it paints in.
 pub(crate) const SMALL_TEXT_SIZE: f32 = 12.0;
@@ -2603,19 +2704,21 @@ fn bubble_has_surface(role: &str) -> bool {
 /// roles so a folded history holds one rhythm, and only the user message
 /// carries a surface behind them. That surface takes `MESSAGE_RADIUS`, so the
 /// message corners stay tighter than the cards around them (#2571).
-// A render call: the nine arguments are the row's shape and its content, so a
-// bundle would only move the same state one call away (#2972).
+// A render call: the arguments are the row's shape and its content, so a bundle
+// would only move the same state one call away (#2972).
 #[allow(clippy::too_many_arguments)]
 fn bubble(
     role: &str,
     content: &str,
     time: &str,
+    message_id: Option<uuid::Uuid>,
     content_width: f32,
     row_cap: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
     full: bool,
     open: Option<&ClickHandler>,
+    voice_pending: bool,
 ) -> Div {
     // The cut happens on the raw source, before anything walks it (#2805): a
     // folded working-out body reads its first rows and the rest is one click
@@ -2704,6 +2807,32 @@ fn bubble(
                 .child(SharedString::from(time.to_string())),
         );
     }
+    // A voice note is a take the microphone heard (#3111): the clip is the
+    // message and the words are its reference, so the row draws the player
+    // first and keeps the transcription one click away. Every other row keeps
+    // its order, with the words leading and the files under them.
+    let voice = if role == "user" {
+        voice_note(&content)
+    } else {
+        None
+    };
+    // The fold exists only when there are words to fold away: a take the
+    // microphone heard with nothing transcribed is a player and nothing else,
+    // and a toggle that opens onto an empty line is a control that does nothing.
+    // The text is already stripped of every marker, so a body that carried only
+    // the clip reads as empty here.
+    let transcript = (voice.is_some() && !text.trim().is_empty())
+        .then(|| transcript_key(message_id, time, &content));
+    let transcript_open = transcript
+        .as_ref()
+        .is_some_and(|key| transcript_is_open(key));
+    // The player goes first, because it is the thing the row is about.
+    if voice.is_some() && !paths.is_empty() {
+        col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    if let Some(key) = &transcript {
+        col = col.child(transcript_toggle(key, transcript_open));
+    }
     // A user row that quotes other rows draws the quote above the reply
     // (#2827). The marker lines are part of the text, so the store keeps them
     // and the copy path carries them without a second field.
@@ -2712,10 +2841,12 @@ fn bubble(
     } else {
         (Vec::new(), text.as_ref())
     };
-    if !quote.is_empty() {
+    // A folded transcript keeps its quote with the words it belongs to: the
+    // quote is part of what the reader wrote, not a second message.
+    if (voice.is_none() || transcript_open) && !quote.is_empty() {
         col = col.child(quote_block(&quote, selection));
     }
-    if !text.trim().is_empty() {
+    if !text.trim().is_empty() && (voice.is_none() || transcript_open) {
         // Every role that carries prose is parsed the same way. The user row
         // renders at its own 16px with `Verbatim`, so a heading typed by hand
         // is a heading and a single Enter is still a line break. The harness
@@ -2741,11 +2872,32 @@ fn bubble(
     // is the control itself: one click opens the whole message in the reader
     // (#3064). A cut with no visible way back to the text is what #904 warns
     // about, and the row's own click is invisible, so the card carries it.
-    if let Some(fold) = &folded {
+    //
+    // A folded transcript keeps its card behind the same fold as its words
+    // (#3111): the card IS the words, so a row whose words are folded away
+    // draws neither.
+    if let Some(fold) = &folded
+        && (voice.is_none() || transcript_open)
+    {
         col = col.child(folded_document_cell(fold, open));
     }
-    if !paths.is_empty() {
+    if voice.is_none() && !paths.is_empty() {
         col = col.child(history_attachments(&paths, attachment_width, handlers));
+    }
+    // The clip for this answer is still being made (#3092), so the row holds the
+    // block it will land in: the same glass at the same size, drawn in the same
+    // column, and swapped for the player when the audio arrives. A placeholder
+    // anywhere else would be a second element that disappears the moment the
+    // real one appears, and the answer would jump.
+    //
+    // It waits on the marker, not only on the flag: a row that already carries
+    // its clip has nothing to wait for, and a second block would sit under a
+    // player that is already there.
+    if voice_pending && role == "assistant" && !paths.iter().any(|path| audio_path(path)) {
+        col = col.child(crate::composer_orb::pending(
+            &format!("voice-pending-{time}"),
+            attachment_width,
+        ));
     }
     if hidden > 0 {
         // Only a working-out body reaches this line now (#3053): every message
@@ -2946,6 +3098,117 @@ fn forward_block(
 /// gpui re-derives an image's height from its own aspect ratio whenever the
 /// height is left `Auto`, so every tile pins both sides here and lets
 /// `object_fit` crop inside the box instead of growing it.
+/// Whether a stored path is a clip, the kind of attachment the row draws as a
+/// player rather than a tile (#3092).
+fn audio_path(path: &std::path::Path) -> bool {
+    Attachment::for_display(path.to_path_buf()).is_audio()
+}
+
+/// The clip a message carries when the message is a voice note (#3111).
+///
+/// A voice note is not any audio file: it is a take the microphone heard, and
+/// the send path writes an `<<AUD:...>>` marker whose path sits in the
+/// conversation's own folder (its project's attachments dir, or the profile's
+/// `voice/` when it has no project) under the recording prefix (#3114).
+/// `voice_input::is_recording` is that rule, and it is the same one the turn
+/// list uses to decide a turn began as one, so the row and the send path cannot
+/// disagree about what a voice note is.
+///
+/// Returns only the clip: whether there are words to fold away is a question
+/// about the row's text, which the caller already has stripped of every marker.
+/// `None` is every other row, including a message that merely attaches a picked
+/// audio file: that one keeps its words in front and its player under them.
+pub(crate) fn voice_note(content: &str) -> Option<PathBuf> {
+    let mut rest = content;
+    while let Some(start) = rest.find("<<") {
+        let after = rest.get(start + 2..)?;
+        let end = after.find(">>")?;
+        let marker = after.get(..end)?;
+        if let Some((kind, path)) = marker.split_once(':')
+            && kind == "AUD"
+            && !path.is_empty()
+            && crate::voice_input::is_recording(Path::new(path))
+        {
+            return Some(PathBuf::from(path));
+        }
+        rest = after.get(end + 2..).unwrap_or_default();
+    }
+    None
+}
+
+thread_local! {
+    /// Which transcripts the reader has opened, keyed by row (#3111).
+    ///
+    /// Paint-time UI state, not model: `bubble` is a plain function with no
+    /// dashboard handle, and this module already keeps exactly this kind of
+    /// state in thread locals. Collapsed is the default every launch, so
+    /// nothing here is persisted.
+    static OPEN_TRANSCRIPTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// The key one row's fold is remembered under (#3111).
+///
+/// A stored row is keyed by its message id, so a repaint, a scroll and a
+/// restart all find the same fold. A live row has no id yet, so it falls back
+/// to its clock reading plus a hash of the words: stable for as long as that
+/// row exists, which is all a fold needs.
+fn transcript_key(message_id: Option<uuid::Uuid>, time: &str, content: &str) -> String {
+    match message_id {
+        Some(id) => id.to_string(),
+        None => {
+            // FNV-1a: a short, stable digest of the words, and nothing that has
+            // to survive the process.
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in content.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!("{time}-{hash:016x}")
+        }
+    }
+}
+
+/// Whether this row's transcript is open right now.
+fn transcript_is_open(key: &str) -> bool {
+    OPEN_TRANSCRIPTS.with(|open| open.borrow().contains(key))
+}
+
+/// The control that folds a voice note's words away (#3111).
+///
+/// A text row, not a chevron on the player: the block stays a pure player, so a
+/// press anywhere on it plays, and the one control that means something else is
+/// a line of its own with a word on it. The press is stopped on the way down so
+/// it never reaches the row's select or its menu.
+fn transcript_toggle(key: &str, open: bool) -> impl IntoElement {
+    let palette = palette::current();
+    let label = if open {
+        "\u{25be} Transcript"
+    } else {
+        "\u{25b8} Transcript"
+    };
+    let pressed = key.to_string();
+    div()
+        .id(SharedString::from(format!("transcript-toggle-{key}")))
+        .flex_none()
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(rgb(palette.text_muted))
+        .hover(|style| style.text_color(rgb(palette.accent)))
+        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |_event, window, _cx| {
+            OPEN_TRANSCRIPTS.with(|open| {
+                let mut open = open.borrow_mut();
+                if !open.remove(&pressed) {
+                    open.insert(pressed.clone());
+                }
+            });
+            window.refresh();
+        })
+        .child(SharedString::from(label))
+}
+
 fn history_attachments(
     paths: &[std::path::PathBuf],
     content_width: f32,
@@ -2969,9 +3232,35 @@ fn history_attachments(
         .pt_1();
     for (index, path) in audio.into_iter().enumerate() {
         let key = path.to_string_lossy();
-        strip = strip.child(div().w_full().max_w(px(420.0)).min_w_0().child(
-            crate::voice_preview::player(&format!("history-{key}-{index}"), path, None, &[]),
-        ));
+        // The same glass block the composer shows for a take, so a sent clip
+        // and the take that produced it are one element with one behaviour.
+        // The transcript builds its rows from plain functions with no `App` in
+        // reach, which is why this calls the context-free entry point (#3092).
+        //
+        // The block is a fixed size, so the row keeps the label underneath it
+        // instead of stretching the glass across the bubble. The caption is
+        // what carries the length, exactly as it does in the composer.
+        strip = strip.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .min_w_0()
+                .gap_1()
+                .child(crate::composer_orb::player_plain(
+                    &format!("history-{key}-{index}"),
+                    path,
+                    None,
+                    &[],
+                    content_width,
+                ))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(crate::composer_orb::label(path, None))),
+                ),
+        );
     }
     if files.is_empty() {
         return strip;
@@ -3222,7 +3511,12 @@ fn tool_ledger_text(calls: &[ToolCall]) -> String {
 /// rounded box holding the head row, the working-out rows when the turn is
 /// open, and the footer that keeps the count, the ctx and the clock after the
 /// turn ends. `None` for a turn that did no work, which earns no card (#758).
-fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<Stateful<Div>> {
+fn settled_card(
+    turn: &Turn,
+    body: Vec<AnyElement>,
+    max_width: f32,
+    voice_pending: bool,
+) -> Option<Stateful<Div>> {
     turn.header.as_ref()?;
     let (glyph, verb) = settled_verdict(turn);
     let failed = glyph == "\u{274c}";
@@ -3255,6 +3549,20 @@ fn settled_card(turn: &Turn, body: Vec<AnyElement>, max_width: f32) -> Option<St
                 .flex_shrink_0()
                 .min_w_0(),
         );
+    // The clip for this answer is being made (#3092). One grey segment says so
+    // while it happens, carrying the same braille cell the rail spins, so the
+    // reader watches the ear being served instead of meeting a finished card
+    // that grows a clip out of nowhere ten seconds later.
+    if voice_pending {
+        head = head.child(head_dot(palette::current().text_muted)).child(
+            head_run(
+                format!("{} speaking the reply", spin_frame()),
+                palette::current().text_muted,
+                Some(1),
+            )
+            .flex_shrink_0(),
+        );
+    }
     // The count, the ctx and the clock ride the verdict's own line (#3042),
     // behind the same dot the live head divides its segments with (#3046), so
     // the finished card is one sentence in one colour instead of a verdict with
@@ -3482,7 +3790,7 @@ pub fn live_slot_sequence(live: &LiveTurn, rows: &[Message], slot: LiveSlot) -> 
     let text = text.trim();
     rows.iter()
         .rev()
-        .find(|row| row.role == "user" && row.content.trim() == text)
+        .find(|row| row.role == "user" && spoken::without_prefix(&row.content).trim() == text)
         .map(|row| row.sequence)
 }
 
@@ -3995,6 +4303,21 @@ fn live_card_footer(live: &LiveTurn, ctx: (Option<u32>, u32)) -> Option<String> 
     stats_line(parts)
 }
 
+/// How one row draws, as opposed to what it holds.
+///
+/// The three flags travel together because every caller decides them together,
+/// and passing them as loose arguments pushed `block_view` past clippy's
+/// argument budget.
+#[derive(Clone, Copy)]
+struct RowMode<'a> {
+    /// Draw the body whole instead of folding it to `row_cap`.
+    full: bool,
+    /// The reader's handler for opening a folded body, when there is one.
+    open: Option<&'a ClickHandler>,
+    /// This row carries the clip of the turn that just settled (#3092).
+    voice_pending: bool,
+}
+
 /// One block, drawn. The fold decides WHETHER a block renders; this decides
 /// only what it looks like.
 fn block_view(
@@ -4003,9 +4326,13 @@ fn block_view(
     row_cap: f32,
     handlers: &HashMap<String, ClickHandler>,
     selection: Option<&SelectionContext>,
-    full: bool,
-    open: Option<&ClickHandler>,
+    mode: RowMode<'_>,
 ) -> Div {
+    let RowMode {
+        full,
+        open,
+        voice_pending,
+    } = mode;
     match block {
         Block::Msg {
             role,
@@ -4029,17 +4356,20 @@ fn block_view(
             role,
             content,
             time,
+            message_id,
             ..
         } => bubble(
             role,
             content,
             time,
+            *message_id,
             content_width,
             row_cap,
             handlers,
             selection,
             full,
             open,
+            voice_pending,
         ),
         Block::Thinking { content } => thinking_block(content, false),
         Block::Tools { calls } => tools_block(calls, selection),
@@ -4166,6 +4496,17 @@ fn head_dot(colour: u32) -> AnyElement {
         .into_any_element()
 }
 
+/// The braille cell the settled card's speaking segment carries (#3092).
+///
+/// The rail's own frames ([`rail_activity::frame`]), read from an origin of the
+/// card's own: the rail asks for its own repaints, while the card is redrawn by
+/// the window's busy tick, which the pending session keeps running. Only the
+/// cadence has to match, and it does, because both read the same frame list.
+fn spin_frame() -> &'static str {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    crate::rail_activity::frame(ORIGIN.get_or_init(std::time::Instant::now).elapsed())
+}
+
 /// What `live_status_line` answers while a turn has nothing at all, worded for
 /// the session rail's preview. The card drops it: the head's slot already shows
 /// the turn working, counting the seconds, so the sentence would only repeat it
@@ -4248,10 +4589,15 @@ fn live_block(
                 row_cap,
                 handlers,
                 Some(&selection),
-                true,
-                // A live row has no stored id yet, so there is no reader
-                // handler to open: it draws whole until it settles (#3064).
-                None,
+                RowMode {
+                    full: true,
+                    // A live row has no stored id yet, so there is no reader
+                    // handler to open: it draws whole until it settles (#3064).
+                    open: None,
+                    // A live turn has no clip in flight: the reply is still
+                    // being written (#3092).
+                    voice_pending: false,
+                },
             ),
         )
         .into_any_element(),
@@ -4343,9 +4689,19 @@ fn live_row_body(
     // see, so it is the only copy there is to drag.
     match live_block(drag, block, content_width, row_cap, handlers) {
         Some(row) => row,
-        None => {
-            block_view(block, content_width, row_cap, handlers, None, true, None).into_any_element()
-        }
+        None => block_view(
+            block,
+            content_width,
+            row_cap,
+            handlers,
+            None,
+            RowMode {
+                full: true,
+                open: None,
+                voice_pending: false,
+            },
+        )
+        .into_any_element(),
     }
 }
 
@@ -4535,8 +4891,19 @@ fn live_view(
         col = col.child(
             match live_block(drag, &block, content_width, row_cap, handlers) {
                 Some(row) => row,
-                None => block_view(&block, content_width, row_cap, handlers, None, true, None)
-                    .into_any_element(),
+                None => block_view(
+                    &block,
+                    content_width,
+                    row_cap,
+                    handlers,
+                    None,
+                    RowMode {
+                        full: true,
+                        open: None,
+                        voice_pending: false,
+                    },
+                )
+                .into_any_element(),
             },
         );
     }
@@ -4577,13 +4944,24 @@ struct PendingClick {
     links: Vec<(Range<usize>, String)>,
     /// Byte offset into `text`, as the shaped layout reported it.
     offset: usize,
+    /// Directories the press resolved against, snapshotted so a release
+    /// cannot resolve against roots that moved mid-gesture (#2846).
+    roots: Vec<PathBuf>,
 }
 
 impl PendingClick {
     /// The destination this press named, if any: the label it landed on
     /// first, then any path or url the token at that offset resolves to.
     fn target(&self) -> Option<ClickTarget> {
-        links::target_for_click(&self.text, &self.links, self.offset)
+        let roots: Vec<&Path> = self.roots.iter().map(PathBuf::as_path).collect();
+        let home = dirs::home_dir();
+        links::target_for_click_roots(
+            &self.text,
+            &self.links,
+            self.offset,
+            &roots,
+            home.as_deref(),
+        )
     }
 
     /// The word the pointer was on, for the log line a miss writes. Clipped by
@@ -4621,9 +4999,33 @@ pub struct CopyDrag {
     on_copied: RefCell<Option<CopiedListener>>,
     /// Routes a resolved click through the window that owns this transcript.
     on_open_target: RefCell<Option<OpenTargetListener>>,
+    /// Directories a click resolves against, nearest first (#2846).
+    ///
+    /// The transcript cannot reach the session's working directory on its own:
+    /// it draws text, and a relative name needs a base. The view that owns the
+    /// session writes it here each frame, so a `/cd` takes effect on the next
+    /// repaint, and a press snapshots the list so a release cannot resolve
+    /// against roots that moved mid-gesture.
+    roots: RefCell<Vec<PathBuf>>,
 }
 
 impl CopyDrag {
+    /// Point click resolution at the session's working directory (#2846).
+    ///
+    /// Called per frame by the owner, so it has to be cheap: the list is
+    /// replaced only when it actually differs.
+    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+        let mut current = self.roots.borrow_mut();
+        if *current != roots {
+            *current = roots;
+        }
+    }
+
+    /// The roots a press should snapshot.
+    fn roots_snapshot(&self) -> Vec<PathBuf> {
+        self.roots.borrow().clone()
+    }
+
     /// The owning view wires the acknowledgement here. The transcript cannot
     /// reach the composer, so the composer's parent is the only place that
     /// knows both halves of the gesture.
@@ -4916,6 +5318,7 @@ fn selectable_text_segment(
             text: click_text.clone(),
             links: click_links.clone(),
             offset: local,
+            roots: pressed.roots_snapshot(),
         });
         let offset = start + local;
         begin.anchor.set(Some(TextPoint::new(row, offset)));
@@ -5521,6 +5924,12 @@ pub struct ViewHooks {
     /// The row whose rewrite is open (#2826). Its message is replaced by a
     /// field and two buttons, in place, and the composer is not involved.
     pub edit_row: Option<InlineEditView>,
+    /// Whether this transcript's session has a spoken reply being made right
+    /// now (#3092). The window holds the set; the card only asks. Only the
+    /// newest turn's card draws the segment: the clip belongs to the answer
+    /// that just settled, and a history full of cards claiming to be speaking
+    /// would be a lie about every one of them.
+    pub voice_pending: bool,
     /// Whether this transcript is following its own bottom (#3027).
     ///
     /// The owner holds the state, because only it can tell a reader who scrolled
@@ -5530,7 +5939,7 @@ pub struct ViewHooks {
     pub following: bool,
 }
 
-/// The callers measure the transcript's outer box. Its `.p_2()` consumes half
+/// The callers measure the transcript's outer box. Its `.px_2()` spends half
 /// a rem on each horizontal side, so rows and attachment plans get one rem
 /// less. Without this conversion a right-aligned bubble is capped to the outer
 /// box and its excess escapes through the left edge (#2947).
@@ -5548,7 +5957,7 @@ fn transcript_content_width(outer_width: f32, rem_size: f32) -> f32 {
 /// screen and exact under a pixel read, so the next screenshot answers the
 /// question by itself, and the answer is what the witness lines cannot give:
 /// whether this element painted.
-fn surface_fill(bg: u32) -> u32 {
+pub(crate) fn surface_fill(bg: u32) -> u32 {
     let lift = |shift: u32| {
         let channel = (bg >> shift) & 0xff;
         ((channel + 3).min(0xff)) << shift
@@ -5732,6 +6141,7 @@ pub fn view(
         copy,
         copied,
         following,
+        voice_pending,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -5782,13 +6192,27 @@ pub fn view(
         .overflow_y_scroll()
         .track_scroll(scroll)
         .gap_2()
-        .p_2()
-        // The chat surface carries the same corner the plan card and the
-        // suggested options carry, so inside a pane its fill follows the ring
-        // instead of painting a square box over the corner arc. No clip here:
-        // `overflow_y_scroll` above is this element's scroll, and a later
-        // `overflow_hidden` would replace it and stop the transcript scrolling.
-        .rounded(px(CARD_RADIUS))
+        // Sides on the rem scale, like every other gutter in this window
+        // (#3114): the composer's rows are built from the same step, so a zoom
+        // moves the whole column together instead of sliding the field off the
+        // conversation.
+        //
+        // No bottom padding (#3114): the session's own 8 is the whole gap
+        // under the last row. This box used to add 8 of its own on top of the
+        // session's 12, so the last card sat 20 from the composer and 8 from
+        // the card above it, and the bottom of the conversation read as a
+        // wider, looser band than the conversation itself.
+        .px_2()
+        .pt_2()
+        // The chat history's own surface takes the message bubbles' curve, not
+        // the card's (#3110): it is the box the bubbles live in, so a rounder
+        // corner than theirs reads as two objects stacked at the edge instead
+        // of one surface. No clip here: `overflow_y_scroll` above is this
+        // element's scroll, and a later `overflow_hidden` would replace it and
+        // stop the transcript scrolling. The session surface around it owns the
+        // clip, which is why a scrolled row can no longer paint square over the
+        // arc.
+        .rounded(px(MESSAGE_RADIUS))
         .bg(rgb(surface_fill(palette::current().bg)));
     // The wheel is the reader's own hand on the transcript: the owning view
     // decides whether a tick releases its follow or gives it back (#2698).
@@ -5870,9 +6294,12 @@ pub fn view(
             row_cap,
             &attachment_handlers,
             None,
-            true,
-            // A marker is not a message: it has no body to fold (#3064).
-            None,
+            RowMode {
+                full: true,
+                // A marker is not a message: it has no body to fold (#3064).
+                open: None,
+                voice_pending: false,
+            },
         ));
     }
     // The turns past the drawn window wait behind their own marker (#2805),
@@ -5936,6 +6363,13 @@ pub fn view(
             _ => 0,
         };
         let carded = turn.header.is_some();
+        // The answer this turn ends on, which is the row the clip belongs to
+        // (#3092). A turn that answered twice draws the block once, under the
+        // answer the reader is waiting on.
+        let answer_at = turn
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::Msg { role, .. } if role == "assistant"));
         let mut pre: Vec<AnyElement> = Vec::new();
         let mut body: Vec<AnyElement> = Vec::new();
         let mut post: Vec<AnyElement> = Vec::new();
@@ -5996,8 +6430,14 @@ pub fn view(
                             row_cap,
                             &attachment_handlers,
                             Some(&selection),
-                            full_body,
-                            open_click,
+                            RowMode {
+                                full: full_body,
+                                open: open_click,
+                                // The clip belongs to the answer of the turn
+                                // that just settled, which is the newest one
+                                // drawn (#3092).
+                                voice_pending: voice_pending && ti == last && answer_at == Some(i),
+                            },
                         ),
                     }
                 }
@@ -6009,8 +6449,11 @@ pub fn view(
                         row_cap,
                         &attachment_handlers,
                         None,
-                        full_body,
-                        open_click,
+                        RowMode {
+                            full: full_body,
+                            open: open_click,
+                            voice_pending: voice_pending && ti == last && answer_at == Some(i),
+                        },
                     ),
                 },
             };
@@ -6107,7 +6550,16 @@ pub fn view(
             }
         }
         col = col.children(pre);
-        if carded && let Some(card) = settled_card(turn, body, row_cap) {
+        if carded
+            && let Some(card) = settled_card(
+                turn,
+                body,
+                row_cap,
+                // The clip belongs to the answer that just settled, which is
+                // the newest turn drawn (#3092).
+                voice_pending && ti == last,
+            )
+        {
             // The listener is per turn and used exactly here, so it is taken
             // out of the map instead of cloned.
             col = col.child(match handlers.remove(&turn.anchor) {
@@ -6456,7 +6908,7 @@ mod tests {
         (mix(16) << 16) | (mix(8) << 8) | mix(0)
     }
 
-    /// #2947: `.p_2()` spends half a rem at each side, at every UI scale.
+    /// #2947: `.px_2()` spends half a rem at each side, at every UI scale.
     #[test]
     fn transcript_width_excludes_both_horizontal_padding_sides() {
         assert_eq!(transcript_content_width(660.0, 16.0), 644.0);
@@ -6830,10 +7282,10 @@ mod tests {
         assert_eq!(opencrabs::ui_core::card::SEEKER_RADIUS, 32.0);
         // The token is declared once and applied where a message is painted:
         // the settled bubble, the settled card and the live card that becomes
-        // it. Every other rounded surface in this file still reads
-        // CARD_RADIUS. Count on the production half only: this file includes
-        // itself, so the literals in this test would otherwise match
-        // themselves.
+        // it, and the session card that clips them all (#3110). Every other
+        // rounded surface in this file still reads CARD_RADIUS. Count on the
+        // production half only: this file includes itself, so the literals in
+        // this test would otherwise match themselves.
         let production = src
             .split("\n#[cfg(test)]\nmod tests")
             .next()
@@ -6844,8 +7296,8 @@ mod tests {
             .filter(|line| line.contains("px(MESSAGE_RADIUS)"))
             .count();
         assert_eq!(
-            message_radius_uses, 3,
-            "the bubble, the settled card and the live card apply the message radius, found {message_radius_uses} uses"
+            message_radius_uses, 4,
+            "the bubble, the settled card, the live card and the session card apply the message radius, found {message_radius_uses} uses"
         );
         let settled = production
             .split("fn settled_card(")

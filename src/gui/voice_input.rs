@@ -23,11 +23,17 @@
 //! nothing in it). Nothing here writes config.
 //!
 //! A recording that comes back with words is saved as an OGG/Opus voice note
-//! under the profile's `voice/` folder (#3044). That is the file the message
-//! carries, the same artifact a channel would have delivered, so the row can
-//! play back what was actually said instead of only the transcript. The save
-//! happens after the transcription, not before: a recording nobody could
-//! transcribe becomes no message, and a file for it would be an orphan.
+//! (#3044). That is the file the message carries, the same artifact a channel
+//! would have delivered, so the row can play back what was actually said
+//! instead of only the transcript. The save happens after the transcription,
+//! not before: a recording nobody could transcribe becomes no message, and a
+//! file for it would be an orphan.
+//!
+//! Where it is saved depends on the conversation (#3114). A session that
+//! belongs to a project keeps its clips in that project's attachments folder,
+//! beside every other file the conversation produced, so a project's audio
+//! travels with the project instead of piling up in one profile-wide `voice/`
+//! drawer. Only a session with no project falls back to `<profile home>/voice/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -38,6 +44,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 use opencrabs::config::Config;
+use uuid::Uuid;
 
 use crate::logging;
 
@@ -56,19 +63,23 @@ pub(crate) const TARGET_RATE: u32 = 16_000;
 /// far past any spoken turn and keeps the worst case at ~8 MB of f32.
 const MAX_SECONDS: u32 = 120;
 
-/// Where a take with words is kept: `<profile home>/voice/`, beside `memory/`
-/// and `logs/`. A profile's recordings belong to that profile.
+/// The fallback folder for a take: `<profile home>/voice/`, beside `memory/`
+/// and `logs/` (#3114).
+///
+/// Only a session with no project writes here. A session that belongs to one
+/// keeps its clips in that project's attachments folder, where the rest of its
+/// files live, so the audio is found with the work it belongs to.
 pub(crate) const VOICE_DIR: &str = "voice";
 
-/// What a recording is named, inside [`VOICE_DIR`].
+/// What a recording is named, inside whichever folder it lands in.
 ///
-/// The prefix is the contract, not decoration: a spoken reply is saved in the
-/// same folder, and only a `voice-*` file is a message whose words came out of
-/// the microphone. Without it the reply's own clip would read as a recording
-/// and its marker would be taken back out of text the user actually typed.
+/// The prefix is the contract, not decoration: a spoken reply is saved beside
+/// it, and only a `voice-*` file is a message whose words came out of the
+/// microphone. Without it the reply's own clip would read as a recording and
+/// its marker would be taken back out of text the user actually typed.
 const RECORDING_PREFIX: &str = "voice-";
 
-/// What a spoken reply is named, inside [`VOICE_DIR`].
+/// What a spoken reply is named, inside the same folder.
 ///
 /// Deliberately not [`RECORDING_PREFIX`]: the reply is the agent's own voice,
 /// and a turn that began with typing must never be mistaken for one the
@@ -233,8 +244,13 @@ impl Transcription {
     ///
     /// Returns immediately. The UI keeps polling the same 50 ms tick it uses
     /// for the microphone, so the answer lands without a second timer.
-    pub(crate) fn start(recording: Recording) -> Self {
-        Self::spawn(move || transcribe(recording))
+    ///
+    /// The session travels with the job because the clip's folder is decided by
+    /// the conversation it belongs to (#3114): a project session keeps its take
+    /// with the project, and only a session with no project falls back to the
+    /// profile's `voice/`.
+    pub(crate) fn start(recording: Recording, session: Option<Uuid>) -> Self {
+        Self::spawn(move || transcribe(recording, session))
     }
 
     /// The same worker, told not to keep the audio (#3044).
@@ -278,10 +294,13 @@ impl Transcription {
 /// The order matters: a take with no words becomes no message, so saving first
 /// would leave a file nothing points at. A save that fails is logged and the
 /// words still go out, because the transcript is what the agent answers.
-fn transcribe(recording: Recording) -> Result<Spoken, String> {
+///
+/// The session is only needed for where the clip goes (#3114): its project's
+/// attachments folder when it has one, the profile's `voice/` otherwise.
+fn transcribe(recording: Recording, session: Option<Uuid>) -> Result<Spoken, String> {
     let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
     let (text, language) = transcribe_wav(recording.wav)?;
-    let audio = match save_voice_note(&recording.pcm) {
+    let audio = match save_voice_note(&recording.pcm, session) {
         Ok(path) => Some(path),
         Err(reason) => {
             logging::error(&format!("voice capture: {reason}"));
@@ -326,26 +345,67 @@ fn transcribe_words(recording: Recording) -> Result<Spoken, String> {
 /// what carries the audio, and the agent gets the words it can answer. A clip
 /// the user picked with the paperclip is a file the agent may need to open, and
 /// that marker has to survive into the prompt.
+///
+/// The folder half of the test has to admit two homes (#3114): a take lives in
+/// the session's project attachments folder when the conversation has a
+/// project, and in the profile's `voice/` when it does not. The prefix is what
+/// actually identifies it, so a file named `voice-<stamp>.ogg` anywhere under
+/// the profile's projects tree is a take, and one outside both homes is not.
 pub(crate) fn is_recording(path: &Path) -> bool {
-    let folder = opencrabs::config::opencrabs_home().join(VOICE_DIR);
-    path.parent() == Some(folder.as_path())
+    let profile = opencrabs::config::opencrabs_home();
+    let in_voice = path.parent() == Some(profile.join(VOICE_DIR).as_path());
+    let in_projects = path.starts_with(opencrabs::services::ProjectService::projects_dir());
+    (in_voice || in_projects)
+        && path.extension().is_some_and(|ext| ext == "ogg")
         && path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(RECORDING_PREFIX))
 }
 
-/// Write one take into the profile's `voice/` folder as an OGG/Opus file.
+/// The folder a clip belongs in (#3114).
+///
+/// The session's project attachments folder when the conversation has a
+/// project, so its audio sits with the rest of the work. A session with no
+/// project, or one whose project cannot be read, falls back to the profile's
+/// `voice/`: a recording that nobody can transcribe is no message, but a take
+/// that did come back with words must still find a home.
+fn clip_dir(session: Option<Uuid>) -> PathBuf {
+    project_clip_dir(session).unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))
+}
+
+/// `projects/<slug>/files/` for the session's project, if it has one.
+///
+/// `FileService::project_files_dir` is the same resolver every other attachment
+/// goes through, so a clip lands exactly where a picked file would. It is async
+/// and needs a pool, and this runs on a capture thread with no reactor, so it
+/// drives one of its own. `global_pool()` is the process's open pool, which
+/// keeps this from connecting a second time to the same file.
+fn project_clip_dir(session: Option<Uuid>) -> Option<PathBuf> {
+    let session = session?;
+    let pool = opencrabs::db::global_pool().cloned()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async move {
+        opencrabs::services::FileService::new(opencrabs::services::ServiceContext::new(pool))
+            .project_files_dir(session)
+            .await
+    })
+}
+
+/// Write one take into its folder as an OGG/Opus file.
 ///
 /// The same container the channels send, so the clip in the transcript is the
 /// artifact a recipient of a voice note would have received. Named by the
 /// millisecond it was saved: two recordings in one second would otherwise
 /// overwrite each other, and the older message would start playing the newer
 /// audio.
-fn save_voice_note(pcm: &[i16]) -> Result<PathBuf, String> {
+fn save_voice_note(pcm: &[i16], session: Option<Uuid>) -> Result<PathBuf, String> {
     let ogg = opencrabs::channels::voice::opus::encode_ogg_opus(pcm, TARGET_RATE)
         .map_err(|e| format!("the recording would not encode as a voice note: {e:#}"))?;
-    let path = write_clip(&ogg, RECORDING_PREFIX)?;
+    let path = write_clip(&ogg, RECORDING_PREFIX, session)?;
     logging::info(&format!(
         "voice capture: saved {} bytes of ogg to {}",
         ogg.len(),
@@ -361,8 +421,12 @@ fn save_voice_note(pcm: &[i16]) -> Result<PathBuf, String> {
 /// arrive: re-encoding a finished clip would only cost time and quality. The
 /// name does not start with [`RECORDING_PREFIX`], so a spoken reply is never
 /// mistaken for something the microphone heard.
-pub(crate) fn save_reply_audio(ogg: &[u8]) -> Result<PathBuf, String> {
-    let path = write_clip(ogg, REPLY_PREFIX)?;
+///
+/// The reply follows its conversation into the project folder too (#3114): a
+/// spoken answer belongs with the take that asked for it, not in a profile-wide
+/// drawer the project never sees.
+pub(crate) fn save_reply_audio(ogg: &[u8], session: Option<Uuid>) -> Result<PathBuf, String> {
+    let path = write_clip(ogg, REPLY_PREFIX, session)?;
     logging::info(&format!(
         "voice reply: saved {} bytes of ogg to {}",
         ogg.len(),
@@ -371,13 +435,13 @@ pub(crate) fn save_reply_audio(ogg: &[u8]) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Write one finished clip into the profile's `voice/` folder, named for the
-/// millisecond it was saved.
+/// Write one finished clip into the folder its conversation calls home, named
+/// for the millisecond it was saved.
 ///
 /// Two recordings inside one second would otherwise overwrite each other, and
 /// the older message would start playing the newer audio.
-fn write_clip(bytes: &[u8], prefix: &str) -> Result<PathBuf, String> {
-    let dir = opencrabs::config::opencrabs_home().join(VOICE_DIR);
+fn write_clip(bytes: &[u8], prefix: &str, session: Option<Uuid>) -> Result<PathBuf, String> {
+    let dir = clip_dir(session);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("the voice folder would not open ({}): {e}", dir.display()))?;
     let stamp = SystemTime::now()

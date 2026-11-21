@@ -30,6 +30,10 @@ pub mod opus;
 
 pub mod text_cleanup;
 
+// The spoken summary a voice turn answers with, kept out of the `local-tts`
+// gate because every provider reads it.
+pub mod spoken;
+
 pub(crate) mod service;
 
 pub use service::transcribe_with_language;

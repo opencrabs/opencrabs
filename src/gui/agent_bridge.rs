@@ -60,16 +60,38 @@ pub enum TurnEvent {
         /// the Telegram card prints. `None` when the provider or the CLI
         /// path could not measure it.
         tokens_per_second: Option<f64>,
+        /// Whether this turn's own input was a recording (#3096). The settle
+        /// reads it from the event, never from a set keyed by session: a
+        /// voice turn whose settle never arrived left its session flagged, so
+        /// the next TYPED turn of that conversation was answered aloud. A turn
+        /// can only speak for itself.
+        voice: bool,
     },
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
     Failed { session: Uuid, text: String },
+    /// A spoken reply for a voice-originated turn started (#3092). Sent after
+    /// the `Done` that settled the turn and before the synthesis call, because
+    /// making the clip is a network round trip per chunk: the answer is on
+    /// screen and the ear is still waiting. The window holds the session while
+    /// this is in flight and the settled card says the reply is being spoken,
+    /// instead of the card freezing and a clip appearing out of nowhere
+    /// seconds later.
+    VoiceReplyPending { session: Uuid },
+    /// The attempt ended, spoken or not (#3092). Always follows the pending
+    /// one, on every failure path, so a card can never keep claiming a clip is
+    /// on the way.
+    VoiceReplyDone { session: Uuid },
     /// A spoken reply for a voice-originated turn is on disk and its marker is
     /// in the assistant row (#3044). Sent after the `Done` that settled the
     /// turn, because synthesis is a network call the settle must not wait on:
     /// the answer is drawn as text first, and the clip appears under it when
     /// the audio lands.
-    VoiceReplySaved { session: Uuid },
+    ///
+    /// It carries the file so the window can start it without waiting for the
+    /// row to reload and hand the path back (#3092): the clip the reader just
+    /// waited for plays itself.
+    VoiceReplySaved { session: Uuid, path: PathBuf },
     /// The user stopped this turn and the stop dropped it where it stood
     /// (#2657). No `Done` and no `Failed` follows a dropped future, so this is
     /// the only thing that tells the window the turn is gone. It carries no
@@ -774,6 +796,25 @@ pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>
     }
 }
 
+/// Clears the window's in-flight marker however the attempt ends (#3092).
+///
+/// Every early return in the thread below is a way for the clip to never
+/// arrive, and a card left saying "speaking the reply" is worse than one that
+/// said nothing at all. A `Drop` covers all of them, panics included, so the
+/// clear is not something each new return has to remember.
+struct VoiceReplyGuard {
+    sink: EventSink,
+    session: Uuid,
+}
+
+impl Drop for VoiceReplyGuard {
+    fn drop(&mut self) {
+        let _ = self.sink.send(TurnEvent::VoiceReplyDone {
+            session: self.session,
+        });
+    }
+}
+
 /// Speak one answer back, for the turn that began as a recording (#3044).
 ///
 /// The window's half of what every channel already does: a voice note is
@@ -807,6 +848,20 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                 crate::logging::info("voice reply: tts disabled, answering in text only");
                 return;
             }
+            // The card already carries the whole report, so only the spoken
+            // half is needed here. A model that skipped the block is still
+            // read aloud, from the paragraph it led with: a voice turn gets a
+            // voice back either way (#3092).
+            let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
+            let speech = match spoken {
+                Some(spoken) => spoken,
+                None => {
+                    crate::logging::warn(
+                        "voice reply: no spoken block, reading the first paragraph",
+                    );
+                    opencrabs::channels::voice::spoken::first_paragraph(&answer)
+                }
+            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -817,8 +872,18 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                     return;
                 }
             };
+            // The card is told the clip is coming before the first chunk goes
+            // out (#3092). Synthesis is a network round trip per chunk, and the
+            // window has nothing else to paint in the meantime.
+            let _ = sink.send(TurnEvent::VoiceReplyPending {
+                session: session_id,
+            });
+            let _cleared = VoiceReplyGuard {
+                sink: sink.clone(),
+                session: session_id,
+            };
             let audio = match runtime
-                .block_on(async { opencrabs::channels::voice::synthesize(&text, &voice).await })
+                .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
             {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -826,7 +891,7 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                     return;
                 }
             };
-            let path = match crate::voice_input::save_reply_audio(&audio) {
+            let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
                 Ok(path) => path,
                 Err(e) => {
                     crate::logging::error(&format!("voice reply save: {e}"));
@@ -868,6 +933,10 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
                 ));
                 let _ = sink.send(TurnEvent::VoiceReplySaved {
                     session: session_id,
+                    // The thread is done with it: the marker above is the last
+                    // read of the file, so the event takes ownership instead of
+                    // leaving a clone to be dropped (#3092).
+                    path,
                 });
             });
         });
@@ -1144,6 +1213,9 @@ pub fn spawn_turn(
     session_id: Uuid,
     content: String,
     display: Option<String>,
+    // Whether this turn's input was a recording (#3096): the flag rides the
+    // turn, so nothing keyed by session can outlive it.
+    voice: bool,
     sink: EventSink,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -1197,11 +1269,23 @@ pub fn spawn_turn(
                 };
                 match outcome {
                     Ok(response) => {
+                        // A text turn never carries a spoken block (#3096). The
+                        // model is told to write one only when the message
+                        // begins with the voice note, and a model that drifts
+                        // must not print it into the card or hand it to any
+                        // later reader. Stripped here, before the settle draws
+                        // the answer and before anything can speak it.
+                        let content = if voice {
+                            response.content
+                        } else {
+                            opencrabs::channels::voice::spoken::visible(&response.content)
+                        };
                         let _ = sink.send(TurnEvent::Done {
                             session: session_id,
-                            content: response.content,
+                            content,
                             context_tokens: response.context_tokens,
                             tokens_per_second: response.tokens_per_second,
+                            voice,
                         });
                     }
                     Err(e) => {
@@ -1288,6 +1372,12 @@ fn spawn_resume(
                             content: response.content,
                             context_tokens: response.context_tokens,
                             tokens_per_second: response.tokens_per_second,
+                            // A resumed turn re-runs a prompt parked by a dead
+                            // process, and that prompt is the words only: the
+                            // recording it came from is not in hand here. It
+                            // answers in text rather than guessing at speech
+                            // (#3096).
+                            voice: false,
                         });
                     }
                     Err(e) => {
@@ -1437,6 +1527,26 @@ fn boot_plan(requests: &[opencrabs::db::PendingRequest]) -> BootPlan {
     plan
 }
 
+/// The newest question the ledger holds for a session, marker and all (#3092).
+///
+/// A resumed turn's parked prompt is what was sent, and a voice turn's prompt is
+/// the transcript with the note in front of it: no marker, so a card drawing it
+/// showed `[voice note]` and no player. The row written before the process died
+/// carries both halves, so the card draws that instead.
+///
+/// `None` when the read fails or the session holds no question yet, which leaves
+/// the parked prompt as the only thing left to draw.
+async fn ledger_question(
+    messages: &opencrabs::db::repository::MessageRepository,
+    session: Uuid,
+) -> Option<String> {
+    let rows = messages.find_recent_by_session(session, 8).await.ok()?;
+    rows.into_iter()
+        .rev()
+        .find(|row| row.role == "user")
+        .map(|row| row.content)
+}
+
 /// The scan half of [`spawn_boot_resume`], on the caller's runtime.
 async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
     use opencrabs::brain::agent::service::boot_report;
@@ -1470,6 +1580,7 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         crate::logging::warn(&format!("boot resume: clearing the ledger failed: {e:#}"));
     }
 
+    let messages = opencrabs::db::repository::MessageRepository::new(pool.clone());
     let sessions = opencrabs::db::SessionRepository::new(pool);
     // What the scan decided, decided once and testable on its own: the async
     // half below only carries it out.
@@ -1562,6 +1673,16 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
                 service.set_session_only_working_directory(session_id, path);
             }
         }
+        // The card draws the question the ledger holds, not the parked prompt
+        // (#3092). A voice turn's prompt is the transcript with the note in
+        // front of it and no marker, so drawing it put `[voice note]` on the
+        // card and left the clip with no player. The row written before the
+        // process died carries both halves: the note the model needs and the
+        // marker the player reads.
+        let user_message = match ledger_question(&messages, session_id).await {
+            Some(question) => question,
+            None => user_message,
+        };
         let cancel = tokio_util::sync::CancellationToken::new();
         // The card first: the window has to know this conversation is busy
         // before the first chunk arrives, or the turn paints into a window

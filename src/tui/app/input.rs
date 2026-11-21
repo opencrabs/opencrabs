@@ -477,7 +477,8 @@ impl App {
         };
         let content_left = self.chat_area_x + 1;
         let col_in_line = col.saturating_sub(content_left) as usize;
-        let Some(target) = super::clickable::target_at(line, col_in_line) else {
+        let Some(target) = super::clickable::target_at(line, col_in_line, &self.working_directory)
+        else {
             return false;
         };
         match super::clickable::open(&target, self.event_sender()) {
@@ -1614,6 +1615,18 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // `alt+h` hides the hint row's current line for a week (#3122). It is
+        // a chord and not a command because the row is one line of advice, not
+        // a mode: the reader wants it gone without leaving the field. The key
+        // asks the same function the paint path uses, so it can only hide the
+        // line that is actually on screen.
+        if event.modifiers.contains(KeyModifiers::ALT)
+            && matches!(event.code, KeyCode::Char('h') | KeyCode::Char('H'))
+        {
+            self.dismiss_current_hint().await;
+            return Ok(());
         }
 
         // Intercept keys when /approve menu is pending

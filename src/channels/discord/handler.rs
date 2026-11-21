@@ -742,6 +742,12 @@ pub(crate) async fn handle_message(
         return;
     }
 
+    // The transcript reads like typing, so the only way the model can know it
+    // was spoken is this marker (#3092).
+    if is_voice {
+        content = crate::channels::voice::spoken::voice_prefix(&content);
+    }
+
     let text_preview = truncate_str(&content, 50);
     tracing::info!(
         "Discord: message from {} ({}): {}",
@@ -1959,9 +1965,12 @@ pub(crate) async fn handle_message(
 
     match result {
         Ok(response) => {
+            // A voice turn answers twice: the report in text, one short block
+            // for the ear (#3092). Splitting first keeps the block out of the
+            // posted chunks and the transcript row.
+            let (answer, spoken) = crate::channels::voice::spoken::split(&response.content);
             // Extract <<IMG:path>> markers — send each as a Discord file attachment.
-            let (response_content, react_emoji) =
-                crate::utils::extract_react_marker(&response.content);
+            let (response_content, react_emoji) = crate::utils::extract_react_marker(&answer);
             // React-back (#381): fire the reaction on the user's message
             // instead of leaking the marker into Discord text.
             if let Some(ref em) = react_emoji {
@@ -2264,7 +2273,16 @@ pub(crate) async fn handle_message(
 
             // TTS: send voice reply if input was audio and TTS is enabled
             if is_voice && voice_config.tts_enabled {
-                match crate::channels::voice::synthesize(&response.content, &voice_config).await {
+                let speech = match spoken {
+                    Some(text) => text,
+                    None => {
+                        tracing::warn!(
+                            "Discord: voice turn carried no spoken block, reading the first paragraph"
+                        );
+                        crate::channels::voice::spoken::first_paragraph(&answer)
+                    }
+                };
+                match crate::channels::voice::synthesize(&speech, &voice_config).await {
                     Ok(audio_bytes) => {
                         send_tts_voice(
                             &discord_state.governor,

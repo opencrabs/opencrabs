@@ -34,12 +34,6 @@ pub const CAPTION: f32 = 16.0;
 /// The gap between two tiles and between two rows, in points (`gap_2`).
 pub const GAP: f32 = 8.0;
 
-/// The points the pane spends on everything that is not content: its own
-/// padding, the gap beside the rail, the splitter, and the border slack a
-/// fractional layout pass eats. Subtracted so a planned row is never wider
-/// than the box it is drawn into.
-const CHROME: f32 = 48.0;
-
 /// Where video poster frames are cached, relative to the OpenCrabs home.
 /// Under the home and not beside the video: a clip that arrives in chat is
 /// usually a file the sender owns and can move, and a poster is our cache,
@@ -137,17 +131,27 @@ pub fn plan(count: usize, available_width: f32) -> RowPlan {
     }
 }
 
-/// The width the transcript's content gets, in points, from the window's
-/// viewport and the rail beside it.
+/// The width the conversation's column has, in points, from the window's
+/// viewport, the rail beside it and the gutter that column spends on its own
+/// sides (#3119).
 ///
 /// This is the number the planner runs on, so it is clamped: a window dragged
 /// narrow, a rail dragged wide, or a viewport read that returns nothing still
 /// has to yield a width one legal tile can sit in. A negative width would plan
 /// a negative tile and paint outside the pane.
-pub fn content_width(viewport: f32, rail: f32) -> f32 {
+///
+/// The gutter is the caller's, because the caller is the one that draws the
+/// column: it pads itself with `px_4`, one rem a side, in a split and on every
+/// screen but the unsplit chat, which runs edge to edge (#3112). This used to
+/// reserve a fixed 48 points for the column's chrome instead. That is the safe
+/// side for a plan and the wrong number for a layout: 16 points too many left
+/// every planned pane narrower than the box it filled, so its rows stopped
+/// short of the plan card under them, which the pane sizes from the box.
+pub fn column_width(viewport: f32, rail: f32, gutter: f32) -> f32 {
     let viewport = if viewport.is_finite() { viewport } else { 0.0 };
     let rail = if rail.is_finite() { rail } else { 0.0 };
-    (viewport - rail - CHROME).max(MIN_TILE + 2.0 * GAP)
+    let gutter = if gutter.is_finite() { gutter } else { 0.0 };
+    (viewport - rail - gutter).max(MIN_TILE + 2.0 * GAP)
 }
 
 /// The most tiles that fit a row at `MIN_TILE` with `GAP` between them.
@@ -330,28 +334,39 @@ mod tests {
     }
 
     #[test]
-    fn content_width_subtracts_the_rail_and_its_chrome() {
-        // The window opens at 980 with a 17 rem rail: 980 - 272 - 48.
-        assert_eq!(content_width(980.0, 272.0), 660.0);
+    fn column_width_subtracts_the_rail_and_the_column_s_gutter() {
+        // A split pads its column with `px_4`, one rem a side (#3001), so the
+        // width a pane is planned against is 980 - 272 - 32 (#3119). A fixed
+        // 48 would leave the planned rows 16 points short of the plan card
+        // sharing their column.
+        assert_eq!(column_width(980.0, 272.0, 32.0), 676.0);
+        // The unsplit chat runs edge to edge (#3112), so its column spends no
+        // gutter at all.
+        assert_eq!(column_width(980.0, 272.0, 0.0), 708.0);
+        assert_eq!(
+            column_width(980.0, f32::NAN, f32::NAN),
+            980.0,
+            "a nonsense rail or gutter reads as none, never as the whole window"
+        );
     }
 
     #[test]
-    fn content_width_clamps_a_pane_too_narrow_for_one_tile() {
+    fn column_width_clamps_a_pane_too_narrow_for_one_tile() {
         // Rail at its maximum on an unchanged window minus the pane chrome is
         // below one tile, so the floor takes over instead of going negative.
-        assert_eq!(content_width(980.0, 900.0), MIN_TILE + 2.0 * GAP);
-        assert_eq!(content_width(100.0, 0.0), MIN_TILE + 2.0 * GAP);
+        assert_eq!(column_width(980.0, 900.0, 32.0), MIN_TILE + 2.0 * GAP);
+        assert_eq!(column_width(100.0, 0.0, 0.0), MIN_TILE + 2.0 * GAP);
     }
 
     #[test]
-    fn content_width_survives_a_nonsense_viewport() {
+    fn column_width_survives_a_nonsense_viewport() {
         // No viewport is no pane: the floor keeps the row legal instead of
         // letting a NaN through to every length downstream.
-        assert_eq!(content_width(f32::NAN, 100.0), MIN_TILE + 2.0 * GAP);
+        assert_eq!(column_width(f32::NAN, 100.0, 32.0), MIN_TILE + 2.0 * GAP);
         // A non-finite RAIL is read as "there is no rail", not as "the rail is
         // the whole window": the pane keeps the width it would have with the
         // sidebar closed.
-        assert_eq!(content_width(980.0, f32::INFINITY), 980.0 - CHROME);
+        assert_eq!(column_width(980.0, f32::INFINITY, 32.0), 948.0);
     }
 
     /// The layout contract: whatever the planner returns, the height it

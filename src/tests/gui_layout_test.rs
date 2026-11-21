@@ -24,14 +24,20 @@ fn the_hover_tint_is_not_applied_to_the_selected_row() {
 
 #[test]
 fn the_chat_pane_has_less_top_and_bottom_padding_than_24px_on_every_side() {
+    // #3112: the unsplit chat keeps no gutter at all, because its ground is the
+    // shot. Every other screen still takes the 16/12/16 the #3001 pass settled
+    // on, and so does a split, whose panes are cards with a ring around them.
     let start = GUI_MAIN
         .find("let mut right = div()")
         .expect("the chat pane is built in render");
     let pane = GUI_MAIN
-        .get(start..start + 900)
+        .get(start..start + 1400)
         .expect("the chat pane is in range");
-    assert!(pane.contains(".pt_3()"));
-    assert!(pane.contains(".pb_4()"));
+    assert!(
+        pane.contains("if self.screen != Screen::Chat || self.window_is_split() {"),
+        "the gutter is conditional on the screen: {pane}"
+    );
+    assert!(pane.contains("right = right.px_4().pt_3().pb_4();"));
     assert!(!pane.contains(".p_6()"));
 }
 

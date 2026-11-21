@@ -189,6 +189,12 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // opening a card that owns none of its calls. INTEGER NOT NULL DEFAULT 0,
     // so every existing row reads as the turn boundary it is.
     include_str!("../migrations/20261116000003_add_message_continuation.sql"),
+    // #3120: the ids behind "hide this hint for a week". A global sidecar keyed
+    // by the hint id and nothing else, because a dismissal belongs to the
+    // reader rather than to the session, and an id survives the copy being
+    // reworded. Idempotent CREATE, nothing to backfill. Appended last per the
+    // list invariant above.
+    include_str!("../migrations/20261121000001_add_hint_dismissals.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {
