@@ -274,12 +274,17 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
     //
     // The tail used to promise both "beat scrolling into the void", which is
     // nonsense: clearing context does not touch the transcript or the scroll
-    // position, so there is nothing about scrolling to beat. The split above is
-    // the reader's actual choice, and the last beat says what each one costs.
+    // position, so there is nothing about scrolling to beat. It then called
+    // `/clear` amnesia, which is wrong in the other direction: `clear.rs` keeps
+    // the whole history in the session, quotes the last six exchanges into the
+    // marker, and hands the agent `session_search` for anything older, so a
+    // cleared session can walk straight back to where it was. What `/clear`
+    // drops is the working context, never the record, and the line has to say
+    // so: the pin in `hints_2279_test.rs` requires the word "history" in it.
     if state.turns >= LONG_SESSION_TURNS && percent < CONTEXT_ROOMY {
         hints.push(Hint {
             id: "fresh-start",
-            text: "/new when the job changes · /clear when the model starts making things up · one is a fresh crab, one is amnesia"
+            text: "/new when the job changes · /clear when the model starts making things up · one drops the baggage, keeps the history"
                 .to_string(),
             command: "/new",
         });
