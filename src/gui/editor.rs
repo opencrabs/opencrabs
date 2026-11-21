@@ -4416,28 +4416,27 @@ mod tests {
     #[test]
     fn composer_caps_its_height_and_scrolls_inside_the_box() {
         let src = include_str!("editor.rs");
+        // The chain is read with its whitespace flattened: indentation moves
+        // whenever a builder above it is wrapped, and the fmt pass of #3124
+        // reindented this one, so a pin that counted columns went red on
+        // layout rather than on the shape it is meant to hold.
+        let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
         // Split so this assertion cannot match its own literal.
         let cap = concat!(
             ".max_h(window.line_height() * ",
             "COMPOSER_MAX_ROWS as f32)"
         );
-        let scroll = concat!(
-            ".overflow_y_scroll()",
-            "\n                        .track_scroll(&"
-        );
+        let scroll = concat!(".overflow_y_scroll() ", ".track_scroll(&");
         // The scroll methods are on a stateful element, so an id has to come
         // first. Without it the gui binary does not compile (#2773).
-        let stateful = concat!(
-            ".id(\"composer-input\")",
-            "\n                        .overflow_y_scroll()"
-        );
+        let stateful = concat!(".id(\"composer-input\")", " .overflow_y_scroll()");
         assert!(src.contains(cap), "the composer must cap its height");
         assert!(
-            src.contains(scroll),
+            flat.contains(scroll),
             "the composer must scroll inside itself"
         );
         assert!(
-            src.contains(stateful),
+            flat.contains(stateful),
             "the scroll box must be stateful or its scroll methods do not exist"
         );
     }
