@@ -89,7 +89,20 @@ fn an_offer_outranks_every_other_hint() {
     state.update_version = Some("0.7.0".to_string());
     state.context_used = 190_000;
     let order: Vec<&str> = candidates(&state).iter().map(|hint| hint.command).collect();
-    assert_eq!(order, vec!["", "/clear", "/evolve"]);
+    // The first three are the whole question: the offer, the context, the
+    // release. Anything behind them is a tip that names no command, and a tip
+    // may ride along as long as it never gets in front of one. The isolation
+    // tip fires at the same dozen turns this state sets, so the vector is
+    // longer than three and the tail is not this test's business (#3126).
+    assert!(
+        order.len() >= 3,
+        "the offer, the context and the release all have to be here: {order:?}"
+    );
+    assert_eq!(
+        &order[..3],
+        &["", "/clear", "/evolve"],
+        "the offer outranks the context, which outranks the release: {order:?}"
+    );
     assert_eq!(tui(&state).map(|h| h.command), Some(""));
 }
 
