@@ -229,12 +229,16 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         });
     }
 
+    // Framed on the reader's symptom, not on a new task: `/new` is what a new
+    // task gets, so asking "new task?" and then naming `/clear` taught the wrong
+    // command for the words it used. A context this full is the point where the
+    // model starts drifting, and that is the thing `/clear` actually fixes.
     if percent >= CONTEXT_TIGHT {
         let freed = compact_tokens(state.clearable());
         hints.push(Hint {
             id: "context",
             text: format!(
-                "new task? /clear frees {freed} tokens · cheaper than watching this thing choke"
+                "model drifting? /clear frees {freed} tokens · cheaper than watching this thing choke"
             ),
             command: "/clear",
         });
@@ -262,15 +266,20 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         });
     }
 
-    // Two ways out, because they cost different things: `/new` starts a fresh
-    // session and takes the conversation with it, which is what a new use case
-    // wants, while `/clear` only drops the context and leaves the history and
-    // the title in place. Naming one of them is how the cheaper option stays a
-    // secret (#3113).
+    // Two ways out, because they solve different problems: `/new` is a different
+    // job, a different session, and the conversation stays behind with the old
+    // one; `/clear` is the same job with a context that has gone bad, which is
+    // what a model inventing things out of stale turns needs. Naming one of them
+    // is how the cheaper option stays a secret (#3113).
+    //
+    // The tail used to promise both "beat scrolling into the void", which is
+    // nonsense: clearing context does not touch the transcript or the scroll
+    // position, so there is nothing about scrolling to beat. The split above is
+    // the reader's actual choice, and the last beat says what each one costs.
     if state.turns >= LONG_SESSION_TURNS && percent < CONTEXT_ROOMY {
         hints.push(Hint {
             id: "fresh-start",
-            text: "/new for a fresh start or new use case · /clear wipes context, keeps history · both beat scrolling into the void"
+            text: "/new when the job changes · /clear when the model starts making things up · one is a fresh crab, one is amnesia"
                 .to_string(),
             command: "/new",
         });
