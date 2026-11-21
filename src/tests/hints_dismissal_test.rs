@@ -218,8 +218,8 @@ fn the_terminal_names_the_chord_and_hides_the_line_it_names() {
 ///
 /// Same reason for the scan: the control only exists after a pointer event. The
 /// rules that matter are structural: the composer's shell holds the field and
-/// the footer alone, the card closes the stack above it, and the cross appears
-/// only for a hint the engine says may be dismissed.
+/// the footer alone, the card is a row of the stack above it, and the cross
+/// appears only for a hint the engine says may be dismissed.
 #[test]
 fn the_window_hides_the_card_on_hover_and_not_inside_the_composer() {
     let render = include_str!("../gui/dashboard_render.rs");

@@ -205,13 +205,20 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         !PANE_CHROME.contains(".p_3()"),
         "and keeps no uniform inset of its own"
     );
-    // The hint is a card of its own now, in the same column as the plan, the
-    // queue and the offers, so it pads the card's uniform step rather than the
-    // footer's row arithmetic (#3102).
+    // The hint is a card of its own, and it pads the column every row of the
+    // chat starts on (#3124). It used a uniform `p_3` like the plan and the
+    // queue, which left its words at 20 while the messages, the field and the
+    // footer's labels all start at 24: the card was four pixels left of the
+    // conversation it comments on. The sides are the card's step and the
+    // vertical step is unchanged.
     let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
     assert!(
-        strip.contains(".p_3()"),
-        "the card pads the same 12 as its neighbours in the stack"
+        strip.contains(".px(transcript::card_inset())") && strip.contains(".py_3()"),
+        "the card's words land on the conversation's column, and its height is untouched"
+    );
+    assert!(
+        !strip.contains(".p_3()"),
+        "a uniform inset is what put its words four pixels left of everything else"
     );
     assert!(
         strip.contains(".rounded(px(transcript::MESSAGE_RADIUS))")

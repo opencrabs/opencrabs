@@ -2506,6 +2506,21 @@ impl Render for Dashboard {
                         session = session.child(central(bar, centred_chat, chat_measure_px));
                     }
                     session = session.child(middle);
+                    // The hint card opens the stack, directly under the last
+                    // card of the conversation (#3124). It used to close the
+                    // stack, under the plan, the queue and the offers, and the
+                    // owner read that as a tip answering a plan it has nothing
+                    // to do with: the line comments on the turn that just
+                    // finished, so it belongs under that turn. Everything below
+                    // it is about what is waiting to happen next.
+                    if let Some(hint) = self.task_hint() {
+                        above = above.child(session_row(
+                            hint_card(&hint, cx).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        ));
+                        above_used = true;
+                    }
                     // In a split every pane carries its own plan, queue and
                     // composer (#2530), so the window-level copies stand down:
                     // drawing both would give the chat two composers. An unsplit
@@ -2591,22 +2606,6 @@ impl Render for Dashboard {
                         } else {
                             central(area, centred_chat, chat_measure_px)
                         });
-                        above_used = true;
-                    }
-                    // The hint card closes the stack, directly above the
-                    // composer it talks about (#3121). It moved here from a
-                    // strip welded to the composer's own border: the field is
-                    // for typing, and a line of advice pinned to it read as
-                    // part of the input. As the last card of the stack it sits
-                    // under the plans, the queue and the offers, which is the
-                    // order a reader needs them in: act on what is waiting,
-                    // then read the tip about it.
-                    if let Some(hint) = self.task_hint() {
-                        above = above.child(session_row(
-                            hint_card(&hint, cx).into_any_element(),
-                            centred_chat,
-                            chat_measure_px,
-                        ));
                         above_used = true;
                     }
                     // The strips take their room from the conversation before
@@ -3832,7 +3831,7 @@ fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// The hint card above the composer (#3102, #3121).
+/// The hint card under the conversation (#3102, #3121, #3124).
 ///
 /// It carries one line about the work: what the screen is asking for right now.
 /// The keys that act on the field itself stay inside the field, where the caret
@@ -3862,9 +3861,14 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
         .gap_2()
         .w_full()
         .min_w_0()
-        // The strips' own step (#3114): the queue and the plan card pad 12, and
-        // this one is the same family, so it does too.
-        .p_3()
+        // The conversation's column, not the strips' 12 (#3124). The card is
+        // placed by `session_row`, which spends half a rem of the gutter on
+        // each side, so a uniform `p_3` left its words at 20 while the messages
+        // above it, the composer's field and the footer's labels all start at
+        // 24. It pads the card's step for the same reason the field does, and
+        // the vertical step stays 12: only the sides were off.
+        .px(transcript::card_inset())
+        .py_3()
         .rounded(px(transcript::MESSAGE_RADIUS))
         .bg(glass_fill(transcript::message_card_surface()))
         .border_1()
@@ -3881,11 +3885,39 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 .flex()
                 .flex_row()
                 .items_center()
+                .gap_2()
                 .min_w_0()
                 .overflow_hidden()
-                .text_xs()
-                .text_color(rgb(shown.accent))
-                .child(SharedString::from(hint.text.clone())),
+                .child(
+                    // The card names itself (#3124). A bare sentence over the
+                    // composer read as the app talking to itself, and the owner
+                    // asked what the line was supposed to be. The label is
+                    // faint and never shrinks, so the tip keeps the row.
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from("Hint")),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        // The theme's accent at full strength shouted for a
+                        // line that is advice, not a warning (#3124). It is
+                        // mixed a quarter of the way into the card it sits on,
+                        // which is the same ink at 75%, and the accent itself
+                        // is untouched: focus rings, the selection wash and
+                        // every other accent surface stay exactly as they were.
+                        .text_color(rgb(gui_theme::mix(
+                            shown.accent,
+                            transcript::message_card_surface(),
+                            25,
+                            100,
+                        )))
+                        .child(SharedString::from(hint.text.clone())),
+                ),
         );
     // Only a hint the reader may hide gets the control, and only while the
     // pointer is on the card: a permanent × on every line would be a button

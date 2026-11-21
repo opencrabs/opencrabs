@@ -2018,9 +2018,12 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         !render.contains("shell = shell.child(hint_card"),
         "and the card is no longer a strip of the composer's own box"
     );
-    // The card is the last strip of the stack above the composer, so it sits
-    // under the plans, the queue and the offers: act on what is waiting, then
-    // read the tip about it.
+    // The card OPENS the stack above the composer, directly under the last
+    // card of the conversation (#3124). It used to close it, under the plans,
+    // the queue and the offers, and a tip printed under a plan read as advice
+    // about the plan: the line comments on the turn that just finished, so it
+    // belongs under that turn, and everything below it is about what is
+    // waiting to happen next.
     let card = render
         .find("if let Some(hint) = self.task_hint()")
         .expect("the card is drawn from the hint the screen is showing");
@@ -2028,10 +2031,22 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
     let card = card
         .split("above_used = true;")
         .next()
-        .expect("the card closes the stack");
+        .expect("the card is one row of the stack");
     assert!(
         card.contains("session_row(") && card.contains("hint_card(&hint, cx)"),
         "the card takes the conversation's column, like every strip above it: {card}"
+    );
+    // The order is the point of #3124: the hint sits above the plan card, not
+    // under it. Both are found in the render, and the hint comes first.
+    let hint_at = render
+        .find("if let Some(hint) = self.task_hint()")
+        .expect("the hint block");
+    let plan_at = render
+        .find("let open = self.chat_session;")
+        .expect("the plan block");
+    assert!(
+        hint_at < plan_at,
+        "the hint is drawn under the conversation and above the plan card"
     );
     // The shell owns the single edge and the single curve (#3114): the composer
     // is a card of a message's size, and it is now the only thing in that box.
