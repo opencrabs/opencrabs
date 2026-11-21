@@ -78,10 +78,23 @@ fn the_mark_is_capped_at_two_characters() {
     // A pasted word with spaces inside keeps no spaces: the badge is a circle.
     assert_eq!(normalise_glyph("a b c"), Some("ab".to_string()));
     assert_eq!(normalise_glyph("  "), None);
+    // An icon is half of what the owner asked for ("so a inicial ou um icon que
+    // o user define"), so an emoji is a legitimate mark and never garbage to
+    // reject. The first draft asserted `None` here and was wrong about the
+    // requirement, not about the code.
+    assert_eq!(normalise_glyph("🦀"), Some("🦀".to_string()));
+    assert_eq!(normalise_glyph("🇵🇹"), Some("🇵🇹".to_string()));
+    // A cut inside a multi-codepoint icon must not leave a dangling joiner: the
+    // mark has to end on something a reader can see.
     assert_eq!(
-        normalise_glyph("🇵🇹"),
+        normalise_glyph("👨‍👩‍👧"),
+        Some("👨".to_string()),
+        "a family emoji cut at two chars keeps the man, not a joiner"
+    );
+    assert_eq!(
+        normalise_glyph("\u{200d}\u{200d}"),
         None,
-        "no alphanumeric to cap cleanly"
+        "joiners alone are not a mark"
     );
 }
 

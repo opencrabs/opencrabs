@@ -239,12 +239,24 @@ pub const GLYPH_MAX_CHARS: usize = 2;
 /// 32 px and the badge's text size is fixed; the caller never has to think
 /// about that, and a paste of a whole word cannot break the strip.
 pub fn normalise_glyph(raw: &str) -> Option<String> {
-    let cleaned: String = raw
+    let mut cleaned: String = raw
         .trim()
         .chars()
         .filter(|c| !c.is_whitespace() && !c.is_control())
         .take(GLYPH_MAX_CHARS)
         .collect();
+    // The cap counts code points, but a reader sees graphemes: cutting a
+    // multi-codepoint icon at two chars can leave the mark ending on a zero
+    // width joiner or a variation selector, an invisible tail that renders the
+    // badge off-centre or as a box. Dropping the tail is what makes "two
+    // characters" a promise about what shows, not about what is stored.
+    while cleaned
+        .chars()
+        .last()
+        .is_some_and(|c| matches!(c, '\u{200d}' | '\u{fe0f}' | '\u{fe0e}'))
+    {
+        cleaned.pop();
+    }
     if cleaned.is_empty() {
         None
     } else {

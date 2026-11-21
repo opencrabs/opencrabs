@@ -219,17 +219,46 @@ fn the_snippet_leaves_what_is_already_right_alone() {
 /// just the one line, because the next card is where it comes back.
 #[test]
 fn every_scroll_container_in_the_wiring_carries_an_id() {
-    // Both panels: the dashboard cards and the remote transcript, which is the
-    // one that shipped clipped because nothing scanned it.
-    for (name, source) in [
-        (
-            "dashboard_instances.rs",
-            include_str!("../dashboard_instances.rs"),
-        ),
-        ("remote_panel.rs", include_str!("../remote_panel.rs")),
-    ] {
-        check_scroll_ids(name, source);
-    }
+    // The dashboard's own cards.
+    check_scroll_ids(
+        "dashboard_instances.rs",
+        include_str!("../dashboard_instances.rs"),
+    );
+
+    // The remote panel has no scroll container of its own any more: its body is
+    // `transcript::view`, the window's own painter, and that painter owns the
+    // scrolling column. What the panel must keep is the handle it hands over,
+    // because a handle that stops travelling is the original bug coming back:
+    // a 40-row session painted into a box nothing can move. Scanning for
+    // `.overflow_y_scroll()` here would now only find nothing and fail, which
+    // is what this guard did the moment the panel started delegating
+    // (2026-11-21).
+    let panel = include_str!("../remote_panel.rs");
+    let view = fn_body(panel, "pub(crate) fn view(").expect("the panel has a view");
+    assert!(
+        view.contains("&ScrollHandle"),
+        "the remote panel must take the transcript's scroll handle: {view}"
+    );
+    assert!(
+        view.contains("transcript::view("),
+        "the body must be the window's own transcript painter: {view}"
+    );
+    assert!(
+        view.contains("scroll,"),
+        "the handle must reach the painter, or the body cannot move: {view}"
+    );
+
+    // And the body both views share has to stay scrollable with the id the
+    // method needs, since that is the container the remote panel relies on now.
+    let body = include_str!("../transcript.rs");
+    assert!(
+        body.contains(".overflow_y_scroll()"),
+        "the shared transcript body must scroll"
+    );
+    assert!(
+        body.contains(".id(\"transcript\")"),
+        "and carry the id `overflow_y_scroll` needs to resolve"
+    );
 }
 
 fn check_scroll_ids(name: &str, source: &str) {
@@ -412,9 +441,18 @@ fn the_transcript_is_built_off_the_ui_thread() {
 fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
     let start = source.find(signature)?;
     let rest = &source[start..];
-    let end = rest[1..]
-        .find("\n    fn ")
-        .or_else(|| rest[1..].find("\n    pub(crate) fn "))
+    // The NEAREST following item ends the body, whichever way it is written.
+    // This used to try `\n    fn ` first and only fall back to `pub(crate) fn`
+    // when that missed, so a private fn anywhere later in the file widened the
+    // window: `instance_disconnect` came back with `instance_glyph_begin` and
+    // more glued on, and an assert that the close button never touches the
+    // store failed on an `InstanceStore` from three functions away. A helper
+    // that silently returns a superset makes every test built on it lie
+    // (2026-11-21).
+    let end = ["\n    fn ", "\n    pub(crate) fn ", "\n    pub fn "]
+        .iter()
+        .filter_map(|marker| rest[1..].find(marker))
+        .min()
         .map(|i| i + 1)
         .unwrap_or(rest.len());
     Some(&rest[..end])
