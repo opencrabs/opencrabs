@@ -219,6 +219,38 @@ had already set, which is why the "already right" case is a test.
 The card draws it in a monospaced-looking block with its own copy button, right
 under the warning it fixes.
 
+### The public tunnel
+
+The snippet answers "how do I make this address reachable", and it is the wrong
+answer for the common case: most people are not on the same network as the crab
+they want to reach, and editing TOML plus restarting the window to pair once is
+a tax on every user. The binary already ships the answer as `opencrabs connect`
+(a cloudflared quick tunnel plus a single-use code), so the card exposes the
+same path behind its own button:
+
+| State | What the card shows |
+|---|---|
+| `Idle` | the bind address, and **abrir túnel público** |
+| `Starting` | "a abrir o túnel público…", because the first run downloads cloudflared |
+| `Up(url)` | the public `https://….trycloudflare.com` address, in green, and where to stop it |
+| `Failed(why)` | the reason, plus **tentar outra vez**; the bind address stays on screen |
+
+`apply_tunnel` is the whole transition, and it is a plain function so a test can
+drive it: the new address rewrites the link and the QR, and **clears the warning
+and the snippet**, because both described an address that is no longer the one
+being handed out. A card showing "túnel activo" and "esta máquina só aceita
+ligações locais" at the same time would be two lies in one place.
+
+It is a separate click on purpose. A quick tunnel publishes a URL on the
+internet, and doing that under a button labelled "gerar código" would be a
+surprise of the same class as minting a code nobody asked for. The code is not
+touched by this: only the address changes, so a code already read out loud stays
+valid.
+
+The tunnel outlives the card. Closing it does not stop cloudflared, and the card
+says so with the command that does (`opencrabs connect --stop`) instead of
+implying a cleanup it never performs.
+
 ### The badge's colour
 
 Each badge tints itself from its own `host_id` (`badge_tint`), stable across
