@@ -277,10 +277,19 @@ async fn the_queue_row_keeps_a_quiet_gray_hierarchy_without_amber() {
     terminal.draw(|f| render(f, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
 
-    // The queue block is two rows: a top border and the content line. The
-    // content sits directly above the input box.
-    let content_y = app.input_area_y - 1;
+    // The queue block is two rows: a top border and the content line. The row
+    // directly above the field is the hint row (#3102), and that row also
+    // says "queued" when a message waits, so the queue row is found by the
+    // preview it carries, not by the label both rows share.
+    let content_y = (0..app.input_area_y)
+        .rev()
+        .find(|&y| row_text(buffer, y).contains("hello bre"))
+        .expect("the queue row is drawn above the field");
     let border_y = content_y - 1;
+    assert!(
+        app.input_area_y - content_y <= 3,
+        "the queue row sits just above the field, under the hint row"
+    );
     let cells = row_cells(buffer, content_y);
     let row = row_text(buffer, content_y);
     assert!(
