@@ -143,8 +143,30 @@ call, so the card says the code lives until it expires and stops there.
 
 ### The card
 
-Top to bottom: the QR, this crab's address, the code, any warning, and three
-buttons (copiar link, copiar código, novo código).
+Top to bottom: the QR, this crab's address, the code, any warning, three
+buttons (copiar link, copiar código, novo código), and the instructions.
+
+The instructions are the point of the card. A code with no "what do I do with
+this" is a number the owner has to reverse-engineer, and the far side's flow is
+three steps that are not guessable from here. `share_steps()` returns them,
+fixed and pure so a test can pin them:
+
+1. no outro crab: botão direito no C, no topo da barra, e escolhe «emparelhar um crab»
+2. cola o link copiado: preenche o endereço, o código e o nome de uma vez
+3. carrega em «emparelhar»: o crab novo aparece na barra e as sessões dele abrem
+
+Each step names the control the owner must press on the other machine, and the
+test asserts those names, because a menu row renamed on one side and not on the
+other turns the card into a wrong instruction: the owner follows it and fails.
+
+`SHARE_FOOTNOTE` closes the card with the two things it cannot do, both of which
+surprise people on first use:
+
+- **Entre dois PCs o caminho é o link colado.** The QR is there for a client
+  that can read codes (a phone); a desktop has no reader, so the QR is decoration
+  until one exists. Saying this costs a line; leaving it out costs an hour.
+- **Descoberta automática na rede ainda não existe.** A crab on the same LAN
+  does not appear on its own: without a code, nothing shows up in the strip.
 
 The QR is painted **white on black whatever the theme is**, at 4 px per module.
 A scanner needs contrast, and a dark card with dark modules is a pretty square
@@ -204,3 +226,12 @@ that a realistic column of hosts stays distinguishable.
   `advertise_url` and the card hands that out instead.
 - A code minted while `[a2a] enabled = false` is dead on arrival. The card says
   so before the other crab tries it, but it cannot fix the config for you.
+- **No discovery on the network.** Nothing listens for other crabs on the LAN
+  and nothing advertises this one, so a crab only ever appears in the strip
+  after a code has been pasted. It is the obvious next step and the one with the
+  most ways to go wrong (who answers, what a hostile answer can do, what happens
+  on a shared café network), so it stays out until it can be built with a
+  trusted-network gate rather than as a convenience.
+- **No QR reader.** The QR is drawn but nothing in this binary reads one: the
+  other side of a pairing is a desktop, and the desktop path is the pasted link.
+  The square earns its place the day a client that scans exists.
