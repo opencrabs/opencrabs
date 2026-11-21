@@ -113,6 +113,40 @@ fn a_config_without_the_pack_is_left_alone() {
 }
 
 #[test]
+fn a_second_launch_leaves_the_migrated_file_byte_identical() {
+    // The other migrations inject commented defaults when nothing structural
+    // changed, so the fixture carries those keys: what this test pins is that
+    // migration 6 itself stops asking for a rewrite once the pack is gone.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[agent]\ncompletion_notification_enabled = true\n\
+         notify_on_plan_completed = false\n\
+         notify_on_task_completed = true\n\
+         notify_on_turn_completed = true\n\
+         notify_on_turn_failed = true\n\
+         subagent_provider = \"inherit\"\nsubagent_model = \"inherit\"\n\
+         plan_provider = \"inherit\"\nexecute_provider = \"inherit\"\n",
+    )
+    .unwrap();
+
+    Config::migrate_if_needed(&path);
+    let after_first = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !after_first.contains("completion_notification_enabled"),
+        "the first pass left the dead master on disk: {after_first}"
+    );
+
+    Config::migrate_if_needed(&path);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        after_first,
+        "the migration must be idempotent, or every launch rewrites the config"
+    );
+}
+
+#[test]
 fn the_load_path_folds_the_pack_before_serde_sees_it() {
     // A repo-local `opencrabs.toml` is never migrated on disk, so the fold in
     // `merge_from_file` is what keeps a legacy file honest at read time.

@@ -75,9 +75,10 @@ fn xml_escape_covers_the_five_metacharacters() {
 
 #[test]
 fn one_finish_keeps_one_key_and_turns_carry_none() {
-    // #2752: a plan finishing and its last task settling are ONE piece of
-    // news. The plan event owns the key, so the second sighting of that
-    // finish is suppressed instead of becoming a second card.
+    // #2752: the finish is ONE piece of news, so it owns a key and the second
+    // sighting of it is suppressed instead of becoming a second card. Since
+    // #3118 the plan event is the only thing that raises a completion banner,
+    // so the key has no sibling to collide with.
     let plan = NotificationEvent::PlanCompleted {
         title: "Ship it".to_string(),
         tasks: 3,
@@ -96,15 +97,8 @@ fn one_finish_keeps_one_key_and_turns_carry_none() {
         "the plan event's key is the one the finish is remembered by"
     );
 
-    // Asking the same thing twice deserves two banners, so turns carry no key.
-    assert_eq!(
-        NotificationEvent::TurnCompleted {
-            summary: "all set".to_string(),
-            session: None,
-        }
-        .dedupe_key(),
-        None
-    );
+    // Asking the same thing twice deserves two banners, so a failed turn
+    // carries no key.
     assert_eq!(
         NotificationEvent::TurnFailed {
             reason: "boom".to_string(),
@@ -245,16 +239,6 @@ fn every_banner_names_the_session_it_is_about() {
             tasks: 3,
             session: Some(session),
         },
-        NotificationEvent::TaskCompleted {
-            label: "write the test".to_string(),
-            success: true,
-            elapsed_secs: 12,
-            session: Some(session),
-        },
-        NotificationEvent::TurnCompleted {
-            summary: "all set".to_string(),
-            session: Some(session),
-        },
         NotificationEvent::TurnFailed {
             reason: "boom".to_string(),
             session: Some(session),
@@ -270,8 +254,8 @@ fn every_banner_names_the_session_it_is_about() {
     }
 
     // A banner with nothing to open stays informational and invents nothing.
-    let bare = NotificationEvent::TurnCompleted {
-        summary: "all set".to_string(),
+    let bare = NotificationEvent::TurnFailed {
+        reason: "boom".to_string(),
         session: None,
     };
     assert_eq!(bare.session(), None);
