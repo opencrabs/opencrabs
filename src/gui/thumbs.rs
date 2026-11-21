@@ -18,7 +18,7 @@
 //! like every other picture; only the one-time crop runs on ours.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, ObjectFit, Pixels, SharedString, img, rems, rgb};
+use gpui::{AnyElement, ObjectFit, Pixels, SharedString, div, img, rems, rgb};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
