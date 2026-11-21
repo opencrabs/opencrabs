@@ -204,6 +204,21 @@ so a change to either encoder fails in the binary rather than in a window.
 5. With no `[a2a] api_key` the card warns that anything on the network can call
    `/a2a/v1`.
 
+### The config snippet
+
+A warning that names two keys still leaves the owner to assemble them in the
+right section with the right quotes, and a typo there is a window that will not
+start. `share_config_snippet` does the assembly: it prints the `[a2a]` block to
+paste, filled in with this machine's real LAN address, and **only the lines that
+are missing**. A machine that is already open and keyed gets `None`, so a
+working card never shows a config block it does not need; a machine that is
+enabled but has no key gets one line, not a rewritten section. Pasting a
+snippet that restated `advertise_url` would silently reset an address the owner
+had already set, which is why the "already right" case is a test.
+
+The card draws it in a monospaced-looking block with its own copy button, right
+under the warning it fixes.
+
 ### The badge's colour
 
 Each badge tints itself from its own `host_id` (`badge_tint`), stable across
