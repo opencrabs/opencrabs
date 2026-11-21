@@ -68,6 +68,13 @@ impl Dashboard {
             self.pair_key(&ev.keystroke, cx);
             return;
         }
+        // The badge's mark editor is one field, and it owns the keyboard for
+        // the same reason: a character typed into it must not also land in the
+        // composer underneath.
+        if self.instance_glyph.is_some() {
+            self.glyph_key(&ev.keystroke, cx);
+            return;
+        }
         // The settings modal owns every key while it is open, on every screen
         // (#2878): an armed credential edit must not leak a typed character
         // into the composer, and the rows' arrows belong to the modal alone.

@@ -737,6 +737,10 @@ pub(crate) struct Dashboard {
     /// The sharing card: a fresh single-use code and the QR that carries it,
     /// minted when the mark's menu asked for one and dropped when it closes.
     pub(crate) instance_share: Option<dashboard_instances::ShareView>,
+    /// The badge's mark editor: which crab, and the one field. `None` is the
+    /// normal state. Kept beside the pairing form because it is the same kind
+    /// of surface (a modal that owns the keyboard) for a one-character job.
+    pub(crate) instance_glyph: Option<dashboard_instances::GlyphForm>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one

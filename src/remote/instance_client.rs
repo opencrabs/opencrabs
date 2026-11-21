@@ -17,6 +17,7 @@
 //! to `tasks/list` and the second shows an error card. `anyhow` alone would
 //! collapse both into a string nobody can branch on.
 
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -104,12 +105,50 @@ pub struct RemoteSession {
 }
 
 /// One row of a remote conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// These are the same columns a local row carries, because the panel paints a
+/// remote conversation with the local transcript painter: it decides what a
+/// turn is, how reasoning folds, and what the card's footer prints, all from
+/// the rows themselves. A row that arrives without them is a row the painter
+/// can only draw as bare text, which is why the first remote panel read like a
+/// different product (Daniel, 21 Nov 2026).
+///
+/// Every field past `created_at` is optional and defaults to absent: a host on
+/// an older build sends none of them, and `None` here means exactly what it
+/// means on a local row, nothing measured, nothing to draw.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RemoteMessage {
     pub id: String,
     pub role: String,
     pub content: String,
     pub created_at: i64,
+    /// The reasoning behind the answer, when the host kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// How many calls the turn made, counted the way the live card counts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<i64>,
+    /// How long the turn took, for the card's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<i64>,
+    /// The conversation's context window at the time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_window: Option<i64>,
+    /// The turn's own output rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_sec: Option<f64>,
+    /// Prompt tokens the model saw on the turn's final call. `TurnMetrics`
+    /// reads this as the turn's ctx, so without it the footer has no budget to
+    /// print even when the host measured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    /// Whether the agent took this user row between tool calls instead of it
+    /// starting a turn. The transcript uses it to keep one busy period in one
+    /// card; without it a remote answer that continued after a tool call is
+    /// drawn as a separate turn, and the conversation reads differently from
+    /// the same conversation locally.
+    #[serde(default)]
+    pub continuation: bool,
 }
 
 /// One A2A task the remote is holding.
@@ -151,9 +190,46 @@ pub fn rpc_body(method: &str, params: serde_json::Value) -> serde_json::Value {
     })
 }
 
+/// The one runtime every remote call shares.
+///
+/// `reqwest` needs a Tokio reactor, and the window is on gpui's executor, so a
+/// runtime has to exist for these calls. The window used to build one per
+/// call; measured 21 Nov, the switch to another crab paid that setup on every
+/// probe and every fetch, and it paid it again for the client each time.
+///
+/// The client itself is the process-wide one (`utils::http::shared()`, #2843):
+/// one CA load, one pool. What is shared here is the reactor that pool belongs
+/// to, because sockets cannot outlive the runtime that made them. Two worker
+/// threads is enough: these are a health probe and a JSON-RPC POST, and a
+/// deeper pool would only queue against SQLite reads on the other side.
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("remote-client")
+            .build()
+            .expect("a runtime for remote calls")
+    });
+    &RUNTIME
+}
+
+/// Run one remote future to completion on the shared runtime.
+///
+/// This is the door a non-async caller uses (the window's background tasks).
+/// It must not be called from inside another Tokio runtime: that panics, and
+/// the panic names it. Everything in the window is on gpui's executor, so the
+/// rule holds there by construction.
+pub fn block_on<T, F>(call: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    runtime().block_on(call)
+}
+
 /// `GET /a2a/health`, timed. `Ok(ms)` when it answered 2xx.
 pub async fn probe(target: &Target<'_>) -> Result<u64> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut req = client.get(target.url("/a2a/health")).timeout(PROBE_TIMEOUT);
     if let Some(token) = target.token {
         req = req.bearer_auth(token);
@@ -172,7 +248,7 @@ pub async fn call(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut req = client
         .post(target.url("/a2a/v1"))
         .timeout(CALL_TIMEOUT)
@@ -296,6 +372,28 @@ fn unix_seconds(value: Option<&serde_json::Value>) -> i64 {
         .unwrap_or(0)
 }
 
+/// A number the host may or may not have measured. `None` covers both "the
+/// host is older and does not send this" and "the row measured nothing", which
+/// the painter draws the same way: no segment.
+fn opt_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|v| v.as_i64())
+}
+
+/// The same for a rate, which `tokens_per_sec` stores as a float.
+fn opt_f64(value: Option<&serde_json::Value>) -> Option<f64> {
+    value.and_then(|v| v.as_f64())
+}
+
+/// A text column the host may not send. An empty string is not "measured and
+/// empty" for reasoning: a host that kept no reasoning sends nothing, so `""`
+/// is treated as absent rather than as a fold header with no body.
+fn opt_text(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 pub fn parse_sessions(value: &serde_json::Value) -> Result<Vec<RemoteSession>> {
     let list = value
         .get("sessions")
@@ -355,6 +453,16 @@ pub fn parse_transcript(value: &serde_json::Value) -> Result<(String, Vec<Remote
                 .unwrap_or_default()
                 .to_string(),
             created_at: unix_seconds(m.get("createdAt")),
+            thinking: opt_text(m.get("thinking")),
+            tool_calls: opt_i64(m.get("toolCalls")),
+            duration_secs: opt_i64(m.get("durationSecs")),
+            ctx_window: opt_i64(m.get("ctxWindow")),
+            tokens_per_sec: opt_f64(m.get("tokensPerSec")),
+            input_tokens: opt_i64(m.get("inputTokens")),
+            continuation: m
+                .get("continuation")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
         .collect();
     Ok((title, messages))
@@ -541,6 +649,61 @@ mod tests {
         assert_eq!(rows[0].role, "user");
         assert_eq!(rows[1].content, "ola");
         assert_eq!(rows[1].created_at, 1_795_183_260);
+    }
+
+    /// The panel paints with the local transcript painter, and that painter
+    /// reads a turn's reasoning, its tool count, its clock and its ctx budget
+    /// off the row. A payload that carries only role+content is a conversation
+    /// the painter can only draw as flat text, which is exactly how a remote
+    /// session came to look like a different product (Daniel, 21 Nov 2026).
+    /// This fixture is `handle_transcript`'s current output, key for key.
+    #[test]
+    fn a_transcript_row_carries_what_the_painter_reads() {
+        let value = serde_json::json!({
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000",
+            "title": "remote chat",
+            "messages": [{
+                "id": "2", "role": "assistant", "content": "ola",
+                "sequence": 2, "createdAt": "2026-11-20T14:01:00+00:00",
+                "thinking": "pensei nisto",
+                "toolCalls": 3,
+                "durationSecs": 7,
+                "ctxWindow": 200000,
+                "tokensPerSec": 42.5,
+                "inputTokens": 74000,
+                "continuation": true
+            }]
+        });
+        let (_, rows) = parse_transcript(&value).unwrap();
+        let row = &rows[0];
+        assert_eq!(row.thinking.as_deref(), Some("pensei nisto"));
+        assert_eq!(row.tool_calls, Some(3));
+        assert_eq!(row.duration_secs, Some(7));
+        assert_eq!(row.ctx_window, Some(200_000));
+        assert_eq!(row.tokens_per_sec, Some(42.5));
+        assert_eq!(row.input_tokens, Some(74_000));
+        assert!(row.continuation);
+    }
+
+    /// A host on an older build sends none of those keys. That is not an error:
+    /// the row simply measured nothing this client can draw, and every field
+    /// defaults to absent so the conversation still opens.
+    #[test]
+    fn a_host_without_those_columns_still_parses() {
+        let value = serde_json::json!({
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000",
+            "title": "old host",
+            "messages": [{"id": "1", "role": "user", "content": "oi",
+                          "sequence": 1, "createdAt": "2026-11-20T14:00:00+00:00"}]
+        });
+        let (_, rows) = parse_transcript(&value).unwrap();
+        let row = &rows[0];
+        assert_eq!(row.thinking, None);
+        assert_eq!(row.tool_calls, None);
+        assert_eq!(row.ctx_window, None);
+        assert_eq!(row.tokens_per_sec, None);
+        assert_eq!(row.input_tokens, None);
+        assert!(!row.continuation);
     }
 
     #[test]

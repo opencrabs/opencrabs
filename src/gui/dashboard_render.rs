@@ -2972,7 +2972,7 @@ impl Render for Dashboard {
         // measure, different source. The strip picked the crab, so what sits
         // here is that crab's transcript, not this window's.
         let right = if self.instance_remote_open() && self.screen == Screen::Chat {
-            self.remote_panel_element(cx)
+            self.remote_panel_element(chat_measure_px, cx)
         } else {
             right.into_any_element()
         };
@@ -3758,6 +3758,10 @@ impl Render for Dashboard {
                 ))
                 .with_priority(2),
             );
+        }
+        // The badge's mark editor, above the strip it changes.
+        if self.instance_glyph.is_some() {
+            root = root.child(self.instance_glyph_modal(cx));
         }
         // The sharing card is the mirror of the pairing form: it hands a code
         // out instead of taking one in, and it must sit above the strip that

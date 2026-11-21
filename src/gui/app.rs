@@ -680,6 +680,7 @@ pub(crate) fn run() {
                         instance_menu_at: None,
                         instance_menu_for: None,
                         instance_share: None,
+                        instance_glyph: None,
                         instance_remote: None,
                         instance_error: None,
                         remote_transcript: None,

@@ -65,6 +65,17 @@ impl InstanceEntry {
     pub fn url(&self) -> &str {
         &self.known.url
     }
+
+    /// What the badge draws: the owner's mark when they set one, otherwise the
+    /// initial of the label.
+    pub fn glyph(&self) -> String {
+        match self.known.glyph.as_deref() {
+            Some(chosen) => {
+                normalise_glyph(chosen).unwrap_or_else(|| badge_glyph(&self.known.label))
+            }
+            None => badge_glyph(&self.known.label),
+        }
+    }
 }
 
 /// The set of known remotes plus which one the window is looking at.
@@ -216,6 +227,30 @@ pub fn badge_glyph(label: &str) -> String {
 /// How many distinct washes a badge can wear. Six is what a column of badges
 /// shows without two neighbours reading the same at a glance.
 pub const BADGE_TINTS: usize = 6;
+
+/// The longest mark a 32 px circle holds. Two characters fit at the badge's
+/// text size; a third pushes the pair off centre.
+pub const GLYPH_MAX_CHARS: usize = 2;
+
+/// Clean what the owner typed into a badge mark.
+///
+/// `None` means "nothing usable, derive it": the field was left empty, or what
+/// is in it is whitespace. Two characters is the cap, because the circle is
+/// 32 px and the badge's text size is fixed; the caller never has to think
+/// about that, and a paste of a whole word cannot break the strip.
+pub fn normalise_glyph(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .take(GLYPH_MAX_CHARS)
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
 
 /// A stable colour slot for a crab, from its `host_id`.
 ///

@@ -199,6 +199,29 @@ pub async fn handle_transcript(
                         "content": m.content,
                         "sequence": m.sequence,
                         "createdAt": m.created_at.to_rfc3339(),
+                        // Everything the transcript painter needs to draw the
+                        // row the way this machine's own chat draws it. These
+                        // lived only in this database, so a remote reader got
+                        // a flattened version of the conversation: no thinking
+                        // block, no ctx/rate footer, no tool count, no turn
+                        // duration (Daniel, 21 Nov: "a UI nao parece ser a
+                        // mesma"). The window is not the place to re-derive
+                        // them, and it cannot: the provider's prompt size and
+                        // the settled turn's own rate are measurements that
+                        // only the host took.
+                        //
+                        // All of them are `Option` and all of them travel as
+                        // `null` on a row that never reached its settle, which
+                        // is the honest answer for a turn still in flight. A
+                        // client that predates this keeps working: it ignores
+                        // keys it does not know.
+                        "thinking": m.thinking,
+                        "durationSecs": m.duration_secs,
+                        "ctxWindow": m.ctx_window,
+                        "tokensPerSec": m.tokens_per_sec,
+                        "toolCalls": m.tool_calls,
+                        "inputTokens": m.input_tokens,
+                        "continuation": m.continuation,
                     })
                 })
                 .collect();

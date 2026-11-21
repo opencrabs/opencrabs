@@ -15,6 +15,7 @@ fn known(id: &str, label: &str) -> KnownInstance {
         token: "ocpair_test".to_string(),
         added_at: 100,
         last_ok: 0,
+        glyph: None,
     }
 }
 

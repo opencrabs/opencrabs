@@ -1,212 +1,115 @@
-//! The panel for a remote crab: its session's transcript, read-only, with the
-//! banner that says which crab you are reading.
+//! The panel for a remote crab: its session's transcript, read-only, plus the
+//! chrome a remote needs and a local chat does not (a banner naming the crab,
+//! and a composer that sends to it).
 //!
-//! Deliberately not `transcript::view`. That function takes a
-//! `TranscriptState` built from ledger rows, and a remote row is not a ledger
-//! row: it has no local session, no cost, no reactions and no message id this
-//! window can act on. Forcing it through would mean inventing twenty fields to
-//! make a read-only view compile, and the first thing a wrong field would break
-//! is the copy and the click handlers the local transcript owns.
+//! The body is `transcript::view`, the same function the window's own chat
+//! draws with. That is the whole point. Daniel read a remote session and saw a
+//! different product, because the first version of this module painted
+//! `content` raw, and the second hand-rolled its own markdown on top. A remote
+//! answer has to read exactly like a local one: same turn cards, same fold
+//! header, same thinking block, same table layout, same code fences. Two
+//! painters of the same data drift the moment either one changes, and the drift
+//! is invisible until someone puts both side by side.
 //!
-//! What it does share with the local panel is the reading experience, because
-//! a remote crab that renders as plain text is a different product: the stored
-//! row goes through the same two steps the transcript uses. `split_segments`
-//! folds the chain of thought away from the answer, and `markdown::blocks_flow`
-//! parses what is left. Painting `content` raw was the bug Daniel hit on the
-//! Lenovo: `<!-- reasoning -->` markers, `[SYSTEM: ...]` scaffolding and a wall
-//! of asterisks in the chat, and a 230 KB row that took seconds to lay out.
+//! What this module owns, then, is the conversion (`RemoteMessage` is not a
+//! `Message`) and the chrome. Everything else is the transcript's: what counts
+//! as a row, how reasoning folds, how a 40 KB answer is capped, which anchors
+//! exist. Re-deciding any of that here is how the two views started
+//! disagreeing.
 
-use std::rc::Rc;
+use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, ClickEvent, IntoElement, SharedString, Window, div, prelude::*, rems, rgb,
+    AnyElement, App, ClickEvent, IntoElement, ScrollHandle, SharedString, Window, div, prelude::*,
+    rems, rgb,
 };
 
 use crate::instances::Health;
-use crate::markdown::{self, MdBlock, MdFlow};
 use crate::palette;
 use crate::transcript;
+use opencrabs::db::models::Message;
 use opencrabs::remote::instance_client::RemoteMessage;
-use opencrabs::tui::app::reasoning_split::{Segment, split_segments};
-use opencrabs::utils::internal_message::is_internal_system_message;
 
-/// How much of a folded block (thinking, retained narration) reaches the
-/// screen. The fold exists to keep the answer readable; a paragraph of it is
-/// enough to see the shape of the reasoning, and the whole chain is what made
-/// the panel slow in the first place.
-const FOLDED_MAX: usize = 480;
-
-/// Ceiling on one answer segment. Answers are meant to be read, so this is
-/// generous; it is here so a runaway row cannot cost a second per frame.
-const ANSWER_MAX: usize = 12_000;
-
-/// One piece of a remote row, already parsed.
-#[derive(Clone)]
-pub(crate) enum RemotePart {
-    /// Visible words, parsed as markdown by the transcript's own renderer.
-    Answer(Rc<Vec<MdBlock>>),
-    /// Internal text the local panel folds away: thinking, retained narration,
-    /// a tool ledger reduced to a count. Muted, labelled and capped.
-    Folded {
-        label: &'static str,
-        body: SharedString,
-    },
-}
-
-/// One row as the paint reads it.
-#[derive(Clone)]
-pub(crate) struct RemoteRow {
-    pub(crate) role: SharedString,
-    pub(crate) at: SharedString,
-    pub(crate) parts: Vec<RemotePart>,
-}
-
-impl RemoteRow {
-    /// `None` for a row the local panel would not draw either: a compaction
-    /// marker, or the harness talking to itself. Both live in the stored
-    /// transcript and neither is conversation.
-    pub(crate) fn from_message(message: &RemoteMessage) -> Option<Self> {
-        let content = message.content.as_str();
-        if content.starts_with("[CONTEXT COMPACTION") {
-            return None;
-        }
-        if message.role == "user" && is_internal_system_message(content) {
-            return None;
-        }
-        let parts = parts_for(&message.role, content);
-        if parts.is_empty() {
-            return None;
-        }
-        Some(Self {
-            role: SharedString::from(if message.role == "user" { "tu" } else { "crab" }),
-            // The remote stamps unix seconds, the same clock the rail sorts
-            // by. The panel prints the local clock and nothing else: a date
-            // under every row is noise on a screen that is read all day.
-            at: SharedString::from(
-                chrono::DateTime::from_timestamp(message.created_at, 0)
-                    .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
-                    .unwrap_or_default(),
-            ),
-            parts,
+/// Build the transcript state a remote session paints with.
+///
+/// The rows are converted, never filtered. `turns_with_origins` and
+/// `row_blocks` already decide what is conversation: a `[SYSTEM: ...]` seed is
+/// not, a `[CONTEXT COMPACTION` marker is not, and reasoning folds into a
+/// `Thinking` block instead of leaking into the answer. Letting the transcript
+/// apply those rules is the only way a remote panel stays identical to the
+/// local one when those rules change.
+///
+/// Called once per fetch, not per paint: the turn split and the row walk cost
+/// real work on a 216 KB session, and a paint must not redo it.
+pub(crate) fn state_for(
+    session_id: &str,
+    messages: &[RemoteMessage],
+) -> transcript::TranscriptState {
+    let session = uuid::Uuid::parse_str(session_id).ok();
+    // A remote id that is not a UUID still needs a stable row id: the transcript
+    // keys its handlers and reaction chips by it, and two rows sharing one id
+    // would make one of them unclickable. Falling back to the row's position
+    // keeps it unique inside the session and stable across a re-read of it.
+    let rows: Vec<Message> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let id = uuid::Uuid::parse_str(&m.id)
+                .unwrap_or_else(|_| uuid::Uuid::from_u128((i as u128) + 1));
+            let mut row = Message::new(
+                session.unwrap_or_else(uuid::Uuid::nil),
+                m.role.clone(),
+                m.content.clone(),
+                i as i32,
+            );
+            row.id = id;
+            row.created_at =
+                chrono::DateTime::from_timestamp(m.created_at, 0).unwrap_or_else(chrono::Utc::now);
+            // Everything the painter reads from a row travels with the row, and
+            // these are the columns that make a remote answer look like a local
+            // one: the reasoning it folds, the calls the card counts, the clock,
+            // the ctx budget, the rate, and whether the row continues the turn
+            // above it. Copying them here, instead of re-deciding any of it in
+            // this module, is what keeps the two views from drifting.
+            row.thinking = m.thinking.clone();
+            row.tool_calls = m.tool_calls;
+            row.duration_secs = m.duration_secs;
+            row.ctx_window = m.ctx_window;
+            row.tokens_per_sec = m.tokens_per_sec;
+            row.input_tokens = m.input_tokens;
+            row.continuation = m.continuation;
+            row
         })
+        .collect();
+    let total = rows.len() as i64;
+    // The card's footer comes from the rows themselves: `TurnMetrics::from_row`
+    // reads `input_tokens`, `ctx_window`, `tokens_per_sec` and `tool_calls` off
+    // the turn's settled row, which is the same road a local card takes. This
+    // map is only the fallback for a turn whose row lost those columns, and a
+    // remote window has nothing to put there that the host did not already put
+    // on the row.
+    //
+    // Origins are different: they are stamped onto rows by a turn that settled
+    // in *this* database, and this window has never seen these turns settle. An
+    // empty map is the honest answer; the transcript already draws a turn
+    // without an origin chip.
+    let metrics: HashMap<String, transcript::TurnMetrics> = HashMap::new();
+    let origins: HashMap<uuid::Uuid, String> = HashMap::new();
+    let (hidden, turns) = transcript::turns_with_origins(&rows, total, &metrics, &origins);
+    transcript::TranscriptState {
+        session,
+        hidden,
+        turns,
+        rows,
+        ..Default::default()
     }
 }
 
-/// Split one stored row into what may be read and what must be folded.
+/// The chrome around a remote transcript.
 ///
-/// Mirrors `transcript::row_blocks`: assistant rows go through the reasoning
-/// split, every other row is taken at face value. A user row is parsed as
-/// verbatim so a soft break stays a line break, which is how the local panel
-/// treats typed text.
-fn parts_for(role: &str, content: &str) -> Vec<RemotePart> {
-    if role != "assistant" {
-        let (text, _) = strip_html_comments(content);
-        return answer_parts(&text, MdFlow::Verbatim);
-    }
-    // Split FIRST. The reasoning markers are themselves HTML comments, so
-    // stripping comments before the split would delete the block boundaries
-    // and dump the chain of thought into the answer as plain text.
-    let mut parts: Vec<RemotePart> = Vec::new();
-    let mut tools = 0usize;
-    for segment in split_segments(content) {
-        match segment {
-            Segment::Reasoning(body) => push_folded(&mut parts, "pensamento", &body),
-            Segment::Blocked(body) => push_folded(&mut parts, "narração retida", &body),
-            Segment::Text(body) => {
-                let (text, found) = strip_html_comments(&body);
-                tools += found;
-                parts.extend(answer_parts(&text, MdFlow::Prose));
-            }
-        }
-    }
-    // A row whose only content was a tool ledger has no words to show, but
-    // dropping it silently would hide that the crab did something. One muted
-    // line says it without pasting the ledger's markup into the chat.
-    if parts.is_empty() && tools > 0 {
-        parts.push(RemotePart::Folded {
-            label: "ferramentas",
-            body: SharedString::from(format!("{tools} chamada(s) de ferramenta, sem texto")),
-        });
-    }
-    parts
-}
-
-/// Parse the visible words of a row, capped so one row cannot own the frame.
-fn answer_parts(text: &str, flow: MdFlow) -> Vec<RemotePart> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    let (capped, _) = capped(trimmed, ANSWER_MAX);
-    let blocks = markdown::blocks_flow(&capped, flow);
-    if blocks.is_empty() {
-        return Vec::new();
-    }
-    vec![RemotePart::Answer(Rc::new(blocks))]
-}
-
-/// Push one folded piece, dropping it when there is nothing in it.
-fn push_folded(parts: &mut Vec<RemotePart>, label: &'static str, body: &str) {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let (capped, _) = capped(trimmed, FOLDED_MAX);
-    parts.push(RemotePart::Folded {
-        label,
-        body: SharedString::from(capped),
-    });
-}
-
-/// Cut on a character boundary, with one ellipsis. Written over `chars()`
-/// rather than a byte range because the byte-slice ratchet counts every new
-/// `[..]` site and this file has no business adding one.
-fn capped(text: &str, max: usize) -> (String, bool) {
-    let mut out = String::with_capacity(text.len().min(max));
-    let mut rest = text.chars();
-    for _ in 0..max {
-        match rest.next() {
-            Some(ch) => out.push(ch),
-            None => return (out, false),
-        }
-    }
-    if rest.next().is_some() {
-        out.push('…');
-        (out, true)
-    } else {
-        (out, false)
-    }
-}
-
-/// Remove `<!-- ... -->` spans, counting the tool ledgers among them.
-///
-/// The stored row keeps its ledgers and its marker comments inline. The local
-/// panel turns them into blocks of their own; this one has no ledger UI, so
-/// the markup is dropped rather than painted as dim HTML, which is what the
-/// user saw as strange characters in the chat.
-fn strip_html_comments(text: &str) -> (String, usize) {
-    let mut out = String::with_capacity(text.len());
-    let mut tools = 0usize;
-    let mut rest = text;
-    loop {
-        let Some((head, tail)) = rest.split_once("<!--") else {
-            out.push_str(rest);
-            break;
-        };
-        out.push_str(head);
-        let Some((inside, after)) = tail.split_once("-->") else {
-            // Unterminated: everything from here is markup that never closed.
-            break;
-        };
-        if inside.trim_start().starts_with("tools") {
-            tools += 1;
-        }
-        rest = after;
-    }
-    (out, tools)
-}
-
-/// What the panel draws for the selected remote.
+/// Deliberately holds no transcript state: `TranscriptState` is not `Clone`, and
+/// cloning 216 KB of rows on every paint to hand the painter its own copy would
+/// be a worse bug than the one being fixed. The state travels beside the frame.
 #[derive(Default)]
 pub(crate) struct RemotePanelFrame {
     /// The crab's label, as the owner typed it.
@@ -215,22 +118,90 @@ pub(crate) struct RemotePanelFrame {
     pub(crate) health: Option<Health>,
     /// The session being read, when one was opened.
     pub(crate) session_title: Option<SharedString>,
-    pub(crate) rows: Vec<RemoteRow>,
+    /// Whether the state holds anything to draw. `turns` alone is not enough: a
+    /// session whose rows are all seeds has turns and nothing to read.
+    pub(crate) has_rows: bool,
     /// Why there is nothing to read, when there is nothing to read.
     pub(crate) notice: Option<SharedString>,
     /// A send is in flight; the composer says so and refuses a second.
     pub(crate) sending: bool,
+    /// The row whose copy just landed, so its icon shows the check and then
+    /// loses it. This is the window's own mark, which is what makes a remote
+    /// answer acknowledge a copy exactly as a local one does.
+    pub(crate) copied: Option<uuid::Uuid>,
 }
 
-/// Draw the banner plus the transcript body.
+/// The hooks a read-only transcript needs.
 ///
-/// `on_send` is minted by the window, because the field's text and the network
-/// call both belong to it. Passing it in keeps this module a paint function.
+/// Every handler is empty on purpose except copy. A remote row has no local id
+/// to react to, no pencil this window can open, no composer to quote it into,
+/// and nothing on another machine's disk that this one may edit. Copy is the
+/// exception because it needs nothing from the row but its text, which the
+/// window already holds: `msg_copy_markdown` copies the string it is handed and
+/// never reads SQLite, so it is safe on a message this database has never seen.
+/// Without it a remote answer loses the affordance a reader uses most, and that
+/// alone makes the panel feel like a different product.
+fn read_only_hooks(
+    copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
+    copied: Option<uuid::Uuid>,
+) -> transcript::ViewHooks {
+    transcript::ViewHooks {
+        attachments: HashMap::new(),
+        drag: None,
+        wheel: None,
+        middle_click: None,
+        message_click: HashMap::new(),
+        message_press: HashMap::new(),
+        selection: None,
+        menu_dismiss: None,
+        ctx_used: None,
+        ctx_max: 0,
+        live_click: None,
+        live_press: HashMap::new(),
+        live_edit: HashMap::new(),
+        older: None,
+        reactions: HashMap::new(),
+        reaction_click: HashMap::new(),
+        edit: HashMap::new(),
+        copy,
+        copied,
+        edit_row: None,
+        voice_pending: false,
+        // A remote transcript follows nothing: no live turn lands under it, so
+        // there is no bottom to chase.
+        following: false,
+    }
+}
+
+/// Draw the banner, the transcript body and the remote composer.
+///
+/// `body` is the session's state and its scroll, or `None` when no session is
+/// open. It is an `Option` rather than an empty state because `TranscriptState`
+/// is not `Clone`: handing the painter a borrowed pair keeps a 200 KB session
+/// out of the per-paint copy path.
+///
+/// `handlers` are the fold clicks, minted by the window because only its own
+/// `cx` can build one. Without them the turn cards draw folded and refuse to
+/// open, which is the one interaction a remote reader actually needs on a
+/// 40-row session.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn view(
     frame: &RemotePanelFrame,
+    body: Option<(&transcript::TranscriptState, &ScrollHandle)>,
+    measure: f32,
+    rem_size: f32,
+    handlers: HashMap<String, transcript::ClickHandler>,
+    // One copy handler per answer row, minted by the window because the
+    // clipboard and the "copied" tick live there. Empty would mean the reader
+    // can read a remote answer but not take it, which is half the interaction
+    // a local answer offers (#2750).
+    copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
+    // The row whose copy icon shows its check. Read from the window because
+    // the mark is one per copy and its timer lives there.
+    copied: Option<uuid::Uuid>,
     draft: &SharedString,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let p = palette::current();
     let dot = match frame.health {
@@ -247,11 +218,11 @@ pub(crate) fn view(
         .w_full()
         .px_4()
         .py_2()
-        .bg(rgb(p.panel))
         .border_b_1()
         .border_color(rgb(p.track))
         .child(
             div()
+                .flex_none()
                 .w(rems(0.375))
                 .h(rems(0.375))
                 .rounded_full()
@@ -259,12 +230,14 @@ pub(crate) fn view(
         )
         .child(
             div()
+                .flex_none()
                 .text_size(rems(0.75))
                 .text_color(rgb(p.text_normal))
                 .child(frame.label.clone()),
         )
         .child(
             div()
+                .flex_none()
                 .text_size(rems(0.6875))
                 .text_color(rgb(p.text_faint))
                 .child(frame.url.clone()),
@@ -272,12 +245,13 @@ pub(crate) fn view(
         .when_some(frame.session_title.clone(), |d, title| {
             d.child(
                 div()
+                    .min_w_0()
                     .text_size(rems(0.6875))
                     .text_color(rgb(p.text_muted))
                     .child(SharedString::from(format!("· {title}"))),
             )
         })
-        .when(frame.rows.is_empty() && frame.notice.is_none(), |d| {
+        .when(!frame.has_rows && frame.notice.is_none(), |d| {
             d.child(
                 div()
                     .text_size(rems(0.6875))
@@ -285,11 +259,10 @@ pub(crate) fn view(
                     .child(SharedString::from("· escolhe uma sessão na rail")),
             )
         })
-        // Closing the view, not forgetting the crab: the pairing stays in the
-        // store and the badge stays in the strip, so "desligar" costs nothing
-        // and the next look is one click. Forgetting lives on the badge's
-        // right-click menu, where the press is deliberate.
         .child(div().flex_1())
+        // "desligar" closes the view; it does not touch the store. Forgetting a
+        // crab is its badge's right-click menu, because that costs the pairing
+        // and a fresh code is a round trip to the other machine.
         .child(
             div()
                 .id("remote-disconnect")
@@ -301,87 +274,40 @@ pub(crate) fn view(
                 .text_size(rems(0.6875))
                 .text_color(rgb(p.text_faint))
                 .hover(|d| d.text_color(rgb(p.red)))
-                .on_click(on_close)
+                .on_click(on_remove)
                 .child(SharedString::from("desligar")),
         );
 
-    let mut body: Vec<AnyElement> = Vec::with_capacity(frame.rows.len() + 1);
-    if let Some(notice) = &frame.notice {
-        body.push(
-            div()
-                .px_4()
-                .py_2()
-                .text_size(rems(0.75))
-                .text_color(rgb(p.warn))
-                .child(notice.clone())
-                .into_any_element(),
-        );
-    }
-    for row in &frame.rows {
-        let mut content = div().flex().flex_col().gap_2().min_w_0();
-        for part in &row.parts {
-            content = match part {
-                // The transcript's own renderer: same markdown, same tables,
-                // same reading size as a local reply.
-                RemotePart::Answer(blocks) => content.child(transcript::document_blocks(blocks)),
-                RemotePart::Folded { label, body } => content.child(
+    // The body is the window's own transcript painter. Read-only falls out of
+    // the empty hooks, not out of a second renderer.
+    let body: AnyElement = match body.filter(|_| frame.has_rows) {
+        Some((state, scroll)) => transcript::view(
+            state,
+            scroll,
+            &transcript::LiveTurn::default(),
+            false,
+            measure,
+            rem_size,
+            handlers,
+            read_only_hooks(copy, frame.copied),
+        )
+        .into_any_element(),
+        None => {
+            let mut col = div().flex().flex_col().gap_2().px_4().py_3();
+            if let Some(notice) = &frame.notice {
+                col = col.child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .pl_2()
-                        .border_l_1()
-                        .border_color(rgb(p.track))
-                        .child(
-                            div()
-                                .text_size(rems(0.625))
-                                .text_color(rgb(p.text_faint))
-                                .child(SharedString::from(*label)),
-                        )
-                        .child(
-                            div()
-                                .text_size(rems(0.75))
-                                .text_color(rgb(p.text_muted))
-                                .child(body.clone()),
-                        ),
-                ),
-            };
+                        .text_size(rems(0.75))
+                        .text_color(rgb(p.warn))
+                        .child(notice.clone()),
+                );
+            }
+            col.into_any_element()
         }
-        body.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(rgb(p.track))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(rems(0.625))
-                                .text_color(rgb(if row.role == "tu" { p.teal } else { p.amber }))
-                                .child(row.role.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(rems(0.625))
-                                .text_color(rgb(p.text_faint))
-                                .child(row.at.clone()),
-                        ),
-                )
-                .child(content)
-                .into_any_element(),
-        );
-    }
+    };
 
-    // The composer is one line and one button. It says what it will do
-    // (`message/send` to this crab) so nobody mistakes it for the local one.
+    // The composer is one line and one button, and it names its destination so
+    // nobody mistakes it for the local composer.
     let composer = div()
         .flex()
         .flex_row()
@@ -399,7 +325,6 @@ pub(crate) fn view(
                 .px_2()
                 .py_1()
                 .rounded_md()
-                .bg(rgb(p.panel))
                 .border_1()
                 .border_color(rgb(p.track))
                 .text_size(rems(0.75))
@@ -417,6 +342,7 @@ pub(crate) fn view(
         .child(
             div()
                 .id("remote-send")
+                .flex_none()
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -430,9 +356,7 @@ pub(crate) fn view(
                 } else {
                     "enviar"
                 }))
-                .on_click(move |ev, window, app| {
-                    on_send(ev, window, app);
-                }),
+                .on_click(on_send),
         );
 
     div()
@@ -443,20 +367,7 @@ pub(crate) fn view(
         .min_h_0()
         .h_full()
         .child(banner)
-        .child(
-            // A scroll container, not a clip: `overflow_hidden` cut every row
-            // past the fold, so a long remote answer was simply gone with no
-            // way to reach it. The id is what makes `overflow_y_scroll`
-            // resolve at all (it lives on `StatefulInteractiveElement`).
-            div()
-                .id("remote-body")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(body),
-        )
+        .child(div().flex().flex_col().flex_1().min_h_0().child(body))
         .child(composer)
         .into_any_element()
 }
@@ -465,120 +376,157 @@ pub(crate) fn view(
 mod tests {
     use super::*;
 
-    fn row(role: &str, content: &str) -> RemoteMessage {
+    const SID: &str = "fd3fdf11-58bb-4414-b499-6dd1dc2203a9";
+
+    fn message(role: &str, content: &str) -> RemoteMessage {
         RemoteMessage {
             id: String::from("m1"),
             role: role.to_string(),
             content: content.to_string(),
             created_at: 1_760_000_000,
+            ..Default::default()
         }
     }
 
-    fn visible(row: &RemoteRow) -> String {
-        row.parts
+    fn drawn(state: &transcript::TranscriptState) -> Vec<(String, String)> {
+        state
+            .turns
             .iter()
-            .filter_map(|part| match part {
-                RemotePart::Answer(blocks) => Some(
-                    blocks
-                        .iter()
-                        .filter_map(|b| match b {
-                            MdBlock::Line(line) => Some(line.text.clone()),
-                            MdBlock::Table(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-                RemotePart::Folded { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn folded_labels(row: &RemoteRow) -> Vec<&'static str> {
-        row.parts
-            .iter()
-            .filter_map(|part| match part {
-                RemotePart::Folded { label, .. } => Some(*label),
-                RemotePart::Answer(_) => None,
+            .flat_map(|t| t.blocks.iter())
+            .filter_map(|b| match b {
+                transcript::Block::Msg { role, content, .. } => {
+                    Some((role.clone(), content.clone()))
+                }
+                _ => None,
             })
             .collect()
     }
 
+    /// The seed the harness sends itself is scaffolding. It reaches the state
+    /// (it is a stored row) and must not be painted: `row_blocks` withholds it,
+    /// which is why going through the transcript is not the same as painting
+    /// `content`.
     #[test]
-    fn reasoning_is_folded_out_of_the_answer() {
-        let message = row(
-            "assistant",
-            "<!-- reasoning -->\nI should think about this.\n<!-- /reasoning -->\n\nThe answer.",
-        );
-        let row = RemoteRow::from_message(&message).expect("a row with an answer is drawn");
-        assert_eq!(folded_labels(&row), vec!["pensamento"]);
-        let text = visible(&row);
-        assert!(text.contains("The answer."), "got {text:?}");
-        assert!(
-            !text.contains("I should think"),
-            "thinking leaked into the answer: {text:?}"
-        );
+    fn the_seed_the_harness_sent_itself_is_not_painted() {
+        let rows = vec![
+            message(
+                "user",
+                "[SYSTEM: Setup just finished. This session runs on the opencrabs provider.]",
+            ),
+            message("assistant", "Brain's online."),
+        ];
+        let state = state_for(SID, &rows);
+        assert_eq!(state.rows.len(), 2);
+        let painted = drawn(&state);
+        assert_eq!(painted.len(), 1, "painted {painted:?}");
+        assert_eq!(painted[0].0, "assistant");
     }
 
     #[test]
-    fn the_harness_talking_to_itself_is_not_a_row() {
-        let seed = row(
-            "user",
-            "[SYSTEM: Setup just finished. This session runs on the opencrabs provider.]",
-        );
-        assert!(RemoteRow::from_message(&seed).is_none());
-        let compaction = row("user", "[CONTEXT COMPACTION] summary of everything");
-        assert!(RemoteRow::from_message(&compaction).is_none());
+    fn a_compaction_marker_is_not_painted() {
+        let rows = vec![
+            message("user", "[CONTEXT COMPACTION] summary of everything"),
+            message("user", "olá"),
+            message("assistant", "olá!"),
+        ];
+        let state = state_for(SID, &rows);
+        let painted = drawn(&state);
+        assert_eq!(painted.len(), 2, "painted {painted:?}");
+        assert!(!painted.iter().any(|(_, c)| c.contains("COMPACTION")));
     }
 
     #[test]
-    fn a_tool_ledger_becomes_a_count_not_markup() {
-        let message = row(
-            "assistant",
-            "<!-- tools: read_file, bash -->\n<!-- /tools -->",
-        );
-        let row = RemoteRow::from_message(&message).expect("the call is still worth a line");
-        assert_eq!(folded_labels(&row), vec!["ferramentas"]);
-        let text = visible(&row);
-        assert!(
-            text.is_empty(),
-            "ledger markup reached the answer: {text:?}"
-        );
-    }
-
-    #[test]
-    fn markdown_is_parsed_instead_of_painted_raw() {
-        let message = row("assistant", "## Título\n\n**forte** e `código`");
-        let row = RemoteRow::from_message(&message).expect("drawn");
-        let text = visible(&row);
-        assert!(text.contains("Título"), "got {text:?}");
-        assert!(
-            !text.contains("**") && !text.contains("##"),
-            "markers survived the parse: {text:?}"
-        );
-    }
-
-    #[test]
-    fn a_huge_reasoning_block_is_capped() {
-        let huge = "a".repeat(50_000);
-        let message = row(
-            "assistant",
-            &format!("<!-- reasoning -->\n{huge}\n<!-- /reasoning -->\n\nok"),
-        );
-        let row = RemoteRow::from_message(&message).expect("drawn");
-        let folded: Vec<usize> = row
-            .parts
+    fn reasoning_folds_instead_of_leaking_into_the_answer() {
+        let rows = vec![
+            message("user", "pergunta"),
+            message(
+                "assistant",
+                "<!-- reasoning -->\nI should think.\n<!-- /reasoning -->\n\nThe answer.",
+            ),
+        ];
+        let state = state_for(SID, &rows);
+        let thinking = state
+            .turns
             .iter()
-            .filter_map(|part| match part {
-                RemotePart::Folded { body, .. } => Some(body.chars().count()),
-                RemotePart::Answer(_) => None,
-            })
-            .collect();
-        assert_eq!(folded.len(), 1);
+            .flat_map(|t| t.blocks.iter())
+            .filter(|b| matches!(b, transcript::Block::Thinking { .. }))
+            .count();
+        assert_eq!(thinking, 1, "the chain of thought was not folded");
+        let answer = drawn(&state)
+            .into_iter()
+            .filter(|(role, _)| role == "assistant")
+            .map(|(_, content)| content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(answer.contains("The answer."), "got {answer:?}");
         assert!(
-            folded[0] <= FOLDED_MAX + 1,
-            "fold kept {} chars, cap is {FOLDED_MAX}",
-            folded[0]
+            !answer.contains("I should think"),
+            "thinking leaked into the answer: {answer:?}"
         );
+    }
+
+    /// The whole road a remote row takes, pinned: wire fields -> `Message` ->
+    /// the card's footer. The panel shares the local painter, so a row that
+    /// arrives without these columns draws a card with no fold block and no
+    /// footer, and the two views drift while sharing a renderer (Daniel,
+    /// 21 Nov 2026: "a UI nao parece ser a mesma").
+    #[test]
+    fn a_remote_row_arrives_with_what_the_card_draws() {
+        let rows = vec![
+            message("user", "pergunta"),
+            RemoteMessage {
+                id: String::from("a1"),
+                role: String::from("assistant"),
+                content: String::from("a resposta"),
+                created_at: 1_760_000_001,
+                thinking: Some(String::from("pensei nisto")),
+                tool_calls: Some(3),
+                duration_secs: Some(7),
+                ctx_window: Some(200_000),
+                tokens_per_sec: Some(42.5),
+                input_tokens: Some(74_000),
+                continuation: false,
+            },
+        ];
+        let state = state_for(SID, &rows);
+        let row = state.rows.last().expect("the answer row");
+        assert_eq!(row.thinking.as_deref(), Some("pensei nisto"));
+        assert_eq!(row.tool_calls, Some(3));
+        let metrics = transcript::TurnMetrics::from_row(&state.rows).expect("a footer");
+        assert_eq!(metrics.ctx_used, 74_000);
+        assert_eq!(metrics.ctx_max, 200_000);
+        assert_eq!(metrics.tps, Some(42.5));
+        assert_eq!(metrics.tool_calls, 3);
+    }
+
+    /// Two rows carrying the same unusable id must still be two rows: a shared
+    /// row id makes one of them unclickable and one fold toggle both.
+    #[test]
+    fn a_non_uuid_remote_id_still_gets_a_distinct_row_id() {
+        let rows = vec![
+            RemoteMessage {
+                id: String::from("not-a-uuid"),
+                role: String::from("user"),
+                content: String::from("um"),
+                created_at: 1_760_000_000,
+                ..Default::default()
+            },
+            RemoteMessage {
+                id: String::from("not-a-uuid"),
+                role: String::from("assistant"),
+                content: String::from("dois"),
+                created_at: 1_760_000_001,
+                ..Default::default()
+            },
+        ];
+        let state = state_for(SID, &rows);
+        assert_ne!(state.rows[0].id, state.rows[1].id);
+    }
+
+    #[test]
+    fn an_empty_session_paints_nothing_and_does_not_panic() {
+        let state = state_for(SID, &[]);
+        assert!(state.turns.is_empty());
+        assert!(drawn(&state).is_empty());
     }
 }

@@ -25,7 +25,7 @@ use gpui::{
     SharedString, StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
 };
 
-use crate::instances::{Health, InstanceEntry, badge_glyph, badge_tint, badge_title, health_mark};
+use crate::instances::{Health, InstanceEntry, badge_tint, badge_title, health_mark};
 use crate::palette;
 use opencrabs::config::gui_theme;
 
@@ -53,7 +53,7 @@ impl StripBadge {
             host_id: entry.host_id().to_string(),
             // One initial, not a cut label: the badge is a circle and the full
             // name lives in `title` below, where the hover can show it whole.
-            label: SharedString::from(badge_glyph(entry.label())),
+            label: SharedString::from(entry.glyph()),
             title: SharedString::from(badge_title(entry, now)),
             health: entry.health,
         }

@@ -18,9 +18,11 @@
 
 use super::*;
 use crate::instance_strip::{self, StripFrame};
-use crate::instances::{Health, Instances};
+use crate::instances::{GLYPH_MAX_CHARS, Health, Instances, normalise_glyph};
 use crate::menu;
-use crate::remote_panel::{self, RemotePanelFrame, RemoteRow};
+use crate::remote_panel::{self, RemotePanelFrame};
+use crate::transcript;
+use gpui::ScrollHandle;
 use opencrabs::config::Config;
 use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_store::{InstanceStore, KnownInstance, now};
@@ -32,27 +34,28 @@ use opencrabs::remote::tunnel;
 /// paint never asks for a probe, it only draws what the last one recorded.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Run one remote call on a Tokio runtime of its own.
+/// Run one remote call on the shared runtime.
 ///
-/// `reqwest::Client::new()` panics with *"there is no reactor running, must be
-/// called from the context of a Tokio 1.x runtime"* when it is built outside
-/// one, and gpui's background executor is not a Tokio runtime. It only looked
-/// fine because nothing had paired yet: the panic fires on the first
-/// `emparelhar`, and it took the window down with it (2026-11-20 23:46Z).
+/// `reqwest` panics with *"there is no reactor running, must be called from the
+/// context of a Tokio 1.x runtime"* when it is built outside one, and gpui's
+/// background executor is not a Tokio runtime. It only looked fine because
+/// nothing had paired yet: the panic fires on the first `emparelhar`, and it
+/// took the window down with it (2026-11-20 23:46Z).
 ///
-/// A short-lived current-thread runtime per call is what `agent_bridge` does
-/// for the same reason: cheap, and it cannot collide with the surface's own
-/// runtime. The call still runs off the UI thread, because it is the
-/// background executor that awaits this future.
+/// This used to build a fresh current-thread runtime per call, and a fresh
+/// `reqwest::Client` with it. Both were paid on every probe of every crab every
+/// five seconds, and the client again on every fetch, which is why the strip
+/// felt slow before any network latency was involved. The runtime now lives in
+/// `remote::instance_client` and the client is the process-wide one, so the
+/// cost is paid once (measured 21 Nov, P4 in `perf-switch.md`).
+///
+/// The call still runs off the UI thread: it is the background executor that
+/// awaits this future, and `block_on` only drives it to completion.
 fn on_remote_runtime<T, F>(call: F) -> anyhow::Result<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>>,
 {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow::anyhow!("não consegui abrir um runtime para a chamada remota: {e}"))?;
-    runtime.block_on(call)
+    crate::remote::instance_client::block_on(call)
 }
 
 impl Dashboard {
@@ -124,6 +127,125 @@ impl Dashboard {
     pub(crate) fn instance_disconnect(&mut self, cx: &mut Context<Self>) {
         self.instance_remote = None;
         self.remote_transcript = None;
+        cx.notify();
+    }
+
+    /// Open the badge's mark editor for one crab.
+    pub(crate) fn instance_glyph_begin(
+        &mut self,
+        host_id: &str,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .instances
+            .get(host_id)
+            .and_then(|e| e.known.glyph.clone());
+        self.instance_glyph = Some(GlyphForm::new(
+            host_id.to_string(),
+            label.to_string(),
+            current,
+        ));
+        cx.notify();
+    }
+
+    /// Write the mark into the store, then into the strip.
+    ///
+    /// An empty field is not an error: it means "derive it again", and the
+    /// record goes back to `None` so the initial follows the label the way it
+    /// did before anyone typed anything.
+    pub(crate) fn instance_glyph_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.instance_glyph.clone() else {
+            return;
+        };
+        let glyph = normalise_glyph(form.field.text());
+        let store = InstanceStore::new(InstanceStore::default_path());
+        match store.find(&form.host_id) {
+            Ok(Some(mut known)) => {
+                known.glyph = glyph.clone();
+                if let Err(e) = store.upsert(known.clone()) {
+                    self.instance_error = Some(SharedString::from(format!("ícone: {e:#}")));
+                    cx.notify();
+                    return;
+                }
+                self.instances.upsert(known);
+                self.instance_error = None;
+                self.instance_glyph = None;
+            }
+            Ok(None) => {
+                // The crab was forgotten from another window while the editor
+                // was open. Saying so beats writing a mark nobody will see.
+                self.instance_error = Some(SharedString::from("esse crab já não está na lista"));
+            }
+            Err(e) => {
+                self.instance_error = Some(SharedString::from(format!("ícone: {e:#}")));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The mark editor's keyboard: Esc closes, Enter saves, everything else is
+    /// text. No Tab, because there is one field and nothing to walk to.
+    pub(crate) fn glyph_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        match ks.key.as_str() {
+            "escape" => {
+                self.instance_glyph = None;
+                self.instance_error = None;
+                cx.notify();
+            }
+            "enter" => self.instance_glyph_submit(cx),
+            _ => {
+                if let Some(edit) = text_field::editing_chord(
+                    ks.key.as_str(),
+                    ks.modifiers.control,
+                    ks.modifiers.platform,
+                    ks.modifiers.alt,
+                    ks.modifiers.shift,
+                ) {
+                    self.apply_glyph_edit(edit, cx);
+                    return true;
+                }
+                if let Some(ch) = ks.key.chars().next().filter(|c| !c.is_control()) {
+                    // The cap is the field's, so a third character is simply
+                    // not accepted: no message, nothing typed that will be cut.
+                    let room = self
+                        .instance_glyph
+                        .as_ref()
+                        .is_some_and(|f| f.field.text().chars().count() < GLYPH_MAX_CHARS);
+                    if room {
+                        if let Some(form) = self.instance_glyph.as_mut() {
+                            form.field.insert_text(&ch.to_string());
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// One editing chord in the mark field, clipboard included.
+    fn apply_glyph_edit(&mut self, edit: text_field::TextFieldEdit, cx: &mut Context<Self>) {
+        let Some(form) = self.instance_glyph.as_mut() else {
+            return;
+        };
+        match text_field::apply(&mut form.field, edit) {
+            Some(text_field::ClipboardRequest::Write(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Some(text_field::ClipboardRequest::Read) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+                    let cut: String = text
+                        .trim()
+                        .chars()
+                        .filter(|c| !c.is_whitespace() && !c.is_control())
+                        .take(GLYPH_MAX_CHARS)
+                        .collect();
+                    form.field.insert_text(&cut);
+                }
+            }
+            None => {}
+        }
         cx.notify();
     }
 
@@ -206,9 +328,11 @@ impl Dashboard {
         self.remote_transcript = Some(RemoteTranscript {
             session_id: session_id.clone(),
             title: SharedString::from(title),
-            rows: Vec::new(),
+            state: Default::default(),
+            has_rows: false,
             notice: None,
             sending: false,
+            scroll: ScrollHandle::new(),
         });
         cx.notify();
 
@@ -242,14 +366,15 @@ impl Dashboard {
                             if !title.is_empty() {
                                 transcript.title = SharedString::from(title);
                             }
-                            // `filter_map`: a seed the harness sent itself, or a
-                            // compaction marker, is stored but is not conversation.
-                            // The local panel hides both, and a remote panel that
-                            // painted them would show scaffolding as chat.
-                            transcript.rows = messages
-                                .iter()
-                                .filter_map(RemoteRow::from_message)
-                                .collect();
+                            // The whole remote session goes through the
+                            // transcript's own rules: it decides what is
+                            // conversation (a seed and a compaction marker are
+                            // not), folds reasoning, and caps a 40 KB answer.
+                            // Filtering here instead is what made a remote
+                            // panel read like a different product.
+                            transcript.state = remote_panel::state_for(&session_id, &messages);
+                            transcript.has_rows =
+                                transcript.state.turns.iter().any(|t| !t.blocks.is_empty());
                             transcript.notice = None;
                         }
                     }
@@ -571,8 +696,172 @@ impl Dashboard {
         .into_any_element()
     }
 
+    /// The badge's mark editor: one field, one save.
+    ///
+    /// A modal and not a menu of preset letters: the whole point is that the
+    /// owner picks the mark, and "the first letter of my other crab's name" is
+    /// exactly the collision this exists to fix.
+    pub(crate) fn instance_glyph_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.instance_glyph.clone() else {
+            return div().into_any_element();
+        };
+        let shown = palette::current();
+        let (before, selected, after) = form.field.render_spans();
+        let typed = form.field.text().chars().count();
+        let submit = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_glyph_submit(cx);
+        });
+        let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            this.instance_glyph = None;
+            this.instance_error = None;
+            cx.notify();
+        });
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(shown.text_faint))
+                    .child(SharedString::from(format!(
+                        "o ícone de {} na coluna da esquerda (até {GLYPH_MAX_CHARS} caracteres, vazio volta à inicial)",
+                        form.label
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .w(rems(2.0))
+                            .h(rems(2.0))
+                            .rounded_full()
+                            .bg(rgb(shown.panel_hi))
+                            .border_1()
+                            .border_color(rgb(shown.accent))
+                            .text_size(rems(0.875))
+                            .text_color(rgb(shown.text_title))
+                            .child(SharedString::from(
+                                normalise_glyph(&form.field.text().to_string())
+                                    .unwrap_or_else(|| "?".to_string()),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(shown.panel))
+                            .border_1()
+                            .border_color(rgb(shown.accent))
+                            .text_size(rems(0.8125))
+                            .text_color(rgb(shown.text))
+                            .when(form.field.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .text_color(rgb(shown.text_faint))
+                                        .child(SharedString::from("ex.: L, 7, 🇵🇹")),
+                                )
+                            })
+                            .child(SharedString::from(before.to_string()))
+                            .when(!selected.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .bg(rgb(shown.selection))
+                                        .child(SharedString::from(selected.to_string())),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(1.5))
+                                    .h(rems(1.0))
+                                    .bg(rgb(shown.accent)),
+                            )
+                            .child(SharedString::from(after.to_string())),
+                    ),
+            )
+            .when(typed >= GLYPH_MAX_CHARS, |d| {
+                d.child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from("cheio: apaga uma letra para trocar")),
+                )
+            })
+            .when_some(self.instance_error.clone(), |d, err| {
+                d.child(
+                    div()
+                        .text_size(rems(0.75))
+                        .text_color(rgb(shown.warn))
+                        .child(err),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("instance-glyph-save")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(rgb(shown.accent))
+                            .text_size(rems(0.75))
+                            .text_color(rgb(shown.bg))
+                            .child(SharedString::from("guardar"))
+                            .on_click(submit),
+                    )
+                    .child(
+                        div()
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(shown.text_faint))
+                            .child(SharedString::from(
+                                "enter guarda · esc fecha · vazio volta à inicial",
+                            )),
+                    ),
+            )
+            .into_any_element();
+        modal_shell::render(
+            modal_shell::ModalView {
+                id: "instance-glyph-modal",
+                title: "Ícone do badge".to_string(),
+                subtitle: form.label.clone(),
+                actions: None,
+                header_close: true,
+                body,
+                footer: None,
+                width: 22.0 * self.rem,
+                max_height: 14.0 * self.rem,
+            },
+            dismiss,
+        )
+        .into_any_element()
+    }
+
     /// The panel column: the banner, the transcript and the remote composer.
-    pub(crate) fn remote_panel_element(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn remote_panel_element(
+        &mut self,
+        measure: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(remote) = self.instance_remote.as_ref() else {
             return div().into_any_element();
         };
@@ -596,10 +885,53 @@ impl Dashboard {
             url: SharedString::from(remote.url.clone()),
             health: entry.map(|e| e.health),
             session_title: transcript.map(|t| t.title.clone()),
-            rows: transcript.map(|t| t.rows.clone()).unwrap_or_default(),
+            has_rows: transcript.is_some_and(|t| t.has_rows),
             notice,
             sending: transcript.is_some_and(|t| t.sending),
+            copied: self.copied_row(),
         };
+        // One fold click per turn anchor, minted here because only this `cx`
+        // can build one and only this view owns the state the click mutates.
+        let mut handlers: std::collections::HashMap<String, transcript::ClickHandler> =
+            std::collections::HashMap::new();
+        if let Some(t) = self.remote_transcript.as_ref() {
+            for anchor in t.state.anchors() {
+                let key = anchor.clone();
+                handlers.insert(
+                    anchor,
+                    std::rc::Rc::new(cx.listener(move |this, _ev, _window, cx| {
+                        if let Some(t) = this.remote_transcript.as_mut() {
+                            t.state.toggle_turn(&key);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+        }
+        // One copy handler per answer, minted here for the same reason the fold
+        // clicks are: the clipboard and the "copied" tick belong to this window.
+        // `msg_copy_markdown` copies the string it is handed and never reads the
+        // row back out of SQLite, so it works on a message this database has
+        // never stored, which every remote row is.
+        let mut copy: std::collections::HashMap<uuid::Uuid, transcript::ClickHandler> =
+            std::collections::HashMap::new();
+        if let Some(t) = self.remote_transcript.as_ref() {
+            for row in t.state.rows.iter().filter(|r| r.role == "assistant") {
+                let id = row.id;
+                let content = row.content.clone();
+                copy.insert(
+                    id,
+                    std::rc::Rc::new(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.msg_copy_markdown(id, content.clone(), cx);
+                    })),
+                );
+            }
+        }
+        // The copy tick. The mark and the timer that clears it live on the
+        // window, so the panel reads the window's mark instead of keeping a
+        // second one that could disagree with it.
+        let copied = self.copied_row();
         let send = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.send_remote(cx);
         });
@@ -612,8 +944,22 @@ impl Dashboard {
         // `text()` borrows the field, and the frame outlives this method: the
         // copy is what makes the draft's bytes the frame's own.
         let draft = SharedString::from(self.remote_draft.text().to_string());
+        // Borrowed after the frame is built: `state` is not `Clone`, and cloning
+        // 200 KB of rows per paint to satisfy a frame field would be a worse bug
+        // than the divergence this panel is fixing. `None` when no session is
+        // open, which is exactly when there is no body to paint.
+        let body = self
+            .remote_transcript
+            .as_ref()
+            .map(|t| (&t.state, &t.scroll));
         remote_panel::view(
             &frame,
+            body,
+            measure,
+            self.rem,
+            handlers,
+            copy,
+            copied,
             &draft,
             move |ev, window, app| send(ev, window, app),
             move |ev, window, app| close(ev, window, app),
@@ -872,6 +1218,7 @@ impl Dashboard {
                             token: paired.token.clone(),
                             added_at: now(),
                             last_ok: 0,
+                            glyph: None,
                         };
                         if let Err(e) = store.upsert(known.clone()) {
                             this.instance_error = Some(SharedString::from(format!(
@@ -1008,8 +1355,18 @@ impl Dashboard {
             this.instance_menu_for = None;
             this.instance_remove(&forget_host, cx);
         });
+        // The mark, in the middle: the row that exists because two crabs can
+        // share an initial, and the strip is where that has to be fixable.
+        let mark_host = host_id.to_string();
+        let mark_label = label.clone();
+        let mark = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            this.instance_menu_at = None;
+            this.instance_menu_for = None;
+            this.instance_glyph_begin(&mark_host, &mark_label, cx);
+        });
         vec![
             menu::menu_item("abrir").on_click(open),
+            menu::menu_item("mudar ícone").on_click(mark),
             menu::menu_item_owned(SharedString::from(format!("esquecer {label}"))).on_click(forget),
         ]
     }
@@ -1735,19 +2092,25 @@ fn qr_modules(link: &str) -> (Vec<bool>, usize) {
 
 /// The remote session being read, and the draft going to it.
 ///
-/// `Clone` only. The rows carry parsed markdown (`MdBlock` has no `PartialEq`
-/// and no `Debug`), and nothing in the window ever compares two transcripts:
-/// the derived `PartialEq`/`Debug` this struct used to carry were never read,
-/// and a hand-written `PartialEq` over parsed blocks would compare pointers
-/// and lie about it.
-#[derive(Clone)]
+/// No `Clone`, no `PartialEq`, no `Debug`. It holds the same `TranscriptState`
+/// the local chat paints from, and that type is neither clonable nor
+/// comparable: it carries the loaded rows and their drawn turns. Nothing in the
+/// window ever copies or compares two transcripts, so a derive would only be a
+/// promise the type cannot keep.
 pub(crate) struct RemoteTranscript {
     pub(crate) session_id: String,
     pub(crate) title: SharedString,
-    pub(crate) rows: Vec<RemoteRow>,
+    /// The remote rows, already shaped by the transcript's own rules: the same
+    /// state type the local chat paints from, so the two cannot diverge.
+    pub(crate) state: transcript::TranscriptState,
+    /// Whether anything in `state` is drawable. A session whose rows are all
+    /// scaffolding has turns and still nothing to read.
+    pub(crate) has_rows: bool,
     /// Why the body is empty or what the last send did, in one line.
     pub(crate) notice: Option<SharedString>,
     pub(crate) sending: bool,
+    /// The body's own scroll, tracked by the transcript painter it is handed to.
+    pub(crate) scroll: ScrollHandle,
 }
 
 /// The pairing form's state, which is also "the form is open".
@@ -1759,6 +2122,29 @@ pub(crate) struct RemoteTranscript {
 /// all come from the same engine the composer uses, so the two cannot drift
 /// (2026-11-20: the form was three `div`s printing a `String`, and Ctrl+V did
 /// nothing at all).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GlyphForm {
+    /// The crab whose badge is being marked.
+    pub(crate) host_id: String,
+    /// Its label, so the modal can say which crab without a second lookup.
+    pub(crate) label: String,
+    pub(crate) field: TextField,
+}
+
+impl GlyphForm {
+    pub(crate) fn new(host_id: String, label: String, current: Option<String>) -> Self {
+        let mut field = TextField::new();
+        if let Some(mark) = current.as_deref().and_then(normalise_glyph) {
+            field.insert_text(&mark);
+        }
+        Self {
+            host_id,
+            label,
+            field,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PairingForm {
     pub(crate) url: TextField,

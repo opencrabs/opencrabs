@@ -61,6 +61,15 @@ pub struct KnownInstance {
     /// Unix seconds of the last successful call, for the strip's "last seen".
     #[serde(default)]
     pub last_ok: u64,
+    /// The mark the owner chose for this crab's badge, one or two characters.
+    ///
+    /// `None` is the normal state and means "derive it": the first alphanumeric
+    /// of the label, which is what a 32 px circle can hold. A crab called
+    /// "lenovo" and one called "lenovo-2" would otherwise wear the same letter,
+    /// and the strip is exactly where telling them apart matters. Defaulted, so
+    /// a store written before this field existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<String>,
 }
 
 /// On-disk shape of `state/remote/instances.json`.
@@ -504,6 +513,7 @@ mod tests {
             token: token.to_string(),
             added_at: 1,
             last_ok: 0,
+            glyph: None,
         }
     }
 
