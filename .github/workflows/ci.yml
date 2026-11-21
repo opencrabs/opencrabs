@@ -724,11 +724,15 @@ jobs:
     # it works optimised.
     env:
       TEST_PROFILE: ci
-    # 60: fork PRs run this on hosted runners at roughly 3x self-hosted
-    # speed, and the 30 cap killed cold-cache fork runs twice (runs
-    # 36078125556 and 36069934718, both cancelled at ~30 while green code
-    # waited). Warm hosted fits in 20; 60 is the cold-cache ceiling.
-    timeout-minutes: 60
+    # Fork PRs run this on hosted runners, where the cache key can never
+    # match (#3132). The job id is part of the key: `main` writes the `test`
+    # leg as Darwin-arm64, and only `test-linux` writes Linux-x64, so a fork
+    # `Test` on ubuntu-latest asks for a key nothing produces and compiles
+    # cold on every attempt. Cold does not fit in 60, which cancelled runs
+    # 44887285200 (twice) and 44884055080 at the ceiling with green code
+    # still compiling. 180 is the ceiling `test-linux` already gives the
+    # warm leg. The old 60 was sized for a warm run a fork can never have.
+    timeout-minutes: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 180 || 60 }}
     steps: &test-steps
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -769,7 +773,12 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A fork PR saves too, so `cache-on-failure` can keep the partial
+          # compile from a cancelled attempt and the retry restores it
+          # (#3132). The save lands on the PR's own ref, never on main, so
+          # this cannot poison a shared cache. Without it the fork job both
+          # failed to restore and never wrote, so every attempt was cold.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event.pull_request.head.repo.fork == true }}
 
       - name: Install mold + ALSA + X11 dev (Linux)
         # Linux-only toolchain extras; macOS uses the Xcode linker.
