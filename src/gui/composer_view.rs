@@ -89,13 +89,15 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
 /// buttons are: primary in the accent, danger in the red, default quiet. A
 /// click sends that exact label as the next turn (#2708).
 ///
-/// Drawn as a card from the Seeker's family (#3101): its radius, its glass
-/// fill, and its shadow, so an offer reads as the same kind of floating
-/// surface as the command card rather than a bare list of words. The rows
-/// stack one above the other instead of wrapping side by side (#3114): a card
-/// wider than the composer pushes the conversation around, and a label sharing
-/// its line with a neighbour is truncated while there is room to read it on a
-/// row of its own.
+/// The buttons are the whole object (#3124). They sat in a card of the message
+/// family (#3114), and a card is a box: the column stretched it to the window's
+/// width, so three short offers painted a slab with most of its surface empty
+/// and the words bunched at the left. The owner read it as "80% of the width is
+/// empty card background" and asked for the buttons on their own. There is no
+/// card now: no fill, no border, no shadow, no padding, so there is nothing
+/// that can be wider than its words. The rows still stack one above the other
+/// (#3114), because a label sharing its line with a neighbour is cut while a
+/// row of its own has room for all of it.
 ///
 /// `focused` is the row the keyboard stands on, `None` while the field has the
 /// caret. Up from the composer hands the keyboard here instead of walking
@@ -117,35 +119,12 @@ pub(crate) fn options_strip(
     // `ui_core::hints` already prints the arrows, enter and the way back out on
     // the hint row above the composer whenever an offer is waiting, so the
     // legend was being drawn twice.
-    let col = div()
-        .flex()
-        .flex_col()
-        // The buttons hug their labels (#3114): a column stretches its children
-        // to the card's width by default, so every row was a full-width bar with
-        // its words bunched at the left and an empty half that read as part of
-        // the button. `items_start` makes the button column take its own width,
-        // and the widest label in the card is what every button then shares: one
-        // size, set by the text instead of by the window.
-        .items_start()
-        .gap_2()
-        .p_3()
-        // The card wears the message bubble's curve and fill (#3114), not the
-        // Seeker's 32 and the raised panel: it sits in the same column as the
-        // messages above it, so a rounder, lighter card read as a panel from a
-        // different window dropped into the conversation. The shadow stays,
-        // because this one floats over the session ground rather than lying in
-        // it, and the fill alone would not lift it off that ground.
-        .rounded(px(transcript::MESSAGE_RADIUS))
-        .bg(glass_fill(transcript::message_card_surface()))
-        .border_1()
-        .border_color(session_edge(p.panel_hi))
-        .shadow_2xl();
-    // One offer per row (#3114). They used to wrap side by side, so two
-    // labels split the card's width and a long one was cut while a row of its
-    // own had room for all of it. The column also makes the keyboard's walk
-    // read the way it behaves: the arrows move down a list, not across a
-    // paragraph.
-    let mut buttons = div().flex().flex_col().gap_1();
+    //
+    // `items_start` is what keeps a button the size of its label (#3114): a
+    // column stretches its children to its own width by default, so every row
+    // would be a full-width bar with an empty half that reads as part of the
+    // button.
+    let mut buttons = div().flex().flex_col().items_start().gap_1();
     for (i, (item, pick)) in rows.iter().enumerate() {
         let (ink, wash) = match item.style {
             SuggestionStyle::Primary => (p.accent, rgba((p.accent << 8) | 0x1c)),
@@ -167,8 +146,9 @@ pub(crate) fn options_strip(
                 .gap_2()
                 .px_3()
                 .py_1p5()
-                // One step inside the card's own 12, so a row's corner never
-                // crosses the curve it sits in (#3114).
+                // One step inside the message card's 12, so a button reads as
+                // the same family as the bubbles it stands under without
+                // being a card itself (#3124).
                 .rounded(px(transcript::MESSAGE_RADIUS - 4.0))
                 .border_1()
                 .border_color(if on {
@@ -180,7 +160,10 @@ pub(crate) fn options_strip(
                 .when(!on, |d| {
                     d.hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
                 })
-                .text_xs()
+                // The answer's body size, not the small print (#3124): an
+                // offer is the one control on screen that wants a click, and
+                // at `text_xs` it read smaller than the words above it.
+                .text_size(px(transcript::PLAIN_TEXT_SIZE))
                 .text_color(rgb(ink))
                 .cursor_pointer()
                 .child(
@@ -206,7 +189,7 @@ pub(crate) fn options_strip(
                 .on_click(move |ev, window, app| pick(ev, window, app)),
         );
     }
-    col.child(buttons)
+    buttons
 }
 
 /// Whether a speech-to-text engine is configured, which decides what the

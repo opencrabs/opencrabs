@@ -270,8 +270,11 @@ fn every_card_in_the_session_draws_one_edge() {
         1,
         "the queue strip carries the edge"
     );
+    // The follow-up offer is not a card any more (#3124): it draws bare
+    // buttons at the chat body's size, so it carries no edge, fill or radius
+    // of its own. The plan card and the queue strip keep theirs.
     assert!(
-        COMPOSER.contains(".border_color(session_edge(p.panel_hi))"),
-        "the suggested options carry the edge"
+        !COMPOSER.contains(".border_color(session_edge(p.panel_hi))"),
+        "the suggested options are buttons, not a card"
     );
 }

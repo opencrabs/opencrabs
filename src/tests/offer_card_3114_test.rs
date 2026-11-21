@@ -46,8 +46,8 @@ fn the_offer_rows_stack_one_above_the_other() {
         "/// Whether a speech-to-text engine is configured",
     );
     assert!(
-        strip.contains("flex_col().gap_1()"),
-        "the buttons are a column, so one offer owns a line"
+        strip.contains("flex_col().items_start().gap_1()"),
+        "the buttons are a column that hugs its labels, so one offer owns a line"
     );
     assert!(
         !strip.contains("flex_wrap"),
@@ -56,6 +56,40 @@ fn the_offer_rows_stack_one_above_the_other() {
     assert!(
         strip.contains("flex_row()"),
         "the row keeps its icon-and-label layout inside the column"
+    );
+}
+
+/// The offers are buttons, not a card (#3124).
+///
+/// The strip was a card of its own: a 12-radius panel in the message fill,
+/// padded 12, holding a column of rows. Two complaints arrived as one. The card
+/// was as wide as the column while its rows were short, so most of it was empty
+/// surface; and at 12 points its words were smaller than the answer directly
+/// above them, which made the one control that wants a click read like a
+/// footnote. The buttons now stand bare at the answer's own body size.
+#[test]
+fn the_offers_are_buttons_rather_than_a_card() {
+    let strip = region(
+        COMPOSER_VIEW,
+        "pub(crate) fn options_strip(",
+        "/// Whether a speech-to-text engine is configured",
+    );
+    assert!(
+        !strip.contains("glass_fill"),
+        "no fill behind the buttons: a card around them is surface the rows \
+         never fill: {strip}"
+    );
+    assert!(
+        !strip.contains("shadow_"),
+        "and no shadow lifting a card that is not there"
+    );
+    assert!(
+        strip.contains(".text_size(px(transcript::PLAIN_TEXT_SIZE))"),
+        "an offer reads at the answer's body size: {strip}"
+    );
+    assert!(
+        !strip.contains("text_xs"),
+        "the small print size is what made the offers look like a footnote"
     );
 }
 
@@ -261,10 +295,10 @@ fn the_gap_under_the_last_card_is_the_gap_between_cards() {
 /// The offer card's column stretched every row to the card's width, so a label
 /// like "yes" sat at the head of a bar the width of the window with an empty
 /// half that read as part of the button. The owner asked for the space to fit
-/// the text. `items_start` on the card makes the button column take its own
-/// width, and because the column still stretches its own children, the widest
-/// label in the card is the width all of them share: one size, decided by the
-/// text.
+/// the text. `items_start` on the button column makes it take its own width,
+/// and because that column still stretches its own children, the widest label
+/// is the width all of them share: one size, decided by the text. The card
+/// around the column went away in #3124, and the column kept the rule.
 #[test]
 fn the_offer_buttons_fit_their_labels() {
     let strip = region(
@@ -313,18 +347,18 @@ fn the_offer_buttons_fit_their_labels() {
 /// fill, read from the transcript, so the strips cannot drift back.
 #[test]
 fn the_cards_share_the_message_curve_and_fill() {
+    // The offers left this family on purpose (#3124): a card around three
+    // short rows was a panel stretched to the column with most of its surface
+    // empty, so the buttons now stand bare and only the plan cards wear the
+    // bubble's curve and fill. The pin keeps them out of it.
     let strip = region(
         COMPOSER_VIEW,
         "pub(crate) fn options_strip(",
         "/// Whether a speech-to-text engine is configured",
     );
     assert!(
-        strip.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
-        "the options card takes the bubble's curve: {strip}"
-    );
-    assert!(
-        strip.contains(".bg(glass_fill(transcript::message_card_surface()))"),
-        "and the fill the bubbles paint"
+        !strip.contains(".bg(glass_fill("),
+        "the offers draw no card of their own: {strip}"
     );
     assert!(
         !strip.contains("SEEKER_RADIUS"),

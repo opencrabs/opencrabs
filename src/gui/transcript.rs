@@ -2238,7 +2238,10 @@ const FORWARD_BAR_GAP: f32 = 12.0;
 /// session surface in `dashboard_render` reads this same constant.
 pub(crate) const MESSAGE_RADIUS: f32 = 12.0;
 const USER_TEXT_SIZE: f32 = 16.0;
-const PLAIN_TEXT_SIZE: f32 = 13.0;
+/// The answer's body size. Public so the strips that stand in the same column
+/// can match it: an offer the user picks should not read smaller than the
+/// answer it follows (#3124).
+pub(crate) const PLAIN_TEXT_SIZE: f32 = 13.0;
 /// Tool calls and card lines: the `text_xs` size the pane draws them at, so a
 /// selectable segment measures exactly the box it paints in.
 pub(crate) const SMALL_TEXT_SIZE: f32 = 12.0;
