@@ -633,10 +633,11 @@ pub(crate) enum CliMessage {
         is_error: bool,
         result: Option<String>,
     },
-    /// Any `type` this build does not know yet (`command_lifecycle` since CLI
-    /// 2.1.325, #3088). The CLI adds event types over time; an unknown one is
-    /// forward-compatible noise, not a parse failure. The raw line is already
-    /// logged at debug before the parse, so nothing is lost by dropping it.
+    /// Any `type` this build does not know yet (`tool_progress` measured
+    /// 2026-11-11, `command_lifecycle` reported in #3088). The CLI adds event
+    /// types over time; an unknown one is forward-compatible noise, not a
+    /// parse failure. The raw line is already logged at debug before the
+    /// parse, so nothing is lost by dropping it.
     #[serde(other)]
     Unknown,
 }
