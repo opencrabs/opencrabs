@@ -299,12 +299,27 @@ pub async fn list_sessions(target: &Target<'_>, limit: usize) -> Result<Vec<Remo
     parse_sessions(&result)
 }
 
+/// One remote conversation: its title, the A2A context it is bound to, and its
+/// rows.
+///
+/// `context_id` is not decoration. `message/send` maps a task onto a session
+/// through the context, so a send that omits it opens a new context, and a new
+/// context is a new session on the far side: the reply lands in a conversation
+/// the panel is not showing, which is exactly what "não consigo enviar
+/// mensagem" looked like from the owner's chair (#3133).
+#[derive(Debug, Clone, Default)]
+pub struct RemoteSession {
+    pub title: String,
+    pub context_id: Option<String>,
+    pub messages: Vec<RemoteMessage>,
+}
+
 /// One remote conversation's rows.
 pub async fn transcript(
     target: &Target<'_>,
     session_id: &str,
     limit: usize,
-) -> Result<(String, Vec<RemoteMessage>)> {
+) -> Result<RemoteSession> {
     let result = call(
         target,
         "session/transcript",
@@ -321,24 +336,53 @@ pub async fn list_tasks(target: &Target<'_>, limit: usize) -> Result<Vec<RemoteT
     parse_tasks(&result)
 }
 
-/// Start a task on the remote. Returns its id; the caller polls [`task`].
-pub async fn send(target: &Target<'_>, text: &str) -> Result<String> {
-    let result = call(
-        target,
-        "message/send",
-        serde_json::json!({
-            "message": {
-                "role": "user",
-                "parts": [{ "text": text }],
-            }
-        }),
-    )
-    .await?;
-    result
+/// Start a task on the remote. Returns its id and the context it landed in;
+/// the caller polls [`task`].
+///
+/// `context_id` is the conversation the task belongs to. Passing it is what
+/// keeps a reply inside the session the panel is reading; omitting it makes the
+/// host mint a context, and therefore a session, of its own (#3133). The answer
+/// carries the context back so a client that had none (a session started on the
+/// far side by hand) can adopt the one the host chose instead of forking again
+/// on the next send.
+pub async fn send(target: &Target<'_>, text: &str, context_id: Option<&str>) -> Result<SentTask> {
+    let result = call(target, "message/send", send_params(text, context_id)).await?;
+    let id = result
         .get("id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
-        .ok_or_else(|| call_error(Failure::Other, "send returned no task id"))
+        .ok_or_else(|| call_error(Failure::Other, "send returned no task id"))?;
+    Ok(SentTask {
+        id,
+        context_id: result
+            .get("contextId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// What `message/send` answered: the task, and the conversation it joined.
+#[derive(Debug, Clone)]
+pub struct SentTask {
+    pub id: String,
+    pub context_id: Option<String>,
+}
+
+/// The `message/send` body, built where a test can read it.
+///
+/// The context is the whole reason this is its own function: it is the one
+/// field that decides whether the message joins the conversation on screen or
+/// opens a new one, and it is easy to drop without noticing, because a send
+/// without it still succeeds (#3133).
+fn send_params(text: &str, context_id: Option<&str>) -> serde_json::Value {
+    let mut message = serde_json::json!({
+        "role": "user",
+        "parts": [{ "text": text }],
+    });
+    if let Some(ctx) = context_id {
+        message["contextId"] = serde_json::Value::String(ctx.to_string());
+    }
+    serde_json::json!({ "message": message })
 }
 
 /// Poll one task's state and answer.
@@ -419,7 +463,7 @@ pub fn parse_sessions(value: &serde_json::Value) -> Result<Vec<RemoteSession>> {
         .collect())
 }
 
-pub fn parse_transcript(value: &serde_json::Value) -> Result<(String, Vec<RemoteMessage>)> {
+pub fn parse_transcript(value: &serde_json::Value) -> Result<RemoteSession> {
     let title = value
         .get("title")
         .and_then(|v| v.as_str())
@@ -465,7 +509,18 @@ pub fn parse_transcript(value: &serde_json::Value) -> Result<(String, Vec<Remote
                 .unwrap_or(false),
         })
         .collect();
-    Ok((title, messages))
+    Ok(RemoteSession {
+        title,
+        // A peer that predates the field answers without it, and then the
+        // panel sends the way it always did: one fresh session per message is
+        // worse than nothing, but it is what that build can do. A build with
+        // the field answers with the context and every send stays in place.
+        context_id: value
+            .get("contextId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        messages,
+    })
 }
 
 pub fn parse_tasks(value: &serde_json::Value) -> Result<Vec<RemoteTask>> {
@@ -644,11 +699,57 @@ mod tests {
                  "sequence": 2, "createdAt": "2026-11-20T14:01:00+00:00"}
             ]
         });
-        let (title, rows) = parse_transcript(&value).unwrap();
-        assert_eq!(title, "remote chat");
+        let read = parse_transcript(&value).unwrap();
+        let rows = &read.messages;
+        assert_eq!(read.title, "remote chat");
         assert_eq!(rows[0].role, "user");
         assert_eq!(rows[1].content, "ola");
         assert_eq!(rows[1].created_at, 1_795_183_260);
+    }
+
+    /// The context is what makes a reply land in the conversation on screen.
+    ///
+    /// `message/send` binds a task to a session through `context_id`, and a
+    /// send without one makes the host mint a fresh context, which is a fresh
+    /// session: the owner's words went somewhere the panel was not showing and
+    /// the composer read as broken (#3133). The transcript is where the client
+    /// learns the context, so the transcript is where the test looks for it.
+    #[test]
+    fn a_transcript_carries_the_context_a_send_needs() {
+        let value = serde_json::json!({
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000",
+            "title": "remote chat",
+            "contextId": "ctx-42",
+            "messages": [],
+        });
+        let read = parse_transcript(&value).unwrap();
+        assert_eq!(read.context_id.as_deref(), Some("ctx-42"));
+    }
+
+    /// A peer that predates the field answers without a context, and the
+    /// client must not invent one: a made-up context would write into a
+    /// stranger's conversation instead of forking its own.
+    #[test]
+    fn a_transcript_without_a_context_stays_without_one() {
+        let value = serde_json::json!({
+            "sessionId": "3f1a2b3c-0000-4000-8000-000000000000",
+            "title": "remote chat",
+            "messages": [],
+        });
+        assert_eq!(parse_transcript(&value).unwrap().context_id, None);
+    }
+
+    /// The body a send puts on the wire. Asserted here because a send that
+    /// drops the context still returns a task id, so no error would ever point
+    /// at it.
+    #[test]
+    fn a_send_asks_for_the_conversation_it_was_given() {
+        let body = send_params("oi", Some("ctx-42"));
+        assert_eq!(body["message"]["contextId"], "ctx-42");
+        assert_eq!(body["message"]["parts"][0]["text"], "oi");
+        // And a send with no context says nothing rather than guessing.
+        let bare = send_params("oi", None);
+        assert!(bare["message"].get("contextId").is_none());
     }
 
     /// The panel paints with the local transcript painter, and that painter
@@ -674,8 +775,8 @@ mod tests {
                 "continuation": true
             }]
         });
-        let (_, rows) = parse_transcript(&value).unwrap();
-        let row = &rows[0];
+        let read = parse_transcript(&value).unwrap();
+        let row = &read.messages[0];
         assert_eq!(row.thinking.as_deref(), Some("pensei nisto"));
         assert_eq!(row.tool_calls, Some(3));
         assert_eq!(row.duration_secs, Some(7));
@@ -696,8 +797,8 @@ mod tests {
             "messages": [{"id": "1", "role": "user", "content": "oi",
                           "sequence": 1, "createdAt": "2026-11-20T14:00:00+00:00"}]
         });
-        let (_, rows) = parse_transcript(&value).unwrap();
-        let row = &rows[0];
+        let read = parse_transcript(&value).unwrap();
+        let row = &read.messages[0];
         assert_eq!(row.thinking, None);
         assert_eq!(row.tool_calls, None);
         assert_eq!(row.ctx_window, None);

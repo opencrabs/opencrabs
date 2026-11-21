@@ -10,6 +10,7 @@
 //! every field here is a field a remote peer gets to read.
 
 use super::TaskStore;
+use crate::a2a::persistence;
 use crate::a2a::types::*;
 use crate::db::repository::SessionListOptions;
 use crate::services::{MessageService, ServiceContext, SessionService};
@@ -225,6 +226,13 @@ pub async fn handle_transcript(
                     })
                 })
                 .collect();
+            // The A2A context this session is bound to, if any. It is what
+            // `message/send` needs to append to *this* session instead of
+            // minting a context (and with it a session) per message; the client
+            // cannot derive it, and guessing would either fork the
+            // conversation or write into a stranger's (#3133).
+            let context_id =
+                persistence::lookup_context_for_session(&service_context.pool(), session_id).await;
             JsonRpcResponse::success(
                 id,
                 // `title` rides along because the panel's banner names the
@@ -234,6 +242,7 @@ pub async fn handle_transcript(
                 serde_json::json!({
                     "sessionId": p.session_id,
                     "title": session_title,
+                    "contextId": context_id,
                     "messages": items,
                 }),
             )
