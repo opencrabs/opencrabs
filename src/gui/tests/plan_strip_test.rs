@@ -117,8 +117,11 @@ fn the_pane_card_owns_its_width_and_click_affordance() {
         body.contains(".when(index == 0") && body.contains("disclosure_icon(color, 1.0)"),
         "the disclosure arrow uses the progress bar's teal on the summary row"
     );
+    // The loop builds the row and then pushes it into the column, so the pin
+    // reads the builder itself: splitting on the push would leave nothing but
+    // the store call in the region (#3124).
     let row = body
-        .split_once("col = col.child(")
+        .split_once("let row = div()")
         .expect("pane rows are built in a loop")
         .1;
     let flat: String = row.split_whitespace().collect::<Vec<_>>().join(" ");
