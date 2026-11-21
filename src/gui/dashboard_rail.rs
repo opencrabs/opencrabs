@@ -48,6 +48,12 @@ impl Dashboard {
         // Both directions move the keyboard: opening hands it to the list,
         // closing gives it back to the input (#2665).
         self.refocus_screen();
+        // The rail's state is the user's, so it is written down for the next
+        // launch (#3105). Every door walks this one transition (the header
+        // button and ctrl+s through `toggle_rail`, the palette's Open and
+        // Close Sidebar, the drag past the floor), so a closed rail is saved
+        // whichever way it was closed.
+        self.persist_layout();
         cx.notify();
     }
 

@@ -14,16 +14,25 @@
 //! GUI binary (`src/gui/window_controls.rs`); the decision lives here, where
 //! the suite can execute it.
 //!
-//! Windows arrives at the same place from the other side (#2966). gpui creates
-//! every window with `WS_SYSMENU`, adds `WS_THICKFRAME | WS_MAXIMIZEBOX` when
-//! the window is resizable and `WS_MINIMIZEBOX` when it is minimizable, and
-//! never sets `WS_CAPTION` (`gpui-0.2.2/src/platform/windows/window.rs:394`),
-//! so the OS draws no title bar and no caption button at all. Meanwhile
-//! `window_decorations()` answers the trait's default `Server`
-//! (`gpui-0.2.2/src/platform.rs:538`), because the Windows window never
-//! overrides it. Such a window is caption-less whichever way it reports, so
-//! `effective_decorations` turns that report into the client decoration it
-//! really is.
+//! Windows arrives at the same place from the other side, and the answer
+//! changed once a live window was measured (#2966, #3083). gpui creates every
+//! window with `WS_SYSMENU`, adds `WS_THICKFRAME | WS_MAXIMIZEBOX` when the
+//! window is resizable and `WS_MINIMIZEBOX` when it is minimizable
+//! (`gpui-0.2.2/src/platform/windows/window.rs:392-405`), and leaves the
+//! non-client area to the OS whenever the title bar is not transparent:
+//! `WM_NCCALCSIZE` returns `None` (`events.rs:705`) and so does the hit test
+//! (`events.rs:884`), so `DefWindowProc` keeps the frame. A window created
+//! that way carries the native caption with its own min, max and close, which
+//! is what a live Windows 11 window reports: `WS_CAPTION` set, a 45 px caption
+//! band, `HTCLOSE` answering over the system buttons. Drawing the cluster on
+//! top of that put two sets of buttons in the same corner, and the app's set
+//! was the dead one, because the platform only runs a control area whose hit
+//! test it answers itself.
+//!
+//! A transparent title bar is the other case: `hide_title_bar` turns on, gpui
+//! strips the frame through `WM_NCCALCSIZE`, and then nothing draws a caption
+//! unless the app does. That is the case [`TITLEBAR_APPEARS_TRANSPARENT`]
+//! describes, and the only one where Windows needs this module's cluster.
 
 use gpui::{Decorations, Tiling, WindowControlArea};
 
@@ -54,12 +63,28 @@ pub fn controls(decorations: Decorations) -> &'static [Control] {
     }
 }
 
-/// Whether the platform draws a caption of its own for a window that reports
-/// server-side decorations.
+/// Whether the GUI asks for a title bar it paints itself.
 ///
-/// macOS and the X11 and Wayland servers do. Windows does not, whatever the
-/// window reports: see the module doc (#2966).
-pub const PLATFORM_DRAWS_CAPTION: bool = !cfg!(target_os = "windows");
+/// `src/gui/app.rs` passes this to `TitlebarOptions::appears_transparent`, and
+/// `src/gui/dashboard_render.rs` reads it back to decide who draws the
+/// controls. One constant, because a window created with one answer and drawn
+/// with the other ends up with either two sets of buttons or none (#3083).
+///
+/// Flipping it to `true` is not free on Windows: gpui then strips the frame,
+/// so the cluster has to carry its own click handler, and `zoom()` there only
+/// ever maximises (`gpui-0.2.2/src/platform/windows/window.rs:782`), so
+/// restoring a maximised window needs a check of its own.
+pub const TITLEBAR_APPEARS_TRANSPARENT: bool = false;
+
+/// Whether the platform draws a caption of its own for a window created with
+/// this title bar.
+///
+/// macOS and the X11 and Wayland servers always do. Windows does whenever the
+/// window keeps its frame, which is exactly the window that did not ask for a
+/// transparent title bar: see the module doc (#3083).
+pub fn platform_draws_caption(titlebar_appears_transparent: bool) -> bool {
+    !cfg!(target_os = "windows") || !titlebar_appears_transparent
+}
 
 /// The decorations a window actually has, once the platform's own caption is
 /// accounted for.

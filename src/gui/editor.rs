@@ -12,8 +12,9 @@
 
 use crate::palette;
 use crate::topic_icons::CRAB_ICONS;
+use crate::transcript;
 use crate::voice_input;
-use opencrabs::ui_core::card::{COMPOSER_RADIUS, glass_fill};
+use opencrabs::ui_core::card::glass_fill;
 use opencrabs::ui_core::commands::gui_completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
@@ -216,30 +217,103 @@ fn message_with_markers(text: &str, attachments: &[Attachment]) -> String {
     payload
 }
 
+/// Where the attachment markers at the end of this text begin, if it has any
+/// (#3092).
+///
+/// A marker is an attachment only where the send path put it: appended after
+/// the words. `words <<IMG:..>> <<IMG:..>>` is two files and
+/// `I quoted <<AUD:/x.ogg>> in this sentence` is none. Reading every marker
+/// anywhere in the body made a reply that quoted one draw a player for a clip it
+/// never sent, and a quote shortened with an ellipsis then opened nothing when
+/// pressed. The tail is read from the end, so a run of markers is found without
+/// knowing how many there are.
+///
+/// The tail is taken per LINE rather than per body: see `attachment_spans`, which
+/// is what callers use. A queued message is spliced onto the one before it with a
+/// newline, and its markers end its own line rather than the whole body (#3099).
+fn trailing_markers(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end();
+    let mut start = trimmed.len();
+    while let Some(head) = trimmed.get(..start) {
+        let head = head.trim_end();
+        if !head.ends_with(">>") {
+            break;
+        }
+        let Some(open) = head.rfind("<<") else {
+            break;
+        };
+        let Some(close) = head.len().checked_sub(2) else {
+            break;
+        };
+        let Some(marker) = head.get(open + 2..close) else {
+            break;
+        };
+        let Some((kind, path)) = marker.split_once(':') else {
+            break;
+        };
+        if !(kind == "IMG" || kind == "VID" || kind == "AUD") || path.is_empty() {
+            break;
+        }
+        start = open;
+    }
+    (start < trimmed.len()).then_some(start)
+}
+
+/// Where each line's own attachment markers begin, as byte offsets into `text`.
+///
+/// A body is not always one authored line. A message typed while a turn is
+/// running is spliced onto the one before it with a newline
+/// (`QueuedUserMessage::join`), and a background task's notice is appended the
+/// same way, so a stored body reads `words <<AUD:..>>\n🔧 notice`. Every one of
+/// those entries still ends with its own markers, but only the last entry is the
+/// end of the BODY, and reading the body's tail left every earlier marker in
+/// place: the bubble printed a raw `<<AUD:...>>` for a clip whose player was
+/// drawn beside it, once per joined message (#3099).
+///
+/// Reading line by line keeps #3092 whole: a marker quoted inside a sentence has
+/// words after it on its own line, so it is still not an attachment.
+fn attachment_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if let Some(start) = trailing_markers(line) {
+            // `trim_end` drops the line's newline (and a `\r` before it), which
+            // is exactly where the run stops counting as the line's tail.
+            spans.push(offset + start..offset + line.trim_end().len());
+        }
+        offset += line.len();
+    }
+    spans
+}
+
 /// The paths carried by `<<IMG:...>>` / `<<VID:...>>` / `<<AUD:...>>` markers in
 /// a message.
 /// Pure string work so it is testable without a window, and shared with the
 /// send path that tracks each attachment against the session.
 pub fn marker_paths(text: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<<") {
-        let Some(after) = rest.get(start + 2..) else {
-            break;
+    for span in attachment_spans(text) {
+        let Some(mut rest) = text.get(span) else {
+            continue;
         };
-        let Some(end) = after.find(">>") else {
-            break;
-        };
-        let Some(marker) = after.get(..end) else {
-            break;
-        };
-        if let Some((kind, path)) = marker.split_once(':')
-            && (kind == "IMG" || kind == "VID" || kind == "AUD")
-            && !path.is_empty()
-        {
-            paths.push(PathBuf::from(path));
+        while let Some(start) = rest.find("<<") {
+            let Some(after) = rest.get(start + 2..) else {
+                break;
+            };
+            let Some(end) = after.find(">>") else {
+                break;
+            };
+            let Some(marker) = after.get(..end) else {
+                break;
+            };
+            if let Some((kind, path)) = marker.split_once(':')
+                && (kind == "IMG" || kind == "VID" || kind == "AUD")
+                && !path.is_empty()
+            {
+                paths.push(PathBuf::from(path));
+            }
+            rest = after.get(end + 2..).unwrap_or_default();
         }
-        rest = after.get(end + 2..).unwrap_or_default();
     }
     paths
 }
@@ -293,29 +367,43 @@ pub fn strip_markers(text: &str) -> Cow<'_, str> {
     if !text.contains("<<") {
         return Cow::Borrowed(text.trim());
     }
+    // A path marker is dropped only where it counts as an attachment, which is
+    // the end of its own line (`attachment_spans`). One quoted inside a sentence
+    // is part of what the reader wrote, so it stays where it was typed (#3092).
+    // A `SPOKEN` block is text meant for the ear rather than a path, so it has
+    // no file behind it and is dropped wherever it sits: a reply reloaded from
+    // the ledger would otherwise print the whole block under the words it
+    // summarizes.
+    let spans = attachment_spans(text);
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<<") {
-        let Some(after) = rest.get(start + 2..) else {
+    let mut cursor = 0usize;
+    while let Some(found) = text.get(cursor..).and_then(|rest| rest.find("<<")) {
+        let start = cursor + found;
+        let Some(after) = text.get(start + 2..) else {
             break;
         };
         let Some(end) = after.find(">>") else { break };
         let Some(marker) = after.get(..end) else {
             break;
         };
-        let is_marker = marker.split_once(':').is_some_and(|(kind, path)| {
-            (kind == "IMG" || kind == "VID" || kind == "AUD") && !path.is_empty()
+        let closer = start + 2 + end + 2;
+        let drop = marker.split_once(':').is_some_and(|(kind, payload)| {
+            kind.eq_ignore_ascii_case("SPOKEN")
+                || ((kind == "IMG" || kind == "VID" || kind == "AUD")
+                    && !payload.is_empty()
+                    && spans.iter().any(|span| span.contains(&start)))
         });
-        if is_marker {
-            if let Some(head) = rest.get(..start) {
-                out.push_str(head);
-            }
-        } else if let Some(keep) = rest.get(..start + 2 + end + 2) {
+        if let Some(head) = text.get(cursor..start) {
+            out.push_str(head);
+        }
+        if !drop && let Some(keep) = text.get(start..closer) {
             out.push_str(keep);
         }
-        rest = after.get(end + 2..).unwrap_or_default();
+        cursor = closer;
     }
-    out.push_str(rest);
+    if let Some(rest) = text.get(cursor..) {
+        out.push_str(rest);
+    }
     Cow::Owned(out.trim().to_string())
 }
 
@@ -336,6 +424,11 @@ pub enum EditorEvent {
     /// end and there is no later history entry. What sits under the field is
     /// the window's to decide, so the editor only says it was asked.
     Below,
+    /// Up was pressed with nowhere left to go while a follow-up offer is
+    /// waiting above the field. The offer is the most actionable thing on
+    /// screen, so it takes the key ahead of history (#3101): the window moves
+    /// the keyboard onto it, and the editor says only that it was asked.
+    Above,
 }
 
 /// A queue recall the composer is holding: every message Up took out of one
@@ -489,6 +582,16 @@ pub struct Editor {
     voice_capture: Option<voice_input::Capture>,
     /// Whether the recording has been asked to stop and its WAV is on the way.
     voice_finishing: bool,
+    /// Whether the take now closing was ended by the chord rather than the
+    /// block's click (#3092). Set when the stop is asked for and spent when
+    /// the words land, because the two threads in between are what make the
+    /// intent outlive the press that carried it.
+    voice_send_on_land: bool,
+    /// Whether the take now closing was abandoned rather than stopped
+    /// (#3092). Escape sets it, and it is spent the moment the recording comes
+    /// back: a cancelled take is never transcribed, never previewed and never
+    /// sent, so the flag has to outlive the same two threads the send does.
+    voice_cancel_on_land: bool,
     /// The transcription in flight, if any.
     voice_transcription: Option<voice_input::Transcription>,
     /// Whether the dictation loop is already ticking. Same one-shot shape as
@@ -498,10 +601,15 @@ pub struct Editor {
     /// moved no digit leaves the frame alone.
     voice_secs: u64,
     /// The meter's window while recording, newest last (#3044). Copied out of
-    /// the capture on every tick: the waveform is the only part of the composer
-    /// that changes ten times a second, so it is also the only reason the row
-    /// repaints while the microphone is open.
+    /// the capture on every tick and handed straight to the block, which is the
+    /// only part of the composer that changes ten times a second and therefore
+    /// the only reason the row repaints while the microphone is open.
     voice_levels: Vec<f32>,
+    /// The block the composer listens through, if the microphone is open
+    /// (#3092). It is painted from the composer's own tick and its texture is
+    /// swapped in place, so a take costs the row one image and no per-pixel
+    /// work in the paint pass.
+    voice_block: Option<crate::composer_orb::LiveSlab>,
     /// The take that has been transcribed and is waiting to be sent (#3044).
     ///
     /// A recording is a message of its own, so it does not go through the caret:
@@ -535,7 +643,7 @@ pub(crate) struct VoiceDraft {
 /// know is that the words in front of it were spoken: that is what tells it to
 /// answer out loud with the voice tools it already has. It is added where the
 /// marker is taken off, so the note never reaches the screen.
-pub const VOICE_NOTE_PREFIX: &str = "[voice note]";
+pub const VOICE_NOTE_PREFIX: &str = opencrabs::channels::voice::spoken::VOICE_PREFIX;
 
 /// Rows the composer shows before it scrolls instead of growing. Ten rows is
 /// about a third of a laptop window: enough to read a paragraph back, never
@@ -559,9 +667,12 @@ pub const NOTICE_TTL: Duration = Duration::from_secs(2);
 const CARET_BLINK_MS: u64 = 530;
 
 /// How often the dictation loop drains the microphone and the transcription
-/// (#3044). Ten ticks a second is fine grain for a counter that reads whole
-/// seconds, and it lands a finished transcript without a second timer.
-const VOICE_TICK: Duration = Duration::from_millis(100);
+/// (#3044). The Seeker's own number (#3092): the strip is glass now, and the
+/// worker behind it renders at thirty frames a second, so a slower tick would
+/// paint every third frame and read as a slideshow. Draining the capture this
+/// often costs nothing, and it lands a finished transcript without a second
+/// timer.
+const VOICE_TICK: Duration = Duration::from_millis(33);
 
 /// What the composer's microphone is doing (#3044). The row paints from this,
 /// never from the threads' state: one of them can be mid-handoff on a frame,
@@ -576,6 +687,47 @@ enum VoicePhase {
     Finishing,
     /// A WAV is on its way through the speech chain.
     Transcribing,
+}
+
+/// What a press of the voice control asks for once the take closes (#3092).
+///
+/// The Seeker's card has carried this distinction since it was built
+/// (`seeker_voice_send`), and the composer did not: the chord and the block's
+/// click walked into one function with no way to tell them apart, so pressing
+/// the chord again parked the words and waited for Enter. The person pressing
+/// the chord twice is saying "send it", and that has to survive as data rather
+/// than as a second gesture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TakeEnd {
+    /// Stop and leave the words in the preview for reading and editing.
+    ///
+    /// The stop square, the microphone's second press and Enter all ask for
+    /// this. Enter is the keyboard's way out without sending (#3092): the
+    /// words land in the preview, extra text can be typed beside them, and the
+    /// next Enter is the send.
+    Park,
+    /// Stop and send the words the moment they land.
+    Send,
+    /// Stop and throw the take away: no preview, no words, no send (#3092).
+    ///
+    /// Escape is the only caller. Parking was the wrong answer for it: a
+    /// person pressing escape mid-sentence is abandoning what they were
+    /// saying, and leaving a transcript in the preview makes the key look
+    /// like it attached the take instead of cancelling it.
+    Cancel,
+}
+
+impl TakeEnd {
+    /// Whether this press sends once the words land (#3092).
+    fn sends(self) -> bool {
+        matches!(self, Self::Send)
+    }
+
+    /// Whether this press throws the take away instead of keeping it
+    /// (#3092).
+    fn cancels(self) -> bool {
+        matches!(self, Self::Cancel)
+    }
 }
 
 /// What the composer says once a dragged range reaches the clipboard (#2587).
@@ -642,10 +794,13 @@ impl Editor {
             caret_looping: false,
             voice_capture: None,
             voice_finishing: false,
+            voice_send_on_land: false,
+            voice_cancel_on_land: false,
             voice_transcription: None,
             voice_looping: false,
             voice_secs: 0,
             voice_levels: Vec::new(),
+            voice_block: None,
             voice_draft: None,
         }
     }
@@ -715,9 +870,12 @@ impl Editor {
     /// The dictation shortcut's action (#3044).
     ///
     /// It only forwards to `toggle_dictation`, the same call the microphone's
-    /// click makes, so the key and the button can never drift apart.
+    /// click makes, so the key and the button can never drift apart. It is the
+    /// one caller that passes `Send` (#3092): the chord is the fast
+    /// path, and a person pressing it a second time has already decided the
+    /// take is worth sending.
     fn toggle_voice(&mut self, _: &ToggleVoice, _window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_dictation(cx);
+        self.toggle_dictation(TakeEnd::Send, cx);
     }
 
     /// What the microphone's click does: one control, two jobs.
@@ -731,7 +889,12 @@ impl Editor {
     /// `pub(crate)` because Seeker's own row hands the job here (#3044): the
     /// card cannot reach the composer's private state, and a second copy of
     /// this match would let the row and the button drift apart.
-    pub(crate) fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `end` is what the press means once the take closes (#3092). The chord
+    /// says send, every click says park, Esc says cancel, and the flag it
+    /// leaves behind is what makes that survive the two worker threads between
+    /// the press and the words.
+    pub(crate) fn toggle_dictation(&mut self, end: TakeEnd, cx: &mut Context<Self>) {
         match self.voice_phase() {
             VoicePhase::Idle => {
                 // One take at a time is what the composer holds (#3044). A
@@ -742,19 +905,60 @@ impl Editor {
                     self.show_notice("Send or discard the voice message first", cx);
                     return;
                 }
+                // The speaker steps aside for the microphone (#3092): a reply
+                // still sounding would bleed into the take, so whatever is
+                // playing ends here rather than under the person's voice.
+                crate::voice_play::silence();
                 self.voice_capture = Some(voice_input::Capture::start());
                 self.voice_finishing = false;
+                // A fresh take carries no intent (#3092): whatever the last
+                // press asked for was spent when its words landed, and a flag
+                // left standing here would send a take nobody asked to send.
+                self.voice_send_on_land = false;
+                self.voice_cancel_on_land = false;
                 self.voice_secs = 0;
                 self.voice_levels.clear();
+                // The block is the strip now (#3092): it opens with the
+                // microphone and closes with it, so its worker never outlives
+                // the take it was painting.
+                self.voice_block =
+                    Some(crate::composer_orb::LiveSlab::start(palette::current().red));
                 self.pump_voice(cx);
             }
             VoicePhase::Recording => {
+                // The intent is written before the stop, not after (#3092):
+                // the tick that drains the capture runs on the same thread
+                // pool, and a flag set after the stop could lose the race to
+                // the transcript it was meant to send.
+                self.voice_send_on_land = end.sends();
+                self.voice_cancel_on_land = end.cancels();
                 if let Some(capture) = self.voice_capture.as_ref() {
                     capture.stop();
                 }
                 self.voice_finishing = true;
+                // A cancelled take says so at the press rather than when the
+                // device finishes (#3092): the block disappears a moment
+                // later, and a block that leaves in silence reads as a
+                // crash.
+                if end.cancels() {
+                    self.show_notice("Recording cancelled", cx);
+                }
             }
-            VoicePhase::Finishing | VoicePhase::Transcribing => {}
+            VoicePhase::Finishing | VoicePhase::Transcribing => {
+                // A second press while the words are still being made is the
+                // same decision arriving early (#3092). Today it did nothing,
+                // which reads as a shortcut that stopped working right when
+                // the person wanted it most, so it arms the send instead.
+                if end.sends() {
+                    self.voice_send_on_land = true;
+                }
+                // An abandonment that arrives after the stop still wins
+                // (#3092): the words are dropped when they land instead of
+                // being previewed for a take nobody wants any more.
+                if end.cancels() {
+                    self.voice_cancel_on_land = true;
+                }
+            }
         }
         cx.notify();
     }
@@ -802,16 +1006,35 @@ impl Editor {
                     // with the device either way.
                     self.voice_capture = None;
                     self.voice_finishing = false;
-                    // The waveform belongs to a recording that is over: leaving
-                    // it up would paint a frozen strip beside the spinner.
+                    // The glass belongs to a recording that is over: leaving
+                    // it up would paint a frozen block beside the spinner.
                     self.voice_levels.clear();
+                    // The glass closes with the microphone. Retiring it here
+                    // rather than on the next take keeps its last texture from
+                    // outliving the recording it was painting.
+                    if let Some(block) = self.voice_block.take() {
+                        block.dispose(cx);
+                    }
                     changed = true;
+                    // The abandonment is spent the moment the recording is
+                    // back (#3092): a cancelled take is never transcribed, so
+                    // its words never exist to be previewed or sent.
+                    let cancelled = std::mem::take(&mut self.voice_cancel_on_land);
                     match answer {
+                        Ok(_) if cancelled => {}
                         Ok(recording) => {
                             self.voice_transcription =
-                                Some(voice_input::Transcription::start(recording));
+                                Some(voice_input::Transcription::start(recording, self.session));
                         }
-                        Err(message) => self.show_notice(message, cx),
+                        Err(message) => {
+                            // The device failed, so there is nothing left to
+                            // send (#3092). Leaving the intent standing would
+                            // arm the next take with a press the person made
+                            // for this one.
+                            self.voice_send_on_land = false;
+                            self.voice_cancel_on_land = false;
+                            self.show_notice(message, cx)
+                        }
                     }
                 }
             }
@@ -825,15 +1048,28 @@ impl Editor {
         if let Some(answer) = answer {
             self.voice_transcription = None;
             changed = true;
-            match answer {
-                Ok(spoken) if spoken.text.trim().is_empty() => {
-                    self.show_notice("The microphone caught nothing.", cx);
+            // The intent is taken once, here, whichever way the words came out
+            // (#3092). Reading it into a local rather than at the send keeps a
+            // failed transcription from leaving the press standing for the
+            // next take, and keeps the flag true only for the moment it is
+            // spent.
+            let send = std::mem::take(&mut self.voice_send_on_land);
+            // An escape pressed while the words were already being made
+            // (#3092): the transcript is dropped where it stands, because
+            // previewing it would be the attach the person cancelled.
+            if std::mem::take(&mut self.voice_cancel_on_land) {
+                self.voice_levels.clear();
+            } else {
+                match answer {
+                    Ok(spoken) if spoken.text.trim().is_empty() => {
+                        self.show_notice("The microphone caught nothing.", cx);
+                    }
+                    Ok(spoken) => self.land_voice(spoken, send, cx),
+                    Err(message) => self.show_notice(message, cx),
                 }
-                Ok(spoken) => self.land_voice(spoken, cx),
-                Err(message) => self.show_notice(message, cx),
             }
         }
-        // The counter moves once a second; the waveform moves on every tick.
+        // The counter moves once a second; the glass moves on every tick.
         // Both are read out of the capture before anything is assigned, so the
         // borrow of the handle does not overlap the writes to the fields it
         // feeds.
@@ -851,6 +1087,23 @@ impl Editor {
                 changed = true;
             }
         }
+        // The glass is painted by its own worker, so the row only has to hand
+        // it this tick's reading and ask for a frame: a recording that stops
+        // repainting is a recording that looks stopped (#3092).
+        let recording = self.voice_phase() == VoicePhase::Recording;
+        if let Some(block) = self.voice_block.as_ref() {
+            block.update(
+                recording,
+                &self.voice_levels,
+                palette::current().red,
+                crate::composer_orb::hovering(crate::composer_orb::BLOCK_ID),
+                (
+                    crate::composer_orb::measured_width(),
+                    crate::composer_orb::BLOCK_HEIGHT,
+                ),
+            );
+            changed = true;
+        }
         if changed {
             cx.notify();
         }
@@ -865,7 +1118,7 @@ impl Editor {
     ///
     /// The words never enter the field. Stopping the microphone is not deciding
     /// to send, but it is also not deciding to write: the take gets its own
-    /// preview under the row, with the waveform it was recorded with and the
+    /// preview under the row, with the shape it was recorded with and the
     /// transcript beneath it, so a person can read what the microphone thought
     /// it heard while still holding the message. Enter is the one thing that
     /// puts a turn on the wire, and the clip rides out as a marker the row
@@ -874,7 +1127,12 @@ impl Editor {
     /// A transcription whose clip could not be saved still has words worth
     /// sending, and the field is the only place left to put them, so that case
     /// keeps typing at the caret rather than losing what was said over a file.
-    fn land_voice(&mut self, spoken: voice_input::Spoken, cx: &mut Context<Self>) {
+    ///
+    /// `send` is the intent the chord left behind (#3092). It is honoured only
+    /// on the clip branch below: a take that lost its audio keeps its words at
+    /// the caret, where they can be read before anything goes out, because a
+    /// file that failed is not a reason to send a transcript nobody has seen.
+    fn land_voice(&mut self, spoken: voice_input::Spoken, send: bool, cx: &mut Context<Self>) {
         let Some(clip) = spoken.audio else {
             self.voice_levels.clear();
             self.insert_dictation(&spoken.text, cx);
@@ -896,6 +1154,13 @@ impl Editor {
             seconds: spoken.seconds,
             levels,
         });
+        // The chord already said what it wanted (#3092). The draft is parked
+        // first and spent second, so the one send path stays the only send
+        // path: the payload, the history entry and the clear all happen in
+        // `submit`, exactly as they would had the person pressed Enter.
+        if send {
+            self.submit(cx);
+        }
         cx.notify();
     }
 
@@ -1383,9 +1648,13 @@ impl Editor {
         self.session = session;
     }
 
-    /// The hint an empty field shows. It belongs to the window's state, not to
-    /// the field's: what the composer can do depends on whether a turn runs and
-    /// what is queued, and the editor sees neither (#2630).
+    /// The hint an empty field shows: the two keys that act on the field
+    /// itself (#3102).
+    ///
+    /// These stay in the field because they are about the field: Esc stops the
+    /// turn that is being written into it, and the chord records a message into
+    /// it. The task-related hints have a card of their own above the composer,
+    /// where they do not compete with the caret.
     pub fn set_placeholder(&mut self, hint: SharedString, cx: &mut Context<Self>) {
         if self.placeholder != hint {
             self.placeholder = hint;
@@ -1397,6 +1666,18 @@ impl Editor {
     /// like the lines the reader sees. At the top row Up goes to the very
     /// start, and at the bottom row Down goes to the very end.
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        // A follow-up offer sits directly above the field, so Up reaches it
+        // before the queue and before history (#3101). It is the most
+        // actionable thing on screen: the turn just ended by offering it, and
+        // sending one is the whole point. Only from a field with nowhere left
+        // to go, so a multi-line draft still walks its own rows first.
+        let offer_waiting = self
+            .session
+            .is_some_and(|s| !crate::agent_bridge::options_snapshot(s).is_empty());
+        if offer_waiting && self.content.is_empty() && self.recall.is_none() {
+            cx.emit(EditorEvent::Above);
+            return;
+        }
         // Up brings the WHOLE queue into the field in one press (#2696): every
         // waiting message joins into one edit, oldest first, so three queued
         // messages are one correction instead of three. The take empties the
@@ -1439,6 +1720,13 @@ impl Editor {
         let target = vertical_row_target(&rows, self.cursor_offset(), -1);
         if target != self.cursor_offset() {
             self.move_to(target, cx);
+            return;
+        }
+        // Off the top row of a draft the offer still wins over history: the
+        // caret has nowhere left to go, and the card above the field is the
+        // only thing up there that does something.
+        if offer_waiting {
+            cx.emit(EditorEvent::Above);
             return;
         }
         // The guard is released before anything else touches `self`: holding it
@@ -1610,13 +1898,40 @@ impl Editor {
         self.replace_text_in_range(None, "\n", window, cx)
     }
 
-    /// Enter sends: non-empty content goes out as an event, the field clears.
+    /// Enter stops a take, or sends what the field holds.
+    ///
+    /// While the microphone is open the key has no message to send: the words
+    /// are still being made, so the press fell through and did nothing at all
+    /// (#3092). That left the mouse as the only way to keep a take without
+    /// sending it, and the chord as the only way to send without the mouse.
+    /// Enter parks the take instead, so the words land in the preview beside
+    /// anything typed there, and the next Enter is the send.
     fn send(&mut self, _: &Send, _window: &mut Window, cx: &mut Context<Self>) {
+        // Every phase but idle is a take in flight, and the park is what a
+        // press means in all three: a recording stops, and a take already
+        // closing or being transcribed keeps the outcome its own press asked
+        // for instead of being sent from under the words.
+        if self.voice_phase() != VoicePhase::Idle {
+            self.toggle_dictation(TakeEnd::Park, cx);
+            return;
+        }
         // Enter on an open emoji list takes the highlighted glyph, as the TUI does.
         if self.emoji_popup().is_some() {
             self.accept_emoji(cx);
             return;
         }
+        self.submit(cx);
+    }
+
+    /// Put what the field holds on the wire, with no key behind it (#3092).
+    ///
+    /// The chord ends a take and the words land a few hundred milliseconds
+    /// later, on a timer, with no key event in sight. Sending from there needs
+    /// no frame: `EditorEvent::Sent` is a plain notification its subscribers
+    /// read with `cx` alone, and nothing in the body below ever touched the
+    /// window. So the emoji branch stays in `send`, where the key belongs, and
+    /// everything that builds a payload lives here, where a tick can reach it.
+    fn submit(&mut self, cx: &mut Context<Self>) {
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
@@ -1742,6 +2057,10 @@ impl Editor {
         // empties the field must not leave a voice message behind to ride the
         // next one.
         self.voice_draft = None;
+        // The intent dies with the message it was for (#3092): a flag left
+        // standing here would send the next take the moment it lands.
+        self.voice_send_on_land = false;
+        self.voice_cancel_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -1769,6 +2088,15 @@ impl Editor {
         // A reply belongs to the conversation it was opened in, so leaving
         // that conversation drops the chip with the draft (#2827).
         self.reply = None;
+        // A press that meant to send into the old conversation must not send
+        // into the new one (#3092): a take still being transcribed when the
+        // person switched would otherwise land as a message in a room they
+        // never meant to speak in. An abandonment dies with it for the same
+        // reason, one step further: a cancel left standing would eat the
+        // next take's words in a conversation the person never cancelled
+        // anything in.
+        self.voice_send_on_land = false;
+        self.voice_cancel_on_land = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -1959,11 +2287,13 @@ impl Editor {
         // microphone is holding the device and the row is counting at the
         // person; escape mid-sentence means "stop this", never "close the
         // card behind it". Checked ahead of the composition and menu cases for
-        // that reason, and the click on the stop square takes the same path.
+        // that reason. The click on the stop square ends the take the same way
+        // but keeps it; escape throws it away (#3092), because a person
+        // abandoning a sentence is not asking to read a transcript of it.
         if ev.keystroke.key == "escape" && self.voice_phase() == VoicePhase::Recording {
             window.prevent_default();
             cx.stop_propagation();
-            self.toggle_dictation(cx);
+            self.toggle_dictation(TakeEnd::Cancel, cx);
             return;
         }
         if ev.keystroke.key == "escape" && self.marked_range.is_some() {
@@ -2027,8 +2357,14 @@ impl Editor {
         if self.content.is_empty() {
             return 0;
         }
+        // Before the first prepaint there is no laid-out text to measure a
+        // press against, so the press must leave the caret where it is.
+        // Returning 0 parked it at the start of the field, and a caret at
+        // offset 0 with an empty selection makes backspace delete nothing at
+        // all: `previous_boundary(0)` is 0, so the delete removes zero bytes
+        // and keeps doing so until something else moves the caret (#3031).
         let Some(bounds) = self.last_bounds.as_ref() else {
-            return 0;
+            return self.cursor_offset();
         };
         let line_height = self.last_line_height;
         let rel_y = position.y - bounds.top();
@@ -2838,47 +3174,56 @@ impl Render for Editor {
             // why the microphone refused to start over it.
             .filter(|_| !self.content.is_empty() || self.voice_draft.is_some())
             .map(str::to_string);
-        // The attachment control leads the row, as the messaging apps place it
-        // (#3037). It used to trail the text on the right, where a control the
-        // field already implied had to be hunted for past the caret.
-        body = body.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(paperclip(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        // No left inset here: the paperclip and the row gap are
-                        // the inset, so the text starts after the control
-                        // instead of indenting twice.
-                        // A draft taller than the box scrolls inside it. Without
-                        // the cap the field grew with every line and painted
-                        // over the pane below, the overlap the owner saw
-                        // (#2773).
-                        .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
-                        // The scroll methods live on a stateful element, so
-                        // the box carries an id before it asks to scroll at
-                        // all. A plain div has neither method and the gui
-                        // binary stopped compiling without this (#2773).
-                        .id("composer-input")
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .child(EditorElement { input: cx.entity() }),
-                )
-                // The microphone closes the row (#3044), where the messaging
-                // apps put theirs: the paperclip attaches on the left, the
-                // voice control sits at the caret's own end.
-                .child(mic(
-                    self.voice_phase(),
-                    self.voice_secs,
-                    &self.voice_levels,
-                    cx,
-                )),
+        // The microphone's block is the composer while a take is running
+        // (#3092): the box turns into the glass, at the width the row had, and
+        // the whole slab ends the recording. The input row it replaces is not
+        // drawn underneath, because a caret blinking behind the animation would
+        // invite typing into a field the take will overwrite.
+        let live = matches!(
+            self.voice_phase(),
+            VoicePhase::Recording | VoicePhase::Finishing
         );
+        if let Some(block) = self.voice_block.as_ref().filter(|_| live) {
+            body = body.child(voice_block(block, self.voice_secs, cx));
+        } else {
+            // The attachment control leads the row, as the messaging apps place
+            // it (#3037). It used to trail the text on the right, where a
+            // control the field already implied had to be hunted for past the
+            // caret.
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(paperclip(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // No left inset here: the paperclip and the row gap
+                            // are the inset, so the text starts after the
+                            // control instead of indenting twice.
+                            // A draft taller than the box scrolls inside it.
+                            // Without the cap the field grew with every line and
+                            // painted over the pane below, the overlap the owner
+                            // saw (#2773).
+                            .max_h(window.line_height() * COMPOSER_MAX_ROWS as f32)
+                            // The scroll methods live on a stateful element, so
+                            // the box carries an id before it asks to scroll at
+                            // all. A plain div has neither method and the gui
+                            // binary stopped compiling without this (#2773).
+                            .id("composer-input")
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(EditorElement { input: cx.entity() }),
+                    )
+                    // The microphone closes the row (#3044), where the messaging
+                    // apps put theirs: the paperclip attaches on the left, the
+                    // voice control sits at the caret's own end.
+                    .child(mic(self.voice_phase(), cx)),
+            );
+        }
         let root = div()
             .relative()
             .flex()
@@ -2917,24 +3262,49 @@ impl Render for Editor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            // The composer owns its own card by default: a focused split pane
+            // The composer owns its own surface by default: a focused split pane
             // renders this element directly (`pane_view.rs`), with nothing
-            // around it, so the surface, the hairline border and the radius
-            // have to live here or a focused pane loses its box while its
-            // keyboard-less siblings keep theirs.
+            // around it, so the fill and the hairline have to live here or a
+            // focused pane loses its footer while its keyboard-less siblings
+            // keep theirs.
             //
             // The single-session chat is the one caller that wraps the editor
             // in a dock shared with the key hints (#2987). That wrapper sets
-            // `docked`, which suppresses this chrome, because two cards would
+            // `docked`, which suppresses this chrome, because two fills would
             // paint the old floating pill inside the new one.
+            //
+            // Square, unlike the docked card (#3112, #3114). This footer takes
+            // the pane's full width and closes it, so a radius would only ever
+            // round the bottom corners into the pane's own corner, and a full
+            // border would draw a box around something that is already an edge.
+            // The hairline on top is the one seam it needs. The shadow goes
+            // with the radius: a footer does not float. The docked copy is a
+            // card that does, and the shell around it owns that shape.
             .when(!self.docked, |d| {
                 d.bg(glass_fill(palette::current().panel))
-                    .shadow_sm()
-                    .border_1()
+                    .border_t(px(1.))
                     .border_color(rgb(palette::current().panel_hi))
-                    .rounded(px(COMPOSER_RADIUS))
             })
-            .p_3()
+            // The inset is the conversation's own (#3114): every row that
+            // carries words in this window starts on one column, and
+            // `CONVERSATION_INSET_REM` is where it is defined. A message's text
+            // lands there because its row pads the transcript's 8 and the
+            // bubble pads its own 16.
+            //
+            // Which of the two insets this field takes depends on where it is
+            // drawn (#3114). The single-session chat puts it inside a card that
+            // `session_row` already placed half a rem in from the session's
+            // edge, so the field pads the rest (`card_inset`) and its words land
+            // on the same column as the messages above it. A focused split pane
+            // renders the field bare, with no card around it, so there the field
+            // is the whole column and pads all of it. The vertical step stays
+            // 12: only the sides were ever off.
+            .px(if self.docked {
+                transcript::card_inset()
+            } else {
+                transcript::conversation_inset()
+            })
+            .py_3()
             .line_height(px(22.))
             .text_size(px(14.))
             .text_color(rgb(palette::current().text))
@@ -3254,21 +3624,21 @@ fn dictation_insertion(content: &str, range: Range<usize>, spoken: &str) -> (Str
 /// paperclip's 1.8rem hit area, so the two ends of the field are one control
 /// line instead of a control and an afterthought.
 ///
-/// It carries the phase itself. Idle is the quiet grey the paperclip wears;
-/// recording turns it red, puts the elapsed time and a live waveform beside it,
-/// and swaps the microphone for a stop square, because a control that just
-/// started the microphone has to say so and has to say how to end it; a WAV
-/// being built keeps the red, and the transcription turns amber, the same
-/// "working" tone the rest of the window uses. Like the paperclip, the colour
-/// goes into the vector and the hover raises the control's opacity.
-fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -> impl IntoElement {
+/// The open microphone is not this control any more. A take turns the whole
+/// composer into the glass block (#3092), because a seventy-eight point strip
+/// in the corner said "something is happening" to whoever already knew to look
+/// at it. Idle is the quiet grey the paperclip wears; a transcription turns the
+/// mark amber, the same "working" tone the rest of the window uses. Like the
+/// paperclip, the colour goes into the vector and the hover raises the
+/// control's opacity.
+fn mic(phase: VoicePhase, cx: &mut Context<Editor>) -> impl IntoElement {
     let palette = palette::current();
     let colour = match phase {
         VoicePhase::Idle => palette.text_muted,
         VoicePhase::Recording | VoicePhase::Finishing => palette.red,
         VoicePhase::Transcribing => palette.amber,
     };
-    let mut control = div()
+    div()
         .id("editor-mic")
         .flex()
         .flex_none()
@@ -3279,30 +3649,7 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
         .rounded_sm()
         .cursor_pointer()
         .opacity(if phase == VoicePhase::Idle { 0.8 } else { 1.0 })
-        .hover(|d| d.opacity(1.0));
-    // While the microphone is open the control becomes a recording strip: the
-    // counter says how long, the wave says it is hearing something, and the
-    // mark on the end is the stop square instead of the microphone. One control
-    // whose meaning changes with the state, which is how every recorder works
-    // and why there is no second button to find (#3044).
-    let mark: gpui::AnyElement = if phase == VoicePhase::Recording {
-        control = control
-            // The counter sits in the row, left of the wave: a red mark alone
-            // says "something is happening", never "for how long", and the one
-            // thing a person wants to know mid-sentence is that the thing is
-            // still running.
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(palette.red))
-                    .child(format!("{}:{:02}", secs / 60, secs % 60)),
-            )
-            .child(waveform(levels, palette.red));
-        crate::icon::stop_icon(colour, 1.05).into_any_element()
-    } else {
-        crate::icon::mic_icon(colour, 1.25).into_any_element()
-    };
-    control
+        .hover(|d| d.opacity(1.0))
         .child(
             div()
                 .flex()
@@ -3310,7 +3657,7 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
                 .items_center()
                 .justify_center()
                 .size(gpui::rems(1.8))
-                .child(mark),
+                .child(crate::icon::mic_icon(colour, 1.25)),
         )
         // The hover names the key, the same sentence the Seeker's microphone
         // shows: two surfaces, one binding, one explanation (#3044).
@@ -3319,45 +3666,85 @@ fn mic(phase: VoicePhase, secs: u64, levels: &[f32], cx: &mut Context<Editor>) -
             MouseButton::Left,
             cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
-                this.toggle_dictation(cx);
+                this.toggle_dictation(TakeEnd::Park, cx);
             }),
         )
 }
 
-/// How many meter readings the waveform draws.
+/// The composer, while the microphone is open (#3092).
 ///
-/// The capture keeps ~1.1 s of readings; the strip shows the last two thirds of
-/// a second, which is about as far back as the eye reads a scroll, and keeps
-/// the control from growing into the field's text.
-const WAVE_BARS: usize = 34;
-
-/// The live meter beside the counter (#3044).
+/// The block is the box: it takes the width the input row had, stands as tall
+/// as the field did, and the whole surface is the stop. That is the point of
+/// the takeover. A recording has to be visible from across the desk, and a
+/// control the size of a glyph is only visible to someone already watching it.
 ///
-/// One bar per reading, oldest on the left, newest on the right, so the strip
-/// scrolls the way a waveform should and its right edge is always what the
-/// microphone heard a moment ago. A bar never drops below two pixels: an empty
-/// strip and a silent microphone have to look different, or a muted device
-/// reads as "still starting up" forever.
-fn waveform(levels: &[f32], colour: u32) -> impl IntoElement {
-    let shown = &levels[levels.len().saturating_sub(WAVE_BARS)..];
-    let mut row = div()
-        .flex()
+/// The elapsed time rides on the glass instead of beside it, because the block
+/// has no beside: it is the composer's full width. The width is measured here,
+/// in paint, and handed to the worker through the module's thread-local, since
+/// a block that opens before the first layout is drawn at a fallback and
+/// resized on the next frame.
+fn voice_block(
+    block: &crate::composer_orb::LiveSlab,
+    secs: u64,
+    cx: &mut Context<Editor>,
+) -> impl IntoElement {
+    let palette = palette::current();
+    div()
+        .id(crate::composer_orb::BLOCK_ID)
+        .relative()
         .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(px(1.5))
-        .h(px(14.0));
-    for level in shown {
-        row = row.child(
+        .w_full()
+        .h(px(crate::composer_orb::BLOCK_HEIGHT))
+        // Square, inside the composer's card (#3112, #3114). The block is the
+        // composer's own box while the microphone is open, so it takes the
+        // field's shape and lets the card around it supply the curve: a rounded
+        // slab inside it would read as a second card floating in the field.
+        .overflow_hidden()
+        .cursor_pointer()
+        .on_hover(|over: &bool, window, _cx| {
+            if crate::composer_orb::note_hover(crate::composer_orb::BLOCK_ID, *over) {
+                window.refresh();
+            }
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_dictation(TakeEnd::Park, cx);
+            }),
+        )
+        .child(gpui::img(block.frame(cx)).absolute().inset_0().size_full())
+        // Measured during paint, after layout: the worker needs a width in
+        // points, and the only place that knows it is the box that was just
+        // given one.
+        .child(
+            gpui::canvas(
+                |bounds, _window, _cx| bounds.size.width,
+                |_bounds, width, _window, _cx| {
+                    crate::composer_orb::measure_width(f32::from(width));
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h_full(),
+        )
+        // The counter sits on the glass, top left, where the mark's own lane
+        // is: a red figure over the liquid reads as part of the material rather
+        // than as a label stuck to it.
+        .child(
             div()
-                .flex_none()
-                .w(px(2.0))
-                .h(px(2.0 + level.clamp(0.0, 1.0) * 12.0))
-                .rounded(px(1.0))
-                .bg(rgb(colour)),
-        );
-    }
-    row
+                .absolute()
+                .top(px(6.0))
+                .left(px(10.0))
+                .text_size(px(11.0))
+                .text_color(rgb(palette.red))
+                .child(format!("{}:{:02}", secs / 60, secs % 60)),
+        )
+        // The one sentence a takeover needs: the surface looks clickable and it
+        // stops the take, so say which it is.
+        .tooltip(|_window, cx| crate::hint::mic_tooltip(crate::hint::mic_line(), cx))
 }
 
 /// The take waiting to be sent, drawn above the input row (#3044).
@@ -3374,29 +3761,50 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         cx.stop_propagation();
         this.discard_voice(cx);
     });
+    // The take is the block now: its own peaks displace the glass, the band is
+    // the scrub track and the mark on the left starts and stops it (#3092).
+    // The discard stays outside the element, so a click meant for the ✕ can
+    // never land on the player.
+    let player = crate::composer_orb::player(
+        "recorded-draft",
+        &draft.clip,
+        Some(draft.seconds),
+        &draft.levels,
+        cx,
+    );
+    let label = crate::composer_orb::label(&draft.clip, Some(draft.seconds));
+    // The block sits alone on its row with only the discard beside it, and the
+    // words go underneath on the block's own left edge. The old preview was
+    // built that way and it reads as one card: a wide element with its caption
+    // below. Pushing the text into a column to the right of the glass instead
+    // turned the block into a left gutter and forced the transcript to fake the
+    // alignment with a fixed indent, which drifted the moment the block's width
+    // changed (#3092).
     div()
         .flex()
         .flex_col()
         .w_full()
         .min_w_0()
         .gap_1()
-        .p_1()
+        // The card's words take the message bubble's inset (#3114). At `p_1`
+        // the caption and the transcription sat four pixels from the card's
+        // edge, which the owner read as no spacing at all on the sides or the
+        // top. The same clip reads well once it is sent, and what it has there
+        // is this inset, so the draft wears it too.
+        .px(px(transcript::MESSAGE_PAD_X))
+        .py(px(transcript::MESSAGE_PAD_Y))
         .rounded(px(6.0))
         .bg(rgb(palette.panel_hi))
         .child(
             div()
                 .flex()
                 .flex_row()
-                .items_start()
+                .items_center()
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .child(div().flex_1().min_w_0().child(crate::voice_preview::player(
-                    "recorded-draft",
-                    &draft.clip,
-                    Some(draft.seconds),
-                    &draft.levels,
-                )))
+                .child(player)
+                .child(div().flex_1())
                 .child(
                     div()
                         .id("voice-preview-discard")
@@ -3409,14 +3817,22 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
                         .on_mouse_down(MouseButton::Left, discard),
                 ),
         )
-        // The recogniser's words stay a draft caption. Enter still sends the
-        // composer's actual field, exactly as before this visual change.
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .pl(px(40.0))
-                .pr(px(20.0))
+                .text_size(px(11.0))
+                .text_color(rgb(palette.text_muted))
+                .child(SharedString::from(label)),
+        )
+        // The recogniser's words stay a draft caption under the block, on the
+        // same left margin, so the card has one edge instead of three. Enter
+        // still sends the composer's actual field, exactly as before this
+        // visual change.
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
                 .text_xs()
                 .text_color(rgb(palette.text_muted))
                 .child(SharedString::from(draft.text.clone())),
@@ -4000,28 +4416,27 @@ mod tests {
     #[test]
     fn composer_caps_its_height_and_scrolls_inside_the_box() {
         let src = include_str!("editor.rs");
+        // The chain is read with its whitespace flattened: indentation moves
+        // whenever a builder above it is wrapped, and the fmt pass of #3124
+        // reindented this one, so a pin that counted columns went red on
+        // layout rather than on the shape it is meant to hold.
+        let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
         // Split so this assertion cannot match its own literal.
         let cap = concat!(
             ".max_h(window.line_height() * ",
             "COMPOSER_MAX_ROWS as f32)"
         );
-        let scroll = concat!(
-            ".overflow_y_scroll()",
-            "\n                        .track_scroll(&"
-        );
+        let scroll = concat!(".overflow_y_scroll() ", ".track_scroll(&");
         // The scroll methods are on a stateful element, so an id has to come
         // first. Without it the gui binary does not compile (#2773).
-        let stateful = concat!(
-            ".id(\"composer-input\")",
-            "\n                        .overflow_y_scroll()"
-        );
+        let stateful = concat!(".id(\"composer-input\")", " .overflow_y_scroll()");
         assert!(src.contains(cap), "the composer must cap its height");
         assert!(
-            src.contains(scroll),
+            flat.contains(scroll),
             "the composer must scroll inside itself"
         );
         assert!(
-            src.contains(stateful),
+            flat.contains(stateful),
             "the scroll box must be stateful or its scroll methods do not exist"
         );
     }
@@ -4423,9 +4838,13 @@ mod tests {
 
     #[test]
     fn strip_markers_removes_only_attachments() {
+        // Only the marker that ends the line is the message's own file. The
+        // first one here has words after it, so it is a quotation and stays
+        // (#3092). This expectation predates that rule and asserted both were
+        // dropped; it was left behind when the tail rule landed.
         assert_eq!(
             strip_markers("look <<IMG:/tmp/a.png>> here <<VID:/tmp/b.mov>>"),
-            "look  here"
+            "look <<IMG:/tmp/a.png>> here"
         );
         assert_eq!(strip_markers("<<IMG:/tmp/a.png>>"), "");
         // An unknown marker is ordinary text and stays put.
@@ -4437,14 +4856,72 @@ mod tests {
         assert_eq!(strip_markers("<<IMG:>>"), "<<IMG:>>");
     }
 
+    /// A queued message ends with its own markers, and the queue splices it onto
+    /// the one before it with a newline (#3099).
+    ///
+    /// Reading the tail of the whole body found only the last entry's markers, so
+    /// every earlier recording printed its raw `<<AUD:...>>` in the bubble while
+    /// the player for it was drawn beside the text.
+    #[test]
+    fn a_marker_at_the_end_of_its_line_is_an_attachment() {
+        // The shape that leaked: a voice note, then a background task's notice
+        // appended after it.
+        // `/fixtures/`, not `/tmp/`: this module is not test-gated as a file, so
+        // the windows-footguns scan reads these literals as live for the windows
+        // build. The path shape is what the test needs, not a real temp dir.
+        let with_notice = "We can aggregate to the push. <<AUD:/fixtures/voice-1.ogg>>\n\
+                           🔧 background task failed: mkdir -p ~/.opencrabs/tmp/gate";
+        assert_eq!(
+            marker_paths(with_notice),
+            vec![PathBuf::from("/fixtures/voice-1.ogg")],
+            "the clip the words carry is still the row's attachment"
+        );
+        assert_eq!(
+            strip_markers(with_notice),
+            "We can aggregate to the push. \n\
+             🔧 background task failed: mkdir -p ~/.opencrabs/tmp/gate",
+            "the marker leaves and the notice stays"
+        );
+
+        // Two voice notes queued together: each ends its own line, so both are
+        // attachments and neither marker is printed.
+        let two_clips = "I mean the issue. <<AUD:/fixtures/voice-2.ogg>>\n\
+                         I know. <<AUD:/fixtures/voice-3.ogg>>";
+        assert_eq!(
+            marker_paths(two_clips),
+            vec![
+                PathBuf::from("/fixtures/voice-2.ogg"),
+                PathBuf::from("/fixtures/voice-3.ogg")
+            ]
+        );
+        assert_eq!(strip_markers(two_clips), "I mean the issue. \nI know.");
+
+        // A marker quoted in the middle of a line is still a quotation, so the
+        // #3092 case is untouched by reading line by line.
+        assert!(
+            marker_paths("I quoted <<AUD:/tmp/x.ogg>> in this sentence").is_empty(),
+            "words after the marker on its own line keep it as text"
+        );
+        assert_eq!(
+            strip_markers("I quoted <<AUD:/tmp/x.ogg>> in this sentence"),
+            "I quoted <<AUD:/tmp/x.ogg>> in this sentence"
+        );
+    }
+
     /// #2298: these helpers walk the text by byte offset, so a marker sitting
     /// next to a character wider than one byte has to be read without slicing
-    /// that character. Accents, an emoji and CJK stand on both sides of the
-    /// markers here, because a session title or a file name carries all three.
+    /// that character. Accents, an emoji and CJK stand in front of the markers
+    /// and inside their paths here, because a session title or a file name
+    /// carries all three.
+    ///
+    /// The markers end the line, which is what makes them the message's own
+    /// files (#3092). This test was written before that rule and kept them
+    /// mid-sentence, so it asserted two paths for text the rule reads as a
+    /// quotation; it was left behind when the rule landed.
     #[test]
     fn marker_paths_read_multibyte_text_around_the_markers() {
         let text =
-            "olá ção 🦀 <<IMG:/fixtures/coração-ção.png>> 中文 <<VID:/fixtures/動画-🦀.mov>> fim é";
+            "olá ção 🦀 中文 <<IMG:/fixtures/coração-ção.png>> <<VID:/fixtures/動画-🦀.mov>>";
         assert_eq!(
             marker_paths(text),
             vec![
@@ -4452,6 +4929,12 @@ mod tests {
                 PathBuf::from("/fixtures/動画-🦀.mov"),
             ]
         );
+        // Multibyte words after the markers make them a quotation, and reading
+        // that line's tail must not cut a character either.
+        let quoted =
+            "olá ção 🦀 <<IMG:/fixtures/coração-ção.png>> 中文 <<VID:/fixtures/動画-🦀.mov>> fim é";
+        assert!(marker_paths(quoted).is_empty());
+        assert_eq!(strip_markers(quoted), quoted);
     }
 
     /// A marker the user is still typing, or one the model cut short, ends the
@@ -4470,18 +4953,47 @@ mod tests {
         }
     }
 
+    /// A marker in the middle of a sentence is a quotation, not a file
+    /// (#3092). Only the tail belongs to the message, so the words on both
+    /// sides stay exactly where they were typed.
     #[test]
     fn strip_markers_keep_multibyte_text_on_both_sides() {
         assert_eq!(
             strip_markers("olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"),
-            "olá 🦀  fim 中文"
+            "olá 🦀 <<IMG:/tmp/coração.png>> fim 中文"
         );
-        assert_eq!(strip_markers("<<VID:/tmp/動画.mov>>já"), "já");
+        assert_eq!(
+            strip_markers("<<VID:/tmp/動画.mov>>já"),
+            "<<VID:/tmp/動画.mov>>já"
+        );
         // An unknown marker is prose and stays whole, multibyte and all.
         assert_eq!(
             strip_markers("veja <<FILE:relatório-ção.pdf>> aqui"),
             "veja <<FILE:relatório-ção.pdf>> aqui"
         );
+        // The message's own attachment is the tail, and that one does leave.
+        assert_eq!(strip_markers("olá 🦀 <<IMG:/tmp/coração.png>>  "), "olá 🦀");
+    }
+
+    /// A reply that quotes a marker draws no player for it (#3092). The clip it
+    /// names belongs to the question, and the quote is shortened, so a player
+    /// there started nothing when pressed.
+    #[test]
+    fn a_quoted_marker_is_not_an_attachment() {
+        let quoted = "Row 998 carries `<<AUD:…voice-1795192403080.ogg>>` and no prefix.";
+        assert!(marker_paths(quoted).is_empty());
+        // The send path appends them, so a real attachment is still found, and
+        // more than one at a time. The directory comes from the platform rather
+        // than a POSIX literal, so the fixture is a real path on Windows too.
+        let dir = std::env::temp_dir();
+        let (first, second) = (dir.join("a.png"), dir.join("b.png"));
+        let sent = format!(
+            "look at these <<IMG:{}>> <<IMG:{}>>",
+            first.display(),
+            second.display()
+        );
+        assert_eq!(marker_paths(&sent), vec![first, second]);
+        assert_eq!(strip_markers(&sent), "look at these");
     }
 
     #[test]
@@ -5007,6 +5519,59 @@ mod tests {
         assert!(
             clip_at < input_at && input_at < mic_at,
             "the paperclip leads, the input holds the middle, the microphone ends the row"
+        );
+    }
+
+    /// The composer is the block while the microphone is open (#3092).
+    ///
+    /// The takeover is the whole point: a strip in the row was easy to miss,
+    /// and the owner asked for the animation to be what the box turns into. The
+    /// three parts worth pinning are that the live phase renders the block
+    /// instead of the input row, that the block is the stop, and that the width
+    /// it was given reaches the worker.
+    #[test]
+    fn the_composer_is_the_block_and_the_block_is_the_stop() {
+        let src = include_str!("editor.rs");
+        let render = src
+            .split("impl Render for Editor")
+            .nth(1)
+            .and_then(|rest| rest.split("fn reply_strip(").next())
+            .expect("the composer's render");
+        assert!(
+            render.contains("voice_block(block, self.voice_secs, cx)"),
+            "a live take no longer turns the composer into the block"
+        );
+        assert!(
+            render.contains("VoicePhase::Recording | VoicePhase::Finishing"),
+            "the block is not gated on the phases that own it"
+        );
+        let body = src
+            .split("fn voice_block(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn voice_strip(").next())
+            .expect("the composer's block");
+        assert!(
+            body.contains("BLOCK_HEIGHT"),
+            "the block is not sized to the composer"
+        );
+        assert!(
+            body.contains("block.frame(cx)"),
+            "the block is sized but its texture is never taken"
+        );
+        assert!(
+            body.contains("measure_width"),
+            "the width the row gave the block never reaches the worker"
+        );
+        assert!(
+            body.contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+            "the glass draws a stop it cannot honour"
+        );
+        // Assembled rather than written out, so the assertion cannot match
+        // itself: a source scan that finds its own text proves nothing.
+        let bar_strip = ["fn ", "wave", "form("].concat();
+        assert!(
+            !src.contains(&bar_strip),
+            "the bar strip is still there beside the glass"
         );
     }
 

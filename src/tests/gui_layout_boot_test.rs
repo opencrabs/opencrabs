@@ -63,3 +63,55 @@ fn the_boot_helper_prefers_the_chat_then_the_caret_then_any_survivor() {
         "then the first leaf the ledger still holds"
     );
 }
+
+/// The rail is part of what a restart restores (#3105). The tree and the frame
+/// already came back; the sidebar did not, so a rail the user closed reopened
+/// on every launch. The boot reads the saved value instead of a literal, and
+/// the one transition every door walks is what writes it.
+#[test]
+fn the_boot_reads_the_saved_rail_instead_of_a_literal() {
+    assert!(
+        DASHBOARD.contains("saved_rail_open.unwrap_or(true)"),
+        "the rail opens only when the file has no choice recorded"
+    );
+    assert!(
+        !DASHBOARD.contains("rail_open: true,"),
+        "a hardcoded open rail is what lost the choice across restarts"
+    );
+}
+
+#[test]
+fn every_rail_toggle_writes_the_choice_down() {
+    assert!(
+        LAYOUT_STORE.contains("pub rail_open: Option<bool>,"),
+        "the saved layout carries the rail's state"
+    );
+    // Assembled at run time so a contiguous copy of the needle does not sit in
+    // a file that other scans read.
+    let write = ["self.", "persist_layout();"].concat();
+    let transition = include_str!("../gui/dashboard_rail.rs");
+    let body = transition
+        .split("pub(crate) fn set_rail_open")
+        .nth(1)
+        .and_then(|tail| tail.split("fn ").next())
+        .expect("the rail transition");
+    assert!(
+        body.contains(&write),
+        "the rail transition is the one door every toggle walks, so it writes"
+    );
+}
+
+/// The split pick puts the rail back the way it found it (#3104). It opens the
+/// rail to name a session, and used to leave it standing afterwards.
+#[test]
+fn the_split_pick_closes_the_rail_it_opened() {
+    let panes = include_str!("../gui/dashboard_panes.rs");
+    assert!(
+        panes.contains("self.split_opened_rail = true;"),
+        "the pick records that it is what opened the rail"
+    );
+    assert!(
+        panes.contains("if std::mem::take(&mut self.split_opened_rail) {"),
+        "and only that opening is undone, so a rail the user opened stays"
+    );
+}

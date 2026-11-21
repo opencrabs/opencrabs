@@ -2278,14 +2278,15 @@ enum BannerKind {
 /// Play the plan-finished chime when the operator opted in (#2255).
 ///
 /// The fact itself arrives as `ProgressEvent::PlanCompleted` on every
-/// surface; only this TUI arm turns it into audio. The flag is read at the
-/// moment of the event, so flipping `[agent] completion_notification_enabled`
-/// in a live session takes effect without a restart. A build without the
-/// `notification-sound` feature stays silent.
+/// surface; only this TUI arm turns it into audio. It is the one completion
+/// sound (#3118): a plan that settles six tasks rings once, at the finish.
+/// The flag is read at the moment of the event, so flipping
+/// `[agent] notify_on_plan_completed` in a live session takes effect without a
+/// restart. A build without the `notification-sound` feature stays silent.
 #[cfg(feature = "notification-sound")]
 fn play_plan_completion_sound_if_enabled() {
     let enabled = crate::config::Config::load()
-        .map(|c| c.agent.completion_notification_enabled)
+        .map(|c| c.agent.notify_on_plan_completed)
         .unwrap_or(false);
     if enabled {
         crate::utils::completion_sound::play_completion_sound();

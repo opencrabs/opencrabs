@@ -45,8 +45,6 @@ impl Dashboard {
         self.chat_state.transcript.live_expanded = false;
         self.turn.settle.begin(self.chat_state.row_total());
         self.turn.busy = true;
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
@@ -55,6 +53,9 @@ impl Dashboard {
             session_id,
             context_text,
             Some(display_text.clone()),
+            // A turn the window mints for itself is text: an approved plan and
+            // a command's reply are read, never spoken (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -127,6 +128,9 @@ impl Dashboard {
             session_id,
             context_text,
             Some(display_text.clone()),
+            // A turn the window mints for itself is text: an approved plan and
+            // a command's reply are read, never spoken (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -139,16 +143,59 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// What the composer says about the state it is in: nothing running, a turn
-    /// running, a queue waiting on it, or a queue already on its way. The words
-    /// live under the caret because that is where the user is typing, and the
-    /// queue card is a list, not an instruction manual (#2630).
+    /// The hint the empty field shows: the two keys that act on the field
+    /// itself (#3102).
+    ///
+    /// These did not move to the card above the composer. Esc stops the turn
+    /// being written into the field, the chord records a message into it, and
+    /// both read best where the caret already is.
     pub(crate) fn composer_hint(&self) -> SharedString {
-        composer_hint_for(
+        crate::composer_view::composer_hint_for(
             self.turn.busy,
             self.queued_for_strip().len(),
             crate::composer_view::voice_ready(),
         )
+    }
+
+    /// Paint the field's hint on the window's composer and every split pane's.
+    ///
+    /// A no-op when the line did not change, so a tick cannot repaint every
+    /// field in the window for nothing (#2630).
+    pub(crate) fn sync_composer_hint(&mut self, cx: &mut Context<Self>) {
+        let hint = self.composer_hint();
+        let panes = self.pane_editors(cx);
+        self.composer.sync_composer_hint(hint, &panes, cx);
+    }
+
+    /// The line the card under the conversation paints right now (#3121).
+    ///
+    /// It has an intent: it names what the screen is asking for at this moment,
+    /// and nothing else. The keys that act on the field itself stay inside the
+    /// field, so the two never compete for the same glance.
+    ///
+    /// It comes back with its id, because the card can now be dismissed and a
+    /// dismissal needs to know which line the reader hid. `None` when the work
+    /// has nothing to say, which paints no card at all rather than an empty
+    /// one.
+    pub(crate) fn task_hint(&self) -> Option<opencrabs::ui_core::hints::Hint> {
+        crate::composer_view::task_hint_for(&self.hint_state())
+    }
+
+    /// Hide the hint the card is showing, for seven days.
+    ///
+    /// The window stops drawing it immediately and the ledger write happens on
+    /// its own thread, so the click never waits on a database open. Seven days
+    /// is the temporary half of the promise the card makes: long enough that
+    /// the reader stops being nagged, short enough that a hint they later want
+    /// comes back on its own instead of being lost for good.
+    pub(crate) fn dismiss_hint(&mut self, hint_id: &str, cx: &mut Context<Self>) {
+        if !self.hint_dismissed.iter().any(|id| id == hint_id) {
+            self.hint_dismissed.push(hint_id.to_string());
+        }
+        let db_path = self.db_path.clone();
+        let hint_id = hint_id.to_string();
+        crate::hint_dismiss::dismiss(db_path, hint_id);
+        cx.notify();
     }
 
     /// Every split pane's own composer. The window's field lives on the chat
@@ -208,12 +255,91 @@ impl Dashboard {
                     move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
                         cx.stop_propagation();
                         agent_bridge::options_take(session);
+                        // A click is the pointer's version of Enter, so the
+                        // keyboard's ring steps aside with the offer (#3101).
+                        this.options_focus = None;
                         this.send_turn_to(session, label.clone(), None, cx);
                     },
                 ));
                 (item, pick)
             })
             .collect()
+    }
+
+    /// Up from a composer with an offer waiting hands the keyboard to the card
+    /// above it (#3101). With nothing to walk the field keeps the caret, and Up
+    /// keeps its history: an empty card must never eat the key.
+    pub(crate) fn focus_options(&mut self, session: Uuid, cx: &mut Context<Self>) {
+        if agent_bridge::options_snapshot(session).is_empty() {
+            return;
+        }
+        self.options_focus = Some((session, 0));
+        self.refocus_overlay();
+        cx.notify();
+    }
+
+    /// One key while the offer holds the keyboard: the arrows walk it, Enter
+    /// sends the row the ring stands on, Esc hands the keys back to the field
+    /// without sending anything, and so does Down past the last row, because a
+    /// list whose bottom is a wall has no exit the screen ever names (#3114).
+    /// Any other key hands them back too, because it means the user went back
+    /// to typing and the field is where typing lands.
+    pub(crate) fn options_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some((session, at)) = self.options_focus else {
+            return;
+        };
+        let offers = agent_bridge::options_snapshot(session);
+        // The offer can leave under the keyboard: a stop takes it, and a new
+        // turn takes it. Hand the keys back rather than walking a list that is
+        // no longer on screen.
+        if offers.is_empty() {
+            self.options_focus = None;
+            self.request_composer_caret(cx);
+            return;
+        }
+        match ks.key.as_str() {
+            "up" => self.options_focus = Some((session, at.saturating_sub(1))),
+            // Down walks the list and then walks out of it (#3114). The last
+            // row used to be a wall: the ring stayed on the card, and only Esc
+            // or a key that meant "back to typing" got the caret back, so a
+            // reader who followed the hint down had no way out that the screen
+            // ever named. Up from the field reaches the card, so Down from its
+            // last row hands the keys back the same way.
+            "down" if at + 1 >= offers.len() => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+            "down" => self.options_focus = Some((session, at + 1)),
+            "enter" => {
+                let Some(item) = offers.get(at) else {
+                    self.options_focus = None;
+                    self.request_composer_caret(cx);
+                    return;
+                };
+                let label = item.label.clone();
+                // The offer belongs to the turn that made it, so it is taken as
+                // the send lands: a second press must not send a stale one.
+                agent_bridge::options_take(session);
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+                self.send_turn_to(session, label, None, cx);
+                return;
+            }
+            "escape" => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+            // Anything else is the user going back to typing, so the ring
+            // steps aside and the field takes the caret again. The key itself
+            // is dropped rather than guessed at: the card never had a caret to
+            // put it in, and typing a stray letter into a message behind the
+            // ring would be the worse surprise.
+            _ => {
+                self.options_focus = None;
+                self.request_composer_caret(cx);
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn drain_pending(&mut self, cx: &mut Context<Self>) {
@@ -263,8 +389,6 @@ impl Dashboard {
             self.chat_state.transcript.live_expanded = false;
             self.turn.settle.begin(self.chat_state.row_total());
             self.turn.busy = true;
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
             let cancel = tokio_util::sync::CancellationToken::new();
             self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
@@ -273,6 +397,8 @@ impl Dashboard {
                 sid,
                 joined.context_text,
                 Some(joined.display_text),
+                // A flushed queue is typed text, like the window's own (#3096).
+                false,
                 self.sink.clone(),
                 cancel,
             );

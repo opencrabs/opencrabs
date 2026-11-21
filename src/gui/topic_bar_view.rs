@@ -112,7 +112,9 @@ pub(crate) fn topic_strip(
             .gap_2()
             .min_w_0()
             // Match the title hairline end to end without moving the tabs.
-            .when(!in_pane, |d| d.mx(rems(-1.5)).px_6())
+            // The negative margin and the padding are the column's own side
+            // padding, so the pair moves with it (#3001).
+            .when(!in_pane, |d| d.mx(rems(-1.0)).px_4())
             .when(in_pane, |d| d.px_2())
             .border_b_1()
             .border_color(separator)

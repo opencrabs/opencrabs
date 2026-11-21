@@ -111,6 +111,8 @@ pub enum OverlayId {
     Rail,
     /// A session's running tasks, armed with Down from the composer.
     Tasks,
+    /// A session's follow-up offer, armed with Up from the composer (#3101).
+    Options,
     /// One task opened into its full view, which covers the window.
     TaskDetail,
     /// The rail's find field, armed with ctrl+f.

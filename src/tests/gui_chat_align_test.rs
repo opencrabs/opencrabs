@@ -140,9 +140,10 @@ fn the_text_width_stays_definite_through_the_wrappers() {
     assert!(line.contains(".min_w_0()"));
 }
 
-/// The chat surface carries the card radius. It must not clip: the element is
-/// already the scroller, and gpui's style setters are last-write-wins, so a
-/// later clip would replace the scroll and freeze the transcript.
+/// The chat surface carries the messages' own radius (#3110). It must not clip:
+/// the element is already the scroller, and gpui's style setters are
+/// last-write-wins, so a later clip would replace the scroll and freeze the
+/// transcript.
 #[test]
 fn the_chat_surface_is_rounded_and_still_scrolls() {
     let column = body_after(TRANSCRIPT, ".id(\"transcript\")")
@@ -150,8 +151,8 @@ fn the_chat_surface_is_rounded_and_still_scrolls() {
         .next()
         .unwrap_or_default();
     assert!(
-        column.contains(".rounded(px(CARD_RADIUS))"),
-        "the chat surface carries the same corner as the cards"
+        column.contains(".rounded(px(MESSAGE_RADIUS))"),
+        "the history is the box the bubbles live in, so it takes their curve"
     );
     assert!(
         column.contains(".overflow_y_scroll()"),
@@ -165,15 +166,21 @@ fn the_chat_surface_is_rounded_and_still_scrolls() {
 
 /// The pane paints its own fill and clips its children, so no child can paint
 /// a square corner over the ring's arc.
+///
+/// The ring takes the message radius (#3110): a pane IS the session surface in
+/// a split, and an unsplit window rounds that surface at 12. The count is one
+/// so a second rounded box cannot appear between the fill and the clip.
 #[test]
 fn the_pane_clips_its_children_to_the_ring() {
     assert_eq!(
-        PANE_VIEW.matches(".rounded(px(CARD_RADIUS))").count(),
+        PANE_VIEW
+            .matches(".rounded(px(transcript::MESSAGE_RADIUS))")
+            .count(),
         1,
         "one pane, one ring"
     );
     let ring = PANE_VIEW
-        .find(".rounded(px(CARD_RADIUS))")
+        .find(".rounded(px(transcript::MESSAGE_RADIUS))")
         .expect("the pane keeps its ring");
     let fill = PANE_VIEW
         .find(".bg(rgb(palette::current().bg))")
@@ -186,6 +193,69 @@ fn the_pane_clips_its_children_to_the_ring() {
     assert!(
         tail.contains(".overflow_hidden()"),
         "the clip comes after the ring in the chain"
+    );
+}
+
+/// A pane's cards sit on the conversation's column, and the conversation stops
+/// above them (#3117).
+///
+/// The transcript pads half a rem on each side, so a strip drawn flush to the
+/// pane's edge came out wider than every message above it. The box that holds
+/// the strips spends that step once for all of them, the same one
+/// `session_row` takes in the unsplit chat.
+///
+/// The wrapper around the transcript clips. The transcript asks for a floor, so
+/// in a short pane it is taller than the room the chrome leaves it, and its
+/// rows painted down over the plan card and behind the composer: the
+/// conversation was cut in half by the field instead of stopping above it. The
+/// clip cannot go on the transcript itself, which is the scroller.
+#[test]
+fn the_pane_cards_take_the_message_column() {
+    let chrome = PANE_VIEW
+        .split_once("fn chrome(&mut self")
+        .expect("the pane's chrome builder")
+        .1;
+    let above = chrome
+        .split_once("let mut above = div()")
+        .expect("the box the strips share")
+        .1
+        .split_once(".gap_2();")
+        .expect("the box's style chain")
+        .0;
+    assert!(
+        above.contains(".px_2()"),
+        "the strips spend the transcript's half rem: {above}"
+    );
+    let leaf = PANE_VIEW
+        .split_once("pub(crate) fn leaf_box(")
+        .expect("the leaf frame")
+        .1;
+    let wrapper = leaf
+        .split_once(".min_h(px(CONVERSATION_FLOOR))")
+        .expect("the conversation's floor")
+        .1
+        .split_once(".child(body)")
+        .expect("the transcript wrapper ends at its body")
+        .0;
+    assert!(
+        wrapper.contains(".overflow_hidden()"),
+        "the box that holds the transcript clips, so a row cannot paint over \
+         the chrome under it: {wrapper}"
+    );
+    // The conversation clears the cards under it by one step (#3119). The
+    // unsplit session keeps that gap on its own column; a pane's frame had
+    // none at all, so the transcript's last row ended flush against the plan
+    // card and the card's edge read as cutting it in half.
+    let below = leaf
+        .split_once(".child(body)")
+        .expect("the transcript wrapper ends at its body")
+        .1
+        .split_once("pane_footer(")
+        .expect("the chrome stack comes before the pane's status row")
+        .0;
+    assert!(
+        below.contains(".pt_2()"),
+        "the chrome stack spends the same 8 under the conversation: {below}"
     );
 }
 
@@ -298,25 +368,25 @@ fn every_row_fills_the_transcript() {
     );
 }
 
-/// The planned width is the transcript's outer measure, but its root spends
-/// half a rem on each horizontal side. The bubble must inherit the remaining
-/// inner width or right alignment pushes that rem of excess off the left
-/// (#2947).
+/// The planned width is the transcript's outer measure, but its root spends a
+/// half rem on each horizontal side. The bubble must inherit the remaining
+/// inner width or right alignment pushes that excess off the left (#2947,
+/// #3114).
 #[test]
-fn the_pixel_cap_excludes_the_transcript_padding() {
+fn the_width_cap_excludes_the_transcript_padding() {
     let view = body_after(TRANSCRIPT, "pub fn view(");
     assert!(
         view.contains("let content_width = transcript_content_width(content_width, rem_size);"),
         "the rows use the inner width, not the transcript's outer measure"
     );
     assert!(
-        view.contains(".p_2()"),
+        view.contains(".px_2()"),
         "this subtraction belongs to the root's actual horizontal padding"
     );
     let helper = body_after(TRANSCRIPT, "fn transcript_content_width(");
     assert!(
         helper.contains("(outer_width - rem_size).max(0.0)"),
-        "two p_2 sides consume one rem total, clamped at zero"
+        "one rem of gutter, split across both sides, clamped at zero"
     );
 }
 

@@ -123,6 +123,25 @@ const fn window_row(
     }
 }
 
+/// A chord the terminal answers and the window does not.
+///
+/// The mirror of [`window_row`]: the window hides a hint by hovering its card
+/// and clicking the ×, so there is no chord to print there (#3122).
+const fn tui_row(
+    section: HelpSection,
+    neutral: &'static str,
+    tui: &'static str,
+    description: &'static str,
+) -> HelpRow {
+    HelpRow {
+        section,
+        neutral,
+        tui: Some(tui),
+        gui: None,
+        description,
+    }
+}
+
 /// The rows both frontends render, in display order.
 ///
 /// The TUI's `Ctrl+H` is missing from the GLOBAL block on purpose: in a
@@ -161,6 +180,15 @@ pub const ROWS: &[HelpRow] = &[
         "Ctrl+N",
         Some("ctrl-n"),
         "New session",
+    ),
+    // The window has no chord for this: its hint card is dismissed by hovering
+    // it and clicking the ×, so printing a key there would name one that does
+    // nothing (#3122).
+    tui_row(
+        HelpSection::Global,
+        "alt+h",
+        "Alt+H",
+        "Hide the hint row's tip for a week",
     ),
     row(
         HelpSection::Global,
@@ -568,6 +596,7 @@ mod tests {
         "Alt+Space",
         "Ctrl+C",
         "Ctrl+N",
+        "Alt+H",
         "Alt+T",
         "Ctrl+S",
         "Ctrl+O",

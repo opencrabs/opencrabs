@@ -40,15 +40,10 @@ fn every_spec_has_a_reader_and_a_real_control() {
     let mut seen: Vec<(&str, &str)> = Vec::new();
     for spec in SPECS {
         assert!(!spec.label.is_empty(), "{} has no label", spec.key);
-        // The four notification children are explained once, by the master
-        // switch above them, so they are the only rows allowed to stay quiet.
-        let quiet_allowed = spec.group == SettingsSection::Notifications
-            && spec.key != "completion_notification_enabled";
-        assert!(
-            quiet_allowed || !spec.blurb.is_empty(),
-            "{} has no blurb",
-            spec.key
-        );
+        // Every row explains itself: the master switch that used to explain
+        // the notification children is gone (#3118), so nothing inherits a
+        // blurb from above any more.
+        assert!(!spec.blurb.is_empty(), "{} has no blurb", spec.key);
         assert!(
             !seen.contains(&(spec.section, spec.key)),
             "{}.{} is listed twice",
@@ -93,7 +88,7 @@ fn every_row_declares_a_paintable_section() {
 #[test]
 fn sections_paint_their_own_rows_only() {
     let notifications = section_rows(SettingsSection::Notifications, SPECS.len(), 0);
-    assert_eq!(notifications.len(), 5);
+    assert_eq!(notifications.len(), 2);
     for index in &notifications {
         assert_eq!(SPECS[*index].group, SettingsSection::Notifications);
     }

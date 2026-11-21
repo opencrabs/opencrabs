@@ -47,6 +47,9 @@ enum Command {
     Toggle,
     Seek(f32),
     Stop,
+    /// Unpause, never pause. The autoplay a spoken reply asks for is an event,
+    /// not a press, so it must not be able to silence a clip (#3092).
+    Resume,
 }
 
 struct Active {
@@ -109,6 +112,41 @@ pub(crate) fn toggle(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     start(path, None)
+}
+
+/// Play a clip without the press semantics of `toggle` (#3092).
+///
+/// A spoken reply starts itself the moment its audio lands. That is an event,
+/// not a press, so an already sounding clip must stay sounding: `toggle` would
+/// pause it, which would turn "here is the clip" into silence. A clip that is
+/// paused resumes where it stands, and one that was never played starts.
+///
+/// It is `autoplay` rather than `play` because the worker loop below already
+/// owns that name, and because the distinction that matters at every call site
+/// is not "make a sound" but "start this without being pressed" (#3092).
+pub(crate) fn autoplay(path: &Path) -> Result<(), String> {
+    if send_existing(path, Command::Resume) {
+        return Ok(());
+    }
+    start(path, None)
+}
+
+/// The clip currently sounding, if any (#3092).
+///
+/// The autoplay reads this first: a reply that lands while the reader is
+/// listening to something else waits its turn, because two clips at once is not
+/// a feature.
+pub(crate) fn sounding() -> Option<PathBuf> {
+    let active = match slot().lock() {
+        Ok(active) => active,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let active = active.as_ref()?;
+    let state = match active.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.playing.then(|| active.path.clone())
 }
 
 /// Seek to a fraction of the clip. Seeking an inactive clip starts it there;
@@ -211,6 +249,29 @@ pub(crate) fn stop(path: &Path) {
     }
 }
 
+/// End whatever is sounding, whichever clip it is (#3092).
+///
+/// A microphone opening and a speaker feeding the same room do not belong
+/// together: the take would record the tail of a spoken reply. The slot holds
+/// one clip at a time, so taking it without asking about the path is the whole
+/// job, and it covers a reply, a draft preview and a transcript row alike.
+///
+/// This ends the clip rather than pausing it. Pausing would leave the reader
+/// with a half played reply and no obvious reason why, while a stop reads as
+/// what it is: the machine got out of the way of the microphone.
+pub(crate) fn silence() {
+    let previous = {
+        let mut active = match slot().lock() {
+            Ok(active) => active,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        active.take()
+    };
+    if let Some(previous) = previous {
+        stop_worker(previous);
+    }
+}
+
 fn stop_worker(active: Active) {
     if active.commands.send(Command::Stop).is_err() {
         logging::debug("voice playback: the previous worker had already stopped");
@@ -268,6 +329,11 @@ fn play(
                     }
                 }
                 Command::Seek(fraction) => seek_sink(&sink, duration, fraction)?,
+                Command::Resume => {
+                    if sink.is_paused() {
+                        sink.play();
+                    }
+                }
                 Command::Stop => {
                     sink.stop();
                     stopped = true;

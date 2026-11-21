@@ -25,7 +25,6 @@ use gpui::{
     rgb,
 };
 use opencrabs::brain::tools::suggest_options::SuggestionItem;
-use opencrabs::ui_core::card::CARD_RADIUS;
 use opencrabs::ui_core::pane_tree::{DropHalf, drop_half};
 use opencrabs::ui_core::scroll::{Follow, scrolled_from_top, wheel_releases_follow};
 use opencrabs::ui_core::split::Layout;
@@ -205,29 +204,41 @@ impl PaneView {
     /// reads it through its weak handle and mints its listeners against the
     /// same handle. Nothing here is built by the walk and handed over: the
     /// column, its ids and its handlers all belong to the leaf.
-    fn chrome(&mut self, cx: &mut Context<Self>) -> Div {
+    fn chrome(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         // The strips share one box that may shrink and clip (#2980), and the
         // composer is appended after it so the input is never the row that
         // gets cut. `flex_none` on the column as a whole is what let the
         // strips ask for more height than the pane has and paint past its
         // bottom edge, over the footer and the pane under it.
         let mut col = div().flex().flex_col().flex_shrink().min_h_0().gap_2();
+        // The strips are cards in the conversation's column, not bands of the
+        // pane (#3117). The transcript pads half a rem on each side and every
+        // row it draws starts there, so a card drawn flush to the pane's edge
+        // came out wider than the messages above it and the two columns read as
+        // two different screens. The box spends that half rem once for all of
+        // them, the same step `session_row` takes in the unsplit chat, and the
+        // cards inside keep their own padding.
         let mut above = div()
             .flex()
             .flex_col()
             .flex_shrink()
             .min_h_0()
+            .px_2()
             .overflow_hidden()
             .gap_2();
         let mut above_used = false;
-        let Some(window) = self.window.upgrade() else {
+        // The upgraded handle is the window's state, named apart from the
+        // `&Window` the plan cards measure their text with (#3124): the two
+        // were one name, and the shadowing handed the entity to a call that
+        // wanted the frame.
+        let Some(owner) = self.window.upgrade() else {
             return col;
         };
         let session = self.session;
         // The window's own answers, read once, so its state is not borrowed
         // while the strips are built.
         let (panes, expanded, queue_expanded, topic_idle, focused, running, forwarding) = {
-            let win = window.read(cx);
+            let win = owner.read(cx);
             (
                 win.panes
                     .as_ref()
@@ -241,6 +252,14 @@ impl PaneView {
                 win.forward_pick.is_some() && win.forward_leaf == Some(session),
             )
         };
+        // Which row of this pane's offer the keyboard stands on, if it is this
+        // pane's offer at all (#3101). Read on its own, so the facts above keep
+        // the shape they had and this stays one pane's business.
+        let option_at = owner
+            .read(cx)
+            .options_focus
+            .filter(|(armed, _)| *armed == session)
+            .map(|(_, at)| at);
         // How much plan this pane can read (#2624): a wall of panes keeps a
         // bar, a pair keeps the running task and the next one or two. The
         // width is the one the walk measured for this leaf.
@@ -256,8 +275,8 @@ impl PaneView {
         self.plan.refresh();
         if let Some(view) = self
             .plan
-            .editing_view(Some(&actions))
-            .or_else(|| self.plan.pane_view(density, expanded))
+            .editing_view(Some(&actions), window)
+            .or_else(|| self.plan.pane_view(density, expanded, window))
         {
             // A click trades the conversation's room for the whole checklist,
             // per pane (#2624). The handler stops the event so the press does
@@ -313,6 +332,9 @@ impl PaneView {
                             cx.stop_propagation();
                             agent_bridge::options_take(session);
                             let _ = weak.update(cx, |this, cx| {
+                                // A click is the pointer's Enter: the ring goes
+                                // with the offer it was standing on (#3101).
+                                this.options_focus = None;
                                 this.send_turn_to(session, label.clone(), None, cx);
                             });
                         },
@@ -320,12 +342,12 @@ impl PaneView {
                     (item, pick)
                 })
                 .collect();
-            above = above.child(options_strip(&rows));
+            above = above.child(options_strip(&rows, option_at));
             above_used = true;
         }
         if let Some(label) = running
             && let Some(area) =
-                window.update(cx, |win, cx| win.task_area(session, label.as_ref(), cx))
+                owner.update(cx, |win, cx| win.task_area(session, label.as_ref(), cx))
         {
             above = above.child(area);
             above_used = true;
@@ -343,7 +365,7 @@ impl PaneView {
         // (#2530, #2610). A forward opened from this leaf swaps its composer
         // for the destination picker, the same placement the chat uses.
         let composer = if forwarding {
-            window.update(cx, |win, cx| win.forward_picker(cx))
+            owner.update(cx, |win, cx| win.forward_picker(cx))
         } else if focused {
             let mut cell = div().flex().flex_col().flex_none().gap_2();
             let slash_popup = self.editor.read(cx).command_popup();
@@ -358,6 +380,12 @@ impl PaneView {
             let draft = self.editor.read(cx).content.clone();
             pane_composer_dim(draft, session, false, self.window.clone())
         };
+        // The field closes the pane's column as its last row, one step under
+        // the cards above it (#3117). That step is the column's own `gap_2`,
+        // the same 8 the unsplit session keeps above its composer card, and it
+        // is why nothing here pads the composer's top: a second gutter on the
+        // field would make the two surfaces disagree about the step between
+        // them the way the old full-bleed cards did.
         col.child(composer)
     }
 
@@ -386,7 +414,7 @@ impl Render for PaneView {
     /// here because everything in it is the pane's own: which conversation it
     /// shows, whether it holds the keyboard, whether the pointer is dragging a
     /// pane over it. The walk is left with the tree.
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = self.window.clone();
         let session = self.session;
         // Separate weak handles for the closures built in this same frame.
@@ -412,13 +440,13 @@ impl Render for PaneView {
                 });
             },
         );
-        let Some(window) = self.window.upgrade() else {
+        let Some(owner) = self.window.upgrade() else {
             return div().into_any_element();
         };
         // The keyboard owner and the status row are the window's answers, so
         // they are read from it rather than guessed here.
         let (focused, footer, landing) = {
-            let win = window.read(cx);
+            let win = owner.read(cx);
             // The footer is built once per frame for every leaf (#2899), so
             // the pane reads the one the walk already resolved instead of
             // taking the bridge lock again on its own draw.
@@ -681,6 +709,14 @@ impl Render for PaneView {
             Some(window) => window.read(cx).copied_row(),
             None => None,
         };
+        // The pane's own conversation directory (#2846): a relative name in
+        // its transcript resolves against the session, not the process cwd,
+        // which a desktop launch never sets.
+        let click_roots = agent_bridge::bridge()
+            .map(|b| b.service.get_working_directory_for_session(self.session))
+            .into_iter()
+            .collect();
+        self.copy_drag.set_roots(click_roots);
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
@@ -689,7 +725,7 @@ impl Render for PaneView {
             // pane's live card never knew its turn was running.
             self.busy,
             self.width,
-            f32::from(_window.rem_size()),
+            f32::from(window.rem_size()),
             fold_handlers,
             transcript::ViewHooks {
                 // The pane's own budget (#2854), not the window's.
@@ -733,6 +769,13 @@ impl Render for PaneView {
                 // has its own follow, so reading it here judged a transcript
                 // the reader was not looking at.
                 following: self.follow.is_following(),
+                // A clip being made for this leaf's conversation (#3092): the
+                // window holds the set, and a split leaf answers a recording
+                // the same way the chat does.
+                voice_pending: match edit_window.upgrade() {
+                    Some(owner) => owner.read(cx).voice_pending.contains(&self.session),
+                    None => false,
+                },
                 ..Default::default()
             },
         )
@@ -741,8 +784,8 @@ impl Render for PaneView {
         // it is asked for here rather than handed over: a pane that only
         // redraws itself must not lose the strip the window built last frame
         // (#2686, #2687).
-        let topics = window.update(cx, |win, cx| win.pane_topics(session, cx));
-        let chrome = self.chrome(cx).into_any_element();
+        let topics = owner.update(cx, |win, cx| win.pane_topics(session, cx));
+        let chrome = self.chrome(window, cx).into_any_element();
         // The frame fills a box of its own, and that box is what the cached
         // view path lays out (`pane_root`, #2805).
         pane_root()
@@ -873,8 +916,14 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
         // The pane paints its own fill and clips its children: the chat body
         // used to paint a square box over the ring's corner arc, so the chat
         // colour showed where the ring should curve.
+        //
+        // The curve is the message bubbles' own, the same one the single-pane
+        // session surface carries (#3110): a pane IS the session surface in a
+        // split, so a rounder corner here would make a split and an unsplit
+        // window disagree about how a conversation looks. It is also the clip,
+        // which is why a scrolled row cannot paint over it.
         .bg(rgb(palette::current().bg))
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(transcript::MESSAGE_RADIUS))
         .border_1()
         .border_color(rgb(focus_ring_color(focused)))
         .overflow_hidden()
@@ -985,6 +1034,15 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
         // as the pane's background, before it gave up a single strip. The
         // listener is the only witness this state has ever had.
         //
+        // The wrapper clips (#3117). The transcript asks for a floor, so in a
+        // short pane it is taller than the room the chrome leaves it and its
+        // rows paint down over the plan card and behind the composer: the
+        // conversation was cut in half by the field instead of stopping above
+        // it. The clip belongs on this box and not on the transcript, because
+        // the transcript IS the scroller and a later `overflow_hidden` there
+        // would replace the scroll (#3110). #3003 removed this one while a
+        // different symptom was being chased; the rows under the composer are
+        // what it was always for.
         .child(
             div()
                 .flex()
@@ -992,6 +1050,7 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .min_h(px(CONVERSATION_FLOOR))
+                .overflow_hidden()
                 .on_children_prepainted(move |bounds, _window, _cx| {
                     witness_conversation_height(
                         bounds.first().map(|bounds| f32::from(bounds.size.height)),
@@ -1015,6 +1074,14 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
                 .flex_shrink()
                 .min_h_0()
                 .min_w_0()
+                // The conversation clears the cards under it by one step
+                // (#3119). The unsplit session keeps this gap on its own
+                // column; a pane's frame had none at all, so the last row of
+                // the transcript ended flush against the plan card, and the
+                // card's edge cut it in half. The same 8 the transcript gives
+                // between two of its rows, spent here so the cards stay whole
+                // and the conversation stops above them.
+                .pt_2()
                 .overflow_hidden()
                 .child(chrome),
         );

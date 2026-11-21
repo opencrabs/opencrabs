@@ -30,7 +30,7 @@ const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
 /// the region starts at the pane width rather than at the match.
 fn chat_arm() -> &'static str {
     GUI_MAIN
-        .split("let pane_width = attachment_view::content_width(")
+        .split("let pane_width = attachment_view::column_width(")
         .nth(1)
         .expect("the chat reads the pane width in render")
         .split("Screen::Usage => {")
@@ -115,6 +115,26 @@ fn the_chat_screen_draws_the_panes() {
         GUI_MAIN.matches("self.panes_body(").count(),
         1,
         "only the chat arm draws the panes: the theme modal opens over it (#2619)"
+    );
+}
+
+#[test]
+fn a_pane_is_planned_against_its_own_box() {
+    // #3119: the column is padded with `px_4`, one rem a side, in a split and
+    // on every screen but the unsplit chat, which runs edge to edge (#3112).
+    // Planning against the attachment planner's fixed 48 over-reserved that
+    // gutter by 16 points, so in a split every row stopped short of the plan
+    // card sharing its column.
+    let render = flat(GUI_MAIN);
+    assert!(
+        render.contains(
+            "let column_gutter = if self.screen == Screen::Chat && !self.window_is_split() { 0.0 } else { 2.0 * self.rem };"
+        ),
+        "the gutter is the column's own: none on the unsplit chat, one rem a side everywhere else"
+    );
+    assert!(
+        render.contains("attachment_view::column_width("),
+        "the pane width comes from the column's own gutter, not the planner's estimate"
     );
 }
 
@@ -492,6 +512,13 @@ fn each_pane_owns_composer_plan_and_queue() {
         body.contains("chrome.insert(*session, col.into_any_element())"),
         "the chat leaf gets a chrome column of its own"
     );
+    // The chat leaf's strips are cards in the conversation's column (#3117).
+    // The transcript pads half a rem on each side, so a card drawn flush to the
+    // pane's edge came out wider than every message above it.
+    assert!(
+        body.contains("div().flex().flex_col().flex_none().min_w_0().px_2().gap_2();"),
+        "the chat leaf's chrome spends the transcript's half rem"
+    );
     // A split pane builds that column in its own render (#2805), from its own
     // session and through the window handle it reports through.
     assert!(
@@ -541,26 +568,28 @@ fn the_pane_holding_the_keyboard_draws_the_real_composer() {
 fn the_window_composer_stands_down_once_the_window_is_split() {
     let arm = flat(composer_arm());
     let gated = arm
-        .split("if !self.window_is_split() {")
+        .split("if self.window_is_split() {")
         .nth(1)
         .expect("the window chrome is gated on the split");
     // The gate keeps the measure wrapper inside it (#2594): the unsplit
     // window still aligns the conversation to one width, and the split leaves
     // stand down. `flat` folds the reflow, so this pins the wrapper itself
-    // rather than the column the editor landed on. Since #2987 the composer
-    // rides in a dock that the wrapper centres, so the measure is read on the
-    // dock rather than on the editor.
+    // rather than the column the editor landed on. Since #3114 the composer is
+    // a card of the conversation's own size again, so it is `session_row` that
+    // spends the half rem, not a `central` wrapper around the dock.
     assert!(
-        gated.contains("col = col.child(central( div() .id(\"composer-dock\")"),
+        gated.contains(".id(\"composer-dock\")"),
         "the window's composer sits inside the gate, still on the chat measure"
     );
     assert!(
-        gated.contains(".child(composer)"),
-        "and the dock holds the composer the swap chose"
+        gated.contains(".child(composer)")
+            && gated.contains("session_row( shell.child(dock.child(footer))"),
+        "and the dock holds the composer the swap chose, inside the card the \
+         helper places (#3114)"
     );
     assert!(
-        gated.contains(".editing_view(actions.as_ref())")
-            && gated.contains(".or_else(|| self.plan.view())"),
+        gated.contains(".editing_view(actions.as_ref(), window)")
+            && gated.contains(".or_else(|| self.plan.view(window))"),
         "so does the window's plan strip: the Editing approval card draws \
          first (#2755) and the running view falls back"
     );

@@ -1,0 +1,1422 @@
+//! The composer's voice player, poured from the Seeker orb's material (#3092).
+//!
+//! A finished take is an object, not a row of controls. The glass holds it: the
+//! horizon sits still in the middle of the block, the warm bowl below it and the
+//! cool dome above it do not move, and the band of light on that seam is the
+//! only thing that travels. A syllable lifts the band where the sound is, tips
+//! it, swells it and brightens it, and the whole block is the play button.
+//!
+//! The shape is a block, not a marble. The first cut of this module reused the
+//! recording orb's sphere, which drew a circle in a row where every other
+//! element is a rectangle: the material fitted, the silhouette did not. What
+//! was fitted is the material (the heat ramp, the saturation curve, the warm
+//! bowl under a cool dome, the dispersion, the dither) and none of that cares
+//! what shape it is poured into. So the geometry here is a rounded box, the
+//! fitted constants still come from `seeker_orb`, and only the things that are
+//! genuinely per-surface live here: the bevel, the rim widths in pixels, and
+//! where the liquid rests.
+//!
+//! Four deliberate differences from the recording orb:
+//!
+//! - the player has no worker thread. `OrbAnimation` renders every 33 ms until
+//!   it is dropped, which is right for a microphone and wrong for a player that
+//!   sits paused for most of its life. The player renders on demand and keeps
+//!   its frame. The block the microphone wears is the exception, for the
+//!   opposite reason: it is as wide as the composer and redrawn thirty times a
+//!   second, so it runs the same worker the orb does;
+//! - the seam is still. The recording orb lets a syllable bend the whole
+//!   horizon; here the bowl and the dome are pinned and only the band moves,
+//!   because a block read at a glance has to keep its shape while the light
+//!   inside it works;
+//! - the body is thinner than the recording orb's, because a player is
+//!   something you read a message through, not something you look at alone;
+//! - the mark sits in its own lane at the left end, where the round play button
+//!   used to be, so the liquid never has to share the middle with it.
+//!
+//! The composer wears the same block while the microphone is open, in place of
+//! its input row, with the live levels in place of a take's peaks: one material,
+//! one shape, before and after the take ends.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use gpui::{
+    App, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage, SharedString,
+    Styled, canvas, div, img, prelude::*, px, rgb,
+};
+use image::{Frame, RgbaImage};
+
+use super::seeker_orb::{
+    AMBER_HUE, AMBIENT, BAND_ARCH, BAND_GAIN, BAND_PULSE, BAND_REACH, BAND_SIGMA, BAND_WALL, BAYER,
+    BOW_BOWL, BOWL_ALPHA, BOWL_HUE, BOWL_LIFT, BREATHE, COOL_HUE, DISPERSION, DOME_ALPHA,
+    EDGE_CAUSTIC, EDGE_COOL, EDGE_DEPTH, EDGE_SPREAD, EDGE_WARM, FAR_LIFT, FAR_WALL, GLOW_GAIN,
+    GLOW_SIGMA, HORIZON, LIFT, MAX_LIFT, RIM_BASE, RIM_FALL_GAIN, RIM_FALL_SIGMA, RIM_GAIN,
+    RIM_SILVER, RIM_TILT_X, RIM_TILT_Y, RIM_TOP_EDGE, RIM_TOP_FULL, RIM_TOP_GAIN, SCRIM_LUMA,
+    SHIMMER, SIDE_BIAS, SLOSH, SLOSH_SPEED, SWELL, SWELL_REACH, SWELL_SPEED, VOICE_SAMPLES,
+    WALL_ALPHA, WALL_EDGE, WALL_FULL, WARM_FOLLOW, bgra, gaussian, hash_noise, microphone_history,
+    relative_luma, rgb_hsv, saturation_at, sine, smooth, smooth_voice, tinted, voice_at,
+};
+use super::voice_play::{self, ClipState};
+use super::voice_preview::{clip_length, fallback_peaks};
+use crate::{logging, palette, voice_media};
+
+/// The corner radius of the block, in units of half its height.
+///
+/// Just under half the half-height: the corners are visibly rounded and the
+/// sides stay straight for most of the block, which is what keeps it reading as
+/// a block rather than a pill.
+const SLAB_BEVEL: f32 = 0.42;
+
+/// How wide the edge is allowed to fade, in pixels. A little over one is the
+/// smallest that reads as smooth at the raster multiples used here.
+const FEATHER_PX: f32 = 1.2;
+
+/// The body is this much thinner than the recording orb's, so a message reads
+/// through the glass while the take is held.
+const BODY_TRANSMISSION: f32 = 0.62;
+
+// The seam -----------------------------------------------------------------
+
+/// How much of the width the track leaves to the wall at either end.
+const TRACK_PAD: f32 = 0.10;
+
+// Everything else about the seam is fitted, and it is fitted against the
+// recording orb's own pixels: the horizon's bow, the arch the band takes as it
+// wraps towards the wall, the tip and the swell that travel along it, the lift
+// a syllable puts under the light, the pulse that thickens it, the shimmer that
+// brightens it. Those live in `seeker_orb` and are imported rather than copied,
+// so a refit reaches the microphone and the player in the same edit.
+//
+// The one thing this module adds is stillness. The block's top and bottom do
+// not move at all: the warm bowl below the horizon and the cool dome above it
+// are pinned where they are, and the only thing that travels is the band. That
+// is what the recording orb already looked like, and the first cut of this
+// module lost it by letting every column's peak lift its own surface, which
+// turned a single lens flare into a row of sound bars.
+
+// The track ----------------------------------------------------------------
+
+/// How bright the part of the take that has not been played is, against the
+/// part that has. It is a rail, not a hole: a person has to see the shape of
+/// what is still coming.
+///
+/// A take at rest is not dimmed by this at all. The recording orb is the
+/// reference for how the material should look, and it has no track: halving
+/// the band on a paused take would have made the block a darker object than
+/// the microphone that recorded it.
+const TRACK_AHEAD: f32 = 0.18;
+
+/// How soft the playhead's edge is along the track, in track units.
+const BAND_SOFT: f32 = 0.012;
+
+/// The playhead's own catch, where the light meets the part already played.
+const PLAYHEAD_GAIN: f32 = 0.30;
+const PLAYHEAD_WIDTH: f32 = 0.050;
+
+// The rim ------------------------------------------------------------------
+
+/// Where the rim ring sits, as a share of the bevel, and how wide it is.
+///
+/// These are pixel-scale rather than material-scale, which is why they are not
+/// imported: the orb's own widths are fitted against a 320-pixel sphere, and a
+/// block thirty points tall needs its own.
+const RIM_BAND: f32 = 0.16;
+const RIM_BAND_SIGMA: f32 = 0.10;
+
+/// The overhead catch, the one edge of a block that always catches light.
+const RIM_TOP_BAND: f32 = 0.20;
+const RIM_TOP_SIGMA: f32 = 0.085;
+
+// The mark ----------------------------------------------------------------
+
+/// How far in from the left edge the mark's centre sits, in units of half the
+/// height.
+pub(crate) const MARK_INSET: f32 = 0.92;
+
+/// The play and pause marks, in units of half the height from their centre.
+const GLYPH_HALF_HEIGHT: f32 = 0.26;
+const GLYPH_APEX: f32 = 0.24;
+const GLYPH_BASE: f32 = -0.15;
+const GLYPH_BAR_INNER: f32 = 0.035;
+const GLYPH_BAR_OUTER: f32 = 0.155;
+const GLYPH_STOP: f32 = 0.185;
+const GLYPH_GAIN: f32 = 0.72;
+
+/// How much a hovered block leans on its rim, so the target answers the pointer
+/// before it is clicked.
+const HOVER_RIM: f32 = 0.35;
+
+/// The player's on-screen size in points, and the multiple it is rasterised at.
+///
+/// Twice the strip it replaced, which is what the owner asked for: the old
+/// block was 138 by 30 points and its mark read as a speck (#3111). The frame
+/// is cached, so the cost is paid once per playhead step rather than once per
+/// repaint. The width is the block's preferred width: it gives way to a
+/// narrower bubble rather than painting past it.
+const PLAYER_POINTS: (f32, f32) = (276.0, 60.0);
+const PLAYER_SCALE: f32 = 2.5;
+
+/// The narrowest the block is drawn, however little room the row has.
+///
+/// Below this the mark and the track stop being a target, so a pane narrower
+/// than this scrolls the block instead of shrinking it further.
+const MIN_PLAYER_WIDTH: f32 = 120.0;
+
+/// The width to draw the block at, given the room the row has for it.
+fn player_width(max_width: f32) -> f32 {
+    PLAYER_POINTS.0.min(max_width).max(MIN_PLAYER_WIDTH)
+}
+
+/// The block's on-screen height in points.
+///
+/// It stands in for the composer's input row while the microphone is open, so
+/// the box grows by this much for the length of a take. Tall enough that the
+/// seam has room to travel and the stop mark is a target rather than a speck.
+pub(crate) const BLOCK_HEIGHT: f32 = 88.0;
+
+/// The width the first frame is drawn at, before the row has measured itself.
+pub(crate) const BLOCK_FALLBACK_WIDTH: f32 = 520.0;
+
+/// The id the composer's block answers hover under, and the one the row paints
+/// it with.
+pub(crate) const BLOCK_ID: &str = "composer-voice-block";
+
+/// The most pixels the block is rasterised at across its width.
+///
+/// The material is a smooth gradient, so past a point more samples buy nothing
+/// the eye can find and cost the worker a linear amount of time. A wide window
+/// gets a coarser multiple instead of a bigger frame.
+const BLOCK_PIXEL_BUDGET: f32 = 1600.0;
+const BLOCK_MAX_SCALE: f32 = 2.0;
+
+/// How often the worker builds a frame while the microphone is open.
+const BLOCK_INTERVAL: Duration = Duration::from_millis(33);
+
+/// The multiple the block is rasterised at for a given width.
+fn block_scale(width: f32) -> f32 {
+    (BLOCK_PIXEL_BUDGET / width.max(1.0)).clamp(1.0, BLOCK_MAX_SCALE)
+}
+
+/// The liquid's own clock, and the loudness that drives it.
+///
+/// These are the recording orb's worker values, kept here rather than fitted
+/// again: the seam has to move at the same rate in both shapes or the take
+/// changes tempo the moment it is stopped. Energy climbs fast on a syllable and
+/// falls slowly between words, and the phase crawls at rest and sprints under
+/// speech.
+const ENERGY_ATTACK: f32 = 0.58;
+const ENERGY_RELEASE: f32 = 0.16;
+const PHASE_CRAWL: f32 = 0.16;
+const PHASE_SPRINT: f32 = 1.25;
+
+/// The longest gap the clock will integrate, so a stalled window does not
+/// teleport the seam across the block when it wakes up.
+const LONGEST_STEP: f32 = 0.10;
+
+/// How many steps of the track the playhead takes before the frame is redrawn.
+///
+/// The block is under a hundred and forty points wide, so one step in a hundred
+/// and twenty-eight is a point: invisible, and it keeps a repaint every forty
+/// milliseconds from re-rasterising the glass on every single tick.
+const PROGRESS_STEPS: f32 = 128.0;
+
+// The block with no take yet (#3092) ---------------------------------------
+
+/// How far the material is drained of colour while the clip is being made.
+///
+/// A spoken reply is a network round trip per chunk, so the block sits there for
+/// seconds. Full colour would read as a finished take that refuses to play, and
+/// the muted glass reads as the same block before it has anything to hold.
+const PENDING_DRAIN: f32 = 0.82;
+
+/// How bright the one highlight that crosses the waiting block is.
+///
+/// It has to be visible over the drained glass without pretending to be the
+/// band: the band answers a take, and there is no take yet.
+const PENDING_SHEEN_GAIN: f32 = 0.34;
+
+/// How wide that highlight is, in units of half the height.
+const PENDING_SHEEN_WIDTH: f32 = 0.26;
+
+/// How fast it crosses, in widths per phase unit.
+///
+/// The phase crawls at `PHASE_CRAWL` when nothing is sounding, which is the
+/// whole life of a waiting block, so this multiplies a clock that is already
+/// slow: at this value a crossing takes about four seconds, fast enough to read
+/// as work and slow enough not to flicker.
+const PENDING_SWEEP_SPEED: f32 = 1.6;
+
+/// The raster the block is drawn into, for an on-screen size and a multiple.
+fn pixels(points: (f32, f32), scale: f32) -> (u32, u32) {
+    (
+        (points.0 * scale).round() as u32,
+        (points.1 * scale).round() as u32,
+    )
+}
+
+/// A block of the material: a rounded box distance field, one sample per raster
+/// pixel.
+///
+/// Coordinates are in units of half the height. `y` runs from -1 at the top
+/// edge to +1 at the bottom, the same way the recording orb's does, and `x`
+/// runs from `-aspect` to `aspect`, so a unit is the same number of pixels in
+/// both directions and the bevel stays circular on any block.
+pub(crate) struct Slab {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// Half the width in units of half the height.
+    pub(crate) aspect: f32,
+    x: Vec<f32>,
+    y: Vec<f32>,
+    /// How far inside the edge this pixel sits, in units of half the height.
+    /// Nought on the edge, and it reaches one at the vertical midline.
+    inside: Vec<f32>,
+    /// The surface normal's forward component: nought where the edge rolls
+    /// away, one on the flat face.
+    normal_z: Vec<f32>,
+}
+
+impl Slab {
+    pub(crate) fn new(width: u32, height: u32) -> Self {
+        let count = (width * height) as usize;
+        let aspect = width as f32 / height as f32;
+        let mut slab = Self {
+            width,
+            height,
+            aspect,
+            x: vec![0.0; count],
+            y: vec![0.0; count],
+            inside: vec![0.0; count],
+            normal_z: vec![0.0; count],
+        };
+        let half_width = (aspect - SLAB_BEVEL).max(0.0);
+        let half_height = 1.0 - SLAB_BEVEL;
+        for row in 0..height {
+            let y = ((row as f32 + 0.5) / height as f32) * 2.0 - 1.0;
+            for column in 0..width {
+                let across = ((column as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+                let x = across * aspect;
+                let index = row as usize * width as usize + column as usize;
+                slab.x[index] = x;
+                slab.y[index] = y;
+                // The rounded-box distance field. The straight parts of the
+                // edge are the clamped offsets; the corners are the only place
+                // the two axes have to be combined.
+                let qx = x.abs() - half_width;
+                let qy = y.abs() - half_height;
+                let outside = (qx.max(0.0) * qx.max(0.0) + qy.max(0.0) * qy.max(0.0)).sqrt();
+                let distance = outside + qx.max(qy).min(0.0) - SLAB_BEVEL;
+                let inside = -distance;
+                slab.inside[index] = inside;
+                let turn = (1.0 - (inside / SLAB_BEVEL).clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                slab.normal_z[index] = (1.0 - turn * turn).max(0.0).sqrt();
+            }
+        }
+        slab
+    }
+}
+
+/// Which mark the block carries.
+#[derive(Clone, Copy)]
+enum Mark {
+    Play,
+    Pause,
+    Stop,
+}
+
+/// One instant of the player, supplied by the composer each repaint.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PlayerState {
+    /// Where the playhead sits, nought to one. Ignored while paused.
+    pub(crate) progress: f32,
+    /// Whether the clip is sounding. Decides the mark and the track.
+    pub(crate) playing: bool,
+    /// Whether the microphone is open on this block instead of a take.
+    pub(crate) recording: bool,
+    /// Whether the pointer is over the block.
+    pub(crate) hovered: bool,
+    /// Whether the clip this block stands for is still being made (#3092).
+    ///
+    /// A waiting block carries no take, so it draws no mark, no track and no
+    /// playhead: only the glass, drained of colour, with one highlight crossing
+    /// it. Anything else would offer a press on audio that does not exist yet.
+    pub(crate) pending: bool,
+}
+
+impl PlayerState {
+    fn mark(&self) -> Mark {
+        if self.recording {
+            Mark::Stop
+        } else if self.playing {
+            Mark::Pause
+        } else {
+            Mark::Play
+        }
+    }
+
+    /// Whether anything in the material is allowed to move. A paused player is
+    /// a photograph of the take: drifting it would say it is doing something.
+    fn moving(&self) -> bool {
+        self.playing || self.recording
+    }
+}
+
+/// Advance the liquid by the time that has passed since the last frame.
+///
+/// One curve for both shapes: the player and the microphone read the same
+/// reading of the take, so a take does not change tempo when it is stopped.
+fn advance(phase: &mut f32, energy: &mut f32, last: &mut Instant, target: f32) {
+    let now = Instant::now();
+    let elapsed = now.duration_since(*last).as_secs_f32().min(LONGEST_STEP);
+    *last = now;
+    let target = target.clamp(0.0, 1.0);
+    let rate = if target > *energy {
+        ENERGY_ATTACK
+    } else {
+        ENERGY_RELEASE
+    };
+    *energy += (target - *energy) * rate;
+    *phase += elapsed * (PHASE_CRAWL + *energy * PHASE_SPRINT);
+}
+
+/// A finished take drawn as the block. Owns the geometry, which is the
+/// expensive part, and renders one frame per call.
+pub(crate) struct PlayerBlock {
+    slab: Slab,
+    levels: [f32; VOICE_SAMPLES],
+    colour: u32,
+    /// Liquid seconds. Not wall time: the seam runs at a base crawl that
+    /// speech accelerates, so a quiet take drifts and a loud one moves.
+    phase: f32,
+    /// How loud the take is where the playhead sits, smoothed on the way up
+    /// fast and on the way down slow, exactly as the recording orb does it.
+    energy: f32,
+    /// When the last frame was drawn, so the phase advances by the time that
+    /// actually passed instead of by an assumed frame interval.
+    last: Instant,
+}
+
+impl PlayerBlock {
+    /// Build a player for one take. `peaks` is whatever the decoder produced,
+    /// at whatever length, and is pooled down to the meter's own width.
+    ///
+    /// `width` is the block's on-screen width, so a row with less room than the
+    /// block asks for gets a smaller raster rather than a cropped one (#3111).
+    pub(crate) fn new(colour: u32, peaks: &[f32], width: f32) -> Self {
+        Self::at(
+            pixels((width, PLAYER_POINTS.1), PLAYER_SCALE),
+            colour,
+            peaks,
+        )
+    }
+
+    /// The same player at an arbitrary raster size, so the tests can render a
+    /// small one instead of paying for a full frame per assertion.
+    pub(crate) fn at(size: (u32, u32), colour: u32, peaks: &[f32]) -> Self {
+        Self {
+            slab: Slab::new(size.0, size.1),
+            levels: smooth_voice(resample(peaks)),
+            colour,
+            phase: 0.0,
+            energy: 0.0,
+            last: Instant::now(),
+        }
+    }
+
+    /// Advance the liquid to now, and report the phase and energy to draw with.
+    ///
+    /// The block owns this rather than the caller, because the two numbers are
+    /// a running integral: energy follows the take with a fast attack and a
+    /// slow release, and the phase advances at a rate that energy sets. Both
+    /// have to survive between frames, and a block already lives as long as the
+    /// take it holds.
+    fn tick(&mut self, state: PlayerState) -> (f32, f32) {
+        // The take's loudness where the playhead sits, so a loud passage moves
+        // the seam further than a quiet one and a pause lets it settle.
+        let target = if state.playing {
+            voice_at(&self.levels, state.progress.clamp(0.0, 1.0))
+        } else {
+            0.0
+        };
+        advance(&mut self.phase, &mut self.energy, &mut self.last, target);
+        (self.phase, self.energy)
+    }
+
+    /// Play or pause the take this block stands for.
+    ///
+    /// The audio lives in `voice_play`, which owns the output stream, the seek
+    /// and the position. The composer asks the block, the block asks the
+    /// player, so nothing outside this module has to know how a clip starts.
+    pub(crate) fn activate(path: &Path) -> Result<(), String> {
+        voice_play::toggle(path)
+    }
+
+    /// Move the playhead to `fraction` of the take, clamped to the track.
+    pub(crate) fn scrub(path: &Path, fraction: f32) -> Result<(), String> {
+        voice_play::seek(path, fraction.clamp(0.0, 1.0))
+    }
+
+    /// Render one frame. Straight alpha BGRA, the layout GPUI's atlas expects.
+    pub(crate) fn render(&mut self, state: PlayerState) -> RenderImage {
+        let (phase, energy) = self.tick(state);
+        paint(&self.slab, &self.levels, self.colour, state, phase, energy)
+    }
+}
+
+/// The block while a microphone is open (#3092).
+///
+/// The composer wears it in place of its input row, so the raster is the width
+/// of the pane rather than the seventy-eight points the strip used to be. That
+/// is roughly twenty times the pixels, redrawn thirty times a second, which is
+/// not work the UI thread can carry while the caret, the transcript and the
+/// conversation keep painting: the field it replaced was the cheap part of the
+/// frame. So it runs the worker shape the Seeker's orb already uses. The thread
+/// owns the liquid, the composer takes the newest texture on its own tick, and
+/// the one it replaces goes back to the atlas.
+pub(crate) struct LiveSlab {
+    latest: Arc<Mutex<Arc<RenderImage>>>,
+    presented: RefCell<Option<Arc<RenderImage>>>,
+    input: Arc<Mutex<SlabInput>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// One tick of the microphone, handed to the worker.
+///
+/// The size travels with it: the composer measures itself during paint, so the
+/// width of a take is only known a frame after the block opened, and a pane
+/// resized mid-sentence has to follow.
+#[derive(Clone, Copy)]
+struct SlabInput {
+    recording: bool,
+    levels: [f32; VOICE_SAMPLES],
+    colour: u32,
+    hovered: bool,
+    points: (f32, f32),
+}
+
+impl LiveSlab {
+    pub(crate) fn start(colour: u32) -> Self {
+        let points = (measured_width(), BLOCK_HEIGHT);
+        let (width, height) = pixels(points, block_scale(points.0));
+        let mut surface = Slab::new(width, height);
+        let input = Arc::new(Mutex::new(SlabInput {
+            recording: true,
+            levels: [0.0; VOICE_SAMPLES],
+            colour,
+            hovered: false,
+            points,
+        }));
+        let state = PlayerState {
+            progress: 1.0,
+            playing: true,
+            recording: true,
+            hovered: false,
+            pending: false,
+        };
+        let levels = [0.0; VOICE_SAMPLES];
+        let first = Arc::new(paint(&surface, &levels, colour, state, 0.0, 0.0));
+        let latest: Arc<Mutex<Arc<RenderImage>>> = Arc::new(Mutex::new(first));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_input = Arc::clone(&input);
+        let worker_latest = Arc::clone(&latest);
+        let worker_stop = Arc::clone(&stop);
+        let spawned = std::thread::Builder::new()
+            .name("gui-composer-block".into())
+            .spawn(move || {
+                let mut fitted = points;
+                let mut liquid = 0.0_f32;
+                let mut energy = 0.0_f32;
+                let mut last = Instant::now();
+                while !worker_stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+                    let tick = *lock(&worker_input);
+                    if tick.points != fitted {
+                        let (width, height) = pixels(tick.points, block_scale(tick.points.0));
+                        surface = Slab::new(width, height);
+                        fitted = tick.points;
+                    }
+                    let target = if tick.recording {
+                        tick.levels[VOICE_SAMPLES - 1]
+                    } else {
+                        0.0
+                    };
+                    advance(&mut liquid, &mut energy, &mut last, target);
+                    let state = PlayerState {
+                        progress: 1.0,
+                        playing: tick.recording,
+                        recording: tick.recording,
+                        hovered: tick.hovered,
+                        pending: false,
+                    };
+                    let next = Arc::new(paint(
+                        &surface,
+                        &tick.levels,
+                        tick.colour,
+                        state,
+                        liquid,
+                        energy,
+                    ));
+                    *lock(&worker_latest) = next;
+                    let spent = began.elapsed();
+                    if spent < BLOCK_INTERVAL {
+                        std::thread::sleep(BLOCK_INTERVAL - spent);
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            logging::error(&format!("composer block thread did not start: {error}"));
+        }
+        Self {
+            latest,
+            presented: RefCell::new(None),
+            input,
+            stop,
+        }
+    }
+
+    /// Hand this tick's reading of the microphone to the worker.
+    ///
+    /// `recording` is false once the microphone has been asked to stop: the WAV
+    /// is still being built, so the block stays up, but the liquid settles
+    /// instead of answering a device that is already closed.
+    pub(crate) fn update(
+        &self,
+        recording: bool,
+        levels: &[f32],
+        colour: u32,
+        hovered: bool,
+        points: (f32, f32),
+    ) {
+        *lock(&self.input) = SlabInput {
+            recording,
+            levels: microphone_history(levels),
+            colour,
+            hovered,
+            points,
+        };
+    }
+
+    /// The newest frame, retiring the one it replaces from the atlas.
+    pub(crate) fn frame(&self, cx: &mut App) -> Arc<RenderImage> {
+        let next = Arc::clone(&lock(&self.latest));
+        let mut presented = self.presented.borrow_mut();
+        if let Some(previous) = presented.as_ref()
+            && !Arc::ptr_eq(previous, &next)
+        {
+            cx.drop_image(Arc::clone(previous), None);
+        }
+        *presented = Some(Arc::clone(&next));
+        next
+    }
+
+    /// Stop the worker and retire the last texture it handed over.
+    pub(crate) fn dispose(&self, cx: &mut App) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(last) = self.presented.borrow_mut().take() {
+            cx.drop_image(last, None);
+        }
+    }
+}
+
+impl Drop for LiveSlab {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+thread_local! {
+    /// The width the composer row gave the block, written during the paint
+    /// phase of the frame that drew it.
+    static BLOCK_WIDTH: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// Record the width the composer handed the block this frame.
+pub(crate) fn measure_width(width: f32) {
+    BLOCK_WIDTH.with(|cell| cell.set(width));
+}
+
+/// The width to draw at: the last one the row measured, or the fallback before
+/// the first frame has been laid out.
+pub(crate) fn measured_width() -> f32 {
+    BLOCK_WIDTH.with(|cell| {
+        let width = cell.get();
+        if width > 0.0 {
+            width
+        } else {
+            BLOCK_FALLBACK_WIDTH
+        }
+    })
+}
+
+/// The warm hue this accent asks for, taken the short way round the wheel.
+///
+/// `WARM_FOLLOW` is fitted to pull the bowl a quarter of the way from the
+/// reference amber towards whatever colour the surface is wearing. Subtracting
+/// the two hues directly breaks wherever hue wraps: red sits at 0.995 and the
+/// reference amber at 0.109, so the plain difference reads as -0.886 and a
+/// quarter of it lands at 0.276, in the greens. That is a red microphone
+/// painting a green block, which is exactly what the recording strip did before
+/// this went the short way: the same red is 0.114 the other way round, and the
+/// bowl stays warm.
+pub(crate) fn warm_hue_for(accent_hue: f32) -> f32 {
+    let mut turn = accent_hue - AMBER_HUE;
+    if turn > 0.5 {
+        turn -= 1.0;
+    } else if turn < -0.5 {
+        turn += 1.0;
+    }
+    BOWL_HUE + turn * WARM_FOLLOW
+}
+
+/// Draw one frame of the block.
+///
+/// `phase` is the liquid's own clock and `level` is how loud the take is where
+/// the playhead sits. Both are integrated by the caller, so this function is
+/// pure: the same numbers always draw the same frame, which is what lets the
+/// tests name a row and assert on it.
+pub(crate) fn paint(
+    slab: &Slab,
+    levels: &[f32; VOICE_SAMPLES],
+    colour: u32,
+    state: PlayerState,
+    phase: f32,
+    level: f32,
+) -> RenderImage {
+    let width = slab.width;
+    let height = slab.height;
+    let aspect = slab.aspect;
+    let mut pixels = RgbaImage::new(width, height);
+    let accent_hue = rgb_hsv(colour).0;
+    let level = level.clamp(0.0, 1.0);
+    let moving = state.moving();
+    // Frame-wide, not per-pixel: the horizon rolls and breathes as one body.
+    // Everything below is the recording orb's own motion, unchanged.
+    let breathe = BREATHE * sine(phase * 0.70);
+    let slosh = SLOSH * level * sine(phase * SLOSH_SPEED);
+    let hover = if state.hovered { HOVER_RIM } else { 0.0 };
+    let feather = FEATHER_PX / (height as f32 * 0.5);
+    let mark = state.mark();
+    let mark_x = -aspect + MARK_INSET;
+    let travel = (aspect - TRACK_PAD).max(0.01);
+    let head_x = -aspect + TRACK_PAD + state.progress.clamp(0.0, 1.0) * 2.0 * travel;
+    // Where the waiting block's highlight is this frame, in the same units the
+    // pixels are drawn in. It runs off both ends so the block spends a moment
+    // empty between crossings instead of bouncing back and forth (#3092).
+    let sheen_x = (phase * PENDING_SWEEP_SPEED).rem_euclid(1.0)
+        * (2.0 * aspect + 2.0 * PENDING_SHEEN_WIDTH)
+        - aspect
+        - PENDING_SHEEN_WIDTH;
+
+    // Everything that depends on the column and not the row is worked out once
+    // per column instead of once per pixel: how far the band reaches, how lit
+    // this stretch of track is, and the two terms that lift and swell the seam
+    // where the sound is.
+    let mut laterals = vec![0.0_f32; width as usize];
+    let mut tracks = vec![0.0_f32; width as usize];
+    let mut lifts = vec![0.0_f32; width as usize];
+    let mut swells = vec![0.0_f32; width as usize];
+    let mut voices = vec![0.0_f32; width as usize];
+    for column in 0..width as usize {
+        let x = slab.x[column];
+        let nx = (x / aspect).clamp(-1.0, 1.0);
+        let along = ((x + aspect - TRACK_PAD) / (2.0 * travel)).clamp(0.0, 1.0);
+        let played = smooth(-BAND_SOFT, BAND_SOFT, state.progress - along);
+        tracks[column] = if moving {
+            TRACK_AHEAD + (1.0 - TRACK_AHEAD) * played
+        } else {
+            1.0
+        };
+        laterals[column] = BAND_WALL + (1.0 - BAND_WALL) * gaussian(nx, BAND_REACH);
+        // Sampled in screen space, not through the lens: the light bends where
+        // the sound is, and the lens rotates underneath it on its own.
+        let voice = voice_at(levels, (nx * 0.5 + 0.5).clamp(0.0, 1.0));
+        voices[column] = voice;
+        lifts[column] = LIFT * level * voice;
+        swells[column] = SWELL * level * sine(nx * SWELL_REACH - phase * SWELL_SPEED) * nx * nx;
+    }
+
+    for (index, pixel) in pixels.pixels_mut().enumerate() {
+        let inside = slab.inside[index];
+        let edge = smooth(0.0, feather, inside);
+        if edge <= 0.0 {
+            continue;
+        }
+        let column = index as u32 % width;
+        let x = slab.x[index];
+        let y = slab.y[index];
+        let nz = slab.normal_z[index];
+        let depth = (inside / SLAB_BEVEL).clamp(0.0, 1.0);
+        let nx = (x / aspect).clamp(-1.0, 1.0);
+        let lateral = laterals[column as usize];
+        let track = tracks[column as usize];
+        let voice = voices[column as usize];
+
+        // The horizon: the seam between the cool dome and the warm bowl. It sits
+        // in the middle of the block, it bows towards the rolled ends through
+        // the same lens the marble's does, and it breathes and tips with the
+        // take. Nothing below it or above it moves on its own.
+        let horizon =
+            HORIZON + BOW_BOWL * (1.0 - nz) + breathe + slosh * nx + swells[column as usize];
+        // The band rides a slightly different seam from the bowl's: it is the
+        // horizon reflected off the inside of the glass, so it arches towards
+        // the wall while the bowl's own boundary falls away. The take's own
+        // history lifts it where the sound is, which is what turns a line into
+        // a surface.
+        let seam = horizon - BAND_ARCH * (1.0 - nz) - lifts[column as usize];
+        let offset = y - seam;
+
+        // The band answers the microphone: it thickens where the sample is loud,
+        // so the light swells instead of only travelling, and it brightens on
+        // the same peak, so a syllable lands as a pulse.
+        let shimmer = 1.0 + SHIMMER * voice * level;
+        let band_width = BAND_SIGMA * (1.0 + BAND_PULSE * voice * level);
+        let band = gaussian(offset, band_width) * lateral * shimmer;
+        let glow = gaussian(offset, GLOW_SIGMA) * (1.0 + SIDE_BIAS * -nx) * lateral;
+        // The two regions the material splits into. `dome` is the colour mix:
+        // cool above the seam, warm below it, crossfaded in light space so the
+        // core of the band cannot go green. `bowl` is the low lift that gives
+        // the warm half depth instead of black showing through.
+        let bowl = smooth(horizon, horizon + 0.60, y);
+        let dome = smooth(-0.04, 0.04, -y);
+
+        // The mark: a play triangle while paused, two bars while playing, a
+        // stop square while the microphone is open. It sits at the left end and
+        // punches through the light, so the seam frames it instead of washing
+        // it out.
+        //
+        // A waiting block draws none (#3092): there is nothing to press, so a
+        // play triangle would be a control that answers nothing.
+        let glyph = if state.pending {
+            0.0
+        } else {
+            match mark {
+                Mark::Play => play_mark(x - mark_x, y, feather),
+                Mark::Pause => pause_mark(x - mark_x, y, feather),
+                Mark::Stop => stop_mark(x - mark_x, y, feather),
+            }
+        };
+
+        // The wall caustic: the narrow chromatic band just inside the rim, cool
+        // above the seam and warm below.
+        let edge_band = gaussian(inside - (1.0 - EDGE_DEPTH), EDGE_SPREAD) * nx * nx;
+        let edge_gain = EDGE_WARM + (EDGE_COOL - EDGE_WARM) * dome;
+        let caustic = edge_band * edge_gain;
+
+        // The border, placed by distance from the edge so the ring follows the
+        // bevel on every side rather than a fixed circle.
+        let rim_key = (0.5 - 0.5 * (nx * RIM_TILT_X + y * RIM_TILT_Y)).max(0.0);
+        let rim_ring = gaussian(depth - RIM_BAND, RIM_BAND_SIGMA);
+        let rim_arc = smooth(RIM_TOP_EDGE, RIM_TOP_FULL, y);
+        let rim_top = gaussian(depth - RIM_TOP_BAND, RIM_TOP_SIGMA) * rim_arc;
+
+        // The playhead: a line where the played part meets the rest.
+        let head = if state.playing && !state.recording {
+            PLAYHEAD_GAIN * gaussian(x - head_x, PLAYHEAD_WIDTH) * smooth(0.0, 0.25, depth)
+        } else {
+            0.0
+        };
+
+        // The mark is a hole in the light, not a shape painted on top of it:
+        // the band and its halo step aside so the white glyph is not swallowed
+        // by the brightest thing in the material.
+        let lit = 1.0 - glyph;
+        // The one thing that moves on a waiting block (#3092): a soft highlight
+        // crossing the seam, which is what says the clip is being made. It rides
+        // the band's own seam so it reads as the same light rather than a bar
+        // sliding over a picture of glass.
+        let sheen = if state.pending {
+            gaussian(nx - sheen_x, PENDING_SHEEN_WIDTH) * lateral
+        } else {
+            0.0
+        };
+        let heat = (AMBIENT
+            + BAND_GAIN * band * track * lit
+            + GLOW_GAIN * glow * track * lit
+            + PENDING_SHEEN_GAIN * sheen
+            + BOWL_LIFT * bowl
+            + RIM_FALL_GAIN * (-inside / RIM_FALL_SIGMA).exp()
+            + RIM_GAIN * rim_ring * (RIM_BASE + (1.0 - RIM_BASE) * rim_key) * (1.0 + hover)
+            + RIM_TOP_GAIN * rim_top
+            + FAR_WALL * gaussian(y - (horizon + FAR_LIFT), GLOW_SIGMA * 0.85)
+            + caustic
+            + head
+            + GLYPH_GAIN * glyph)
+            .clamp(0.0, 1.0);
+
+        let base_saturation = saturation_at(heat);
+        let saturation = base_saturation + (EDGE_CAUSTIC - base_saturation) * edge_band.min(1.0);
+        // The material splits its hues through the thickest part of the glass,
+        // so the block gets the same fringe: warm in the bowl, cool in the dome.
+        let fringe = DISPERSION * inside.clamp(0.0, 1.0).powi(6);
+        let warm_hue = warm_hue_for(accent_hue);
+        let warm = tinted(warm_hue - fringe, saturation, heat);
+        let cool = tinted(COOL_HUE + fringe, saturation, heat);
+        let mut red = warm.0 * (1.0 - dome) + cool.0 * dome;
+        let mut green = warm.1 * (1.0 - dome) + cool.1 * dome;
+        let mut blue = warm.2 * (1.0 - dome) + cool.2 * dome;
+        // A waiting block has no take, so the colour drains out of it (#3092):
+        // the same glass, before it has anything to hold. What is left of the
+        // hue keeps the block in the accent's family without claiming to be
+        // reading a sound.
+        if state.pending {
+            let grey = relative_luma(red, green, blue);
+            red += (grey - red) * PENDING_DRAIN;
+            green += (grey - green) * PENDING_DRAIN;
+            blue += (grey - blue) * PENDING_DRAIN;
+        }
+        // The mark and the overhead catch lose their hue: a play button is
+        // white, not a lit cyan shape.
+        let silver = (RIM_SILVER * rim_top + glyph).clamp(0.0, 1.0);
+        red += (1.0 - red) * silver;
+        green += (1.0 - green) * silver;
+        blue += (1.0 - blue) * silver;
+
+        // Density from geometry, thinner than the recording orb's. The mark is
+        // the one part of the block that is solid, so it stays legible over
+        // whatever the glass is sitting on.
+        let region = smooth(-0.15, 0.25, -y);
+        let deep = BOWL_ALPHA + (DOME_ALPHA - BOWL_ALPHA) * region;
+        let chord = 0.55 + 0.45 * nz;
+        let wall = nx * nx * smooth(WALL_FULL, WALL_EDGE, 1.0 - depth);
+        let density = ((deep * chord * (1.0 - wall) + WALL_ALPHA * wall) * BODY_TRANSMISSION)
+            .max(glyph * 0.88)
+            .clamp(0.0, 1.0);
+
+        // The fitted values are the reference's composited pixels, so over the
+        // dark scrim the emitted colour is lifted to land on them.
+        if density > 1e-4 {
+            let emitted = relative_luma(red, green, blue);
+            if emitted > 1e-4 {
+                let composited = (heat - SCRIM_LUMA * (1.0 - density)) / density;
+                let gain = (composited.max(0.0) / emitted).min(MAX_LIFT);
+                red = (red * gain).min(1.0);
+                green = (green * gain).min(1.0);
+                blue = (blue * gain).min(1.0);
+            }
+        }
+
+        let alpha = (density * edge).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let row = index as u32 / width;
+        let dither = ((BAYER[((row & 3) * 4 + (column & 3)) as usize] - 0.5) * 1.4
+            + (hash_noise(index) - 0.5) * 0.8)
+            / 255.0;
+        *pixel = bgra(red + dither, green + dither, blue + dither, alpha + dither);
+    }
+    RenderImage::new(vec![Frame::new(pixels)])
+}
+
+/// One rendered player, kept so an unrelated repaint costs nothing.
+struct Cached {
+    block: PlayerBlock,
+    peaks: Arc<Vec<f32>>,
+    path: PathBuf,
+    /// The on-screen width the cached frame was drawn at, so a row that grows
+    /// or shrinks gets a new raster instead of the old one stretched (#3111).
+    width: f32,
+    state: PlayerState,
+    frame: Arc<RenderImage>,
+}
+
+thread_local! {
+    static PLAYERS: RefCell<HashMap<String, Cached>> = RefCell::new(HashMap::new());
+    static HOVERED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+/// Remember whether the pointer is over a block, reporting whether that
+/// changed, so the caller only asks for a frame when it did.
+pub(crate) fn note_hover(id: &str, over: bool) -> bool {
+    HOVERED.with(|hovered| {
+        let mut hovered = hovered.borrow_mut();
+        if hovered.get(id).copied().unwrap_or(false) == over {
+            return false;
+        }
+        hovered.insert(id.to_string(), over);
+        true
+    })
+}
+
+pub(crate) fn hovering(id: &str) -> bool {
+    HOVERED.with(|hovered| hovered.borrow().get(id).copied().unwrap_or(false))
+}
+
+/// The frame for this instant, rendered only when something visible changed.
+///
+/// A player sits still for most of its life, so rendering on demand and
+/// remembering the frame is both cheaper and simpler: an unrelated keystroke
+/// repaints the composer and finds the same texture waiting.
+fn frame_for(
+    id: &str,
+    path: &Path,
+    peaks: &Arc<Vec<f32>>,
+    colour: u32,
+    width: f32,
+    state: PlayerState,
+    cx: Option<&mut App>,
+) -> Arc<RenderImage> {
+    let (frame, retired) = PLAYERS.with(|players| {
+        let mut players = players.borrow_mut();
+        // A waiting block is the one block whose frame changes with nothing in
+        // the state: its highlight moves on the clock alone (#3092). Serving a
+        // cached frame would freeze it, so it always redraws.
+        if let Some(cached) = players.get(id).filter(|_| !state.pending)
+            && cached.path.as_path() == path
+            && Arc::ptr_eq(&cached.peaks, peaks)
+            && cached.width == width
+            && cached.state.progress == state.progress
+            && cached.state.playing == state.playing
+            && cached.state.hovered == state.hovered
+        {
+            return (Arc::clone(&cached.frame), None);
+        }
+        let previous = players.remove(id);
+        let (mut block, retired) = match previous {
+            Some(old) => {
+                // The block carries the liquid's phase and energy, so it is
+                // kept across repaints and only rebuilt when the take itself
+                // changes. Rebuilding it would restart the seam mid-word. A new
+                // width is one of those changes: the slab is sized when the
+                // block is built (#3111).
+                let block = if old.path.as_path() == path
+                    && Arc::ptr_eq(&old.peaks, peaks)
+                    && old.width == width
+                {
+                    old.block
+                } else {
+                    PlayerBlock::new(colour, peaks, width)
+                };
+                (block, Some(old.frame))
+            }
+            None => (PlayerBlock::new(colour, peaks, width), None),
+        };
+        let frame = Arc::new(block.render(state));
+        players.insert(
+            id.to_string(),
+            Cached {
+                block,
+                peaks: Arc::clone(peaks),
+                path: path.to_path_buf(),
+                width,
+                state,
+                frame: Arc::clone(&frame),
+            },
+        );
+        (frame, retired)
+    });
+    if let Some(retired) = retired {
+        // Only the composer has an `App` in reach. A transcript row is built
+        // from a plain function, so the retired texture is left to the
+        // allocator there instead of being handed back to the atlas (#3092).
+        if let Some(cx) = cx {
+            cx.drop_image(retired, None);
+        }
+    }
+    frame
+}
+
+/// How far a press has to travel before it counts as a scrub rather than a tap.
+const TAP_SLOP: f32 = 3.0;
+
+/// Where a player sits on screen, recorded by the probe it paints.
+type Track = Rc<RefCell<Option<[f32; 4]>>>;
+
+/// One press on the glass, so a scrub and a tap can be told apart on release.
+struct Press {
+    id: String,
+    from: f32,
+    moved: bool,
+}
+
+thread_local! {
+    static BOUNDS: RefCell<HashMap<String, Track>> = RefCell::new(HashMap::new());
+    static PRESS: RefCell<Option<Press>> = const { RefCell::new(None) };
+}
+
+fn bounds_track(id: &str) -> Track {
+    BOUNDS.with(|tracks| {
+        Rc::clone(
+            tracks
+                .borrow_mut()
+                .entry(id.to_string())
+                .or_insert_with(|| Rc::new(RefCell::new(None))),
+        )
+    })
+}
+
+/// A transparent layer that records where the block was painted.
+///
+/// Pointer events arrive in window coordinates, and the block has to turn one
+/// of them into a position along its track. That needs the rectangle it was
+/// drawn in, and the probe is how a div learns its own.
+fn bounds_probe(track: Track) -> impl IntoElement {
+    canvas(
+        |bounds, _window, _cx| bounds,
+        move |bounds, _, _window, _cx| {
+            let left = f32::from(bounds.origin.x);
+            let top = f32::from(bounds.origin.y);
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            track
+                .borrow_mut()
+                .replace([left, top, left + width, top + height]);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .w_full()
+    .h_full()
+}
+
+fn set_drag(id: &str, from: f32) {
+    PRESS.with(|press| {
+        *press.borrow_mut() = Some(Press {
+            id: id.to_string(),
+            from,
+            moved: false,
+        });
+    });
+}
+
+/// Whether this press has become a scrub. Reports `true` once it has, so the
+/// caller seeks on the move that crosses the threshold and on every one after.
+fn drag_moved(id: &str, x: f32) -> bool {
+    PRESS.with(|press| {
+        let mut press = press.borrow_mut();
+        let Some(held) = press.as_mut().filter(|held| held.id == id) else {
+            return false;
+        };
+        if (x - held.from).abs() <= TAP_SLOP {
+            return false;
+        }
+        held.moved = true;
+        true
+    })
+}
+
+/// End the press, reporting whether it was a tap rather than a scrub.
+fn release_drag(id: &str) -> bool {
+    PRESS.with(|press| {
+        let mut press = press.borrow_mut();
+        let tap = match press.as_ref() {
+            Some(held) if held.id == id => !held.moved,
+            _ => return false,
+        };
+        *press = None;
+        tap
+    })
+}
+
+fn fraction_at(id: &str, x: f32) -> Option<f32> {
+    let track = BOUNDS.with(|tracks| tracks.borrow().get(id).cloned())?;
+    let bounds = *track.borrow();
+    let [left, _, right, _] = bounds?;
+    if right <= left {
+        return None;
+    }
+    Some(((x - left) / (right - left)).clamp(0.0, 1.0))
+}
+
+fn seek_at(id: &str, path: &Path, x: f32) {
+    let Some(fraction) = fraction_at(id, x) else {
+        return;
+    };
+    if let Err(reason) = PlayerBlock::scrub(path, fraction) {
+        logging::error(&format!("composer player: {reason}"));
+    }
+}
+
+/// Where the playhead is and how long the take is.
+///
+/// The player knows both once a clip has been started, and the draft knows the
+/// length before that, so the two are asked in that order. One helper, because
+/// the track and the caption must never disagree about where the take ends.
+fn span(live: Option<ClipState>, seconds: Option<f32>) -> (Duration, Option<Duration>) {
+    let total = live
+        .map(|state| state.duration)
+        .filter(|duration| !duration.is_zero())
+        .or_else(|| {
+            seconds
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .map(Duration::from_secs_f32)
+        });
+    let position = live.map(|state| state.position).unwrap_or_default();
+    (total.map_or(position, |total| position.min(total)), total)
+}
+
+/// The same span, for a clip whose length is not known from the draft.
+///
+/// A stored message carries no recorded duration, so the decoder is asked for
+/// it. Without that fallback a chat row paints the empty clock until the take
+/// is played once, which is the one moment the length should already be known
+/// (#3092).
+fn span_for(
+    path: &Path,
+    live: Option<ClipState>,
+    seconds: Option<f32>,
+) -> (Duration, Option<Duration>) {
+    let (position, total) = span(live, seconds);
+    let total = total.or_else(|| voice_media::duration(path).map(Duration::from_secs));
+    (total.map_or(position, |total| position.min(total)), total)
+}
+
+/// The take as a player: the block, its liquid, its track and its mark.
+///
+/// Nothing else belongs inside it. The discard control stays outside the
+/// element so a click meant for the ✕ can never land on the glass, and the
+/// transcript stays outside so the words are selectable text and not part of a
+/// texture.
+pub(crate) fn player(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+    cx: &mut App,
+) -> impl IntoElement {
+    player_into(
+        id,
+        path,
+        seconds,
+        fallback_levels,
+        measured_width(),
+        Some(cx),
+    )
+}
+
+/// The same block for a surface with no `App` in reach, such as a stored row in
+/// the transcript.
+///
+/// One look, one behaviour, two entry points. The only thing the `App` buys is
+/// handing a retired texture back to the atlas, and a chat row is built by a
+/// plain function with no context to pass, so the wrapper simply says so
+/// instead of the module growing a second player that drifts from this one
+/// (#3092).
+///
+/// `max_width` is the room the row has for the block. The composer measures
+/// itself, a chat row knows its content width, and both end up at the same
+/// clamp (#3111).
+pub(crate) fn player_plain(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+    max_width: f32,
+) -> impl IntoElement {
+    player_into(id, path, seconds, fallback_levels, max_width, None)
+}
+
+fn player_into(
+    id: &str,
+    path: &Path,
+    seconds: Option<f32>,
+    fallback_levels: &[f32],
+    max_width: f32,
+    cx: Option<&mut App>,
+) -> impl IntoElement {
+    let width = player_width(max_width);
+    let live = voice_play::state(path);
+    let (position, total) = span_for(path, live, seconds);
+    let fraction = total
+        .filter(|total| !total.is_zero())
+        .map(|total| (position.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    let state = PlayerState {
+        // Quantised so the track advances in sub-point steps instead of asking
+        // for a new texture on every tick of the dashboard.
+        progress: (fraction * PROGRESS_STEPS).round() / PROGRESS_STEPS,
+        playing: live.is_some_and(|state| state.playing),
+        recording: false,
+        hovered: hovering(id),
+        pending: false,
+    };
+    let peaks = voice_media::visual(path)
+        .map(|visual| Arc::clone(&visual.peaks))
+        .unwrap_or_else(|| Arc::new(fallback_peaks(fallback_levels)));
+    let frame = frame_for(id, path, &peaks, palette::current().amber, width, state, cx);
+
+    let hover_id = id.to_string();
+    let press_path = path.to_path_buf();
+    let drag_path = path.to_path_buf();
+    let down_id = id.to_string();
+    let move_id = id.to_string();
+    let up_id = id.to_string();
+    let out_id = id.to_string();
+    let painted = bounds_track(id);
+    div()
+        .id(SharedString::from(format!("voice-orb-{id}")))
+        .relative()
+        .flex_none()
+        .w(px(width))
+        .h(px(PLAYER_POINTS.1))
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                set_drag(&down_id, f32::from(event.position.x));
+            },
+        )
+        .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+            if drag_moved(&move_id, f32::from(event.position.x)) {
+                cx.stop_propagation();
+                seek_at(&move_id, &drag_path, f32::from(event.position.x));
+                window.refresh();
+            }
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, window, _cx| {
+                // A press that never travelled is a tap: it starts or stops the
+                // take. A press that travelled was a scrub and has already
+                // moved the playhead, so letting go must not also toggle.
+                if release_drag(&up_id)
+                    && let Err(reason) = PlayerBlock::activate(&press_path)
+                {
+                    logging::error(&format!("composer player: {reason}"));
+                }
+                window.refresh();
+            },
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, window, _cx| {
+                release_drag(&out_id);
+                window.refresh();
+            },
+        )
+        .on_hover(move |over: &bool, window, _cx| {
+            if note_hover(&hover_id, *over) {
+                window.refresh();
+            }
+        })
+        .child(img(frame).absolute().inset_0().size_full())
+        .child(bounds_probe(painted))
+}
+
+/// The block while its clip is still being made (#3092).
+///
+/// The same glass at the same size as the player it becomes, holding nothing
+/// yet: no mark, no track, no playhead, and a caption that says the length is
+/// unknown. It exists so a voice turn does not sit finished and then grow a clip
+/// out of nowhere ten seconds later. The answer row draws it where the player
+/// will land, at the player's own size and with the same padding the attachment
+/// strip carries, so the swap moves nothing.
+///
+/// No press and no pointer: there is no audio to start, and a control that
+/// answers nothing teaches the reader to stop pressing blocks.
+pub(crate) fn pending(id: &str, max_width: f32) -> impl IntoElement {
+    let state = PlayerState {
+        pending: true,
+        ..PlayerState::default()
+    };
+    let width = player_width(max_width);
+    // One `Arc` for every waiting block, so the frame cache keeps each block
+    // across repaints: a fresh allocation would read as a different take and
+    // restart the highlight from the left edge on every frame.
+    let frame = frame_for(
+        id,
+        Path::new(""),
+        &pending_peaks(),
+        palette::current().amber,
+        width,
+        state,
+        None,
+    );
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .min_w_0()
+        .gap_1()
+        // The same top padding the attachment strip puts above a real player,
+        // so the block does not step down when the audio arrives.
+        .pt_1()
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .w(px(width))
+                .h(px(PLAYER_POINTS.1))
+                .child(img(frame).absolute().inset_0().size_full()),
+        )
+        // The caption a clip of unknown length carries, built by the same
+        // formatter `label` uses, so the block neither changes height nor
+        // changes wording when the audio arrives: only the total stops being
+        // unknown.
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(palette::current().text_muted))
+                .child(SharedString::from(format!("{} / --:--", clip_length(0)))),
+        )
+}
+
+/// The flat peaks a waiting block draws with.
+fn pending_peaks() -> Arc<Vec<f32>> {
+    static PEAKS: std::sync::OnceLock<Arc<Vec<f32>>> = std::sync::OnceLock::new();
+    Arc::clone(PEAKS.get_or_init(|| Arc::new(fallback_peaks(&[]))))
+}
+
+/// The take's position and length, for the caption beside the block.
+pub(crate) fn label(path: &Path, seconds: Option<f32>) -> String {
+    let (position, total) = span_for(path, voice_play::state(path), seconds);
+    let length = total
+        .map(|total| clip_length(total.as_secs()))
+        .unwrap_or_else(|| "--:--".to_string());
+    format!("{} / {length}", clip_length(position.as_secs()))
+}
+
+/// Pool whatever the decoder produced down to the meter's own width, keeping
+/// each bucket's peak so a quiet passage between two loud ones survives.
+pub(crate) fn resample(peaks: &[f32]) -> [f32; VOICE_SAMPLES] {
+    let mut levels = [0.0; VOICE_SAMPLES];
+    if peaks.is_empty() {
+        return levels;
+    }
+    let last = peaks.len() - 1;
+    for (bucket, slot) in levels.iter_mut().enumerate() {
+        let from = (bucket * peaks.len() / VOICE_SAMPLES).min(last);
+        let to = ((bucket + 1) * peaks.len() / VOICE_SAMPLES)
+            .max(from + 1)
+            .min(peaks.len());
+        let peak = peaks[from..to].iter().copied().fold(0.0_f32, f32::max);
+        *slot = peak.clamp(0.0, 1.0);
+    }
+    levels
+}
+
+/// Coverage of a play triangle pointing right, anti-aliased by `feather`.
+fn play_mark(nx: f32, ny: f32, feather: f32) -> f32 {
+    // Signed distances to the two edges that are not the base: the vertical one
+    // at the back, and the sloping pair that meet at the apex. Positive is
+    // inside, so the smaller of the two is the distance to the nearest edge.
+    let back = nx - GLYPH_BASE;
+    let span = GLYPH_HALF_HEIGHT * (GLYPH_APEX - nx) / (GLYPH_APEX - GLYPH_BASE);
+    let side = span - ny.abs();
+    smooth(-feather, feather, back.min(side))
+}
+
+/// Coverage of two pause bars, anti-aliased by `feather`.
+fn pause_mark(nx: f32, ny: f32, feather: f32) -> f32 {
+    let vertical = (GLYPH_HALF_HEIGHT - ny.abs())
+        .min((nx.abs() - GLYPH_BAR_INNER).min(GLYPH_BAR_OUTER - nx.abs()));
+    smooth(-feather, feather, vertical)
+}
+
+/// Coverage of a stop square, anti-aliased by `feather`. The recording strip
+/// ends the take, so its mark says stop rather than play.
+fn stop_mark(nx: f32, ny: f32, feather: f32) -> f32 {
+    let square = GLYPH_STOP - nx.abs().max(ny.abs());
+    smooth(-feather, feather, square)
+}

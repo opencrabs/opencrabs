@@ -8,6 +8,17 @@ use crate::status::help_rows;
 use crate::topic_bar_view::topic_label;
 use crate::window_input::{QUIT_WINDOW, WHEEL_LINE_PX};
 use opencrabs::brain::mission_control::McAnalytics;
+use opencrabs::ui_core::hints::HintState;
+
+/// The card's line, as the window paints it (#3102).
+///
+/// The window reads the line with its id, because the card can be dismissed and
+/// a dismissal names which one. These tests only care about the words, so they
+/// drop the id here rather than reaching into a second door that would have to
+/// be kept in step with the first.
+fn card_line(state: &HintState) -> Option<String> {
+    crate::composer_view::task_hint_for(state).map(|hint| hint.text)
+}
 
 /// A leaf is its own view now (#2805): its state and the transcript it
 /// draws are scanned here, not in the crate root.
@@ -1069,8 +1080,25 @@ fn the_seeker_prints_the_window_only_rows_and_routes_them() {
         "the row targets the field the keyboard owns, not the window's"
     );
     assert!(
-        arm.contains("editor.toggle_dictation(cx)"),
-        "the row starts the same loop the control and the chord start"
+        arm.contains("editor.toggle_dictation(crate::editor::TakeEnd::Park, cx)"),
+        "the row parks the words: a query is worth reading before it runs"
+    );
+    // The chord is the one caller that sends (#3092): the microphone's click
+    // and the block's click park, so the words wait for Enter exactly as they
+    // always did, and only the fast path spends the take.
+    let editor_src = include_str!("../editor.rs");
+    let chord = fn_body(editor_src, "toggle_voice");
+    assert!(
+        chord.contains("self.toggle_dictation(TakeEnd::Send, cx)"),
+        "the chord sends the moment the words land"
+    );
+    assert!(
+        fn_body(editor_src, "mic").contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the idle control parks: a click is not a decision to send"
+    );
+    assert!(
+        fn_body(editor_src, "voice_block").contains("this.toggle_dictation(TakeEnd::Park, cx)"),
+        "the block parks: stopping the take is not sending it"
     );
 
     // The field's own microphone (#3044): the card records in place. It
@@ -1658,6 +1686,80 @@ fn a_topic_chip_answers_the_split_pick() {
 }
 
 #[test]
+fn a_chat_topic_chip_answers_the_split_pick() {
+    // #3097: the rail's chips answered the pick (#2760) but the row at the top
+    // of the chat kept its own path, so a press opened the conversation in the
+    // chat leaf and left the waiting pane armed on a session nobody chose.
+    let src = DASHBOARD;
+    let tabs = fn_body(src, "topic_tabs");
+    assert!(
+        tabs.contains("if this.split_pick.is_some()"),
+        "the chat chip asks whether a pane is waiting"
+    );
+    assert!(
+        tabs.contains("this.choose_split(id, cx)"),
+        "and fills it instead of opening the topic"
+    );
+    assert!(
+        tabs.contains("this.chat_topics_expanded = false"),
+        "the row was expanded to pick with, so the pick folds it back"
+    );
+}
+
+#[test]
+fn the_split_pick_scrim_leaves_the_topic_row_bright() {
+    // #3097: the scrim is `.occlude()`, which blocks the mouse for everything
+    // behind its hitbox, and the row sat inside the band it covered. The row
+    // was therefore dead while a pick waited, and the only way to choose a
+    // topic was the sidebar, which the scrim never covered. The band is
+    // measured now, so a row on any edge keeps its place instead of only the
+    // top one: a side row is centred beside the conversation, so a constant
+    // put the band in the wrong place for every edge but the top.
+    let overlays = include_str!("../overlays.rs");
+    let scrim = fn_body(overlays, "split_pick_overlay");
+    assert!(
+        scrim.contains("hole: Option<topic_tabs::StripRect>"),
+        "the scrim is told where the row it has to leave alone actually sat"
+    );
+    assert!(
+        scrim.contains("topic_tabs::scrim_band(hole, f32::from(rail_px))"),
+        "and asks the shared band function which way to split"
+    );
+    assert!(
+        scrim.contains(".when(vertical, |d| d.flex_row())"),
+        "a side row splits the scrim left to right"
+    );
+    assert!(
+        scrim.contains(".when(!vertical, |d| d.flex_col())"),
+        "a top or bottom row splits it top to bottom"
+    );
+    // A band that blocked the mouse would leave the row as dead as before.
+    let band = fn_body(overlays, "pick_row");
+    assert!(
+        !band.contains(".occlude()"),
+        "the bright band must not take the pointer"
+    );
+    assert!(
+        !band.contains(".bg("),
+        "and must not dim the row it exists to leave bright"
+    );
+    // The render measures the row rather than deriving it.
+    let render = dashboard_render(DASHBOARD);
+    assert!(
+        render.contains("on_children_prepainted({"),
+        "the row records where it landed on each paint"
+    );
+    assert!(
+        render.contains("let pick_hole = if split_draws_its_own"),
+        "a split's own strips take a constant, the window row its measurement"
+    );
+    assert!(
+        render.contains("split_pick_overlay(layout, rail_px, pick_hole)"),
+        "and the measured band is handed to the scrim"
+    );
+}
+
+#[test]
 fn the_seeker_and_the_filter_answer_the_split_pick() {
     // #2760: the Seeker's OpenSession arm and the rail filter's Enter both
     // opened directly, so a pick from either left the waiting pane armed.
@@ -1680,18 +1782,29 @@ fn a_split_keeps_the_topics_bar_on_the_pane_that_carries_it() {
     // topics repeated one bar per pane and each bar claimed topics that
     // belong to a different pane.
     let src = DASHBOARD;
-    // The rule reads `pane_topics`, where the strip is gated, so the scan
-    // takes that body instead of hoping the concat happens to spell the
-    // condition the way an older revision did (#3060).
-    let pane = fn_body(src, "pane_topics");
-    let flat: String = pane.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The rule reads `pane_carries_topics`, where the strip is gated, so the
+    // scan takes that body instead of hoping the concat happens to spell the
+    // condition the way an older revision did (#3060). The predicate moved out
+    // of `pane_topics` so the split pick's scrim can ask the same question
+    // (#3097): a band left bright over a row that is not drawn is a stripe
+    // across the chat.
+    let carries = fn_body(src, "pane_carries_topics");
+    let flat: String = carries.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("let carries_topics = leaves.len() == 1 || pane_root == session;"),
         "only the pane carrying the topics draws the strip"
     );
     assert!(
-        flat.contains("if !carries_topics || !self.sessions.is_topic_enabled(pane_root)"),
+        flat.contains("carries_topics && self.sessions.is_topic_enabled(pane_root)"),
         "and the strip is gated on it"
+    );
+    assert!(
+        flat.contains("&& self.family_has_topics(pane_root)"),
+        "a family with no topics left carries no strip (#2863)"
+    );
+    assert!(
+        fn_body(src, "pane_topics").contains("if !self.pane_carries_topics(session)"),
+        "the strip itself asks the shared predicate"
     );
 }
 
@@ -1771,13 +1884,13 @@ fn a_split_pane_draws_the_plans_density_shape() {
         .and_then(|rest| rest.split("\n}\n").next())
         .expect("panes body");
     assert!(
-        body.contains("self.plan.pane_view(density, expanded)"),
+        body.contains("self.plan.pane_view(density, expanded, window)"),
         "the chat leaf in a split draws the compact strip"
     );
     // A split pane builds its own strip in its own render (#2805), so the
     // density shape is read where that leaf draws.
     assert!(
-        PANE_VIEW.contains("self.plan.pane_view(density, expanded)"),
+        PANE_VIEW.contains("self.plan.pane_view(density, expanded, window)"),
         "every pane draws the compact strip"
     );
     assert!(
@@ -1793,7 +1906,7 @@ fn a_split_pane_draws_the_plans_density_shape() {
         "a click expands the checklist for that pane alone"
     );
     assert!(
-        !body.contains(".plan.view()"),
+        !body.contains(".plan.view(window)"),
         "no split pane draws the full checklist"
     );
 }
@@ -1864,10 +1977,18 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
     // inside give the room and nothing paints past the pane's bottom edge.
     // #2985 moved the floor onto the wrapper, so the body chain carries
     // `min_h(px(CONVERSATION_FLOOR))` rather than `min_h_0` (#3000).
+    // #3119 spends the transcript's own 8px between the conversation and the
+    // cards under it, so the gap is part of the chain the pin holds. It is
+    // asserted as two runs because the comment explaining the gap sits inside
+    // the chain, and a flattened region keeps its comments.
     let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        flat.contains(".flex_shrink() .min_h_0() .min_w_0() .overflow_hidden() .child(chrome),"),
+        flat.contains(".flex_shrink() .min_h_0() .min_w_0()"),
         "the chrome stack is not shrinkable"
+    );
+    assert!(
+        flat.contains(".pt_2() .overflow_hidden() .child(chrome),"),
+        "the stack does not carry the gap above the cards, or does not clip what does not fit"
     );
     assert!(
         flat.contains(
@@ -1881,90 +2002,255 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
     );
 }
 
-/// The composer's hint names the keys that work in the state on screen, so
-/// the queue's instructions sit under the caret instead of in the card
-/// (#2630).
+/// The field keeps the two keys that act on it, and the card above carries the
+/// work instead (#3102).
+///
+/// These two never merge. Esc stops the turn being written into the field and
+/// the chord records a message into it, so they belong where the caret is. The
+/// card has an intent of its own: what the screen is asking for right now.
 #[test]
-fn the_composer_hint_names_the_queue_while_a_turn_runs() {
-    assert_eq!(
-        composer_hint_for(false, 0, false).as_ref(),
-        "Talk to the crab… · /voice sets up the mic",
-        "an idle composer without an engine points at the command that sets one up"
-    );
-    let running = composer_hint_for(true, 0, false);
+fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
+    let render = include_str!("../dashboard_render.rs");
     assert!(
-        running.contains("esc") && running.contains("queues"),
-        "a running turn says Esc stops it and Enter queues: {running}"
+        render
+            .contains("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement"),
+        "the card is a card of its own, drawn from the hint it carries"
     );
-    let queued = composer_hint_for(true, 2, false);
+    // The composer's shell is the field and its footer, and nothing else: a
+    // line of advice welded to the top of the box you type into reads as part
+    // of the input, and it had no way to be answered.
     assert!(
-        queued.contains("queued 2"),
-        "the count is on screen: {queued}"
+        render.contains("let shell = div()"),
+        "the shell holds the field and the footer only"
     );
     assert!(
-        queued.contains('↑') && queued.contains("esc"),
-        "Up edits a queued message and Esc flushes it: {queued}"
+        !render.contains("shell = shell.child(hint_card"),
+        "and the card is no longer a strip of the composer's own box"
+    );
+    // The card OPENS the stack above the composer, directly under the last
+    // card of the conversation (#3124). It used to close it, under the plans,
+    // the queue and the offers, and a tip printed under a plan read as advice
+    // about the plan: the line comments on the turn that just finished, so it
+    // belongs under that turn, and everything below it is about what is
+    // waiting to happen next.
+    let card = render
+        .find("if let Some(hint) = self.task_hint()")
+        .expect("the card is drawn from the hint the screen is showing");
+    let card = &render[card..];
+    let card = card
+        .split("above_used = true;")
+        .next()
+        .expect("the card is one row of the stack");
+    assert!(
+        card.contains("session_row(") && card.contains("hint_card(&hint, cx)"),
+        "the card takes the conversation's column, like every strip above it: {card}"
+    );
+    // The order is the point of #3124: the hint sits above the plan card, not
+    // under it. Both are found in the render, and the hint comes first.
+    let hint_at = render
+        .find("if let Some(hint) = self.task_hint()")
+        .expect("the hint block");
+    let plan_at = render
+        .find("let open = self.chat_session;")
+        .expect("the plan block");
+    assert!(
+        hint_at < plan_at,
+        "the hint is drawn under the conversation and above the plan card"
+    );
+    // The shell owns the single edge and the single curve (#3114): the composer
+    // is a card of a message's size, and it is now the only thing in that box.
+    let shell = &render[render
+        .find("let shell = div()")
+        .expect("the composer still builds a shell")..];
+    let shell = shell
+        .split("col = col.child(")
+        .next()
+        .expect("the shell ends where it joins the column");
+    assert!(
+        shell.contains(".border_1()"),
+        "one edge for the field and its footer: {shell}"
+    );
+    assert!(
+        shell.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "and the messages' curve, so the card matches the bubbles: {shell}"
+    );
+    // The dock lost the surface it used to paint (#2987): the shell owns it, so
+    // there is exactly one card on screen.
+    let dock = render
+        .split("let dock = div()")
+        .nth(1)
+        .expect("the composer dock is still built");
+    let dock = dock
+        .split(".child(composer)")
+        .next()
+        .expect("the dock still starts with the field");
+    assert!(
+        !dock.contains("glass_fill"),
+        "the dock paints no surface of its own: the shell above owns it"
+    );
+    assert!(
+        !dock.contains(".rounded("),
+        "and no radius of its own, or the two corners would fight"
+    );
+    // The field's own hint still reaches every composer, panes included.
+    assert!(
+        include_str!("../editor.rs").contains("fn set_placeholder("),
+        "the field still paints its own hint"
+    );
+    assert!(
+        include_str!("../chat_leaf.rs").contains("fn sync_composer_hint("),
+        "and the window still paints it on the field and every pane"
+    );
+    // The card never repeats them: a line already on screen does not need a
+    // second home.
+    let quiet = card_line(&HintState::default());
+    assert!(
+        quiet.is_none(),
+        "a quiet conversation paints no card at all: {quiet:?}"
     );
 }
 
-/// The idle hint offers the microphone the composer can actually serve
-/// (#3044): the chord once an engine is configured, the setup command when
-/// there is none, and never both at the same time.
+/// The card has an intent: one line naming what the screen is asking for, and
+/// nothing else (#3102).
+///
+/// It is not a rotation. A line that changes on its own reads as noise, because
+/// the reader cannot tell a new fact from the same fact coming round again.
 #[test]
-fn the_composer_hint_offers_the_microphone_only_when_it_works() {
-    let ready = composer_hint_for(false, 0, true);
+fn the_card_says_what_the_screen_is_asking_for() {
+    // An offer waiting is the most actionable thing on screen, and the arrows
+    // reach it instead of the composer history.
+    let offered = card_line(&HintState {
+        offers: 1,
+        ..HintState::default()
+    })
+    .expect("an offer on screen earns the card");
+    assert!(
+        offered.contains('↑') && offered.contains("enter sends"),
+        "the card says how to reach the offer: {offered}"
+    );
+    // The card holds the keyboard while it is focused, so it has to name the
+    // way back out or the reader is stuck with Esc and a guess (#3114).
+    assert!(
+        offered.contains("esc back to the field"),
+        "and how to leave it: {offered}"
+    );
+
+    let many = card_line(&HintState {
+        offers: 3,
+        ..HintState::default()
+    })
+    .expect("three offers");
+    assert!(
+        many.contains('↓') && many.contains('3'),
+        "a list is walked both ways and says how long it is: {many}"
+    );
+    assert!(
+        many.contains("past the last") && many.contains("esc back to the field"),
+        "the end of the list is a door, and the card says so: {many}"
+    );
+
+    // The rail holds the keyboard, so the card names its keys and nothing the
+    // composer would never receive.
+    let rail = card_line(&HintState {
+        rail_focused: true,
+        offers: 2,
+        ..HintState::default()
+    })
+    .expect("the rail always has something to say");
     assert_eq!(
-        ready, "Talk to the crab… · ctrl+alt+r to record, same key to stop",
-        "a configured window names the chord and what it does"
+        rail, "type to filter · enter opens · esc back · the list will not read itself",
+        "the list outranks the offer, because it owns the keys"
     );
-    assert!(
-        ready.contains("same key to stop"),
-        "the one key both starts and stops the take: {ready}"
+
+    // A split pick reads the same keys for a different promise, and it ends on
+    // the line the shared hint carries, not on the shorter one it replaced
+    // (#3124): the card draws `task_line_hint` verbatim.
+    let split = card_line(&HintState {
+        rail_focused: true,
+        rail_split: true,
+        ..HintState::default()
+    })
+    .expect("a split pick");
+    assert_eq!(
+        split, "type to find · enter splits · esc cancels · yes, you can have two",
+        "one word apart is the difference between a shortcut and a surprise"
     );
+
+    // A queue is the field's, so the card stays empty while a turn runs: the
+    // same number in two places is one sentence drawn twice (#3124).
+    // Nothing is suggested while the answer is still being written: the field
+    // already says Esc stops it.
+    let busy = card_line(&HintState {
+        processing: true,
+        ..HintState::default()
+    });
     assert!(
-        !ready.contains("/voice"),
-        "a working microphone never points the reader at setup: {ready}"
+        busy.is_none(),
+        "a running turn leaves the card to the field, which says Esc stops: {busy:?}"
+    );
+}
+
+/// The card never repeats what the field already says, so the two keys that
+/// act on the field appear in exactly one place (#3102).
+#[test]
+fn the_card_never_repeats_the_fields_own_keys() {
+    let states = [
+        HintState::default(),
+        HintState {
+            processing: true,
+            ..HintState::default()
+        },
+        HintState {
+            offers: 2,
+            ..HintState::default()
+        },
+        HintState {
+            rail_focused: true,
+            ..HintState::default()
+        },
+        HintState {
+            turns: 40,
+            update_version: Some("0.7.0".to_string()),
+            ..HintState::default()
+        },
+    ];
+    for state in &states {
+        let Some(line) = card_line(state) else {
+            continue;
+        };
+        assert!(
+            !line.contains("ctrl+alt+r"),
+            "the recording chord lives in the field, not on the card: {line}"
+        );
+        assert!(
+            !line.contains("esc stops"),
+            "so does Esc stopping the turn: {line}"
+        );
+    }
+}
+
+/// The field's own hint still names both keys, and the microphone it offers is
+/// the one the window can actually serve (#3044, #3102).
+#[test]
+fn the_field_hint_names_the_two_keys_that_act_on_it() {
+    let busy = composer_hint_for(true, 0, true);
+    assert!(
+        busy.contains("esc stops") && busy.contains("typing queues"),
+        "a running turn says Esc stops it and that typing is not lost: {busy}"
+    );
+    let ready = composer_hint_for(false, 0, true);
+    assert!(
+        ready.contains("ctrl+alt+r") && ready.contains("same key to send"),
+        "a configured window names the chord and what it does: {ready}"
     );
     let cold = composer_hint_for(false, 0, false);
-    assert_eq!(
-        cold, "Talk to the crab… · /voice sets up the mic",
-        "an unconfigured window names the only command that helps"
+    assert!(
+        cold.contains("/voice") && cold.contains("settings"),
+        "an unconfigured window names the settings screen for what it is: {cold}"
     );
     assert!(
         !cold.contains("ctrl+alt+r"),
         "a chord that would only print an error is not offered: {cold}"
-    );
-    for hint in [ready, cold] {
-        assert!(
-            hint.starts_with("Talk to the crab…"),
-            "the product's own prompt still leads the line: {hint}"
-        );
-    }
-    // A running turn keeps its keys: the microphone waits for the field.
-    assert_eq!(
-        composer_hint_for(true, 0, true),
-        composer_hint_for(true, 0, false),
-        "a busy composer says how to stop, not how to dictate"
-    );
-}
-
-/// A hint is a placeholder, never a control: with anything typed the field
-/// shows the draft and the hint is gone (#2630).
-#[test]
-fn the_hint_never_survives_a_draft() {
-    let editor = include_str!("../editor.rs");
-    assert!(
-        editor.contains("let display = if empty { placeholder } else { content };"),
-        "the field paints the placeholder only while it is empty"
-    );
-    assert!(
-        editor.contains("hsla_from(palette::current().text_faint)"),
-        "the hint is the faint colour, not the text colour"
-    );
-    assert_eq!(
-        composer_hint_for(false, 0, false).as_ref(),
-        "Talk to the crab… · /voice sets up the mic",
-        "an empty idle field keeps the product's own prompt, then the way to the mic"
     );
 }
 
@@ -3501,11 +3787,11 @@ fn a_side_strip_centres_with_the_pane_it_belongs_to() {
         !side.contains("root = root.child(strip)"),
         "the strip is never a root sibling of the pane again"
     );
-    // The column pads itself with `px_6` a side, so its own width is the
-    // measure plus 3rem. Capping it there puts its children back on the
+    // The column pads itself with `px_4` a side, so its own width is the
+    // measure plus 2rem. Capping it there puts its children back on the
     // axis they always centred on.
     assert!(
-        side.contains("chat_measure_px + 3.0 * self.rem"),
+        side.contains("chat_measure_px + 2.0 * self.rem"),
         "the cap is the measure plus the column's own padding"
     );
     assert!(
@@ -3583,5 +3869,39 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
     assert!(
         notice.contains("rearm_pane_follow(session, cx)"),
         "a pane's own transcript is scrolled into view too"
+    );
+}
+
+/// The composer is a card, and the ground under it is square (#3114).
+///
+/// #3112 took the composer edge to edge and flat, and took the session surface
+/// with it: the ground is the whole shot now, so it carries no corner. The owner
+/// then sent the composer back to a card the size of a message, which is where
+/// the two shapes part company: the card has a curve because it floats on the
+/// ground, and the ground has none because it IS the window.
+#[test]
+fn the_composer_is_a_card_on_a_square_ground() {
+    let render = include_str!("../dashboard_render.rs");
+    let shell = &render[render
+        .find("let shell = div()")
+        .expect("the composer still builds a shell")..];
+    let shell = shell
+        .split("col = col.child(")
+        .next()
+        .expect("the shell ends where it joins the column");
+    assert!(
+        shell.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "the card wears the messages' curve, not a flat edge: {shell}"
+    );
+    let surface = &render[render
+        .find("let mut session = div()")
+        .expect("the chat builds a session surface")..];
+    let surface = surface
+        .split(".overflow_hidden();")
+        .next()
+        .expect("the surface clips");
+    assert!(
+        !surface.contains(".rounded("),
+        "the ground is the shot, so it carries no corner either: {surface}"
     );
 }

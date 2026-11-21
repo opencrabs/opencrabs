@@ -167,10 +167,27 @@ pub(crate) struct Dashboard {
     /// The window's rem size in px. The zoom keys move it and every
     /// rem-based length in the theme follows.
     pub(crate) rem: f32,
+    /// The frame the window is showing (#3082), recorded on every paint because
+    /// that is the only place the window is in hand. `poll` writes it once it
+    /// stops moving, and `persist_layout` carries it with the pane tree.
+    pub(crate) window_frame: Option<layout_store::WindowState>,
+    /// The frame `poll` saw on its previous tick. A drag produces a new frame
+    /// on every paint, so the write waits for two ticks to agree before it
+    /// happens: one write at the end of a drag instead of twenty a second.
+    pub(crate) window_frame_seen: Option<layout_store::WindowState>,
+    /// The frame already on disk, so a settled window costs no write at all.
+    pub(crate) window_frame_saved: Option<layout_store::WindowState>,
     /// Ledger path resolved once at startup, before the window opens.
     /// Period fetches reuse it; they never re-read the config, because
     /// tiny-stack background threads must not run `Config::load`.
     pub(crate) db_path: std::path::PathBuf,
+    /// The hint ids the reader has hidden, read once at startup and appended
+    /// to on each dismissal (#3121).
+    ///
+    /// Held here rather than queried per frame: the engine asks on every
+    /// repaint which lines may print, and a database read behind a paint is a
+    /// stutter the reader would feel as the window thinking.
+    pub(crate) hint_dismissed: Vec<String>,
     /// The session rail's live state.
     pub(crate) sessions: sessions::SessionsState,
     /// Which rail rows have work in flight, and which plans wait (#2636).
@@ -221,12 +238,6 @@ pub(crate) struct Dashboard {
     /// a picker, not a setting, so it folds itself after a bounded idle period
     /// instead of staying open until the window restarts.
     pub(crate) rail_chips_expanded: std::collections::HashMap<Uuid, std::time::Instant>,
-    /// The conversations whose turn is running a voice message (#3044). A turn
-    /// started from a recording is answered with speech once it settles, the
-    /// way a channel answers a voice note, and this is how the settle knows
-    /// which turns those are: the transcript is ordinary text by the time it
-    /// reaches the bridge, and nothing downstream can tell it apart from typing.
-    pub(crate) voice_turns: std::collections::HashSet<Uuid>,
     /// The last voice state the window painted (#3054): active playback and
     /// waveform loads. The poll compares one snapshot, so position changes
     /// and completed background decodes both reach the visible previews.
@@ -316,6 +327,13 @@ pub(crate) struct Dashboard {
     pub(crate) pane_drop: Option<(Uuid, DropHalf)>,
     /// The layout a split is waiting on a session for; the sidebar picks it (#2438).
     pub(crate) split_pick: Option<Layout>,
+    /// Whether the pick is what opened the sidebar (#3104).
+    ///
+    /// The pick needs the rail up to name a session, so a closed rail opens for
+    /// it. Only that opening is undone when the pick lands: a rail the user
+    /// opened themselves, or one a row menu and the Seeker split into, stays
+    /// open because closing it would take away something they asked for.
+    pub(crate) split_opened_rail: bool,
     /// A split's new session is being created, so the created row fills the pane.
     pub(crate) split_creating: bool,
     /// The row whose message menu is open (#2613). One at a time, like the
@@ -484,6 +502,12 @@ pub(crate) struct Dashboard {
     pub(crate) pane_warning: Option<String>,
     /// Which side of the chat the topic row sits on (#2402).
     pub(crate) topic_edge: topic_tabs::Edge,
+    /// Where the chat's topic row landed on the last paint, in window
+    /// coordinates (#3097). A split pick's scrim leaves that band bright so a
+    /// press reaches a chip on any edge, and it is measured rather than
+    /// derived because a side row is centred beside the conversation, so no
+    /// constant knows where it starts.
+    pub(crate) topic_strip_rect: std::rc::Rc<std::cell::RefCell<Option<topic_tabs::StripRect>>>,
     /// Whether the chat's topic row shows its whole family (#2949). The row
     /// folds past `BAR_TOPICS_SHOWN` and prints a pill; the pill was a label,
     /// so the folded topics could only be reached from the rail. A press
@@ -613,6 +637,11 @@ pub(crate) struct Dashboard {
     /// The session whose task list holds the keyboard, after Down from its
     /// composer. The row the keys stand on is that session's `task_open`.
     pub(crate) task_focus: Option<Uuid>,
+    /// The follow-up offer holding the keyboard, after Up from a composer with
+    /// an offer waiting (#3101): the session it belongs to and the row the
+    /// keys stand on. One at a time, because the caret is in one place; `None`
+    /// while the field has it.
+    pub(crate) options_focus: Option<(Uuid, usize)>,
     /// The task whose output is showing, per session.
     pub(crate) task_open: HashMap<Uuid, Uuid>,
     /// The last output read for an open task, with when it was read and the
@@ -628,11 +657,14 @@ pub(crate) struct Dashboard {
     /// Bumped on every open, so the repaint loop of a view that was closed
     /// and reopened ends instead of doubling up.
     pub(crate) task_detail_generation: u64,
-    /// Plan tasks whose completion already rang (#2691). One set for the
-    /// whole window, shared by the window strip and every pane strip, so a
-    /// plan drawn in two places rings once. The terminal keeps the same
-    /// single set (`tui::app::state::announced_task_completions`).
-    pub(crate) announced_task_completions: std::collections::HashSet<Uuid>,
+    /// Plan tasks whose settle already reached the rail flash (#2691),
+    /// durable across launches and keyed by session (#3004). One ledger for
+    /// the whole window, shared by the window strip and every pane strip, so a
+    /// plan drawn in two places flashes once. The terminal keeps its own
+    /// ledger over the same file (`utils::settle_ledger`), and each write
+    /// merges with what is on disk, so the two surfaces cannot erase each
+    /// other's records.
+    pub(crate) settle_ledger: opencrabs::utils::settle_ledger::SettleLedger,
     /// Until when each session's rail plan bar stays flashing orange, per
     /// session, keyed by the plan's own session id (#2701 follow-up).
     ///
@@ -704,6 +736,14 @@ pub(crate) struct Dashboard {
     /// screen and restores the destination's, and the window never has to
     /// guess which conversation a card belongs to.
     pub(crate) stashed: std::collections::HashMap<Uuid, chat_leaf::Turn>,
+    /// Sessions whose spoken reply is being made right now (#3092).
+    ///
+    /// The turn has settled and its card is on screen, and the clip is still a
+    /// network round trip away. Kept on the window rather than on the card
+    /// because the reload that follows `Done` rebuilds every card, so a flag
+    /// living on one of them would be erased by the next read. A split leaf
+    /// reads the same set, so a pane's card says it too.
+    pub(crate) voice_pending: std::collections::HashSet<Uuid>,
     /// The open conversation's context window: the compaction budget the
     /// service actually enforces for it, not a hardcoded 200K.
     pub(crate) ctx_max: u32,

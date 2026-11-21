@@ -61,6 +61,7 @@ mod editor;
 mod fonts;
 mod help_view;
 mod hint;
+mod hint_dismiss;
 mod icon;
 mod launch;
 mod layout_store;
@@ -95,6 +96,7 @@ mod rail_activity;
 // The rail is an entity of its own (#2933): its rows, chips, badges and
 // filter menu are built once per frame it is handed, and a frame that matches
 // the last one replays the prepaint instead of rebuilding every listener.
+mod composer_orb;
 mod rail_view;
 mod screen_keys;
 mod seeker_orb;
@@ -127,11 +129,10 @@ mod voice_media;
 mod voice_play;
 mod voice_preview;
 mod window_controls;
+mod window_geometry;
 mod window_input;
 
-use crate::composer_view::{
-    command_popup_view, composer_hint_for, emoji_popup_view, options_strip, queue_strip,
-};
+use crate::composer_view::{command_popup_view, emoji_popup_view, options_strip, queue_strip};
 use crate::dashboard_panes::{DividerDrag, PaneDrag, PaneGhost, splitter};
 use crate::dashboard_rail::{RAIL_DEFAULT_REM, RAIL_MAX_REM, RAIL_MIN_REM};
 use crate::dashboard_state::{Dashboard, FooterPlace, Screen, SendOrigin};
@@ -200,7 +201,7 @@ use opencrabs::ui_core::commands as slash;
 // The Seeker engine: ranking, keywords and state, shared with the terminal
 // so both clients print the same rows in the same order (#2458). Named `find`
 // because `palette` here is the window's colour table.
-use opencrabs::ui_core::card::{CARD_RADIUS, COMPOSER_RADIUS, glass_fill};
+use opencrabs::ui_core::card::{CARD_RADIUS, glass_fill, session_edge};
 use opencrabs::ui_core::palette::{
     self as find, Channel, PaletteAction, PaletteItem, PaletteKind, PaletteState,
 };
@@ -211,12 +212,11 @@ use opencrabs::ui_core::help_keys;
 use futures::channel::oneshot;
 
 use gpui::{
-    AnyElement, AnyView, App, Application, Bounds, ClickEvent, ClipboardItem, Context, Div,
-    DragMoveEvent, Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, div, point, prelude::*, px, rems, rgb,
-    rgba, size,
+    AnyElement, AnyView, App, Application, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent,
+    Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, ScrollDelta,
+    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowOptions, div, point, prelude::*, px, rems, rgb, rgba,
 };
 // The decoration request is Linux-only (#2813): every other platform keeps the
 // server-side decorations its window manager already draws.
@@ -240,7 +240,9 @@ use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
 use opencrabs::ui_core::usage::loader::usage_view;
 use opencrabs::ui_core::usage::view_model::UsageViewModel;
-use opencrabs::ui_core::window_controls::{PLATFORM_DRAWS_CAPTION, effective_decorations};
+use opencrabs::ui_core::window_controls::{
+    TITLEBAR_APPEARS_TRANSPARENT, effective_decorations, platform_draws_caption,
+};
 
 fn main() {
     app::run();

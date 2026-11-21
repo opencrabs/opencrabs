@@ -231,8 +231,13 @@ pub(crate) async fn deliver_final_response(
             // response (classic HTML edit/send, or table-free rich message).
             // render_suggestions attaches its keyboard to THIS bubble when Some.
             let mut final_bubble: Option<super::state::MergeBubble> = None;
+            // A voice turn answers twice: the full report in text, and one
+            // short block for the ear (#3092). The split happens here, before
+            // anything else reads the answer, so the block can never reach the
+            // bubble, the stored row, or the photo scan.
+            let (answer, spoken) = crate::channels::voice::spoken::split(&response.content);
             // Extract <<IMG:path>> markers — send each as a Telegram photo.
-            let (text_only, img_paths) = crate::utils::extract_img_markers(&response.content);
+            let (text_only, img_paths) = crate::utils::extract_img_markers(&answer);
             // Strip LLM-hallucinated artifacts (<!-- tools-v2 -->, XML tool blocks)
             let text_only = crate::utils::sanitize::strip_llm_artifacts(&text_only);
             let text_only = redact_secrets(&text_only);
@@ -1323,11 +1328,24 @@ pub(crate) async fn deliver_final_response(
 
             // If input was voice AND TTS is enabled, also send voice note after text
             if is_voice && voice_config.tts_enabled {
+                // What gets read aloud is the block, never the report. A model
+                // that forgot the block still gets a voice answer: the first
+                // paragraph is the lead, which is the closest thing to a
+                // summary the answer has.
+                let speech = match spoken {
+                    Some(text) => text,
+                    None => {
+                        tracing::warn!(
+                            "Telegram: voice turn carried no spoken block, reading the first paragraph"
+                        );
+                        crate::channels::voice::spoken::first_paragraph(&answer)
+                    }
+                };
                 tracing::info!(
                     "Telegram: TTS requested — synthesizing response text (len={})",
-                    response.content.len()
+                    speech.len()
                 );
-                match crate::channels::voice::synthesize(&response.content, voice_config).await {
+                match crate::channels::voice::synthesize(&speech, voice_config).await {
                     Ok(audio_bytes) => {
                         tracing::info!(
                             "Telegram: TTS succeeded — {} bytes of audio, sending to chat {}",

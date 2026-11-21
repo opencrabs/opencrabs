@@ -38,6 +38,14 @@ exclude = [
     "src/assets/splash.png",
     "src/assets/opencrabs-xiaomi-mimo-collab.png",
     "src/assets/opencrabs-logo.jpg",
+    # Brand art for posts and memes. The transparent-background logo is the
+    # source image those are made from, never a byte the crate compiles: no
+    # include_bytes! names it, and the only reference in the tree is a test
+    # asserting the sessions rail does NOT use it. It is 146 KiB of the
+    # budget for nothing, and the voice work this batch added pushed the
+    # packaged crate 9,345 bytes past the 10 MB line. Same class as the logo
+    # above: kept in the repository, out of the published crate.
+    "src/assets/opencrabs-logo-no-bg.png",
 ]
 
 [dependencies]

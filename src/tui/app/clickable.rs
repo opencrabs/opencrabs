@@ -13,9 +13,17 @@ use std::path::Path;
 use crate::ui_core::links::ClickTarget;
 
 /// Resolve the openable token at `col`, a character index into the rendered
-/// line, against the process cwd and the user's home directory.
-pub(crate) fn target_at(line: &str, col: usize) -> Option<ClickTarget> {
-    crate::ui_core::links::target_at(line, col)
+/// line, against the session's working directory, the process cwd and the
+/// user's home directory (#2846).
+///
+/// The session directory comes first because the terminal can be launched from
+/// anywhere, and the transcript names files relative to the conversation, not
+/// to the shell that started it. The process cwd stays as the second root so a
+/// session that never moved still resolves exactly as it did.
+pub(crate) fn target_at(line: &str, col: usize, session_dir: &Path) -> Option<ClickTarget> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let roots = [session_dir, cwd.as_path()];
+    crate::ui_core::links::target_at_roots(line, col, &roots, dirs::home_dir().as_deref())
 }
 
 /// Launch the target with the system default handler, detached (#2170).

@@ -74,6 +74,12 @@ impl Dashboard {
         // A send ends that pane's offer, the same rule the window's own
         // composer follows (#2708).
         agent_bridge::options_take(session);
+        // And the ring that was standing on it: leaving the index behind would
+        // let a later offer steal the keyboard without anyone pressing up
+        // (#3101).
+        if self.options_focus.map(|(sid, _)| sid) == Some(session) {
+            self.options_focus = None;
+        }
         // A slash line is a screen command: `/help`, `/models` and `/sessions`
         // read and write the window's own chrome, so they run there and the
         // leaf is left where it is. A prompt is the pane's own turn (#2614).
@@ -154,16 +160,14 @@ impl Dashboard {
         // Attachments are tracked against the pane's session, so the file
         // lands in that conversation's artifacts, exactly as the window's does.
         let attached = editor::marker_paths(&original);
-        // A turn that began as a recording is answered with speech when it
-        // settles (#3044), so the settle has to know which turns those are.
-        if voice.is_some() {
-            self.voice_turns.insert(session);
-        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             session,
             text,
             display,
+            // A turn that began as a recording is answered with speech when it
+            // settles (#3044), and the turn carries that fact itself (#3096).
+            voice.is_some(),
             self.sink.clone(),
             cancel,
         );
@@ -395,6 +399,10 @@ impl Dashboard {
             session,
             joined.context_text,
             Some(joined.display_text),
+            // A flushed queue is typed text: the take behind it was sent long
+            // before, and a queue that speaks would answer words nobody spoke
+            // (#3096).
+            false,
             self.sink.clone(),
             cancel,
         );
@@ -550,6 +558,11 @@ impl Dashboard {
         // stale follow-up into it.
         if let Some(sid) = self.chat_state.session() {
             agent_bridge::options_take(sid);
+            // The keyboard's ring goes with it, or the next offer would arrive
+            // already holding keys nobody handed it (#3101).
+            if self.options_focus.map(|(focused, _)| focused) == Some(sid) {
+                self.options_focus = None;
+            }
         }
         // The composer the text came from: when it sends a recalled message,
         // that message leaves the queue with the text while the rest of its
@@ -620,8 +633,7 @@ impl Dashboard {
             self.finish_recall(&sent_from, cx);
             // The composer now says a message is waiting on the turn, the
             // moment it is queued rather than on the next turn event (#2630).
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         }
@@ -631,8 +643,7 @@ impl Dashboard {
             self.composer
                 .unsent
                 .push(Self::pending_message(text, display.clone()));
-            let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-            self.composer.sync_composer_hint(hint, &panes, cx);
+            self.sync_composer_hint(cx);
             cx.notify();
             return;
         };
@@ -662,24 +673,21 @@ impl Dashboard {
         // (#2637).
         self.finish_recall(&sent_from, cx);
         self.turn.busy = true;
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
+        self.sync_composer_hint(cx);
         let cancel = tokio_util::sync::CancellationToken::new();
         self.turn.cancel = Some(cancel.clone());
         // Attachments are tracked against the session the same way the TUI
         // does it (`FileService::get_or_create_file`), so the file lands in
         // the session's artifacts, not just in the message text.
         let attached = editor::marker_paths(&original);
-        // A turn that began as a recording is answered with speech when it
-        // settles (#3044).
-        if voice.is_some() {
-            self.voice_turns.insert(sid);
-        }
         agent_bridge::spawn_turn(
             bridge.service.clone(),
             sid,
             text,
             display,
+            // Same rule as the pane path: the turn says whether it was spoken,
+            // and nothing outside it remembers (#3096).
+            voice.is_some(),
             self.sink.clone(),
             cancel,
         );
@@ -971,10 +979,24 @@ impl Dashboard {
         // the file and published it to `Config::current()`, so this tick only
         // re-derives the values the window cached at boot.
         self.drain_config_reloads(cx);
+        // Report window focus to the notification transport (#3005). Nothing
+        // in the GUI ever called `set_surface_focused`, so the transport read
+        // "unknown", and `should_raise` treats unknown as "the user is not
+        // looking": every event raised a banner, including the ones for work
+        // that settled while the window sat frontmost. `active_window` is the
+        // platform's main window, which is nil whenever another application
+        // holds focus, so its presence is the same signal the TUI reports from
+        // its focus events. Sampled every tick instead of wired to a callback
+        // because gpui hands the dashboard no activation event, and a relaxed
+        // atomic store twenty times a second costs nothing.
+        opencrabs::utils::desktop_notify::set_surface_focused(cx.active_window().is_some());
         // One clock for the whole tick (#2899): the checks below that cost a
         // file read or a bridge lock answer a question a repaint asks, so they
         // run on the repaint cadence and their answer is reused in between.
         self.poll_tick = self.poll_tick.wrapping_add(1);
+        // A frame that stopped moving gets written once (#3082). Sits above the
+        // early returns because an idle window is exactly when a drag ends.
+        self.settle_window_frame();
         // Playback and background waveform decoding leave no event behind
         // (#3054). One snapshot covers position, pause, completion and the
         // pending visual count, so the dashboard paints exactly when either
@@ -1043,6 +1065,10 @@ impl Dashboard {
             }
             if self.turn.busy
                 || pane_busy
+                // A clip being made is work in flight with no event to carry
+                // it (#3092): the card's speaking segment has to keep blinking
+                // for however long synthesis takes.
+                || !self.voice_pending.is_empty()
                 // A rail flash is an animation of its own: the plan bar has to
                 // keep alternating orange and its resting colour while the
                 // window is open, and stop the moment it closes. The window
@@ -1054,8 +1080,15 @@ impl Dashboard {
                 // branch, so they repaint on a slower cadence than the poll
                 // itself. At 20 Hz this walked every pane's transcript five
                 // times as often as the animation needed (#2688).
+                //
+                // A clip being made is the exception (#3092): its highlight
+                // travels on the clock alone, and at a fifth of the poll it
+                // moved further than its own width between frames, which reads
+                // as a stutter instead of a sweep. The burst lasts exactly as
+                // long as synthesis does.
+                let waiting_clip = !self.voice_pending.is_empty();
                 self.composer.anim_tick = self.composer.anim_tick.wrapping_add(1);
-                if busy_repaint_due(self.composer.anim_tick) {
+                if waiting_clip || busy_repaint_due(self.composer.anim_tick) {
                     cx.notify();
                 }
             }
@@ -1109,8 +1142,7 @@ impl Dashboard {
                     if self.chat_state.session().is_none() {
                         self.new_session(cx);
                     }
-                    let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-                    self.composer.sync_composer_hint(hint, &panes, cx);
+                    self.sync_composer_hint(cx);
                     self.drain_pending(cx);
                 }
                 agent_bridge::TurnEvent::SessionCreated(id) => {
@@ -1487,11 +1519,11 @@ impl Dashboard {
                 }
                 // A plan just closed (#2255, #2691). The settle emits this
                 // before the plan file is archived, so it is the one signal
-                // that cannot be missed by a file read. The chime is opt-in
-                // and feature-gated, and no toast or desktop notification is
-                // raised, exactly as the terminal's arm.
+                // that cannot be missed by a file read. This is the ONLY
+                // completion sound: one chime per plan, never one per task
+                // (#3118), and it is gated on `notify_on_plan_completed`.
                 agent_bridge::TurnEvent::ProgressFor(_, ProgressEvent::PlanCompleted { .. }, _) => {
-                    Self::play_task_chime();
+                    Self::play_plan_chime();
                 }
                 // The service discarded text it had already streamed, so the
                 // card drops it now instead of waiting for the reload (#3021).
@@ -1515,6 +1547,7 @@ impl Dashboard {
                     content,
                     context_tokens,
                     tokens_per_second,
+                    voice,
                 } => {
                     // The card's live line belongs to this turn (#2718), so
                     // it retires with it: the preview under it is the ledger's
@@ -1550,8 +1583,10 @@ impl Dashboard {
                         // on the same rule the window's is: `spawn_speak_reply`
                         // runs `channels::voice::synthesize` on the answer the
                         // leaf just drew. Read before the settle finalizes the
-                        // card's stream.
-                        if self.voice_turns.remove(&session) {
+                        // card's stream. The flag is the turn's own (#3096), so
+                        // a settle that never arrived cannot leave the next
+                        // typed turn of this leaf speaking.
+                        if voice {
                             let spoken = if content.trim().is_empty() {
                                 self.pane_view(session)
                                     .and_then(|pane| {
@@ -1643,8 +1678,10 @@ impl Dashboard {
                     // so the transcript draws it under the words it speaks and
                     // keeps it across a restart. Off-thread on purpose: the
                     // answer is already on screen and synthesis is a network
-                    // call per chunk.
-                    if self.voice_turns.remove(&session) {
+                    // call per chunk. The flag travels on this event (#3096),
+                    // so a turn that never settled cannot hand its voice to
+                    // the typed question that follows it.
+                    if voice {
                         let spoken = if content.trim().is_empty() {
                             self.turn
                                 .live
@@ -1667,9 +1704,8 @@ impl Dashboard {
                     // with it (#2718).
                     self.rail_live.remove(&session);
                     // A failed turn is not spoken (#3044): there is no answer
-                    // to read aloud, and leaving the session flagged would make
-                    // the next typed turn answer in audio.
-                    self.voice_turns.remove(&session);
+                    // to read aloud. Nothing has to be cleared here either, the
+                    // flag lived on the turn that just failed (#3096).
                     // A failure is still activity, so the row moves like a
                     // settled turn does (#2666).
                     self.refresh_rail(cx);
@@ -1837,10 +1873,8 @@ impl Dashboard {
                     // The turn is gone, so its rail spinner goes with it.
                     self.rail.clear(session);
                     // A stopped turn says nothing, so it is not spoken either
-                    // (#3044). Same reason as a failure: the flag belongs to
-                    // the turn that started as a recording, and this one is
-                    // over.
-                    self.voice_turns.remove(&session);
+                    // (#3044). Nothing has to be cleared for that: the flag was
+                    // the stopped turn's own and it is over with it (#3096).
                     // Unconditional (#2811): a card that just stopped has to
                     // paint its stop glyph once. It is static from here, so
                     // this is the only repaint it needs, and the animation
@@ -1896,12 +1930,51 @@ impl Dashboard {
                     self.refresh_rail(cx);
                     cx.notify();
                 }
+                // The clip for a voice turn is being made (#3092):
+                // `VoiceReplyPending` says synthesis started, which is a
+                // network round trip per chunk. The answer settled a moment
+                // ago, so the card is told to say the clip is coming rather
+                // than sitting finished and then growing a clip out of nowhere.
+                agent_bridge::TurnEvent::VoiceReplyPending { session } => {
+                    if self.voice_pending.insert(session) {
+                        cx.notify();
+                    }
+                }
+                // Spoken or not, the attempt is over (#3092). The success path
+                // sends `VoiceReplySaved` first, which is what reloads the row;
+                // this only takes the segment off the card.
+                agent_bridge::TurnEvent::VoiceReplyDone { session } => {
+                    if self.voice_pending.remove(&session) {
+                        cx.notify();
+                    }
+                }
                 // The spoken reply for a voice turn is on disk and its marker
                 // is in the assistant row (#3044). The `Done` that settled the
                 // turn has already reloaded without it, so this read is what
                 // puts the clip under the words it speaks.
-                agent_bridge::TurnEvent::VoiceReplySaved { session } => {
+                //
+                // It plays itself (#3092), which is the whole point of waiting
+                // for it, but only in the conversation the reader is looking at
+                // and only when nothing else is already sounding: a reply that
+                // lands while he is listening to another clip waits, and a
+                // conversation off screen starts silent.
+                agent_bridge::TurnEvent::VoiceReplySaved { session, path } => {
                     if self.chat_state.session() == Some(session) {
+                        // Every outcome leaves a line (#3092). The player
+                        // reports a clip that would not open and nothing else,
+                        // so a run that autoplayed and a run that skipped look
+                        // identical in the log, which is no way to answer "did
+                        // it play" after the sound is already gone.
+                        if let Some(other) = crate::voice_play::sounding() {
+                            logging::info(&format!(
+                                "voice reply autoplay: held back, {} is still sounding",
+                                other.display()
+                            ));
+                        } else if let Err(reason) = crate::voice_play::autoplay(&path) {
+                            logging::error(&format!("voice reply autoplay: {reason}"));
+                        } else {
+                            logging::info(&format!("voice reply autoplay: {}", path.display()));
+                        }
                         reload = Some(session);
                     } else if self.pane_view(session).is_some() {
                         self.reload_pane(session, cx);
@@ -1946,14 +2019,15 @@ impl Dashboard {
         }
         // A finished turn is the moment the queue drains: before this it only
         // drained on `Ready`, so a message typed while busy never went out.
-        // The hint follows the turn and the queue, including a report that
-        // landed mid-turn, so it is repainted on every event batch (#2630).
-        let (hint, panes) = (self.composer_hint(), self.pane_editors(cx));
-        self.composer.sync_composer_hint(hint, &panes, cx);
+        // The row above the composer reads the turn and the queue from this
+        // same state, so the repaint below is what shows the drain (#3102).
         if !self.turn.busy {
             self.turn.cancel = None;
             self.drain_pending(cx);
         }
+        // The turn and the queue both just moved, and the field's hint is
+        // decided from them (#2630, #3102).
+        self.sync_composer_hint(cx);
         self.follow_chat();
         cx.notify();
     }

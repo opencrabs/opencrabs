@@ -193,15 +193,17 @@ fn a_preview_refresh_follows_any_live_work() {
     );
 }
 
-/// The single-session composer and its key hints are ONE card, not a
+/// The single-session composer and its key hints are ONE surface, not a
 /// pill parked above a separate footer row.
 ///
 /// The scan reads the rendered order, not the presence of a style: a
 /// `rounded(px(..))` on the composer is invisible to a test that only
 /// greps for the dock's id, which is how the floating pill shipped in
-/// the first place. Three things are pinned together: the dock owns
-/// the surface and the radius, the footer is its child, and the
-/// composer paints its own card only while nothing docks it (#2987).
+/// the first place. Three things are pinned together: the shell owns
+/// the fill, the edge and the one curve, the footer is its child, and the
+/// composer paints its own surface only while nothing docks it (#2987).
+/// Since #3114 the card is the messages' size again, so the shape it
+/// shares with them is their radius.
 #[test]
 fn composer_dock_holds_the_input_and_the_key_hints() {
     let dock_at = DASHBOARD
@@ -216,8 +218,9 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         .expect("the chat column ends on a char boundary");
     for rule in [
         ".child(composer)",
-        ".child(footer.into_any_element())",
-        ".rounded(px(COMPOSER_RADIUS))",
+        "shell.child(dock.child(footer))",
+        ".border_1()",
+        ".rounded(px(transcript::MESSAGE_RADIUS))",
         ".bg(glass_fill(palette::current().panel))",
         ".gap_0()",
     ] {
@@ -230,7 +233,7 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         "the hairline between the input and the key hints is gone"
     );
 
-    // The composer paints its own card ONLY when nothing docks it. A
+    // The composer paints its own surface ONLY when nothing docks it. A
     // focused split pane renders the bare editor (`pane_view.rs`), so
     // deleting the chrome outright would leave that pane boxless while
     // its keyboard-less siblings keep theirs. The dock suppresses it
@@ -241,34 +244,45 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         editor.contains(".when(!self.docked, |d| {"),
         "the composer chrome is no longer conditional on the dock"
     );
-    for chrome in [".shadow_sm()", ".rounded(px(COMPOSER_RADIUS))"] {
-        let at = editor
-            .find(".when(!self.docked, |d| {")
-            .expect("the dock gate");
-        let gate = editor
-            .get(at..)
-            .expect("the dock gate offset lands on a char boundary");
-        let end = gate.find(".p_3()").expect("the field's padding");
+    // Flat (#3112): the pane's footer carries no shadow and no radius of its
+    // own. Both used to be here, and both made the composer read as a card
+    // floating inside the pane instead of the pane's own bottom edge.
+    let at = editor
+        .find(".when(!self.docked, |d| {")
+        .expect("the dock gate");
+    let gate = editor
+        .get(at..)
+        .expect("the dock gate offset lands on a char boundary");
+    let gate = gate
+        .get(..gate.find(".py_3()").expect("the field's vertical padding"))
+        .expect("the field padding ends on a char boundary");
+    for gone in [".shadow_sm()", ".rounded("] {
         assert!(
-            gate.get(..end)
-                .expect("the field padding ends on a char boundary")
-                .contains(chrome),
-            "the undocked composer lost {chrome}"
+            !gate.contains(gone),
+            "the undocked composer still paints {gone}"
         );
     }
+    assert!(
+        gate.contains(".border_t(px(1.))"),
+        "the undocked composer lost the hairline that is its only seam"
+    );
     assert!(
         DASHBOARD
             .contains("editor.docked = self.screen == Screen::Chat && !self.window_is_split();"),
         "the dock flag must be recomputed per frame, not latched"
     );
 
-    // The dim composer a keyboard-less pane draws is the same 44px
-    // box, so it follows the same radius or the pane reshapes on
-    // focus loss.
+    // The dim composer a keyboard-less pane draws is the same 44px box, so it
+    // follows the same flat shape or the pane reshapes on focus loss (#2987,
+    // #3112).
     let chrome = include_str!("../pane_chrome.rs");
     assert!(
-        chrome.contains(".rounded(px(card::COMPOSER_RADIUS))"),
-        "the dim pane composer no longer shares the dock radius"
+        !chrome.contains(".rounded("),
+        "the dim pane composer still rounds a corner the dock no longer has"
+    );
+    assert!(
+        chrome.contains(".border_t(px(1.))"),
+        "the dim pane composer lost the hairline that is its only seam"
     );
 }
 
@@ -315,5 +329,9 @@ fn composer_dock_sits_below_the_bottom_topic_row() {
     assert!(
         !chat.contains("col.child(central(footer"),
         "the footer escaped the dock and became its own row again"
+    );
+    assert!(
+        chat.contains("shell.child(dock.child(footer))"),
+        "the footer is the card's last row, inside the dock it shares (#3114)"
     );
 }
