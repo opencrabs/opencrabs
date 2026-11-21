@@ -115,6 +115,10 @@ impl Dashboard {
         self.instances.clear_selection();
         self.instance_remote = None;
         self.remote_transcript = None;
+        // Half-typed words belong to the crab they were typed for. Keeping
+        // them would let Enter, pressed after coming back and opening another
+        // crab, send one crab's draft to a different machine.
+        self.remote_draft = text_field::TextField::new();
         cx.notify();
     }
 
@@ -128,6 +132,9 @@ impl Dashboard {
     pub(crate) fn instance_disconnect(&mut self, cx: &mut Context<Self>) {
         self.instance_remote = None;
         self.remote_transcript = None;
+        // Closing the view drops the draft with it, for the same reason
+        // `instance_clear` does: the words were addressed to that crab.
+        self.remote_draft = text_field::TextField::new();
         cx.notify();
     }
 
@@ -271,6 +278,23 @@ impl Dashboard {
         let Some(form) = self.instance_glyph.as_mut() else {
             return;
         };
+        // The field can hold a whole picture name (`topic:crab_cli`), fourteen
+        // characters in a field capped at two. Typing over one starts fresh
+        // (see `glyph_key`); an editing chord that writes has to do the same,
+        // or one backspace leaves `topic:crab_cl`, a name that resolves to no
+        // icon and would be stored and painted raw. Movement, select-all and
+        // copy keep the name on screen because none of them write.
+        let writes = matches!(
+            edit,
+            text_field::TextFieldEdit::Backspace { .. }
+                | text_field::TextFieldEdit::Delete { .. }
+                | text_field::TextFieldEdit::DeleteToLineStart
+                | text_field::TextFieldEdit::Cut
+                | text_field::TextFieldEdit::Paste
+        );
+        if writes && glyph_is_picture(form.field.text()) {
+            form.field = text_field::TextField::new();
+        }
         match text_field::apply(&mut form.field, edit) {
             Some(text_field::ClipboardRequest::Write(text)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -369,6 +393,7 @@ impl Dashboard {
         let token = entry.known.token.clone();
         self.remote_transcript = Some(RemoteTranscript {
             session_id: session_id.clone(),
+            context_id: None,
             title: SharedString::from(title),
             state: Default::default(),
             has_rows: false,
@@ -393,13 +418,17 @@ impl Dashboard {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let (title, messages) = on_remote_runtime(async {
+                    let read = on_remote_runtime(async {
                         let target = Target::new(&fetch_url, Some(&token));
                         instance_client::transcript(&target, &fetch_id, 40).await
                     })?;
-                    let state = remote_panel::state_for(&build_id, &messages);
+                    let state = remote_panel::state_for(&build_id, &read.messages);
                     let has_rows = state.turns.iter().any(|t| !t.blocks.is_empty());
-                    Ok::<_, anyhow::Error>((title, state, has_rows))
+                    // The context rides with the rows: a send that does not
+                    // carry it opens a new session on the far side, and the
+                    // reply lands in a conversation this panel is not drawing
+                    // (#3133).
+                    Ok::<_, anyhow::Error>((read.title, read.context_id, state, has_rows))
                 })
                 .await;
 
@@ -412,8 +441,9 @@ impl Dashboard {
                     return;
                 }
                 match result {
-                    Ok((title, state, has_rows)) => {
+                    Ok((title, context_id, state, has_rows)) => {
                         if let Some(transcript) = this.remote_transcript.as_mut() {
+                            transcript.context_id = context_id;
                             // The host's title wins over the rail's: the list
                             // may be a minute old, and a rename in between is
                             // exactly what the banner would get wrong.
@@ -1100,6 +1130,24 @@ impl Dashboard {
             return;
         };
         let token = entry.known.token.clone();
+        // One send at a time. The field empties the moment the words leave, so
+        // a second Enter would post nothing, but a second *click* on "enviar"
+        // could still fire on the frame before `sending` paints.
+        if self.remote_transcript.as_ref().is_some_and(|t| t.sending) {
+            return;
+        }
+        // The conversation this send belongs to. A transcript read carries the
+        // host's context; a send without it makes the host open a new session,
+        // which is what made the composer look like it sent nothing at all
+        // (#3133).
+        let context_id = self
+            .remote_transcript
+            .as_ref()
+            .and_then(|t| t.context_id.clone());
+        let session_id = self
+            .remote_transcript
+            .as_ref()
+            .map(|t| t.session_id.clone());
         if let Some(transcript) = self.remote_transcript.as_mut() {
             transcript.sending = true;
         }
@@ -1109,23 +1157,37 @@ impl Dashboard {
         cx.spawn(async move |this, cx| {
             let send_url = url.clone();
             let body = text.clone();
+            let ctx = context_id.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     on_remote_runtime(async {
                         let target = Target::new(&send_url, Some(&token));
-                        instance_client::send(&target, &body).await
+                        instance_client::send(&target, &body, ctx.as_deref()).await
                     })
                 })
                 .await;
+            let sent = result.is_ok();
 
             let _ = this.update(cx, |this, cx| {
                 if let Some(transcript) = this.remote_transcript.as_mut() {
                     transcript.sending = false;
-                    transcript.notice = Some(match &result {
-                        Ok(task_id) => SharedString::from(format!("tarefa criada: {task_id}")),
-                        Err(e) => SharedString::from(format!("não enviou: {e:#}")),
-                    });
+                    match &result {
+                        Ok(task) => {
+                            // Adopt the host's context. The first send to a
+                            // session that never spoke A2A opens one, and the
+                            // next send has to reuse it or fork again.
+                            if transcript.context_id.is_none() {
+                                transcript.context_id = task.context_id.clone();
+                            }
+                            transcript.notice =
+                                Some(SharedString::from(format!("tarefa criada: {}", task.id)));
+                        }
+                        Err(e) => {
+                            transcript.notice =
+                                Some(SharedString::from(format!("não enviou: {e:#}")));
+                        }
+                    }
                 }
                 if result.is_err() {
                     // Give the words back: losing a typed message to a network
@@ -1133,6 +1195,44 @@ impl Dashboard {
                     this.remote_draft = text_field::TextField::from_text(&text);
                 }
                 cx.notify();
+            });
+
+            if !sent {
+                return;
+            }
+            // The host writes the user's row when it starts the task, a beat
+            // after it answers. One short wait and one re-read, so the words
+            // appear in the conversation instead of only in a notice line.
+            let Some(session_id) = session_id else {
+                return;
+            };
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let still_here = this
+                    .remote_transcript
+                    .as_ref()
+                    .is_some_and(|t| t.session_id == session_id);
+                if !still_here {
+                    return;
+                }
+                // Re-reading rebuilds the panel, so the context has to survive
+                // the rebuild: the fetch fills it from the host a moment later,
+                // and losing it in between would fork the very next send.
+                let keep = this
+                    .remote_transcript
+                    .as_ref()
+                    .and_then(|t| t.context_id.clone());
+                let title = this
+                    .remote_transcript
+                    .as_ref()
+                    .map(|t| t.title.to_string())
+                    .unwrap_or_default();
+                this.open_remote_session(session_id.clone(), title, cx);
+                if let Some(transcript) = this.remote_transcript.as_mut() {
+                    transcript.context_id = keep;
+                }
             });
         })
         .detach();
@@ -1248,6 +1348,10 @@ impl Dashboard {
         let Some(entry) = self.instances.get(&host_id) else {
             return;
         };
+        // Every way into a crab lands here: the badge, the pairing form, and
+        // the Ctrl+Alt+Up/Down switch. The draft is per crab, so it is dropped
+        // at the one door they all use.
+        self.remote_draft = text_field::TextField::new();
         let url = entry.url().to_string();
         let token = entry.known.token.clone();
         self.instance_remote = Some(RemoteView::loading(host_id.clone()));
@@ -2213,6 +2317,12 @@ fn qr_modules(link: &str) -> (Vec<bool>, usize) {
 /// promise the type cannot keep.
 pub(crate) struct RemoteTranscript {
     pub(crate) session_id: String,
+    /// The A2A context this session is bound to, as the host reports it. A
+    /// send carries it so the message joins this conversation; without it the
+    /// host mints a context per message, which is a new session per message
+    /// (#3133). `None` until the transcript has been read, and for a session
+    /// that has never been spoken to over A2A.
+    pub(crate) context_id: Option<String>,
     pub(crate) title: SharedString,
     /// The remote rows, already shaped by the transcript's own rules: the same
     /// state type the local chat paints from, so the two cannot diverge.

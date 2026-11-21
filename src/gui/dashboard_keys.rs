@@ -636,6 +636,15 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // An open remote crab is the nearest surface under the menus, and
+            // Esc is the way back to this window's own crab. It has to answer
+            // before the turn gate below: that gate cancels the *local* turn,
+            // which while a remote is on screen is work the user cannot see
+            // and did not ask to stop (#3133).
+            if self.instance_remote_open() {
+                self.remote_key(&ev.keystroke, cx);
+                return;
+            }
             // The command list lives inside the composer, so with it open Esc
             // closes the list and keeps the draft: the terminal's behaviour,
             // and the nearest thing answers first.
