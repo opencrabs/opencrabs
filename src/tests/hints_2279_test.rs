@@ -164,7 +164,7 @@ fn a_surface_drops_a_hint_it_cannot_run_instead_of_printing_it() {
     // this surface cannot run: that is the bounce the filter exists to stop.
     let nothing = hint(&state, |_| false);
     assert!(
-        nothing.map_or(true, |hint| hint.command.is_empty()),
+        nothing.is_none_or(|hint| hint.command.is_empty()),
         "a surface that runs none of the commands is left only with the lines that name keys"
     );
 }
