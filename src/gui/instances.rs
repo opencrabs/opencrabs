@@ -256,7 +256,16 @@ pub fn glyph_is_picture(glyph: &str) -> bool {
 pub fn normalise_glyph(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if glyph_is_picture(trimmed) {
-        return Some(trimmed.to_string());
+        // A picture name is a mark only if the badge can draw it. The strip
+        // renders the embedded pack's bytes and nothing else, so a name that
+        // resolves to no icon (a half-erased `topic:crab_cl`, or any `img:`
+        // file, which the strip has no cache to decode) would be painted as
+        // its own raw string inside a 32 px square. Falling back to the
+        // label's initial is the honest mark.
+        let drawable = crate::topic_icons::topic_icon(trimmed)
+            .or_else(|| crate::topic_icons::crab_icon(trimmed))
+            .is_some();
+        return drawable.then(|| trimmed.to_string());
     }
     let mut cleaned: String = trimmed
         .chars()

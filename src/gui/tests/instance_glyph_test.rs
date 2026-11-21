@@ -157,3 +157,26 @@ fn a_picture_mark_reaches_the_entry() {
     assert_eq!(entry(Some(stored.as_str())).glyph(), stored);
     assert_eq!(entry(None).glyph(), "L");
 }
+
+/// A picture name the badge cannot draw is not a mark.
+///
+/// The mark field seeds itself with the stored name, and a single backspace
+/// turned `topic:crab_cli` into `topic:crab_cl`: still shaped like a picture,
+/// resolving to no icon. Storing that painted the raw string in a 32 px square
+/// and the owner saw a mark that was neither their letter nor a picture. An
+/// `img:` file has no renderer in the strip at all, so it is refused for the
+/// same reason: a mark that cannot be drawn is not a mark.
+#[test]
+fn a_picture_name_that_draws_nothing_falls_back_to_the_initial() {
+    assert_eq!(normalise_glyph("topic:crab_cl"), None);
+    assert_eq!(normalise_glyph("topic:nao_existe"), None);
+    assert_eq!(normalise_glyph("img:9f2c.png"), None);
+
+    // The badge keeps a real mark rather than a broken name.
+    assert_eq!(entry(Some("topic:crab_cl")).glyph(), "L");
+    assert_eq!(entry(Some("img:9f2c.png")).glyph(), "L");
+
+    // A name that does resolve still passes through whole.
+    let real = crate::topic_icons::store_name("crab_cli");
+    assert_eq!(normalise_glyph(&real), Some(real));
+}
