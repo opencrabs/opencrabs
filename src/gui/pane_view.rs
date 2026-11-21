@@ -255,7 +255,7 @@ impl PaneView {
         // Which row of this pane's offer the keyboard stands on, if it is this
         // pane's offer at all (#3101). Read on its own, so the facts above keep
         // the shape they had and this stays one pane's business.
-        let option_at = window
+        let option_at = owner
             .read(cx)
             .options_focus
             .filter(|(armed, _)| *armed == session)
