@@ -5,6 +5,7 @@
 //! client and the store carry their own tests next to the code that parses.
 
 use crate::dashboard_instances::{PairingForm, RemoteState, RemoteView};
+use opencrabs::config::A2aConfig;
 use opencrabs::ui_core::text_field::TextField;
 
 #[test]
@@ -120,5 +121,90 @@ fn the_card_says_what_it_cannot_do() {
     assert!(
         SHARE_FOOTNOTE.contains("descoberta"),
         "the footnote must say discovery does not exist yet"
+    );
+}
+
+#[test]
+fn a_working_config_gets_no_snippet() {
+    // A card on a machine that is already reachable must not carry a config
+    // block: showing one would suggest something is broken when nothing is, and
+    // the owner would go edit a file that is already right.
+    use crate::dashboard_instances::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: true,
+        bind: "0.0.0.0".to_string(),
+        port: 18790,
+        allowed_origins: vec![],
+        advertise_url: Some("https://crab.example".to_string()),
+        api_key: Some("uma-chave-longa".to_string()),
+    };
+    assert_eq!(share_config_snippet(&a2a), None);
+}
+
+#[test]
+fn a_loopback_crab_gets_the_block_that_opens_it() {
+    // The common case on this machine: enabled, bound to loopback, no key. The
+    // snippet has to carry all three fixes, because fixing one and not the
+    // others leaves the card warning about the next one and the owner looping.
+    use crate::dashboard_instances::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: false,
+        bind: "127.0.0.1".to_string(),
+        port: 18790,
+        allowed_origins: vec![],
+        advertise_url: None,
+        api_key: None,
+    };
+    let snippet = share_config_snippet(&a2a).expect("a loopback crab needs the block");
+    assert!(
+        snippet.starts_with("[a2a]"),
+        "section header first: {snippet}"
+    );
+    assert!(
+        snippet.contains("enabled = true"),
+        "turn the gateway on: {snippet}"
+    );
+    assert!(
+        snippet.contains("bind = \"0.0.0.0\""),
+        "open the bind: {snippet}"
+    );
+    assert!(
+        snippet.contains("advertise_url = \"http://"),
+        "name the address: {snippet}"
+    );
+    assert!(
+        snippet.contains(":18790"),
+        "the port comes from the config: {snippet}"
+    );
+    assert!(
+        snippet.contains("api_key ="),
+        "no key means no auth: {snippet}"
+    );
+}
+
+#[test]
+fn the_snippet_leaves_what_is_already_right_alone() {
+    // A machine that is open to the network but has no key needs one line, not
+    // a rewritten block. Rewriting keys the owner already set is how a snippet
+    // becomes a footgun: pasting it would silently reset their address.
+    use crate::dashboard_instances::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: true,
+        bind: "0.0.0.0".to_string(),
+        port: 9000,
+        allowed_origins: vec![],
+        advertise_url: Some("https://crab.example".to_string()),
+        api_key: None,
+    };
+    let snippet = share_config_snippet(&a2a).expect("no key is still a problem");
+    assert!(!snippet.contains("enabled = true"), "already on: {snippet}");
+    assert!(!snippet.contains("bind ="), "already open: {snippet}");
+    assert!(
+        !snippet.contains("advertise_url"),
+        "already named: {snippet}"
+    );
+    assert!(
+        snippet.contains("api_key ="),
+        "the one missing key: {snippet}"
     );
 }

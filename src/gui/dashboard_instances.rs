@@ -955,11 +955,15 @@ impl Dashboard {
                 return;
             }
         };
-        let (url, warning) = match Config::load() {
-            Ok(config) => share_target(&config.a2a),
+        let (url, warning, snippet) = match Config::load() {
+            Ok(config) => {
+                let (url, warning) = share_target(&config.a2a);
+                (url, warning, share_config_snippet(&config.a2a))
+            }
             Err(e) => (
                 "http://127.0.0.1:18790".to_string(),
                 Some(format!("não consegui ler a config: {e}")),
+                None,
             ),
         };
         let label = this_host_label();
@@ -977,6 +981,7 @@ impl Dashboard {
             qr,
             width,
             warning,
+            snippet,
             ttl_secs: CODE_TTL_SECS,
         });
         cx.notify();
@@ -1120,6 +1125,53 @@ impl Dashboard {
                     .into_any_element(),
             );
         }
+        // The fix, not just the diagnosis. The warning names keys; this is the
+        // block already assembled with this machine's own address, so the owner
+        // copies one thing instead of editing TOML from a sentence.
+        if let Some(snippet) = &share.snippet {
+            let copy_snippet = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                if let Some(share) = this.instance_share.as_ref() {
+                    if let Some(snippet) = share.snippet.as_ref() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(snippet.clone()));
+                    }
+                }
+            });
+            body.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(rems(0.6875))
+                                    .text_color(rgb(shown.text_faint))
+                                    .child(SharedString::from(
+                                        "cola isto em config.toml e reabre a janela",
+                                    )),
+                            )
+                            .child(
+                                button("instance-share-copy-config", "copiar", false)
+                                    .on_click(copy_snippet),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(shown.panel_hi))
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(shown.text_normal))
+                            .child(SharedString::from(snippet.clone())),
+                    )
+                    .into_any_element(),
+            );
+        }
         body.push(
             div()
                 .flex()
@@ -1254,6 +1306,8 @@ pub(crate) struct ShareView {
     pub(crate) width: usize,
     /// Why this address will not work from another machine, when it will not.
     pub(crate) warning: Option<String>,
+    /// The `[a2a]` block to paste when the config is what is in the way.
+    pub(crate) snippet: Option<String>,
     pub(crate) ttl_secs: u64,
 }
 
@@ -1309,6 +1363,49 @@ fn share_target(a2a: &opencrabs::config::A2aConfig) -> (String, Option<String>) 
         None
     };
     (format!("http://{host}:{}", a2a.port), warning)
+}
+
+/// The `[a2a]` block this machine needs before another crab can reach it, as
+/// text the owner can paste into `config.toml`.
+///
+/// A warning that names two keys still leaves the owner to assemble them in the
+/// right section with the right quotes, and a typo there is a window that will
+/// not start. The snippet is that assembly done here: what is missing is filled
+/// in with this machine's real address, what is already right is left alone,
+/// and a machine that needs nothing gets `None` so a working card never shows a
+/// config block it does not need.
+pub(crate) fn share_config_snippet(a2a: &opencrabs::config::A2aConfig) -> Option<String> {
+    let host = lan_ip().unwrap_or_else(|| "o-ip-desta-maquina".to_string());
+    let loopback = matches!(a2a.bind.as_str(), "127.0.0.1" | "localhost" | "::1");
+    let no_key = a2a
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty();
+    if a2a.enabled && !loopback && !no_key {
+        return None;
+    }
+    let mut lines = vec!["[a2a]".to_string()];
+    if !a2a.enabled {
+        lines.push("enabled = true".to_string());
+    }
+    if loopback {
+        lines.push("bind = \"0.0.0.0\"".to_string());
+    }
+    if a2a
+        .advertise_url
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        lines.push(format!("advertise_url = \"http://{host}:{}\"", a2a.port));
+    }
+    if no_key {
+        lines.push("api_key = \"<uma-chave-longa-que-so-tu-sabes>\"".to_string());
+    }
+    Some(lines.join("\n"))
 }
 
 /// This machine's address on the LAN.
