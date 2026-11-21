@@ -440,7 +440,11 @@ fn the_transcript_is_built_off_the_ui_thread() {
 
 fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
     let start = source.find(signature)?;
-    let rest = &source[start..];
+    // `get` instead of `&source[start..]`: a byte index is only safe while it
+    // happens to sit on a char boundary, and this helper is used by every test
+    // in the file, so a panic here would read as a broken test rather than a
+    // broken helper (2026-11-21).
+    let rest = source.get(start..)?;
     // The NEAREST following item ends the body, whichever way it is written.
     // This used to try `\n    fn ` first and only fall back to `pub(crate) fn`
     // when that missed, so a private fn anywhere later in the file widened the
@@ -451,11 +455,11 @@ fn fn_body<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
     // (2026-11-21).
     let end = ["\n    fn ", "\n    pub(crate) fn ", "\n    pub fn "]
         .iter()
-        .filter_map(|marker| rest[1..].find(marker))
+        .filter_map(|marker| rest.get(1..)?.find(marker))
         .min()
         .map(|i| i + 1)
         .unwrap_or(rest.len());
-    Some(&rest[..end])
+    rest.get(..end)
 }
 #[test]
 fn the_workspace_mark_is_the_way_home() {
