@@ -643,7 +643,7 @@ pub(crate) fn run() {
                         task_detail: None,
                         task_detail_scroll: ScrollHandle::new(),
                         task_detail_generation: 0,
-                        announced_task_completions: std::collections::HashSet::new(),
+                        settle_ledger: opencrabs::utils::settle_ledger::SettleLedger::open(),
                         plan_flash_until: HashMap::new(),
                         chat_state: chat_leaf::ChatState {
                             transcript: transcript::TranscriptState {

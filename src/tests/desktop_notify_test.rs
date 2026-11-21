@@ -19,8 +19,8 @@ use crate::config::AgentConfig;
 use crate::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus, TaskType};
 use crate::utils::desktop_notify::{
     ACTIVATION_SCHEME, MAX_PENDING_ACTIVATIONS, NotificationEvent, activation_from_arg, enabled,
-    first_time, fresh_settled_tasks, post_activation, post_activation_from_args,
-    record_settled_tasks, should_raise, take_activation, toast_xml, truncate, xml_escape,
+    first_time, fresh_settled_tasks, post_activation, post_activation_from_args, should_raise,
+    take_activation, toast_xml, truncate, xml_escape,
 };
 
 const SOURCE: &str = include_str!("../utils/desktop_notify.rs");
@@ -141,15 +141,10 @@ fn a_plan_announces_itself_once_and_never_per_task() {
         "the retired variants must not come back"
     );
 
-    // Recording the settle is bookkeeping for the rail flash: it counts what
-    // it saw and never raises anything itself.
-    let mut recorded: HashSet<Uuid> = HashSet::new();
-    assert_eq!(record_settled_tasks(&mut recorded, &[Some(&plan)]), 2);
-    assert_eq!(
-        record_settled_tasks(&mut recorded, &[Some(&plan)]),
-        0,
-        "a second read flashes nothing"
-    );
+    // Nothing in the transport records settles any more: that bookkeeping is
+    // the durable per-session ledger's job (#3004), covered in
+    // `settle_ledger_test`. What this file pins is that the transport raises
+    // one banner per plan and never one per task.
 }
 
 #[test]

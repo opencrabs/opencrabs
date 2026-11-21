@@ -3,11 +3,16 @@
 //! code; `nm` on the GUI binary showed `play_completion_sound` was not even
 //! linked in. These checks read source because the window has no headless
 //! harness, and each one pins a call site whose absence IS the bug: drop the
-//! event arm, drop the render hook, or give each strip its own seen set, and
-//! the notification goes back to silence or starts ringing twice.
+//! event arm, drop the render hook, or give each strip its own record, and the
+//! notification goes back to silence or starts ringing twice.
 //!
 //! #3118 adds the other half: one chime per plan, never one per task. The
 //! settle pass still walks every strip, but all it does is flash the rail.
+//!
+//! #3004 moves what counts as already-announced off the window and into a
+//! durable per-session ledger, so a relaunch does not replay every settle the
+//! last process flashed. The pass must still read every strip, and must do it
+//! through that one ledger.
 //!
 //! The chime decision itself is behavioural and lives in
 //! `gui::plan_strip::tests`, over a real plan file. No audio is asserted here:
@@ -84,18 +89,19 @@ fn the_render_path_settles_after_the_strip_refresh() {
     );
 }
 
-/// One seen set for the whole window. A plan can be drawn by the window strip
-/// and by a pane strip at once, so a per-strip set would flash twice for one
-/// task, and a count instead of a set would flash on every re-read.
+/// One ledger for the whole window, durable per session (#3004). A plan can be
+/// drawn by the window strip and by a pane strip at once, so a per-strip record
+/// would flash twice for one task, and a count instead of a set would flash on
+/// every re-read.
 #[test]
-fn the_settle_pass_walks_every_strip_through_one_seen_set() {
+fn the_settle_pass_walks_every_strip_through_one_ledger() {
     let body = fn_body(
         DASHBOARD_KEYS,
         "pub(crate) fn settle_plan_tasks(&mut self, cx: &mut Context<Self>) {",
     );
     assert!(
-        body.contains("&mut self.announced_task_completions"),
-        "the pass uses the window's single seen set: {body}"
+        body.contains("self.settle_ledger.record("),
+        "the pass records through the window's one ledger: {body}"
     );
     assert!(
         body.contains("self.plan.document()"),
@@ -108,12 +114,13 @@ fn the_settle_pass_walks_every_strip_through_one_seen_set() {
         body.contains("in &self.pane_states") && body.contains("pane.read(cx).plan.document()"),
         "every pane strip is walked too, read through its own handle: {body}"
     );
-    // The settle count comes from the shared helper over one seen set, so a
-    // plan drawn twice flashes once and a reload of an unchanged file flashes
-    // not at all. A local count would drift and blink on every frame.
+    // The freshness answer comes from the ledger, which folds in what a
+    // previous process already flashed, so a plan drawn twice flashes once and
+    // a relaunch on an unchanged file flashes not at all. A local count would
+    // drift and blink on every frame.
     assert!(
-        body.contains("record_settled_tasks(seen, &borrowed)"),
-        "the dedupe is the shared helper over one seen set, not a local count: {body}"
+        body.contains("self.settle_ledger.record(*session, Some(doc))"),
+        "the dedupe is the durable ledger per session, not a local count: {body}"
     );
     // #3118: the pass is bookkeeping only. The per-task chime is gone, so a
     // plan that settles six tasks rings once, at the finish.

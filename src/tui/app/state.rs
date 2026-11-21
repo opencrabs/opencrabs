@@ -513,11 +513,13 @@ pub struct App {
     /// Animation state
     pub animation_frame: usize,
 
-    /// Plan tasks whose completion has already been announced with a chime
-    /// (#2574). Plan documents are re-read from disk on every plan tool call,
-    /// so the same finished task arrives repeatedly; this set is what keeps
-    /// the sound once-per-completion instead of once-per-read.
-    pub(crate) announced_task_completions: std::collections::HashSet<uuid::Uuid>,
+    /// Plan tasks whose settle already reached the pane ring (#2574),
+    /// durable across launches and keyed by session (#3004). Plan documents
+    /// are re-read from disk on every plan tool call, so the same finished
+    /// task arrives repeatedly; this ledger is what keeps the ring
+    /// once-per-completion instead of once-per-read, and what stops a restart
+    /// from replaying every settle the previous process already announced.
+    pub(crate) settle_ledger: crate::utils::settle_ledger::SettleLedger,
 
     /// Sessions whose plan just finished a task, and when (#2593). The pane
     /// ring pulses in a colour the focused pane does not use, so the chime has
@@ -1163,7 +1165,7 @@ impl App {
             build_lines: Vec::new(),
             build_msg_idx: None,
             animation_frame: 0,
-            announced_task_completions: std::collections::HashSet::new(),
+            settle_ledger: crate::utils::settle_ledger::SettleLedger::open(),
             plan_completion_flash: HashMap::new(),
 
             escape_pending_at: None,
@@ -1687,6 +1689,12 @@ impl App {
     /// focused pane left a background session's checklist frozen at the
     /// moment it was opened, so its settle flashed minutes later, on the click
     /// that finally reloaded it (#2733).
+    ///
+    /// What counts as already flashed lives in the durable per-session ledger
+    /// (#3004), not in a set on the app. A relaunch after a clean exit, a
+    /// panic or a machine restart resumes where the last process stopped
+    /// instead of flashing every settled task again, and one session's
+    /// settles never suppress another's.
     pub(crate) async fn settle_plan_tasks(&mut self) -> usize {
         self.pane_manager.bind_missing_plan_paths().await;
         self.pane_manager.refresh_plans_changed_on_disk();
@@ -1706,24 +1714,41 @@ impl App {
             .collect();
         let window_plan = self.pane_manager.focused_plan().cloned();
 
+        // Record each plan against its own session's durable ledger (#3004).
+        // The first pass after a launch folds in what a previous process
+        // already flashed, so a plan that has not moved does not blink again;
+        // a task that settled while the TUI was closed is still new, so it
+        // blinks once. The ledger is the one record of what was fresh, so the
+        // flash and the record cannot disagree.
         let mut settled = 0usize;
         let mut flashes: Vec<Uuid> = Vec::new();
         for (session_id, plan) in &per_pane {
-            let count = crate::utils::desktop_notify::record_settled_tasks(
-                &mut self.announced_task_completions,
-                &[plan.as_ref()],
-            );
-            settled += count;
-            if count > 0
-                && let Some(session_id) = session_id
-            {
-                flashes.push(*session_id);
+            // A plan document names the session that owns it; the pane's own
+            // session is the fallback for a pre-init plan that still writes the
+            // nil id. A pane with neither key is skipped rather than bucketed
+            // under nil, so two unbound panes cannot share one record.
+            let session = plan
+                .as_ref()
+                .map(|doc| doc.session_id)
+                .filter(|id| *id != Uuid::nil())
+                .or(*session_id);
+            let Some(session) = session else {
+                continue;
+            };
+            let fresh = self.settle_ledger.record(session, plan.as_ref());
+            settled += fresh.len();
+            if !fresh.is_empty() {
+                flashes.push(session);
             }
         }
-        settled += crate::utils::desktop_notify::record_settled_tasks(
-            &mut self.announced_task_completions,
-            &[window_plan.as_ref()],
-        );
+        if let Some(doc) = &window_plan
+            && doc.session_id != Uuid::nil()
+        {
+            settled += self
+                .settle_ledger
+                .record(doc.session_id, Some(doc))
+                .len();
+        }
         let now = std::time::Instant::now();
         for session_id in flashes {
             self.plan_completion_flash.insert(session_id, now);

@@ -45,6 +45,7 @@ use uuid::Uuid;
 
 use crate::tui::plan::PlanDocument;
 
+
 /// Set to a non-empty value other than `0` to disable desktop notifications.
 ///
 /// Accepts `1`, `true`, `yes` and `on`. Anything else leaves notifications on,
@@ -234,30 +235,15 @@ fn config_allows(event: &NotificationEvent) -> bool {
     }
 }
 
-/// Record the plan tasks that settled since the last tick in `seen`.
-///
-/// Returns the number of tasks this call recorded, which is exactly the count
-/// a surface uses to decide whether its rail should flash. The caller hands
-/// over the very set it keeps for the flash, so a task counts for both or for
-/// neither, and a plan file that is re-read twice cannot count twice.
-///
-/// No banner is raised here. Per-task notification was retired in #3118: one
-/// banner per task is the spam the flag pack existed to produce, and a plan
-/// announces itself once, at the finish, from the turn-settle seam.
-pub fn record_settled_tasks(seen: &mut HashSet<Uuid>, plans: &[Option<&PlanDocument>]) -> usize {
-    let mut recorded = 0;
-    for entry in plans {
-        let Some(plan) = *entry else { continue };
-        recorded += fresh_settled_tasks(seen, &[Some(plan)]).len();
-    }
-    recorded
-}
-
 /// Settled tasks in `plans` that `seen` had not recorded yet, adding them as
 /// it goes.
 ///
-/// Split out from [`record_settled_tasks`] so the bookkeeping is testable
-/// without touching the config file or an OS transport.
+/// This is the bookkeeping primitive, not a surface: the durable per-session
+/// record in [`crate::utils::settle_ledger`] owns what each launch has already
+/// announced (#3004), and the TUI and GUI both ask it rather than keeping a
+/// seen set of their own. Kept here because it is pure, needs no config file
+/// and no OS transport, and reads the settled ids through the same
+/// [`crate::utils::completion_sound::resolved_task_ids`] the chime pack used.
 pub(crate) fn fresh_settled_tasks(
     seen: &mut HashSet<Uuid>,
     plans: &[Option<&PlanDocument>],

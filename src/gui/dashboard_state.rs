@@ -650,11 +650,14 @@ pub(crate) struct Dashboard {
     /// Bumped on every open, so the repaint loop of a view that was closed
     /// and reopened ends instead of doubling up.
     pub(crate) task_detail_generation: u64,
-    /// Plan tasks whose completion already rang (#2691). One set for the
-    /// whole window, shared by the window strip and every pane strip, so a
-    /// plan drawn in two places rings once. The terminal keeps the same
-    /// single set (`tui::app::state::announced_task_completions`).
-    pub(crate) announced_task_completions: std::collections::HashSet<Uuid>,
+    /// Plan tasks whose settle already reached the rail flash (#2691),
+    /// durable across launches and keyed by session (#3004). One ledger for
+    /// the whole window, shared by the window strip and every pane strip, so a
+    /// plan drawn in two places flashes once. The terminal keeps its own
+    /// ledger over the same file (`utils::settle_ledger`), and each write
+    /// merges with what is on disk, so the two surfaces cannot erase each
+    /// other's records.
+    pub(crate) settle_ledger: opencrabs::utils::settle_ledger::SettleLedger,
     /// Until when each session's rail plan bar stays flashing orange, per
     /// session, keyed by the plan's own session id (#2701 follow-up).
     ///

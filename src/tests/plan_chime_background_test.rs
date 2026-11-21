@@ -9,10 +9,10 @@
 //!
 //! The tests drive the two seams the tick uses: the per-pane mtime reload and
 //! the settled-task counter (`fresh_settled_tasks`, which is exactly the
-//! number the rail flash responds to). They stop short of
-//! `record_settled_tasks` only because it takes the surface's own seen set;
-//! the counter it wraps is the whole decision. No banner is raised by either
-//! since #3118, and no sound: the settle pass flashes, it does not ring.
+//! freshness the rail flash responds to). They stop short of the durable
+//! per-session ledger only because it needs a file on disk; the counter it
+//! wraps is the whole decision. No banner is raised by either since #3118, and
+//! no sound: the settle pass flashes, it does not ring.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};

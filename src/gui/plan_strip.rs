@@ -799,7 +799,8 @@ mod tests {
             "the strip loads the plan the chime pass reads"
         );
 
-        // One seen set for the window, exactly as the Dashboard holds it.
+        // One seen set for the window, the union the Dashboard's ledger keeps
+        // in memory and carries to disk per session (#3004).
         let mut seen: HashSet<uuid::Uuid> = HashSet::new();
         assert_eq!(
             newly_resolved(&mut seen, &[window_strip.document(), pane_strip.document()]),

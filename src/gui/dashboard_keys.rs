@@ -1118,9 +1118,12 @@ impl Dashboard {
     /// plan file the tool writes. A gpui window has no tick, so the render
     /// path is the equivalent place: it already re-reads the strips by
     /// mtime, and this pass turns the settled tasks into one rail flash. The
-    /// window strip and every pane strip share one seen set, so a plan drawn
+    /// window strip and every pane strip share one ledger, so a plan drawn
     /// twice flashes once, and a reload of an unchanged file does nothing at
-    /// all. The one completion sound is the plan-finished chime, raised from
+    /// all. That ledger is durable per session (#3004): a relaunch after a
+    /// clean exit, a panic or a machine restart resumes where the last
+    /// process stopped instead of flashing every settled task again. The one
+    /// completion sound is the plan-finished chime, raised from
     /// `ProgressEvent::PlanCompleted`.
     pub(crate) fn settle_plan_tasks(&mut self, cx: &mut Context<Self>) {
         // Four passes a second, not one per frame (#2899). The pass clones
@@ -1146,63 +1149,56 @@ impl Dashboard {
             pane.update(cx, |pane, _| pane.plan.refresh());
         }
 
-        // Every plan in this frame, each paired with the row that draws it, in
-        // one order so a settled task reaches the flash from a single pass. A
-        // pre-init plan writes the nil session until the hook stamps it, so the
-        // drawing row is the honest fallback.
+        // Every plan in this frame, each paired with the session that owns it,
+        // so a settled task is recorded against the right conversation and
+        // flashed from a single pass. A pre-init plan writes the nil session
+        // until the hook stamps it, so the drawing row is the honest fallback.
         // Owned snapshots: a pane is an entity now (#2805), so a borrowed
         // document would keep its handle borrowed across the record. One
         // snapshot per pane per frame, and a plan is a handful of tasks.
-        let mut plans: Vec<Option<opencrabs::tui::plan::PlanDocument>> =
+        let mut plans: Vec<(Uuid, opencrabs::tui::plan::PlanDocument)> =
             Vec::with_capacity(1 + self.pane_states.len());
-        let mut owners: Vec<Uuid> = Vec::with_capacity(1 + self.pane_states.len());
 
-        plans.push(self.plan.document().cloned());
-        owners.push(self.chat_session.unwrap_or(Uuid::nil()));
-        for (pane_id, pane) in &self.pane_states {
-            plans.push(pane.read(cx).plan.document().cloned());
-            owners.push(*pane_id);
-        }
-
-        let seen = &mut self.announced_task_completions;
-
-        // Which sessions settle in this pass. Read before the record, because
-        // the record is what writes them into `seen`, the only record of what
-        // already flashed. Asking `contains` rather than `insert` keeps that
-        // write in one place, so the settled sessions and the flash cannot
-        // disagree about which task was fresh.
-        let mut settled: Vec<Uuid> = Vec::new();
-        for (slot, owner) in plans.iter().zip(owners.iter()) {
-            let Some(doc) = slot else {
-                continue;
-            };
-            let fresh = opencrabs::utils::completion_sound::resolved_task_ids(Some(doc))
-                .into_iter()
-                .any(|id| !seen.contains(&id));
-            if !fresh {
-                continue;
-            }
-            settled.push(if doc.session_id == Uuid::nil() {
-                *owner
+        if let Some(doc) = self.plan.document().cloned() {
+            let session = if doc.session_id == Uuid::nil() {
+                self.chat_session.unwrap_or(Uuid::nil())
             } else {
                 doc.session_id
-            });
+            };
+            plans.push((session, doc));
+        }
+        for (pane_id, pane) in &self.pane_states {
+            let Some(doc) = pane.read(cx).plan.document().cloned() else {
+                continue;
+            };
+            let session = if doc.session_id == Uuid::nil() {
+                *pane_id
+            } else {
+                doc.session_id
+            };
+            plans.push((session, doc));
         }
 
-        // #2729: the same seen set keeps one settle from flashing twice. No
-        // banner is raised here any more (#3118): the rail flash is the whole
-        // per-task signal.
-        let borrowed: Vec<Option<&opencrabs::tui::plan::PlanDocument>> =
-            plans.iter().map(Option::as_ref).collect();
-        if opencrabs::utils::desktop_notify::record_settled_tasks(seen, &borrowed) == 0 {
+        // Record each plan against its own session's durable ledger (#3004).
+        // The first pass after a launch folds in what a previous process
+        // already flashed, so a plan that has not moved does not blink again;
+        // a task that settled while the window was closed is still new, so it
+        // blinks once. The ledger is the one record of what was fresh, so the
+        // flash and the record cannot disagree.
+        let mut settled: Vec<Uuid> = Vec::new();
+        for (session, doc) in &plans {
+            let fresh = self.settle_ledger.record(*session, Some(doc));
+            if fresh.is_empty() || *session == Uuid::nil() {
+                continue;
+            }
+            settled.push(*session);
+        }
+        if settled.is_empty() {
             return;
         }
         // One flash per settled session: the blink is the per-task signal, and
         // the plan-finished chime is the only sound.
         for session in settled {
-            if session == Uuid::nil() {
-                continue;
-            }
             self.plan_flash_until.insert(
                 session,
                 now + opencrabs::utils::completion_sound::FLASH_WINDOW,
