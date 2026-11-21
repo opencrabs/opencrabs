@@ -1210,13 +1210,7 @@ impl Dashboard {
                 // side, so a card drawn flush to the pane's edge came out wider
                 // than every message above it. The box spends that step once,
                 // the same one `session_row` takes in the unsplit chat.
-                let mut col = div()
-                    .flex()
-                    .flex_col()
-                    .flex_none()
-                    .min_w_0()
-                    .px_2()
-                    .gap_2();
+                let mut col = div().flex().flex_col().flex_none().min_w_0().px_2().gap_2();
                 if let Some(view) = plan_view {
                     // A click trades the conversation's room for the whole
                     // checklist, per pane (#2624). The handler stops the event

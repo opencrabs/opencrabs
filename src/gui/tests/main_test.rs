@@ -2033,10 +2033,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
     let card = render
         .find("shell = shell.child(hint_card(&line));")
         .expect("the card is a child of that shell, not a sibling floating over it");
-    let card = render[card..]
-        .lines()
-        .next()
-        .expect("the join is one line");
+    let card = render[card..].lines().next().expect("the join is one line");
     assert!(
         card.contains("hint_card(&line)"),
         "the strip itself is what the shell holds: {card}"

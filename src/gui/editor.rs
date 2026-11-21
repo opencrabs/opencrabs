@@ -1023,10 +1023,8 @@ impl Editor {
                     match answer {
                         Ok(_) if cancelled => {}
                         Ok(recording) => {
-                            self.voice_transcription = Some(voice_input::Transcription::start(
-                                recording,
-                                self.session,
-                            ));
+                            self.voice_transcription =
+                                Some(voice_input::Transcription::start(recording, self.session));
                         }
                         Err(message) => {
                             // The device failed, so there is nothing left to

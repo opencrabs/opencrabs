@@ -84,7 +84,9 @@ fn the_transcript_keeps_its_scroll_and_gives_up_the_clip() {
         .find(".track_scroll(scroll)")
         .expect("the transcript scrolls");
     let tail = &TRANSCRIPT[scroll..];
-    let end = tail.find(".bg(rgb(surface_fill(").expect("the history paints");
+    let end = tail
+        .find(".bg(rgb(surface_fill(")
+        .expect("the history paints");
     let element = &tail[..end];
     assert!(
         element.contains(".rounded(px(MESSAGE_RADIUS))"),

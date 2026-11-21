@@ -42,7 +42,9 @@ fn the_master_becomes_the_plan_switch_and_the_dead_keys_go() {
     );
     let agent = agent(&doc);
     assert_eq!(
-        agent.get("notify_on_plan_completed").and_then(|v| v.as_bool()),
+        agent
+            .get("notify_on_plan_completed")
+            .and_then(|v| v.as_bool()),
         Some(true),
         "the master's value is what the plan switch inherits"
     );
@@ -86,9 +88,8 @@ fn a_dead_failure_switch_cannot_survive_a_disabled_master() {
 
 #[test]
 fn the_dead_keys_are_removed_even_without_a_master() {
-    let (_d, doc) = migrate(
-        "[agent]\nnotify_on_task_completed = true\nnotify_on_turn_completed = true\n",
-    );
+    let (_d, doc) =
+        migrate("[agent]\nnotify_on_task_completed = true\nnotify_on_turn_completed = true\n");
     let agent = agent(&doc);
     assert!(agent.get("notify_on_task_completed").is_none());
     assert!(agent.get("notify_on_turn_completed").is_none());

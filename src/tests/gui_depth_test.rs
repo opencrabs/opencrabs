@@ -54,10 +54,7 @@ fn the_input_has_a_panel_background_and_a_hairline() {
     // Flat since #3112: the shadow was what made the composer read as a card
     // floating inside the pane rather than the pane's own bottom edge. The
     // hairline on top is the only separation it needs.
-    assert!(
-        !root.contains(".shadow_sm()"),
-        "the composer floats again"
-    );
+    assert!(!root.contains(".shadow_sm()"), "the composer floats again");
     assert!(
         root.contains(".border_t(px(1.))"),
         "the composer lost the hairline that is its only seam"

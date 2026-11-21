@@ -43,8 +43,8 @@ fn notify_on_plan_completed_defaults_to_false() {
         !empty.notify_on_plan_completed,
         "a config that never names the key stays silent"
     );
-    let on: AgentConfig = serde_json::from_str(r#"{"notify_on_plan_completed": true}"#)
-        .expect("explicit key parses");
+    let on: AgentConfig =
+        serde_json::from_str(r#"{"notify_on_plan_completed": true}"#).expect("explicit key parses");
     assert!(on.notify_on_plan_completed, "the opt-in must stick");
 }
 

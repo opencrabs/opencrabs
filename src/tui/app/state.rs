@@ -1744,10 +1744,7 @@ impl App {
         if let Some(doc) = &window_plan
             && doc.session_id != Uuid::nil()
         {
-            settled += self
-                .settle_ledger
-                .record(doc.session_id, Some(doc))
-                .len();
+            settled += self.settle_ledger.record(doc.session_id, Some(doc)).len();
         }
         let now = std::time::Instant::now();
         for session_id in flashes {

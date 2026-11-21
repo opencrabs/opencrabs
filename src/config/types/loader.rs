@@ -973,9 +973,7 @@ impl Config {
         let plan_before = agent
             .get("notify_on_plan_completed")
             .and_then(|v| v.as_bool());
-        let failed_before = agent
-            .get("notify_on_turn_failed")
-            .and_then(|v| v.as_bool());
+        let failed_before = agent.get("notify_on_turn_failed").and_then(|v| v.as_bool());
 
         let mut changed = agent.remove("notify_on_task_completed").is_some();
         changed |= agent.remove("notify_on_turn_completed").is_some();

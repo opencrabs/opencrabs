@@ -131,10 +131,7 @@ fn persist(path: &Path, session: Uuid, tasks: &[Uuid]) {
         }
     };
     if let Err(e) = crate::config::types::io::atomic_write(path, &text) {
-        tracing::warn!(
-            "announce record at {} not written: {e}",
-            path.display()
-        );
+        tracing::warn!("announce record at {} not written: {e}", path.display());
     }
 }
 

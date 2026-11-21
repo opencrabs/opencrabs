@@ -408,7 +408,11 @@ impl PlayerBlock {
     /// `width` is the block's on-screen width, so a row with less room than the
     /// block asks for gets a smaller raster rather than a cropped one (#3111).
     pub(crate) fn new(colour: u32, peaks: &[f32], width: f32) -> Self {
-        Self::at(pixels((width, PLAYER_POINTS.1), PLAYER_SCALE), colour, peaks)
+        Self::at(
+            pixels((width, PLAYER_POINTS.1), PLAYER_SCALE),
+            colour,
+            peaks,
+        )
     }
 
     /// The same player at an arbitrary raster size, so the tests can render a
@@ -1239,15 +1243,7 @@ fn player_into(
     let peaks = voice_media::visual(path)
         .map(|visual| Arc::clone(&visual.peaks))
         .unwrap_or_else(|| Arc::new(fallback_peaks(fallback_levels)));
-    let frame = frame_for(
-        id,
-        path,
-        &peaks,
-        palette::current().amber,
-        width,
-        state,
-        cx,
-    );
+    let frame = frame_for(id, path, &peaks, palette::current().amber, width, state, cx);
 
     let hover_id = id.to_string();
     let press_path = path.to_path_buf();

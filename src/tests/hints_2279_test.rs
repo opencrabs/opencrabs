@@ -98,7 +98,10 @@ fn a_long_but_roomy_conversation_names_both_ways_out() {
         hint.text
     );
     // One line, one decision: the window prints what the terminal prints.
-    assert_eq!(gui_hint(&state).map(|hint| hint.text), Some(hint.text.clone()));
+    assert_eq!(
+        gui_hint(&state).map(|hint| hint.text),
+        Some(hint.text.clone())
+    );
 }
 
 #[test]

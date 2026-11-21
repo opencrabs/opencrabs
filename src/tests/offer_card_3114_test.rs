@@ -127,10 +127,7 @@ fn the_offer_line_names_the_way_back_to_the_field() {
         many.contains("past the last") && many.contains("back to the field"),
         "the end of a list says what the end does: {many}"
     );
-    assert!(
-        many.contains('3'),
-        "and how long the list is: {many}"
-    );
+    assert!(many.contains('3'), "and how long the list is: {many}");
 }
 
 /// The composer's own inset matches the column the conversation sits on
@@ -147,14 +144,9 @@ fn the_offer_line_names_the_way_back_to_the_field() {
 /// three rows of one surface started on three different columns.
 #[test]
 fn the_field_pads_the_same_sides_as_the_card_around_it() {
-    let field = region(
-        EDITOR,
-        ".when(!self.docked, |d| {",
-        ".line_height(px(22.))",
-    );
+    let field = region(EDITOR, ".when(!self.docked, |d| {", ".line_height(px(22.))");
     assert!(
-        field.contains(".px(if self.docked {")
-            && field.contains("transcript::card_inset()"),
+        field.contains(".px(if self.docked {") && field.contains("transcript::card_inset()"),
         "the docked field pads the card's own column"
     );
     assert!(
@@ -194,13 +186,19 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
     );
     // The footer row under the hairline is the last of those rows, and it
     // padded a flat 12 while everything above it moved (#3114).
-    let footer = region(DASHBOARD_RENDER, ".justify_between()", ".into_any_element()");
+    let footer = region(
+        DASHBOARD_RENDER,
+        ".justify_between()",
+        ".into_any_element()",
+    );
     assert!(
         footer.contains(".px(transcript::card_row_inset())"),
         "the footer row pads the card's column minus the pill"
     );
     assert_eq!(
-        footer.matches(".px(transcript::hover_pill_inset())").count(),
+        footer
+            .matches(".px(transcript::hover_pill_inset())")
+            .count(),
         3,
         "and all three of its labels pad the pill, so every glyph starts on the column"
     );
@@ -217,7 +215,11 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
 /// same step instead of a second, tighter grid.
 #[test]
 fn the_gap_under_the_last_card_is_the_gap_between_cards() {
-    let root = region(TRANSCRIPT, ".track_scroll(scroll)", ".rounded(px(MESSAGE_RADIUS))");
+    let root = region(
+        TRANSCRIPT,
+        ".track_scroll(scroll)",
+        ".rounded(px(MESSAGE_RADIUS))",
+    );
     assert!(
         root.contains(".px_2()\n        .pt_2()"),
         "the transcript pads its top and sides, never its bottom: {root}"
@@ -230,7 +232,11 @@ fn the_gap_under_the_last_card_is_the_gap_between_cards() {
         root.contains(".gap_2()"),
         "and its rows step by the same 8 the session uses"
     );
-    let session = region(DASHBOARD_RENDER, "let mut session = div()", "// Height, not `flex_1`");
+    let session = region(
+        DASHBOARD_RENDER,
+        "let mut session = div()",
+        "// Height, not `flex_1`",
+    );
     assert!(
         session.contains(".gap_2()"),
         "the session steps 8, the transcript's own row rhythm: {session}"
@@ -272,12 +278,20 @@ fn the_offer_buttons_fit_their_labels() {
     );
     // The plan approval card already sizes its chips to their labels; the pin
     // is here so the two cards cannot drift apart again.
-    let card = region(PLAN_STRIP, "pub fn editing_view(", "/// The plan as a split pane draws it");
+    let card = region(
+        PLAN_STRIP,
+        "pub fn editing_view(",
+        "/// The plan as a split pane draws it",
+    );
     assert!(
         card.contains("flex_row()") && card.contains(".gap_2()"),
         "the two decisions sit side by side: {card}"
     );
-    let chip = region(PLAN_STRIP, "fn action_chip(", "/// How much of a plan one pane shows");
+    let chip = region(
+        PLAN_STRIP,
+        "fn action_chip(",
+        "/// How much of a plan one pane shows",
+    );
     assert!(
         chip.contains(".flex_none()"),
         "and each chip keeps its own width instead of growing: {chip}"
@@ -347,7 +361,11 @@ fn the_cards_share_the_message_curve_and_fill() {
 /// own.
 #[test]
 fn the_take_preview_pads_like_the_message_it_becomes() {
-    let strip = region(EDITOR, "fn voice_strip(", "/// The keybindings the editor needs");
+    let strip = region(
+        EDITOR,
+        "fn voice_strip(",
+        "/// The keybindings the editor needs",
+    );
     assert!(
         strip.contains(".px(px(transcript::MESSAGE_PAD_X))"),
         "the sides take the bubble's inset: {strip}"

@@ -179,7 +179,10 @@ fn the_tick_refreshes_every_pane_before_counting() {
     let body = STATE_SRC
         .split("pub(crate) async fn settle_plan_tasks(&mut self) -> usize {")
         .nth(1)
-        .and_then(|tail| tail.split("\n    /// The focused pane's resolved plan").next())
+        .and_then(|tail| {
+            tail.split("\n    /// The focused pane's resolved plan")
+                .next()
+        })
         .expect("settle_plan_tasks exists in the tick");
     assert!(
         body.contains("refresh_plans_changed_on_disk()"),

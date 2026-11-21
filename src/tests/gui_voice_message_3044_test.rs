@@ -315,7 +315,8 @@ fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
         "the project folder is asked for first"
     );
     assert!(
-        clip_dir.contains(".unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))"),
+        clip_dir
+            .contains(".unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))"),
         "a session with no project still has somewhere to put its take"
     );
     let resolve = region_in(input, "fn project_clip_dir(", "/// Write one take");
@@ -351,7 +352,11 @@ fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
         "a spoken answer lands beside the take that asked for it"
     );
     // A take is now readable from two homes, so the folder test admits both.
-    let recording = region_in(input, "pub(crate) fn is_recording(", "/// The folder a clip");
+    let recording = region_in(
+        input,
+        "pub(crate) fn is_recording(",
+        "/// The folder a clip",
+    );
     assert!(
         recording.contains("ProjectService::projects_dir()"),
         "a clip in a project's attachments folder is still a take"

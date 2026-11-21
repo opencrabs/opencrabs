@@ -137,7 +137,11 @@ fn the_fold_hides_the_quote_and_the_document_card_too() {
 /// same set back, so a repaint does not close what the reader opened.
 #[test]
 fn the_toggle_writes_the_set_it_reads() {
-    let toggle = region(TRANSCRIPT, "fn transcript_toggle(", "fn history_attachments(");
+    let toggle = region(
+        TRANSCRIPT,
+        "fn transcript_toggle(",
+        "fn history_attachments(",
+    );
     assert!(
         toggle.contains("OPEN_TRANSCRIPTS.with(|open| {"),
         "the press flips the set"
@@ -154,7 +158,11 @@ fn the_toggle_writes_the_set_it_reads() {
         toggle.contains("window.refresh()"),
         "the row repaints once the set changed"
     );
-    let read = region(TRANSCRIPT, "fn transcript_is_open(", "fn transcript_toggle(");
+    let read = region(
+        TRANSCRIPT,
+        "fn transcript_is_open(",
+        "fn transcript_toggle(",
+    );
     assert!(
         read.contains("OPEN_TRANSCRIPTS.with(|open| open.borrow().contains(key))"),
         "and the read is the same set"

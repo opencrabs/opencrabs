@@ -156,8 +156,7 @@ fn a_corrupt_record_reads_empty_and_is_rewritten_clean() {
     );
 
     let text = std::fs::read_to_string(&path).expect("the record was rewritten");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&text).expect("the rewrite is valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("the rewrite is valid JSON");
     assert!(
         parsed.get("sessions").is_some(),
         "the rewrite carries the documented shape: {text}"

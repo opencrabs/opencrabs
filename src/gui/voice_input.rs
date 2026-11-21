@@ -371,8 +371,7 @@ pub(crate) fn is_recording(path: &Path) -> bool {
 /// `voice/`: a recording that nobody can transcribe is no message, but a take
 /// that did come back with words must still find a home.
 fn clip_dir(session: Option<Uuid>) -> PathBuf {
-    project_clip_dir(session)
-        .unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))
+    project_clip_dir(session).unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))
 }
 
 /// `projects/<slug>/files/` for the session's project, if it has one.

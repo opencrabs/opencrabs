@@ -2708,13 +2708,11 @@ impl Render for Dashboard {
                     //
                     // The footer is the last row of the card and it takes the
                     // card's column like the field above it (#3114).
-                    session = session.child(
-                        div().w_full().min_w_0().pb_2().child(session_row(
-                            shell.child(dock.child(footer)).into_any_element(),
-                            centred_chat,
-                            chat_measure_px,
-                        )),
-                    );
+                    session = session.child(div().w_full().min_w_0().pb_2().child(session_row(
+                        shell.child(dock.child(footer)).into_any_element(),
+                        centred_chat,
+                        chat_measure_px,
+                    )));
                     // The session card takes the conversation's measure and
                     // centres as a whole, so its own edges line up with the
                     // text instead of the card being full width with the text
@@ -3857,5 +3855,3 @@ fn hint_card(line: &SharedString) -> Div {
                 .child(line.clone()),
         )
 }
-
-

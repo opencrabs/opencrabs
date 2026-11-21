@@ -45,7 +45,6 @@ use uuid::Uuid;
 
 use crate::tui::plan::PlanDocument;
 
-
 /// Set to a non-empty value other than `0` to disable desktop notifications.
 ///
 /// Accepts `1`, `true`, `yes` and `on`. Anything else leaves notifications on,

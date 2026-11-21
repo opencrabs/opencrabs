@@ -115,7 +115,9 @@ fn the_ground_is_square_and_full_bleed() {
     let tail = &RENDER[start..];
     let clip = ".overflow_hidden();";
     let end = tail.find(clip).expect("the surface clips") + clip.len();
-    let surface = tail.get(..end).expect("the surface ends on a char boundary");
+    let surface = tail
+        .get(..end)
+        .expect("the surface ends on a char boundary");
     assert!(
         !surface.contains(".rounded("),
         "the ground carries no corner, so nothing inherits one: {surface}"
