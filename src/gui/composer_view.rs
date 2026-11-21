@@ -40,9 +40,14 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
         .flex()
         .flex_col()
         .gap_1()
+        // The message card's curve and fill, like the plan card above it
+        // (#3114): the queue stands in the conversation's column, so it is one
+        // family with the bubbles rather than a rounder, lighter panel dropped
+        // in among them. The inset stays at 12, the step the plan card above it
+        // uses: both are strips over the composer, and they pad alike.
         .p_3()
-        .rounded(px(CARD_RADIUS))
-        .bg(glass_fill(palette::current().panel))
+        .rounded(px(transcript::MESSAGE_RADIUS))
+        .bg(glass_fill(transcript::message_card_surface()))
         .border_1()
         .border_color(session_edge(palette::current().panel_hi))
         .child(

@@ -2165,15 +2165,33 @@ pub(crate) fn conversation_inset() -> Rems {
     rems(CONVERSATION_INSET_REM)
 }
 
-/// The inset of a row that carries clickable labels, which reach out to the
-/// column by the pill's own padding (#3114).
-pub(crate) fn conversation_row_inset() -> Rems {
-    rems(CONVERSATION_INSET_REM - HOVER_PILL_INSET_REM)
-}
-
 /// The padding a hover pill adds inside such a row (#3114).
 pub(crate) fn hover_pill_inset() -> Rems {
     rems(HOVER_PILL_INSET_REM)
+}
+
+/// The column inside a card that already sits on the conversation's gutter
+/// (#3114).
+///
+/// A card of the session's own size (the plan, the queue, the composer) is
+/// placed by `session_row`, which spends half a rem on each side to put the
+/// card's edge where a message's edge is. Its words still have to reach the
+/// same column as a message's words, so a row inside such a card pads the
+/// conversation's inset LESS that half rem. Read as a pixel count the two
+/// disagree the moment the reader zooms, which is why the subtraction is here
+/// and in rem steps.
+pub(crate) const CARD_INSET_REM: f32 = CONVERSATION_INSET_REM - 0.5;
+
+/// The card's column, resolved for a style call (#3114).
+pub(crate) fn card_inset() -> Rems {
+    rems(CARD_INSET_REM)
+}
+
+/// The inset of a label row inside such a card (#3114): the card's column less
+/// the pill's own padding, so the label's glyph lands on the column and its
+/// clickable box reaches the card's edge step.
+pub(crate) fn card_row_inset() -> Rems {
+    rems(CARD_INSET_REM - HOVER_PILL_INSET_REM)
 }
 
 /// The shortest the conversation is ever allowed to be (#2980).

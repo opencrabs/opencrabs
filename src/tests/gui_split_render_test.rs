@@ -541,23 +541,24 @@ fn the_pane_holding_the_keyboard_draws_the_real_composer() {
 fn the_window_composer_stands_down_once_the_window_is_split() {
     let arm = flat(composer_arm());
     let gated = arm
-        .split("if !self.window_is_split() {")
+        .split("if self.window_is_split() {")
         .nth(1)
         .expect("the window chrome is gated on the split");
     // The gate keeps the measure wrapper inside it (#2594): the unsplit
     // window still aligns the conversation to one width, and the split leaves
     // stand down. `flat` folds the reflow, so this pins the wrapper itself
-    // rather than the column the editor landed on. Since #2987 the composer
-    // rides in a dock that the wrapper centres, so the measure is read on the
-    // dock rather than on the editor.
+    // rather than the column the editor landed on. Since #3114 the composer is
+    // a card of the conversation's own size again, so it is `session_row` that
+    // spends the half rem, not a `central` wrapper around the dock.
     assert!(
-        gated.contains("col = col.child(central( div() .id(\"composer-dock\")"),
+        gated.contains(".id(\"composer-dock\")"),
         "the window's composer sits inside the gate, still on the chat measure"
     );
     assert!(
-        gated.contains(".child(central(composer, centred_chat, chat_measure_px))"),
-        "and the dock holds the composer the swap chose, on the conversation's \
-         column (#3114)"
+        gated.contains(".child(composer)")
+            && gated.contains("session_row( shell.child(dock.child(footer))"),
+        "and the dock holds the composer the swap chose, inside the card the \
+         helper places (#3114)"
     );
     assert!(
         gated.contains(".editing_view(actions.as_ref())")

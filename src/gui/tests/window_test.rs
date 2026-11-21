@@ -200,10 +200,10 @@ fn a_preview_refresh_follows_any_live_work() {
 /// `rounded(px(..))` on the composer is invisible to a test that only
 /// greps for the dock's id, which is how the floating pill shipped in
 /// the first place. Three things are pinned together: the shell owns
-/// the fill and the one hairline, the footer is its child, and the
+/// the fill, the edge and the one curve, the footer is its child, and the
 /// composer paints its own surface only while nothing docks it (#2987).
-/// Since #3112 that surface is flat, so the shape it shares is the
-/// absence of a radius rather than a radius.
+/// Since #3114 the card is the messages' size again, so the shape it
+/// shares with them is their radius.
 #[test]
 fn composer_dock_holds_the_input_and_the_key_hints() {
     let dock_at = DASHBOARD
@@ -217,9 +217,10 @@ fn composer_dock_holds_the_input_and_the_key_hints() {
         .get(..end)
         .expect("the chat column ends on a char boundary");
     for rule in [
-        ".child(central(composer, centred_chat, chat_measure_px))",
-        "central(footer, centred_chat, chat_measure_px)",
-        ".border_t(px(1.))",
+        ".child(composer)",
+        "shell.child(dock.child(footer))",
+        ".border_1()",
+        ".rounded(px(transcript::MESSAGE_RADIUS))",
         ".bg(glass_fill(palette::current().panel))",
         ".gap_0()",
     ] {
@@ -328,5 +329,9 @@ fn composer_dock_sits_below_the_bottom_topic_row() {
     assert!(
         !chat.contains("col.child(central(footer"),
         "the footer escaped the dock and became its own row again"
+    );
+    assert!(
+        chat.contains("shell.child(dock.child(footer))"),
+        "the footer is the card's last row, inside the dock it shares (#3114)"
     );
 }

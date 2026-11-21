@@ -292,16 +292,16 @@ fn the_card_sits_on_top_of_the_composer() {
         .find("let mut shell = div()")
         .expect("the card and the composer share one shell");
     let dock = render
-        .find("dock.child(central(footer, centred_chat, chat_measure_px))")
+        .find("shell.child(dock.child(footer))")
         .expect("the composer card is what it rides on");
     assert!(
         stack < dock,
         "the card is added to the stack before the composer"
     );
-    // One surface, and the shell clips it. The pair used to share one radius
-    // (#3102); the composer is a flat footer now (#3112), so the shell owns a
-    // hairline on top instead of a curve and the clip stays, because the card
-    // must not paint past the surface it rides on.
+    // One surface, and the shell clips it. The pair shares one radius (#3102),
+    // which came back when the composer became a card of a message's size again
+    // (#3114): the strip is its top edge, so the curve is the card's own and the
+    // clip stays, because the card must not paint past the surface it rides on.
     let shell_body = render
         .get(stack..)
         .expect("the shell starts on a char boundary")
@@ -313,12 +313,12 @@ fn the_card_sits_on_top_of_the_composer() {
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        shell_body.contains(".border_t(px(1.))"),
-        "the shell owns the one seam the pair shares"
+        shell_body.contains(".border_1()"),
+        "the card floats, so it needs all four of its sides"
     );
     assert!(
-        !shell_body.contains(".rounded("),
-        "the composer is flat, so the shell carries no curve: {shell_body}"
+        shell_body.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "and the messages' curve, so the pair reads as one family: {shell_body}"
     );
     assert!(
         shell_body.contains(".overflow_hidden()"),

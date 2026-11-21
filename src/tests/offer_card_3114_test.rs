@@ -137,12 +137,14 @@ fn the_offer_line_names_the_way_back_to_the_field() {
 /// (#3114).
 ///
 /// A message bubble's text lands 24 from the session edge: its row pads 8 and
-/// the bubble pads 16. The footer runs edge to edge since #3112, so every row
-/// inside it carries the whole column itself, and `CONVERSATION_INSET_REM` is
-/// the one place that number lives. A uniform `p_3` on the field left its text, its
-/// paperclip and its mic at 12, and the task strip leaned on a gutter that no
-/// longer exists and sat at 16, so three rows of one surface started on three
-/// different columns.
+/// the bubble pads 16. The composer is a card of a message's size again, placed
+/// by `session_row`, which already spent half a rem of that 24 on each side, so
+/// the rows inside it pad the rest (`card_inset`) and their words land on the
+/// column. A focused split pane draws the field bare, with no card around it, so
+/// there the field is the whole column and pads all of `conversation_inset`. A
+/// uniform `p_3` on the field left its text, its paperclip and its mic at 12,
+/// and the task strip leaned on a gutter that no longer exists and sat at 16, so
+/// three rows of one surface started on three different columns.
 #[test]
 fn the_field_pads_the_same_sides_as_the_card_around_it() {
     let field = region(
@@ -151,8 +153,13 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         ".line_height(px(22.))",
     );
     assert!(
-        field.contains(".px(transcript::conversation_inset())"),
-        "the field's sides take the conversation's column"
+        field.contains(".px(if self.docked {")
+            && field.contains("transcript::card_inset()"),
+        "the docked field pads the card's own column"
+    );
+    assert!(
+        field.contains("transcript::conversation_inset()"),
+        "and a bare pane's field pads the whole column, since no card is around it"
     );
     assert!(
         field.contains(".py_3()"),
@@ -177,9 +184,9 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
     // the pill's own 4.
     let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
     assert!(
-        strip.contains(".px(transcript::conversation_row_inset())")
+        strip.contains(".px(transcript::card_row_inset())")
             && strip.contains(".px(transcript::hover_pill_inset())"),
-        "the strip's two insets add up to the field's column"
+        "the strip's two insets add up to the field's column inside the card"
     );
     assert!(
         !strip.contains(".px_3()"),
@@ -189,8 +196,8 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
     // padded a flat 12 while everything above it moved (#3114).
     let footer = region(DASHBOARD_RENDER, ".justify_between()", ".into_any_element()");
     assert!(
-        footer.contains(".px(transcript::conversation_row_inset())"),
-        "the footer row pads the column minus the pill"
+        footer.contains(".px(transcript::card_row_inset())"),
+        "the footer row pads the card's column minus the pill"
     );
     assert_eq!(
         footer.matches(".px(transcript::hover_pill_inset())").count(),

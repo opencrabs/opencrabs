@@ -980,8 +980,11 @@ mod tests {
             panes.contains("editing_view(Some(&actions))"),
             "a split pane draws the waiting plan, not just the running one"
         );
+        // The unsplit arm is the `else` of the split gate (#3110 moved the
+        // check from a `!window_is_split()` wrapper to the branch itself), so
+        // the slice starts at the gate and ends where the queue is read.
         let unsplit = main
-            .split("if !self.window_is_split() {")
+            .split("if self.window_is_split() {")
             .nth(1)
             .and_then(|rest| rest.split("let waiting = self.queued_for_strip();").next())
             .expect("the unsplit strip block");

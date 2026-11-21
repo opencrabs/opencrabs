@@ -722,14 +722,15 @@ impl Render for Dashboard {
                             // arm above yields an empty row, so a pane footer
                             // keeps the chrome it already had.
                             //
-                            // The row pads the column minus the hover pill's
-                            // inset, and each label pads the rest, so every
-                            // first glyph starts on `CONVERSATION_INSET_REM`
-                            // (#3114). That is the column the field's own pad
-                            // and the transcript's gutter + bubble put their
-                            // words on, and this row read as one notch left of
-                            // both while it padded a flat 12.
-                            .px(transcript::conversation_row_inset())
+                            // The row pads the card's column minus the hover
+                            // pill's inset, and each label pads the rest, so
+                            // every first glyph starts on
+                            // `CONVERSATION_INSET_REM` (#3114). That is the
+                            // column the field's own pad and the transcript's
+                            // gutter + bubble put their words on; the card is
+                            // already half a rem in from the session's edge, so
+                            // this row's step is the card's, not the pane's.
+                            .px(transcript::card_row_inset())
                             .py_2()
                             // The Seeker opens with a chord nothing on
                             // screen named (#2747). The hint is permanent and
@@ -2640,24 +2641,22 @@ impl Render for Dashboard {
                     // stacked flush would each round their own corners and
                     // leave a notch where they meet.
                     //
-                    // The field itself takes the conversation's measure
-                    // (#3114). The dock is the ground's width, but the words
-                    // in it have to start where the words above them start,
-                    // and a pane wider than the measure puts the transcript's
-                    // column in from the edge by the slack the cap leaves. A
-                    // bare child of a full-width dock measured its own 24 from
-                    // the PANE edge instead, which is the notch the owner
-                    // photographed: the field, the hints and the footer all sat
-                    // one slack to the left of every message. `central` is the
-                    // same wrapper the plan card, the popups and the topic
-                    // strip already go through, and it is a no-op wherever the
-                    // transcript is not capped.
+                    // The card is the messages' size again (#3114). It ran edge
+                    // to edge after #3112, and the owner called that out on a
+                    // single pane: a full-bleed band under measure-wide cards
+                    // read as a slab from another window, and its words had to
+                    // be pushed back onto the conversation's column by hand.
+                    // The width comes from `session_row` below, the helper the
+                    // plan card and the queue already use, so the card's edge
+                    // lands where a message's edge lands and the rows inside it
+                    // pad the card's own column (`card_inset`) instead of the
+                    // pane's.
                     let dock = div()
                         .id("composer-dock")
                         .flex()
                         .flex_col()
                         .gap_0()
-                        .child(central(composer, centred_chat, chat_measure_px))
+                        .child(composer)
                         .child(
                             div()
                                 .w_full()
@@ -2666,19 +2665,11 @@ impl Render for Dashboard {
                         );
                     // The task card rides on top of the composer, flush, as a
                     // thin strip of the same surface (#3102). It is not a box
-                    // of its own: the shell below owns the one hairline, so the
-                    // card cannot float over the gap or leave a notch where the
-                    // two meet. It says what the screen is asking for, which is
-                    // why it disappears when there is nothing to ask.
-                    //
-                    // The footer is flat (#3112). It used to round its own four
-                    // corners and carry a full border, which made it one more
-                    // card floating at the bottom of the session. It is not a
-                    // card: it is the last row of the session surface, it takes
-                    // the full width, and the surface's own clip rounds the two
-                    // bottom corners for it. That is the whole distinction the
-                    // owner asked for: the messages sit ON the ground, the
-                    // composer IS the ground's bottom edge.
+                    // of its own: the shell below owns the one border and the
+                    // one radius, so the card cannot float over the gap or
+                    // leave a notch where the two meet. It says what the screen
+                    // is asking for, which is why it disappears when there is
+                    // nothing to ask.
                     let mut shell = div()
                         .flex()
                         .flex_col()
@@ -2686,36 +2677,29 @@ impl Render for Dashboard {
                         .w_full()
                         .min_w_0()
                         .bg(glass_fill(palette::current().panel))
-                        .border_t(px(1.))
+                        .border_1()
                         .border_color(rgb(palette::current().panel_hi))
+                        .rounded(px(transcript::MESSAGE_RADIUS))
                         .overflow_hidden();
                     if let Some(line) = self.task_card_line() {
-                        // On the conversation's column, like the field under it
-                        // (#3114): a full-width strip would keep its 24 on the
-                        // pane edge while the message text above it starts a
-                        // slack further in.
-                        shell = shell.child(central(
-                            hint_card(&line).into_any_element(),
-                            centred_chat,
-                            chat_measure_px,
-                        ));
+                        shell = shell.child(hint_card(&line));
                     }
-                    // The composer closes the session as its last row, inside
-                    // the same clip, edge to edge (#3110, #3112). It used to
-                    // keep a `px_2`/`pb_2` gutter so it read as a card of the
-                    // messages' own size; the owner then called that out as
-                    // wrong for the composer specifically, because a card that
-                    // sits flush on three edges is a card whose sides you
-                    // cannot see. Flat is the answer: no gutter, no radius of
-                    // its own, and the session's clip supplies the two bottom
-                    // corners.
+                    // The composer closes the session as its last row, a card of
+                    // the conversation's own size (#3110, #3114). `session_row`
+                    // spends the half rem on each side, so the card's edge is
+                    // where a message's edge is, and `pb_2` is that same step
+                    // below: a rounded card flush on the window's bottom edge is
+                    // a card whose bottom you cannot see.
                     //
                     // The footer is the last row of the card and it takes the
-                    // conversation's column like the field above it (#3114):
-                    // the card runs edge to edge, its words do not.
-                    session = session.child(shell.child(
-                        dock.child(central(footer, centred_chat, chat_measure_px)),
-                    ));
+                    // card's column like the field above it (#3114).
+                    session = session.child(
+                        div().w_full().min_w_0().pb_2().child(session_row(
+                            shell.child(dock.child(footer)).into_any_element(),
+                            centred_chat,
+                            chat_measure_px,
+                        )),
+                    );
                     // The session card takes the conversation's measure and
                     // centres as a whole, so its own edges line up with the
                     // text instead of the card being full width with the text
@@ -3786,9 +3770,9 @@ impl Dashboard {
     }
 }
 
-/// One strip, on the bubbles' own column (#3110, #3112).
+/// One card, on the bubbles' own column (#3110, #3114).
 ///
-/// The ground runs edge to edge now, so the strips cannot simply take its
+/// The ground runs edge to edge now, so the cards cannot simply take its
 /// width: they would be wider than every message above them. What they match is
 /// the CONTENT column, which is the conversation's measure when the pane is
 /// wider than it, and the pane itself when it is not. `px_2` is the transcript's
@@ -3837,14 +3821,12 @@ fn hint_card(line: &SharedString) -> Div {
         .flex_row()
         .items_center()
         .w_full()
-        // The strip starts on the conversation's column (#3114), and it gets
-        // there the same way the footer does: the row pads the column minus
-        // the hover pill's inset, and the label inside pads the rest. The pill
-        // needs its own 4 or the hover fill would start on the glyph. It used
-        // to lean on the composer shell's gutter for 8 of those pixels, and
-        // when the footer went edge to edge (#3112) the strip slid 8 left of
-        // everything it was meant to line up with.
-        .px(transcript::conversation_row_inset())
+        // The strip is a row of the composer's card (#3114), so it pads the
+        // card's column minus the hover pill's inset, and the label inside pads
+        // the rest: the pill needs its own 4 or the hover fill would start on
+        // the glyph. The card already sits on the session's half rem, so this
+        // row's own step is the card's, not the pane's.
+        .px(transcript::card_row_inset())
         .py_1()
         .border_b(px(1.))
         .border_color(rgb(shown.panel_hi))

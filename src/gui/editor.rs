@@ -3275,12 +3275,13 @@ impl Render for Editor {
             // `docked`, which suppresses this chrome, because two fills would
             // paint the old floating pill inside the new one.
             //
-            // Flat, like the docked one (#3112). The footer takes the pane's
-            // full width and closes it, so a radius would only ever round the
-            // bottom corners into the pane's own corner, and a full border
-            // would draw a box around something that is already an edge. The
-            // hairline on top is the one seam it needs. The shadow goes with
-            // the radius: a footer does not float.
+            // Square, unlike the docked card (#3112, #3114). This footer takes
+            // the pane's full width and closes it, so a radius would only ever
+            // round the bottom corners into the pane's own corner, and a full
+            // border would draw a box around something that is already an edge.
+            // The hairline on top is the one seam it needs. The shadow goes
+            // with the radius: a footer does not float. The docked copy is a
+            // card that does, and the shell around it owns that shape.
             .when(!self.docked, |d| {
                 d.bg(glass_fill(palette::current().panel))
                     .border_t(px(1.))
@@ -3290,13 +3291,21 @@ impl Render for Editor {
             // carries words in this window starts on one column, and
             // `CONVERSATION_INSET_REM` is where it is defined. A message's text
             // lands there because its row pads the transcript's 8 and the
-            // bubble pads its own 16, and the field, its paperclip and its mic
-            // take the whole 24 themselves because the flat footer (#3112)
-            // left them no gutter to share it with. A uniform `p_3` left them
-            // at 12, then a 16 that matched nothing, so the words the reader
-            // typed sat left of the words above them. The vertical step stays
+            // bubble pads its own 16.
+            //
+            // Which of the two insets this field takes depends on where it is
+            // drawn (#3114). The single-session chat puts it inside a card that
+            // `session_row` already placed half a rem in from the session's
+            // edge, so the field pads the rest (`card_inset`) and its words land
+            // on the same column as the messages above it. A focused split pane
+            // renders the field bare, with no card around it, so there the field
+            // is the whole column and pads all of it. The vertical step stays
             // 12: only the sides were ever off.
-            .px(transcript::conversation_inset())
+            .px(if self.docked {
+                transcript::card_inset()
+            } else {
+                transcript::conversation_inset()
+            })
             .py_3()
             .line_height(px(22.))
             .text_size(px(14.))
@@ -3688,11 +3697,10 @@ fn voice_block(
         .flex_none()
         .w_full()
         .h(px(crate::composer_orb::BLOCK_HEIGHT))
-        // Flat, like the composer it replaces (#3112). The block is the
-        // composer's own box while the microphone is open, so it inherits the
-        // composer's shape: full width, square corners, closed at the bottom by
-        // the session's clip. A rounded slab inside a square footer read as a
-        // second card floating in the field.
+        // Square, inside the composer's card (#3112, #3114). The block is the
+        // composer's own box while the microphone is open, so it takes the
+        // field's shape and lets the card around it supply the curve: a rounded
+        // slab inside it would read as a second card floating in the field.
         .overflow_hidden()
         .cursor_pointer()
         .on_hover(|over: &bool, window, _cx| {

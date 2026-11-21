@@ -2007,15 +2007,11 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         render.contains(".gap_0()"),
         "the card and the composer stack with nothing between them"
     );
-    // The shell owns the single seam. It used to own the single radius too
-    // (#3102); the composer is a flat footer now (#3112), so the seam is a
-    // hairline along the top and there is no curve left to share. Two boxes
-    // stacked flush would each round their own corners and leave a notch where
-    // they meet, which is exactly what the card floating above the composer did.
-    assert!(
-        render.contains(".border_t(px(1.))"),
-        "one seam for the pair, so it reads as a single surface"
-    );
+    // The shell owns the single edge and the single curve (#3102, #3114): the
+    // composer is a card of a message's size again, so the card's top strip and
+    // the field under it share one box. Two boxes stacked flush would each round
+    // their own corners and leave a notch where they meet, which is exactly what
+    // the card floating above the composer did.
     let shell = &render[render
         .find("let mut shell = div()")
         .expect("the card and the composer share one shell")..];
@@ -2024,18 +2020,25 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        !shell.contains(".rounded("),
-        "the composer is a flat footer, so the shell carries no curve: {shell}"
+        shell.contains(".border_1()"),
+        "one edge for the pair, so it reads as a single card: {shell}"
     );
-    // The card is a child of that shell, and it takes the conversation's
-    // measure like the field under it (#3114): the card runs edge to edge, the
-    // words in it do not.
-    let card = render
-        .find("shell = shell.child(central(")
-        .expect("the card is a child of that shell, not a sibling floating over it");
-    let card = &render[card..card + 160];
     assert!(
-        card.contains("hint_card(&line).into_any_element(),"),
+        shell.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "and the messages' curve, so the pair matches the bubbles: {shell}"
+    );
+    // The card is a child of that shell, and the shell is a card of the
+    // conversation's own size (#3114): its rows pad the card's column instead of
+    // measuring the pane.
+    let card = render
+        .find("shell = shell.child(hint_card(&line));")
+        .expect("the card is a child of that shell, not a sibling floating over it");
+    let card = render[card..]
+        .lines()
+        .next()
+        .expect("the join is one line");
+    assert!(
+        card.contains("hint_card(&line)"),
         "the strip itself is what the shell holds: {card}"
     );
     // The dock lost the surface it used to paint (#2987): the shell above owns
@@ -2045,7 +2048,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         .nth(1)
         .expect("the composer dock is still built");
     let dock = dock
-        .split(".child(central(composer, centred_chat, chat_measure_px))")
+        .split(".child(composer)")
         .next()
         .expect("the dock still starts with the field");
     assert!(
@@ -3849,15 +3852,15 @@ fn a_notice_is_parked_with_the_conversation_that_asked() {
     );
 }
 
-/// The composer is flat, and the ground under it is square (#3112).
+/// The composer is a card, and the ground under it is square (#3114).
 ///
-/// It used to round its own corners to the card's radius (#3110) and the two
-/// curves met at the same edge. The owner then called the composer out as the
-/// one surface that should not be a card at all, and in the same pass took the
-/// session surface with it: the ground is the whole shot now, so there is no
-/// curve left anywhere along the field's edge to agree with.
+/// #3112 took the composer edge to edge and flat, and took the session surface
+/// with it: the ground is the whole shot now, so it carries no corner. The owner
+/// then sent the composer back to a card the size of a message, which is where
+/// the two shapes part company: the card has a curve because it floats on the
+/// ground, and the ground has none because it IS the window.
 #[test]
-fn the_composer_is_flat_and_the_ground_is_square() {
+fn the_composer_is_a_card_on_a_square_ground() {
     let render = include_str!("../dashboard_render.rs");
     let shell = &render[render
         .find("let mut shell = div()")
@@ -3867,8 +3870,8 @@ fn the_composer_is_flat_and_the_ground_is_square() {
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        !shell.contains(".rounded("),
-        "the composer is flat end to end: {shell}"
+        shell.contains(".rounded(px(transcript::MESSAGE_RADIUS))"),
+        "the card wears the messages' curve, not a flat edge: {shell}"
     );
     let surface = &render[render
         .find("let mut session = div()")
