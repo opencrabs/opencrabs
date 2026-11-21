@@ -255,8 +255,33 @@ implying a cleanup it never performs.
 
 Each badge tints itself from its own `host_id` (`badge_tint`), stable across
 restarts and bounded so a column of crabs never collapses into five identical
-grey circles. Two tests hold it: one pins stability and the bound, one pins
+grey squares. Two tests hold it: one pins stability and the bound, one pins
 that a realistic column of hosts stays distinguishable.
+
+### The badge's mark
+
+A badge wears a mark, and the mark is one of three things: the label's first
+letter, up to two characters the owner typed, or one picture from the same pack
+the topic tabs use (`topic_icons`). The badge is a rounded square for the same
+reason the rail's session marks and the topic tabs are: it is the same chrome in
+the same column, and a circle among squares read as a different widget.
+
+**Mudar ícone** opens the badge's editor, and it is the topic prompt with a
+different subject: a field for the two characters, the pack below it as a grid
+of pictures, and a pick that applies at once instead of arming a second click.
+The two shapes share the storage (`topic:` and `img:` prefixes pass through
+`normalise_glyph` whole), so a mark picked here is a mark the topic code can
+already read. The write goes to `instances.json` before the strip is told,
+because a mark that only lives in this window is a mark the next launch loses.
+
+### The C, and the way home
+
+The first square is not a crab: it is **C**, this window's own crab. While a
+remote is on screen it is the only thing in the column that is not that remote,
+so it wears the accent border and a left click goes back to the local ledger
+(`instance_clear`: the selection, the remote view and its transcript). Before
+that it was right-click only, which meant the one control a user needs to leave
+a remote was the one control the mouse never finds.
 
 ## Known limits
 
