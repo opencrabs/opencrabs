@@ -59,9 +59,6 @@ fn state_of(app: &App) -> HintState {
         // already walks it with the arrows (#596), so the row only has to say
         // that it is there.
         offers: app.followup_suggestions.len(),
-        // The terminal queues a message typed while a turn runs, the same as
-        // the window does, so the row names the same keys (#3102).
-        queued: queued_count(app),
         // The terminal has no rail holding the keyboard: its session list is a
         // screen of its own, and the composer is not drawn behind it.
         rail_focused: false,
@@ -74,22 +71,6 @@ fn state_of(app: &App) -> HintState {
         // no engine behind it would bounce.
         voice: crate::config::Config::current().voice_config().stt_enabled,
     }
-}
-
-/// How many messages wait on the session on screen.
-///
-/// The map is shared with every channel, so the guard is taken and dropped
-/// before anything is drawn: holding it across render work would let a
-/// background send block the frame (#2244).
-fn queued_count(app: &App) -> usize {
-    let Some(session) = &app.current_session else {
-        return 0;
-    };
-    app.queued_messages
-        .lock()
-        .ok()
-        .and_then(|map| map.get(&session.id).map(Vec::len))
-        .unwrap_or(0)
 }
 
 /// The hint the row is printing right now, if any (#3122).

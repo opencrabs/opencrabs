@@ -148,28 +148,34 @@ fn a_split_pick_speaks_before_focus_lands() {
     );
 }
 
-/// A queue is the one rung that is also true while a turn runs.
+/// A queue belongs to the field, and the card never says it twice (#3124).
+///
+/// The field prints the count and the keys that act on it, so a card line
+/// carrying the same number was one sentence drawn twice. The state has no
+/// field for a queue any more, which makes that duplication unrepresentable
+/// rather than merely discouraged, and a running turn leaves the card empty
+/// because the reader is waiting, not choosing.
 #[test]
-fn a_queue_says_where_the_message_goes() {
-    let draining = line(&HintState {
-        queued: 2,
+fn a_queue_never_reaches_the_card() {
+    let busy = line(&HintState {
+        processing: true,
         ..quiet()
-    })
-    .expect("a queue on its way out");
+    });
     assert!(
-        draining.contains("2 queued") && draining.contains("sending now"),
-        "an idle field with a queue says the queue is on its way: {draining}"
+        busy.is_none(),
+        "a running turn leaves the card to the field, which names the queue: {busy:?}"
     );
 
-    let waiting = line(&HintState {
-        processing: true,
-        queued: 2,
-        ..quiet()
-    })
-    .expect("a queue on a running turn");
+    // The source pin: the words the card used to print are gone, so a later
+    // rung cannot bring them back by copy-paste without failing here.
+    let source = include_str!("../ui_core/hints.rs");
     assert!(
-        waiting.contains("2 queued") && waiting.contains("turn ends"),
-        "and while a turn runs it says when the queue goes out: {waiting}"
+        !source.contains("queued · sent when the turn ends"),
+        "the card does not narrate a queue the field already counts"
+    );
+    assert!(
+        !source.contains("queued · sending now"),
+        "and it does not narrate the drain either"
     );
 }
 
@@ -212,11 +218,6 @@ fn the_card_never_repeats_the_fields_own_keys() {
         quiet(),
         HintState {
             processing: true,
-            ..quiet()
-        },
-        HintState {
-            processing: true,
-            queued: 1,
             ..quiet()
         },
         HintState {

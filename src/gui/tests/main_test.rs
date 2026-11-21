@@ -2166,18 +2166,8 @@ fn the_card_says_what_the_screen_is_asking_for() {
         "one word apart is the difference between a shortcut and a surprise"
     );
 
-    // A queue is the only rung also true while a turn runs.
-    let queued = card_line(&HintState {
-        processing: true,
-        queued: 2,
-        ..HintState::default()
-    })
-    .expect("a queue on a running turn");
-    assert!(
-        queued.contains("2 queued"),
-        "the count is the first thing worth knowing: {queued}"
-    );
-
+    // A queue is the field's, so the card stays empty while a turn runs: the
+    // same number in two places is one sentence drawn twice (#3124).
     // Nothing is suggested while the answer is still being written: the field
     // already says Esc stops it.
     let busy = card_line(&HintState {
@@ -2198,11 +2188,6 @@ fn the_card_never_repeats_the_fields_own_keys() {
         HintState::default(),
         HintState {
             processing: true,
-            ..HintState::default()
-        },
-        HintState {
-            processing: true,
-            queued: 1,
             ..HintState::default()
         },
         HintState {

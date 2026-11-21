@@ -3768,9 +3768,6 @@ impl Dashboard {
                 .chat_session
                 .map(|sid| agent_bridge::options_snapshot(sid).len())
                 .unwrap_or(0),
-            // What the keys do while a turn runs, which is not what they do
-            // when the field is idle (#3102).
-            queued: self.queued_for_strip().len(),
             // The rail holding the keyboard changes what a typed character
             // does, so the row says so instead of naming commands the field
             // will never receive.

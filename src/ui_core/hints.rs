@@ -8,7 +8,8 @@
 //!
 //! The card has an intent. It names what the screen is asking for at this
 //! moment, one line, and nothing else: the rail holding the keyboard, an offer
-//! waiting above the field, a queue on its way out, or a rung of the ladder. It
+//! waiting above the field, or a rung of the ladder. A queue is the field's,
+//! which already counts it and names the keys that act on it (#3124). It
 //! does not rotate. A line that changes on a timer reads as noise, because the
 //! reader cannot tell a new fact from the same fact coming round again.
 //!
@@ -92,7 +93,7 @@ pub const DISMISS_DAYS: i64 = 7;
 ///
 /// Two classes share the card and only one of them is advice. A functional line
 /// names what the keys do RIGHT NOW (the rail holding the keyboard, an offer
-/// waiting, a queue on its way out) or states a fact about the machine (the
+/// waiting) or states a fact about the machine (the
 /// context is nearly full, a release is waiting). Hiding any of those for a
 /// week would leave the reader guessing about a screen that is behaving in a
 /// way they cannot see the reason for, so they stay.
@@ -101,10 +102,7 @@ pub const DISMISS_DAYS: i64 = 7;
 /// a new tip is dismissible by default instead of silently joining the class
 /// that can never be hidden.
 pub fn dismissible(id: &str) -> bool {
-    !matches!(
-        id,
-        "offers" | "queue" | "rail" | "rail-split" | "context" | "update"
-    )
+    !matches!(id, "offers" | "rail" | "rail-split" | "context" | "update")
 }
 
 /// What a surface knows about the conversation when it draws the row.
@@ -134,12 +132,6 @@ pub struct HintState {
     /// the reader needs to know there is more than one to walk. Zero means the
     /// turn offered nothing, which is the common case.
     pub offers: usize,
-    /// Messages waiting on the running turn.
-    ///
-    /// A queue changes what the keys do: while one is waiting, Up takes the
-    /// message back instead of the offer, and once the turn is over the queue
-    /// is what sends next. Zero means nothing is waiting.
-    pub queued: usize,
     /// The session list holds the keyboard.
     ///
     /// While it does, the composer is not where a typed character lands: the
@@ -442,21 +434,12 @@ pub fn task_line_hint(state: &HintState, supported: impl Fn(&str) -> bool) -> Op
             command: "",
         });
     }
-    // A queue is the only rung that is also true while a turn runs.
-    if state.queued > 0 {
-        return Some(Hint {
-            id: "queue",
-            text: if state.processing {
-                format!(
-                    "{} queued · sent when the turn ends · patience, they are coming",
-                    state.queued
-                )
-            } else {
-                format!("{} queued · sending now · yes, all of them", state.queued)
-            },
-            command: "",
-        });
-    }
+    // A queue is not a rung. The field already prints the count and the keys
+    // that act on it ("queued 2 · ↑ recalls · esc stops"), so a card line with
+    // the same number is one sentence drawn twice, which is the duplication
+    // #3102 exists to stop (#3124). The card says the next true thing about
+    // the work instead, and while a turn runs that is nothing at all.
+    //
     // Nothing is suggested while the answer is still being written: the reader
     // is waiting, not choosing, and the field already says Esc stops it.
     hint(state, supported)

@@ -67,7 +67,7 @@ fn a_functional_line_cannot_be_dismissed() {
     // These name what the keys do at this moment, or a fact about the machine.
     // Hiding any of them would leave the reader guessing at a screen that is
     // behaving for a reason they cannot see.
-    for id in ["offers", "queue", "rail", "rail-split", "context", "update"] {
+    for id in ["offers", "rail", "rail-split", "context", "update"] {
         assert!(!dismissible(id), "{id} is not advice, so it stays");
     }
     for id in ["seeker", "usage", "compaction", "fresh-start", "whisper"] {
