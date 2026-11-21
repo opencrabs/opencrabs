@@ -314,7 +314,10 @@ pub(crate) fn view(
     let empty = draft.is_empty();
     // A caret of its own: the field is not a real text input, so without this
     // bar there is no way to see where the next character lands.
-    let caret = div().flex_none().w(px(1.5)).h(rems(0.95)).bg(rgb(p.accent));
+    // 2 px, the local caret's width. The blink is the editor's own clock and
+    // this field has none: a bar that stays lit is the honest version of a
+    // caret nobody is animating.
+    let caret = div().flex_none().w(px(2.)).h(rems(0.95)).bg(rgb(p.accent));
     let mut line = div()
         .flex()
         .flex_row()
@@ -322,35 +325,65 @@ pub(crate) fn view(
         .items_center()
         .w_full()
         .min_w_0();
+    // The bar belongs where the next character will land, not at the
+    // selection's far edge: after a backwards selection (shift+Left) the
+    // caret sits at the selection's start, and painting it after the
+    // highlighted run put it a word away from the text it would replace.
+    let caret_at_start = draft
+        .selection()
+        .is_some_and(|(start, _)| draft.caret() == start);
     if empty {
-        line = line.child(
+        // The placeholder is text, not a position: the bar goes before it, so
+        // an empty composer reads as "typing starts here" instead of putting
+        // the caret past the hint.
+        line = line.child(caret).child(
             div()
                 .text_color(rgb(p.text_faint))
-                .child(SharedString::from("escreve para este crab…")),
+                // The local composer's own string, from the constant it
+                // paints with: same field, same words (#3133).
+                .child(SharedString::from(crate::editor::PLACEHOLDER)),
         );
+    } else if caret_at_start {
+        line = line.child(div().child(SharedString::from(before.to_string())));
+        line = line.child(caret);
+        if !selected.is_empty() {
+            line = line.child(
+                div()
+                    .bg(rgb(p.selection))
+                    .child(SharedString::from(selected.to_string())),
+            );
+        }
+        line = line.child(div().child(SharedString::from(after.to_string())));
     } else {
         line = line.child(div().child(SharedString::from(before.to_string())));
-    }
-    if !selected.is_empty() {
-        line = line.child(
-            div()
-                .bg(rgb(p.selection))
-                .child(SharedString::from(selected.to_string())),
-        );
-    }
-    line = line.child(caret);
-    if !empty {
-        line = line.child(div().child(SharedString::from(after.to_string())));
+        if !selected.is_empty() {
+            line = line.child(
+                div()
+                    .bg(rgb(p.selection))
+                    .child(SharedString::from(selected.to_string())),
+            );
+        }
+        line = line
+            .child(caret)
+            .child(div().child(SharedString::from(after.to_string())));
     }
 
+    // The field's own box, to the local composer's measurements: `card_inset`
+    // for the side step so the words land on the messages' column, `py_3` and a
+    // 44 px floor so the empty box is the same slab as the one in the chat, and
+    // 14 px on a 22 px line so a line of text is the same height in both
+    // (#3114, #3133). A remote field that was 13 px in a 32 px box read as a
+    // different control even with the same shell around it.
     let field = div()
         .flex()
         .flex_col()
         .w_full()
         .min_w_0()
-        .px_3()
-        .py_2()
-        .text_size(rems(0.8125))
+        .px(transcript::card_inset())
+        .py_3()
+        .line_height(px(22.))
+        .text_size(px(14.))
+        .min_h(px(44.))
         .text_color(rgb(p.text))
         .child(line);
 
@@ -411,6 +444,27 @@ pub(crate) fn view(
         .child(div().w_full().h(px(1.)).bg(rgb(p.panel_hi)))
         .child(footer);
 
+    // A send's answer has to be readable whatever the body holds. It used to
+    // live only in the empty-body branch, so a reply that landed in a session
+    // with messages was written nowhere the owner could see it, which is the
+    // other half of "não consigo enviar mensagem" (#3133).
+    let notice = frame
+        .notice
+        .clone()
+        .filter(|_| frame.has_rows)
+        .map(|notice| {
+            div()
+                .mx_4()
+                .mt_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(p.panel_hi))
+                .text_size(rems(0.6875))
+                .text_color(rgb(p.warn))
+                .child(notice)
+        });
+
     div()
         .flex()
         .flex_col()
@@ -420,6 +474,7 @@ pub(crate) fn view(
         .h_full()
         .child(banner)
         .child(div().flex().flex_col().flex_1().min_h_0().child(body))
+        .children(notice)
         .child(composer)
         .into_any_element()
 }

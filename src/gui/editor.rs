@@ -461,6 +461,12 @@ pub struct ReplyAttachment {
 
 /// The editor view. Ranges internal to this struct are utf8; every value
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
+/// What an empty composer says. Shared with the remote panel, which draws the
+/// same field for a crab on the other machine: two copies of this string drift
+/// the first time one of them is edited, and the owner reads the drift as "the
+/// composer is not the same" (#3133).
+pub(crate) const PLACEHOLDER: &str = "Talk to the crab…";
+
 pub struct Editor {
     pub focus_handle: FocusHandle,
     /// A request to put the caret back in this field once a frame with a
@@ -766,7 +772,7 @@ impl Editor {
             session: None,
             attachments: Vec::new(),
             reply: None,
-            placeholder: "Talk to the crab…".into(),
+            placeholder: PLACEHOLDER.into(),
             docked: false,
             selected_range: 0..0,
             selection_reversed: false,
