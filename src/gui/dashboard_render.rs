@@ -499,9 +499,24 @@ impl Render for Dashboard {
         // actually has, read from the live viewport rather than a constant, so
         // a row can never be planned wider than the box it is drawn into
         // (#2395). The usage screen loses its side panel from the same number.
-        let pane_width = attachment_view::content_width(
+        //
+        // The width the conversation's column really has (#3119): the viewport
+        // less the rail and the gutter the column spends on its own sides. The
+        // column is padded with `px_4`, one rem a side, in a split and on every
+        // screen but the unsplit chat; the unsplit chat runs edge to edge
+        // (#3112). A fixed 48 points of chrome, the safe side for a plan, was
+        // 16 too many here, and in a split those points made every planned pane
+        // narrower than the box it was drawn into: the rows stopped short of
+        // the plan card under them, which the pane sizes from the box itself.
+        let column_gutter = if self.screen == Screen::Chat && !self.window_is_split() {
+            0.0
+        } else {
+            2.0 * self.rem
+        };
+        let pane_width = attachment_view::column_width(
             f32::from(window.viewport_size().width),
             self.visible_rail_width() * self.rem,
+            column_gutter,
         );
         let picker_layout = model_layout::model_layout(
             pane_width,

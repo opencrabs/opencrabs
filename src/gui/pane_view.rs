@@ -1070,6 +1070,14 @@ pub(crate) fn leaf_box(leaf: LeafBox) -> AnyElement {
                 .flex_shrink()
                 .min_h_0()
                 .min_w_0()
+                // The conversation clears the cards under it by one step
+                // (#3119). The unsplit session keeps this gap on its own
+                // column; a pane's frame had none at all, so the last row of
+                // the transcript ended flush against the plan card, and the
+                // card's edge cut it in half. The same 8 the transcript gives
+                // between two of its rows, spent here so the cards stay whole
+                // and the conversation stops above them.
+                .pt_2()
                 .overflow_hidden()
                 .child(chrome),
         );

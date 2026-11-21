@@ -30,7 +30,7 @@ const PANE_CHROME: &str = include_str!("../gui/pane_chrome.rs");
 /// the region starts at the pane width rather than at the match.
 fn chat_arm() -> &'static str {
     GUI_MAIN
-        .split("let pane_width = attachment_view::content_width(")
+        .split("let pane_width = attachment_view::column_width(")
         .nth(1)
         .expect("the chat reads the pane width in render")
         .split("Screen::Usage => {")
@@ -115,6 +115,26 @@ fn the_chat_screen_draws_the_panes() {
         GUI_MAIN.matches("self.panes_body(").count(),
         1,
         "only the chat arm draws the panes: the theme modal opens over it (#2619)"
+    );
+}
+
+#[test]
+fn a_pane_is_planned_against_its_own_box() {
+    // #3119: the column is padded with `px_4`, one rem a side, in a split and
+    // on every screen but the unsplit chat, which runs edge to edge (#3112).
+    // Planning against the attachment planner's fixed 48 over-reserved that
+    // gutter by 16 points, so in a split every row stopped short of the plan
+    // card sharing its column.
+    let render = flat(GUI_MAIN);
+    assert!(
+        render.contains(
+            "let column_gutter = if self.screen == Screen::Chat && !self.window_is_split() { 0.0 } else { 2.0 * self.rem };"
+        ),
+        "the gutter is the column's own: none on the unsplit chat, one rem a side everywhere else"
+    );
+    assert!(
+        render.contains("attachment_view::column_width("),
+        "the pane width comes from the column's own gutter, not the planner's estimate"
     );
 }
 

@@ -242,6 +242,21 @@ fn the_pane_cards_take_the_message_column() {
         "the box that holds the transcript clips, so a row cannot paint over \
          the chrome under it: {wrapper}"
     );
+    // The conversation clears the cards under it by one step (#3119). The
+    // unsplit session keeps that gap on its own column; a pane's frame had
+    // none at all, so the transcript's last row ended flush against the plan
+    // card and the card's edge read as cutting it in half.
+    let below = leaf
+        .split_once(".child(body)")
+        .expect("the transcript wrapper ends at its body")
+        .1
+        .split_once("pane_footer(")
+        .expect("the chrome stack comes before the pane's status row")
+        .0;
+    assert!(
+        below.contains(".pt_2()"),
+        "the chrome stack spends the same 8 under the conversation: {below}"
+    );
 }
 
 /// The pane title is the pane's name, so it carries a heading's weight instead
