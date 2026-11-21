@@ -523,3 +523,24 @@ fn the_mark_and_the_badges_are_rounded_squares() {
          or the box itself is being drawn as a circle"
     );
 }
+
+#[test]
+fn a_remote_send_carries_the_conversation_on_screen() {
+    // `send_params` is already pinned next to the client, and it is only half
+    // the story: the wire helper can carry a context that the window never
+    // passes it. That is exactly the bug the owner hit, because a send without
+    // a context still returns a task id and still looks like it worked while
+    // the host opens a brand new session (#3133).
+    let source = include_str!("../dashboard_instances.rs");
+    let body =
+        fn_body(source, "pub(crate) fn send_remote").expect("send_remote is the window's send");
+    assert!(
+        body.contains(".context_id.clone()"),
+        "the send must read the context off the transcript it is showing"
+    );
+    assert!(
+        body.contains("instance_client::send(&target, &body, ctx.as_deref())"),
+        "the context must reach the client as its third argument, not be \
+         dropped on the way"
+    );
+}
