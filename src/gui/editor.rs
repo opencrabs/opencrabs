@@ -3778,7 +3778,13 @@ fn voice_strip(draft: &VoiceDraft, cx: &mut Context<Editor>) -> Div {
         .w_full()
         .min_w_0()
         .gap_1()
-        .p_1()
+        // The card's words take the message bubble's inset (#3114). At `p_1`
+        // the caption and the transcription sat four pixels from the card's
+        // edge, which the owner read as no spacing at all on the sides or the
+        // top. The same clip reads well once it is sent, and what it has there
+        // is this inset, so the draft wears it too.
+        .px(px(transcript::MESSAGE_PAD_X))
+        .py(px(transcript::MESSAGE_PAD_Y))
         .rounded(px(6.0))
         .bg(rgb(palette.panel_hi))
         .child(

@@ -2120,8 +2120,13 @@ const RHYTHM_CELL_PAD_X: f32 = 16.0;
 const RHYTHM_CELL_PAD_Y: f32 = 6.0;
 
 /// Message text sits inside the rounded surface, never on its curved edge.
-const MESSAGE_PAD_X: f32 = 16.0;
-const MESSAGE_PAD_Y: f32 = 12.0;
+///
+/// The composer's take preview reads them too (#3114): a recorded clip and the
+/// words the recogniser heard are the same card whether they are still a draft
+/// or already a message, so the inset they put their words at is one number
+/// rather than two that drift apart.
+pub(crate) const MESSAGE_PAD_X: f32 = 16.0;
+pub(crate) const MESSAGE_PAD_Y: f32 = 12.0;
 
 /// The conversation's left column, in rem steps (#3114).
 ///

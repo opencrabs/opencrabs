@@ -326,3 +326,29 @@ fn the_cards_share_the_message_curve_and_fill() {
         "the pane ring and the action chip keep their own curve"
     );
 }
+
+/// The take's words in the composer sit inside their card, not on its edge
+/// (#3114).
+///
+/// The draft preview padded a flat four, so the caption and the recogniser's
+/// transcription started four pixels from the card's own edge and the top row
+/// touched the corner: the owner read it as no spacing at all. The same clip
+/// reads well once it is sent, and what it has there is the message bubble's
+/// inset, so the draft takes those two numbers instead of a third one of its
+/// own.
+#[test]
+fn the_take_preview_pads_like_the_message_it_becomes() {
+    let strip = region(EDITOR, "fn voice_strip(", "/// The keybindings the editor needs");
+    assert!(
+        strip.contains(".px(px(transcript::MESSAGE_PAD_X))"),
+        "the sides take the bubble's inset: {strip}"
+    );
+    assert!(
+        strip.contains(".py(px(transcript::MESSAGE_PAD_Y))"),
+        "and so does the top and the bottom"
+    );
+    assert!(
+        !strip.contains(".p_1()"),
+        "the four-pixel pad is what put the words on the edge"
+    );
+}
