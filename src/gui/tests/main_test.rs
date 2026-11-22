@@ -2968,6 +2968,18 @@ fn the_seeker_hint_is_visible_and_clickable() {
         hint.contains("seeker_chord_label()"),
         "the chord printed must come from the shared label, not a literal"
     );
+    // The pill shares its row with the identity, which paints `text_faint`.
+    // At `text_muted` the chord was the loudest ink in a footer of chrome, so
+    // the eye landed on the key before the session it described (#3146). The
+    // resting token is the row's own; the hover wash stays the door's cue.
+    assert!(
+        hint.contains(".text_color(rgb(palette::current().text_faint))"),
+        "the pill rests on the same ink as the live state beside it"
+    );
+    assert!(
+        !hint.contains("text_muted"),
+        "a chord label must not out-shine the live state it shares the row with"
+    );
 }
 
 #[test]

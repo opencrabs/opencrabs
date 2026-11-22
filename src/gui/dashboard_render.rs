@@ -789,6 +789,13 @@ impl Render for Dashboard {
                             // label here bought nothing. The Usage and Files
                             // footers keep their labels: neither has a Seeker
                             // pill or a rail of its own to click.
+                            //
+                            // The pill rests on the row's own ink, not the
+                            // brighter muted token (#3146). It shares this row
+                            // with live state, and a chord label is advice: at
+                            // `text_muted` it was the loudest thing in a footer
+                            // of faint chrome, so the eye landed on the chord
+                            // before the session it was describing.
                             .child(
                                 div()
                                     .id("seeker-hint")
@@ -800,7 +807,7 @@ impl Render for Dashboard {
                                     .rounded_sm()
                                     .px(transcript::hover_pill_inset())
                                     .text_xs()
-                                    .text_color(rgb(palette::current().text_muted))
+                                    .text_color(rgb(palette::current().text_faint))
                                     .cursor_pointer()
                                     .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                                     .on_click(cx.listener(
