@@ -420,46 +420,6 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# Cheap profile for the test slices that do not exist to prove release
-# behaviour. `[profile.ci]` is release with thin LTO, which is right for a
-# shipped binary and wrong for 250k lines of test code that run once and
-# take 166 s: 43 of the 46 minutes that leg costs are rustc, not tests.
-#
-# The macOS leg keeps `ci` so every push still proves release-mode
-# correctness. This profile is only for the Linux leg. It is deliberately
-# NOT used by the Windows module slices: `citest` cannot link on Windows at
-# all (LNK2038, esaxx-rs /MT against llama /MD, and no LTO to dead-strip
-# the mismatch), so that step stays on `--profile ci`, the profile its build
-# step in the same job already used.
-#
-# debug-assertions and overflow-checks are pinned off deliberately.
-# `inherits = "dev"` turns both ON, which would make this leg assert a
-# different program than the macOS leg and turn any divergence into a
-# phantom platform bug.
-#
-# Do NOT raise CARGO_BUILD_JOBS on a job using this profile.
-# `[profile.dev.package."*"]` sets opt-level 2, so dependencies still build
-# at opt-level 2 and a dependency unit is as large as a release one: two
-# concurrent units evicted the 16 GB runner at 15.8 GB in run 43676233062.
-[profile.citest]
-inherits = "dev"
-opt-level = 1
-# `debug` is pinned to 0 rather than inheriting `dev`'s `true`. It was `1`,
-# which is the same value, and it is the one line in this profile that nobody
-# documented. It also drags `split-debuginfo = "unpacked"` in from
-# `[profile.dev]`, so every codegen unit wrote its own `.dwo` beside it.
-#
-# Measured over the 11 runs of this leg after it landed, the median is 60m29s
-# against 48m21s for the `ci` profile on the same job, and none of the 11 beat
-# that baseline (min 50m52s, max 111m43s). A leg that compiles 250k lines of
-# test code once, to run a suite that finishes in under three minutes, should
-# not pay for line tables nothing reads (#2934).
-debug = 0
-codegen-units = 256
-lto = false
-debug-assertions = false
-overflow-checks = false
-
 [[bin]]
 name = "opencrabs"
 path = "src/main.rs"

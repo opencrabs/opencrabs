@@ -769,10 +769,10 @@ jobs:
     name: Test
     needs: [lint, audit]
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
-    # This leg is the release-mode correctness check, so it stays on
-    # `--profile ci` (release, thin LTO). The cheap `citest` profile is
-    # only for the legs that exist to prove the code works, not to prove
-    # it works optimised.
+    # This leg is the release-mode correctness check, so it runs
+    # `--profile ci` (release, thin LTO). Every test leg runs the same
+    # profile: a cheaper test-only profile was tried, measured slower, and
+    # removed (#2934), so there is one profile to reason about.
     env:
       TEST_PROFILE: ci
     # Fork PRs run this on hosted runners, where the cache key can never
@@ -873,11 +873,10 @@ jobs:
         # so the peak is a single rustc (~9 GB) instead of two, and each unit
         # still fans its codegen across all four cores.
         #
-        # The profile is per-leg (#2934): macOS keeps `ci` and stays the
-        # release-mode correctness check, while `test-linux` sets
-        # TEST_PROFILE=citest, opt-level 1 with 256 codegen units. The suite
-        # is 166 s of testing behind 43 minutes of rustc, so most of that leg
-        # was optimising test code nobody ships.
+        # Every test leg runs the same `ci` profile (#2934). A cheaper
+        # test-only profile was tried on the Linux leg and measured slower
+        # than `ci` (median 60m against 47m across the runs that reported),
+        # so it was removed and the profile no longer varies per leg.
         #
         # Do NOT pin CARGO_PROFILE_CI_CODEGEN_UNITS here. Codegen-units is part
         # of cargo's fingerprint, so overriding it rebuilds the entire dependency
@@ -939,18 +938,13 @@ jobs:
     needs: [lint, audit]
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-24.04
-    # 180, not 90 (#2934): the citest profile changed `Cargo.toml`, and
-    # rust-cache keys on that file, so the run that introduces the profile
-    # rebuilds every dependency from source. At 90 that run hit the ceiling
-    # mid-compile and then failed to save the cache, so the profile could
-    # never warm itself: every attempt started cold and died the same way.
-    # A ceiling is not a target, a warm run never approaches it.
-    timeout-minutes: 180
-    env:
-      # Cheaper than the macOS leg on purpose: see [profile.citest] in
-      # Cargo.toml. macOS keeps `ci` so release-mode correctness is still
-      # proven on every push.
-      TEST_PROFILE: citest
+    # 90, back from the 180 that stood here (#2934). The 180 existed only
+    # because a test-only profile changed `Cargo.toml`, and rust-cache keys
+    # on that file, so every run that touched the profile rebuilt all deps
+    # from source and needed the extra headroom to reach a cache save. That
+    # profile is gone, so this is back to a ceiling a warm run never
+    # approaches: the `ci` profile lands around 47 minutes here.
+    timeout-minutes: 90
     steps: *test-steps
 
   # ── Stage 2a3: GUI path filter (decides whether Stage 2c runs) ───────────
