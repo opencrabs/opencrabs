@@ -231,11 +231,11 @@ fn the_window_hides_the_card_on_hover_and_not_inside_the_composer() {
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        !shell.contains("hint_card"),
+        !shell.contains("hint_line"),
         "the field is for typing, and a line of advice welded to it reads as input"
     );
     let card = &render[render
-        .find("fn hint_card(hint: &Hint")
+        .find("fn hint_line(hint: &Hint")
         .expect("the card is a function of the hint it carries")..];
     assert!(
         card.contains("crate::composer_orb::note_hover"),

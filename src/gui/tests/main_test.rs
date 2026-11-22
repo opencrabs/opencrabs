@@ -2002,19 +2002,19 @@ fn every_pane_keeps_its_strips_at_their_own_height() {
     );
 }
 
-/// The field keeps the two keys that act on it, and the card above carries the
+/// The field keeps the two keys that act on it, and the line above carries the
 /// work instead (#3102).
 ///
 /// These two never merge. Esc stops the turn being written into the field and
 /// the chord records a message into it, so they belong where the caret is. The
 /// card has an intent of its own: what the screen is asking for right now.
 #[test]
-fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
+fn the_field_keeps_its_own_keys_and_the_line_carries_the_work() {
     let render = include_str!("../dashboard_render.rs");
     assert!(
         render
-            .contains("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement"),
-        "the card is a card of its own, drawn from the hint it carries"
+            .contains("fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement"),
+        "the line is its own element, drawn from the hint it carries"
     );
     // The composer's shell is the field and its footer, and nothing else: a
     // line of advice welded to the top of the box you type into reads as part
@@ -2024,8 +2024,8 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         "the shell holds the field and the footer only"
     );
     assert!(
-        !render.contains("shell = shell.child(hint_card"),
-        "and the card is no longer a strip of the composer's own box"
+        !render.contains("shell = shell.child(hint_line"),
+        "and the line is no longer a strip of the composer's own box"
     );
     // The card OPENS the stack above the composer, directly under the last
     // card of the conversation (#3124). It used to close it, under the plans,
@@ -2042,7 +2042,7 @@ fn the_field_keeps_its_own_keys_and_the_card_carries_the_work() {
         .next()
         .expect("the card is one row of the stack");
     assert!(
-        card.contains("session_row(") && card.contains("hint_card(&hint, cx)"),
+        card.contains("session_row(") && card.contains("hint_line(&hint, cx)"),
         "the card takes the conversation's column, like every strip above it: {card}"
     );
     // The order is the point of #3124: the hint sits above the plan card, not

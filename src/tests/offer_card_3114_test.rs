@@ -205,28 +205,30 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         !PANE_CHROME.contains(".p_3()"),
         "and keeps no uniform inset of its own"
     );
-    // The hint is a card of its own, and it pads the column every row of the
-    // chat starts on (#3124). It used a uniform `p_3` like the plan and the
-    // queue, which left its words at 20 while the messages, the field and the
-    // footer's labels all start at 24: the card was four pixels left of the
-    // conversation it comments on. The sides are the card's step and the
-    // vertical step is unchanged.
-    let strip = region(DASHBOARD_RENDER, "fn hint_card(", "\n}\n");
+    // The hint is a line of the conversation's column, not a card (#3139). It
+    // still pads the column every row of the chat starts on, and it paints no
+    // surface of its own: the theme's accent already carries the words, so a
+    // fill and an edge only added a third panel to a window that has two.
+    let line = region(DASHBOARD_RENDER, "fn hint_line(", "\n}\n");
     assert!(
-        strip.contains(".px(transcript::card_inset())") && strip.contains(".py_3()"),
-        "the card's words land on the conversation's column, and its height is untouched"
+        line.contains(".px(transcript::card_inset())"),
+        "the line's words land on the conversation's column"
     );
     assert!(
-        !strip.contains(".p_3()"),
+        !line.contains(".p_3()"),
         "a uniform inset is what put its words four pixels left of everything else"
     );
     assert!(
-        strip.contains(".rounded(px(transcript::MESSAGE_RADIUS))")
-            && strip.contains(".bg(glass_fill(transcript::message_card_surface()))"),
-        "and wears the message card's fill and curve, like the queue above it"
+        !line.contains(".rounded(px(transcript::MESSAGE_RADIUS))")
+            && !line.contains(".bg(glass_fill("),
+        "a tip is text, so it draws no card of its own: {line}"
     );
     assert!(
-        !strip.contains(".px(transcript::card_row_inset())"),
+        !line.contains(".border_1()"),
+        "and no edge, which is what made one sentence read as a panel"
+    );
+    assert!(
+        !line.contains(".px(transcript::card_row_inset())"),
         "it is no longer a row of the composer's card"
     );
     // The footer row under the hairline is the last of those rows, and it

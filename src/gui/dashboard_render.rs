@@ -2515,7 +2515,7 @@ impl Render for Dashboard {
                     // it is about what is waiting to happen next.
                     if let Some(hint) = self.task_hint() {
                         above = above.child(session_row(
-                            hint_card(&hint, cx).into_any_element(),
+                            hint_line(&hint, cx).into_any_element(),
                             centred_chat,
                             chat_measure_px,
                         ));
@@ -3828,29 +3828,30 @@ fn session_row(view: AnyElement, centred: bool, measure: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// The hint card under the conversation (#3102, #3121, #3124).
+/// The hint line under the conversation (#3102, #3121, #3124, #3139).
 ///
 /// It carries one line about the work: what the screen is asking for right now.
 /// The keys that act on the field itself stay inside the field, where the caret
 /// is, so the two never compete for the same glance.
 ///
-/// It is a card of the conversation's column, not a strip of the composer's
-/// box. A line welded to the top of the field read as part of the input, and it
-/// had no way to be answered: a reader who already knew the tip had to look at
-/// it forever. So it stands on its own, in the message card's fill and curve,
-/// and hovering it offers the one control it needs, a way to make it stop.
+/// It is a line, not a card (#3139). The card it used to be drew a fill, an
+/// edge and a curve around one sentence, which made a tip read as a third
+/// surface competing with the conversation it comments on. The ink already
+/// carries it: the accent at three quarters is louder than the muted chrome
+/// around it, so the box only added another border to look at. Hovering it
+/// still offers the one control it needs, a way to make it stop.
 ///
 /// The hover state lives in the shared thread-local the player blocks use, so
 /// a repaint costs one map lookup and no view rebuild.
-fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
+fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
     let shown = palette::current();
-    let hover_id = format!("hint-card-{}", hint.id);
+    let hover_id = format!("hint-line-{}", hint.id);
     let over = crate::composer_orb::hovering(&hover_id);
-    // The id is what makes the card stateful, and `on_hover` only exists on a
-    // stateful element (#3121), so the card returns the element it builds
+    // The id is what makes the line stateful, and `on_hover` only exists on a
+    // stateful element (#3121), so the line returns the element it builds
     // rather than a plain `Div` it can no longer be.
-    let mut card = div()
-        .id("hint-card")
+    let mut line = div()
+        .id("hint-line")
         .flex()
         .flex_row()
         .items_center()
@@ -3858,20 +3859,14 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
         .gap_2()
         .w_full()
         .min_w_0()
-        // The conversation's column, not the strips' 12 (#3124). The card is
-        // placed by `session_row`, which spends half a rem of the gutter on
-        // each side, so a uniform `p_3` left its words at 20 while the messages
-        // above it, the composer's field and the footer's labels all start at
-        // 24. It pads the card's step for the same reason the field does, and
-        // the vertical step stays 12: only the sides were off.
+        // The conversation's column (#3124): the transcript already spends half
+        // a rem of gutter on each side, so this adds the other 16 and the words
+        // land on the messages' 24. No vertical padding and no surface: the
+        // transcript's own 8 is the whole gap to the turn above and the offer
+        // below.
         .px(transcript::card_inset())
-        .py_3()
-        .rounded(px(transcript::MESSAGE_RADIUS))
-        .bg(glass_fill(transcript::message_card_surface()))
-        .border_1()
-        .border_color(session_edge(shown.panel_hi))
         .on_hover(move |is_over: &bool, window, _cx| {
-            // Only a change is worth a frame: a pointer that rests on the card
+            // Only a change is worth a frame: a pointer that rests on the line
             // would otherwise repaint the window on every mouse move.
             if crate::composer_orb::note_hover(&hover_id, *is_over) {
                 window.refresh();
@@ -3886,7 +3881,7 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 .min_w_0()
                 .overflow_hidden()
                 .child(
-                    // The card names itself (#3124). A bare sentence over the
+                    // The line names itself (#3124). A bare sentence over the
                     // composer read as the app talking to itself, and the owner
                     // asked what the line was supposed to be. The label is
                     // faint and never shrinks, so the tip keeps the row.
@@ -3903,13 +3898,13 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                         .text_xs()
                         // The theme's accent at full strength shouted for a
                         // line that is advice, not a warning (#3124). It is
-                        // mixed a quarter of the way into the card it sits on,
+                        // mixed a quarter of the way into the surface it sits on,
                         // which is the same ink at 75%, and the accent itself
                         // is untouched: focus rings, the selection wash and
                         // every other accent surface stay exactly as they were.
                         .text_color(rgb(gui_theme::mix(
                             shown.accent,
-                            transcript::message_card_surface(),
+                            transcript::surface_fill(shown.bg),
                             25,
                             100,
                         )))
@@ -3917,14 +3912,14 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 ),
         );
     // Only a hint the reader may hide gets the control, and only while the
-    // pointer is on the card: a permanent × on every line would be a button
+    // pointer is on the line: a permanent × on every line would be a button
     // asking to be pressed by accident. The class comes from the engine, which
     // keeps the warnings (a context about to overflow) undismissable: hiding
     // the one line that says the conversation is running out of room is not a
     // preference, it is a way to lose work.
     if over && dismissible(hint.id) {
         let id = hint.id;
-        card = card.child(
+        line = line.child(
             div()
                 .id("hint-dismiss")
                 .flex_none()
@@ -3944,5 +3939,5 @@ fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 .child(SharedString::from("×")),
         );
     }
-    card
+    line
 }

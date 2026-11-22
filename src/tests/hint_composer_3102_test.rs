@@ -324,7 +324,7 @@ fn the_card_is_its_own_card_above_the_composer() {
         .next()
         .expect("the shell ends where it joins the column");
     assert!(
-        !shell.contains("hint_card"),
+        !shell.contains("hint_line"),
         "the field's shell carries no advice any more: {shell}"
     );
 
@@ -358,7 +358,7 @@ fn the_card_is_painted_in_the_theme_accent() {
 
     let render = include_str!("../gui/dashboard_render.rs");
     let start = render
-        .find("fn hint_card(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {")
+        .find("fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {")
         .expect("the window's card");
     let body = render
         .get(start..)
