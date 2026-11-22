@@ -852,10 +852,14 @@ fn every_paint_hands_over_the_turn_the_window_holds() {
     // rewrites one of those entries (#2925), and the body that paints it.
     // A split pane paints from its own `PaneView::live`, and the Themes
     // preview leaf the centered modal replaced is gone (#2619).
+    // The fifth is the append, not a paint (#3032): the turn that just
+    // finished is converted to a transcript row from the same live card,
+    // so the reader sees it without a refetch and without a second turn
+    // being read anywhere.
     assert_eq!(
         production.matches("&self.turn.live,").count(),
-        4,
-        "the attachment scan, the live action rows, the edit sequence and the chat body all paint the window's turn"
+        5,
+        "the attachment scan, the live action rows, the edit sequence, the chat body and the finished turn's append all read the window's turn"
     );
     assert_eq!(
         production.matches("swap_visible_turn(").count(),
