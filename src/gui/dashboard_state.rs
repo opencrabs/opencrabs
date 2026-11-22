@@ -724,6 +724,11 @@ pub(crate) struct Dashboard {
     /// spans and a fake caret and a remote question could not be edited,
     /// selected or wrapped the way a local one can (#3133).
     pub(crate) remote_editor: Entity<editor::Editor>,
+    /// Whether the remote panel is showing a conversation that has not started
+    /// yet (`/new` on an open crab). Nothing exists on the host until the first
+    /// message goes out, so the panel says so rather than asking for a pick
+    /// that has already been made (#3133).
+    pub(crate) remote_new: bool,
     /// The last instance error, said in one line at the bottom of the strip's
     /// column. `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,

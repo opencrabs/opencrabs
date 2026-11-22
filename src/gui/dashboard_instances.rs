@@ -390,6 +390,42 @@ impl Dashboard {
         )
     }
 
+    /// "New conversation", wherever the window asks for it (#3133).
+    ///
+    /// With a crab open the conversation on screen is the other machine's, so a
+    /// new one has to be there too. `/new` and Ctrl+N used to call the local
+    /// `new_session` while the panel was drawing the remote, which created a
+    /// session on this machine that nobody could see, left the panel exactly as
+    /// it was, and read as a key that did nothing. The owner's words: "nao
+    /// parece deixar criar novas sessoes".
+    pub(crate) fn new_conversation(&mut self, cx: &mut Context<Self>) {
+        if self.instance_remote_open() {
+            self.instance_new_remote(cx);
+            return;
+        }
+        self.new_session(cx);
+    }
+
+    /// A fresh conversation on the open crab.
+    ///
+    /// Nothing is created here on purpose: the A2A surface has no "make me an
+    /// empty session", and a send with no `context_id` is what makes the host
+    /// open one. So the panel empties, the next message carries no context, and
+    /// the session that appears in the other crab's rail is one with a message
+    /// in it rather than an empty row somebody has to clean up.
+    pub(crate) fn instance_new_remote(&mut self, cx: &mut Context<Self>) {
+        if !self.instance_remote_open() {
+            return;
+        }
+        self.remote_transcript = None;
+        self.remote_new = true;
+        self.reset_remote_field(cx);
+        self.remote_editor.update(cx, |editor, _| {
+            editor.focus_pending = true;
+        });
+        cx.notify();
+    }
+
     /// Open one of the remote's sessions: fetch its transcript.
     pub(crate) fn open_remote_session(
         &mut self,
@@ -406,6 +442,7 @@ impl Dashboard {
             return;
         };
         let token = entry.known.token.clone();
+        self.remote_new = false;
         self.remote_transcript = Some(RemoteTranscript {
             session_id: session_id.clone(),
             context_id: None,
@@ -1120,6 +1157,12 @@ impl Dashboard {
             (RemoteState::Loading, _) => Some(SharedString::from("a falar com o crab…")),
             (RemoteState::Failed(e), _) => Some(SharedString::from(e.clone())),
             (_, Some(t)) => t.notice.clone(),
+            // A conversation that has not started yet says so, instead of
+            // asking for a pick the reader has already made: `/new` on a crab
+            // empties the panel and the next message opens the session (#3133).
+            (_, None) if self.remote_new => Some(SharedString::from(
+                "conversa nova: escreve em baixo para começar",
+            )),
             (_, None) => Some(SharedString::from(
                 "escolhe uma sessão na rail para ler a conversa",
             )),
@@ -1557,6 +1600,8 @@ impl Dashboard {
         // the Ctrl+Alt+Up/Down switch. The draft is per crab, so it is dropped
         // at the one door they all use.
         self.reset_remote_field(cx);
+        // A pick is not a new conversation: the flag belongs to `/new` alone.
+        self.remote_new = false;
         // And the field takes the keyboard, the way a freshly opened chat puts
         // the caret in its composer: a remote you have to click before typing
         // reads as broken, and the local composer is not on screen to hold

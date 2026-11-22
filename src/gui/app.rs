@@ -707,6 +707,7 @@ pub(crate) fn run() {
                         instance_error: None,
                         remote_transcript: None,
                         remote_editor,
+                        remote_new: false,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,

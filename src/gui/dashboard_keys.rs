@@ -297,9 +297,10 @@ impl Dashboard {
         }
         // ctrl+n opens a new conversation, the terminal's own chord. The row
         // is created in the ledger first, so the rail and the transcript agree
-        // on which session the next turn is written to.
+        // on which session the next turn is written to. With a crab open the
+        // conversation on screen is that crab's, so the new one is too (#3133).
         if ev.keystroke.modifiers.control && ev.keystroke.key == "n" {
-            self.new_session(cx);
+            self.new_conversation(cx);
             return;
         }
         // ctrl+s shows or hides the rail: the sidebar is the window's own

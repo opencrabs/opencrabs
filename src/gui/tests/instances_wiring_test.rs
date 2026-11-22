@@ -915,3 +915,49 @@ fn the_caret_goes_to_the_field_the_frame_draws() {
         "the caret must follow the field that is drawn: {arm}"
     );
 }
+
+#[test]
+fn a_new_conversation_follows_the_crab_on_screen() {
+    // The owner's report: "nao parece deixar criar novas sessoes". `/new` and
+    // Ctrl+N called the local `new_session` while the panel was drawing the
+    // other crab, so a session was created on this machine, the panel did not
+    // change, and the key read as dead. The new conversation has to be the
+    // crab's, and it has to be created by the host, not here.
+    let dash = include_str!("../dashboard_instances.rs");
+    let route =
+        fn_body(dash, "pub(crate) fn new_conversation(").expect("both doors ask one function");
+    let remote = route
+        .find("instance_remote_open()")
+        .expect("the crab on screen has to be asked first");
+    let local = route
+        .find("self.new_session(cx)")
+        .expect("the local path stays the fallback");
+    assert!(
+        remote < local,
+        "the remote branch has to come first, or a crab's /new lands on this machine"
+    );
+
+    let fresh = fn_body(dash, "pub(crate) fn instance_new_remote(")
+        .expect("a fresh remote conversation has its own door");
+    assert!(
+        fresh.contains("remote_transcript = None"),
+        "an empty panel is what drops the context, and no context is what makes \
+         the host open a session: {fresh}"
+    );
+    assert!(
+        !fresh.contains("spawn_create_session") && !fresh.contains("new_session"),
+        "nothing is created on this machine for a crab's conversation: {fresh}"
+    );
+
+    // Both doors: the chord and the command.
+    let keys = include_str!("../dashboard_keys.rs");
+    assert!(
+        keys.contains("self.new_conversation(cx)"),
+        "ctrl+n has to follow the crab too"
+    );
+    let cmds = include_str!("../dashboard_commands.rs");
+    assert!(
+        cmds.contains("GuiAction::NewSession => self.new_conversation(cx)"),
+        "/new has to follow the crab too"
+    );
+}
