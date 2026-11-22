@@ -1733,8 +1733,8 @@ impl Dashboard {
                     // would put an id in the copy order that no row carries.
                     // That is the state the live card was already in, and the
                     // next reload reconciles it.
-                    match self.chat_state.session() {
-                        Some(sid) => match transcript::turn_from_live(&self.turn.live, None) {
+                    if let Some(sid) = self.chat_state.session() {
+                        match transcript::turn_from_live(&self.turn.live, None) {
                             Some(mut turn) => {
                                 // The checklist this turn finished is a row in
                                 // the ledger, not something the card painted,
@@ -1771,8 +1771,7 @@ impl Dashboard {
                             // Nothing to append from, so the rows are the only
                             // record of this turn.
                             None => reload = Some(sid),
-                        },
-                        None => {}
+                        }
                     }
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {
