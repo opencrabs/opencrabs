@@ -389,7 +389,12 @@ pub(crate) fn view(
         .flex_col()
         .flex_none()
         .min_w_0()
-        .mx_4()
+        // The chat's own step, not a wider one: `session_row` spends half a rem
+        // of the gutter on each side of the local card, and the transcript
+        // hands its rows `measure - rem`. A rem of margin here put this card a
+        // half rem inside the bubbles above it and made the panel read as a
+        // narrower column than the conversation it holds (#3133).
+        .mx_2()
         .mt_1()
         .mb_2()
         .bg(opencrabs::ui_core::card::glass_fill(p.panel))
@@ -411,7 +416,7 @@ pub(crate) fn view(
         .filter(|_| frame.has_rows)
         .map(|notice| {
             div()
-                .mx_4()
+                .mx_2()
                 .mt_1()
                 .px_2()
                 .py_1()
@@ -429,6 +434,13 @@ pub(crate) fn view(
         .min_w_0()
         .min_h_0()
         .h_full()
+        // The chat's ground, the same call it makes (#3112): the local surface
+        // is `surface_fill(bg)`, a three-step lift off the window, and this
+        // panel was painting straight onto the window's own fill. Two surfaces
+        // a few points apart read as two different products side by side, which
+        // is what the owner saw when he said the look was not the same (#3133).
+        .bg(rgb(transcript::surface_fill(p.bg)))
+        .overflow_hidden()
         .child(banner)
         .child(div().flex().flex_col().flex_1().min_h_0().child(body))
         .children(notice)
