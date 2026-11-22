@@ -248,7 +248,7 @@ impl Tool for ProviderVisionTool {
         }
         for candidate in &candidates {
             match try_vision_candidate(
-                &client,
+                client,
                 candidate,
                 &question,
                 &image_url,

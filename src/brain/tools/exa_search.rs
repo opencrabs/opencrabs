@@ -163,7 +163,7 @@ impl ExaSearchTool {
 
         // Try with existing session, re-init on 404
         let result = self
-            .try_mcp_tool_call(&client, query, num_results, search_type)
+            .try_mcp_tool_call(client, query, num_results, search_type)
             .await;
 
         match result {
@@ -172,7 +172,7 @@ impl ExaSearchTool {
                 // Session expired — re-initialize
                 tracing::info!("MCP session expired, re-initializing");
                 *self.mcp_session_id.write().await = None;
-                self.try_mcp_tool_call(&client, query, num_results, search_type)
+                self.try_mcp_tool_call(client, query, num_results, search_type)
                     .await
             }
             Err(e) => Err(e),

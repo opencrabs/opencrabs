@@ -156,7 +156,10 @@ pub fn buffered_transport(timeout: Duration) -> reqwest::Client {
 pub(crate) fn buffered_transport_cached(timeout: Duration) -> std::sync::Arc<reqwest::Client> {
     use std::sync::{Arc, Mutex};
 
-    static CLIENTS: OnceLock<Mutex<Vec<(Duration, Arc<reqwest::Client>)>>> = OnceLock::new();
+    // One cache entry: the ceiling it was built for, and the client.
+    type CeilingClient = (Duration, Arc<reqwest::Client>);
+
+    static CLIENTS: OnceLock<Mutex<Vec<CeilingClient>>> = OnceLock::new();
     let cache = CLIENTS.get_or_init(|| Mutex::new(Vec::new()));
     let mut entries = cache.lock().unwrap_or_else(|poison| poison.into_inner());
 

@@ -592,7 +592,7 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
         .timeout(std::time::Duration::from_secs(PREVALIDATE_TIMEOUT_SECS))
     });
 
-    let resp = match send_with_retry(&client, &url, source, "connect").await {
+    let resp = match send_with_retry(client, &url, source, "connect").await {
         Ok(r) => r,
         Err(outcome) => return outcome,
     };
@@ -611,7 +611,7 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
         // server-side URL fetcher is the unreliable hop — it 400s with
         // "failed to get HTTP URL content" on URLs this host fetches fine —
         // so Telegram never sees a URL at all.
-        let body = match read_body_with_retry(&client, &url, resp, source, "body").await {
+        let body = match read_body_with_retry(client, &url, resp, source, "body").await {
             Ok(b) => b,
             Err(outcome) => return outcome,
         };
@@ -627,11 +627,11 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
                     "natural render exceeds the photo box; retrying at the width clamp"
                 );
                 let clamp_url = ink_url_params(source, MERMAID_INK_CLAMP_PARAMS);
-                let cresp =
-                    match send_with_retry(&client, &clamp_url, source, "connect-clamp").await {
-                        Ok(r) => r,
-                        Err(outcome) => return outcome,
-                    };
+                let cresp = match send_with_retry(client, &clamp_url, source, "connect-clamp").await
+                {
+                    Ok(r) => r,
+                    Err(outcome) => return outcome,
+                };
                 let cstatus = cresp.status().as_u16();
                 let ctype = cresp
                     .headers()
@@ -644,7 +644,7 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
                     return fail("clamp-response", source, error_note(cstatus, &cbody), None);
                 }
                 let cbytes =
-                    match read_body_with_retry(&client, &clamp_url, cresp, source, "body-clamp")
+                    match read_body_with_retry(client, &clamp_url, cresp, source, "body-clamp")
                         .await
                     {
                         Ok(b) => b,

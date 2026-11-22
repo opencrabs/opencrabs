@@ -596,7 +596,7 @@ pub async fn run_debate(mut config: DebateConfig) -> Result<DebateSession, Debat
         for (i, (endpoint, msg)) in messages.into_iter().enumerate() {
             let client = client.clone();
             handles.push(tokio::spawn(async move {
-                let result = send_a2a_message(&client, &endpoint, msg).await;
+                let result = send_a2a_message(client, &endpoint, msg).await;
                 (i, endpoint, result)
             }));
         }

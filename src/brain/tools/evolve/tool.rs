@@ -278,7 +278,7 @@ impl Tool for EvolveTool {
                 return self
                     .evolve_via_binary_download(
                         sid,
-                        &client,
+                        client,
                         &release,
                         current_version,
                         latest_tag,

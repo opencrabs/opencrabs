@@ -56,7 +56,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
         None => mint_and_persist_id()?,
     };
 
-    match post_install(&client, &url, &install_id, false).await {
+    match post_install(client, &url, &install_id, false).await {
         Ok(issued) => return store_install(install_id, issued),
         Err(InstallError::AlreadyIssued) => {}
         Err(other) => return Err(other),
@@ -65,7 +65,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
     // The proxy knows this ID and this machine does not hold its token, so ask
     // for the token to be reissued against the same ID. The matching proxy
     // change is tracked separately; a proxy without it answers 409 again.
-    match post_install(&client, &url, &install_id, true).await {
+    match post_install(client, &url, &install_id, true).await {
         Ok(issued) => return store_install(install_id, issued),
         Err(InstallError::AlreadyIssued) => {}
         Err(other) => return Err(other),
@@ -94,7 +94,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
         "The built-in provider would not reissue a token for install {install_id}; \
          minting a new install identity {fresh}"
     );
-    let issued = post_install(&client, &url, &fresh, false).await?;
+    let issued = post_install(client, &url, &fresh, false).await?;
     store_install(fresh, issued)
 }
 
