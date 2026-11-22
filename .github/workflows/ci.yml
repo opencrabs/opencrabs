@@ -377,11 +377,14 @@ jobs:
     # cmake C++ + ~15 for the thin-LTO link of a 4-vCPU runner); warm runs
     # from rust-cache land near 10. The original 40 cap killed a build that
     # was minutes from linking. Keep a cap so a true hang can't burn 360.
-    # 90 (not 60) while the scoped-test step rides along: the cfg(test) lib
-    # compiles on top of the build. The job is NOT in the required gate, so
-    # the extra ceiling is a priced trade for the first-ever Windows
-    # execution receipts, not silent drift.
-    timeout-minutes: 90
+    #
+    # 180 since #2944: this job now also links the cfg(test) harness that the
+    # slice executes, a second thin-LTO link of a ~197 MB binary on top of the
+    # bin. The 90 it carried before was priced for a step that rode along and
+    # never finished: 72m24s build, 16m39s left, cancelled mid-link with no
+    # verdict. A cap is a ceiling, not a bill, and the slice's verdict no
+    # longer depends on this one: it runs in windows-slice under its own cap.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -522,119 +525,167 @@ jobs:
           Write-Host "::notice::early exit for a reason other than a missing entry point, not treated as a failure"
           exit 0
 
-      # Scoped execution: only the modules whose tests assert platform
-      # behaviour. Full-suite Windows was rejected twice (#627 cost, and
-      # POSIX-semantics failures that are not bugs). Every member below
-      # exists on this tree, so Windows gives real receipts on day 1 instead
-      # of a zero-match tripwire:
-      #   config::winlock                     3 tests, cross-handle
-      #                                       contention and fail-closed
-      #                                       terminate proof, cfg(windows):
-      #                                       these run nowhere else
-      #   tests::utils_shell_test             4 tests, the shell_pair probe
-      #                                       contract
-      #   tests::utils_cwd_test               4 tests, drive-letter and
-      #                                       lookalike dirs
-      #   tests::browser_default_windows_test  6 tests, browser path
-      #                                       detection
-      #   tests::profile_test                69 tests (13 of them
-      #                                       #[ignore]d for touching the
-      #                                       live ~/.opencrabs), lock-owner
-      #                                       stamp parsing and reused-PID
-      #                                       resolution. The round-9
-      #                                       finding (a Windows-only test
-      #                                       failure) lived in exactly this
-      #                                       module, and no CI job could
-      #                                       have seen it: Windows ran no
-      #                                       tests.
-      #   tests::rtk_path_test                5 tests, the PATH separator
-      #                                       shape: `ensure_dir_in_path`
-      #                                       joined with `:` instead of
-      #                                       `;`, fusing the rtk dir to the
-      #                                       first existing entry and
-      #                                       deleting System32 from PATH
-      #                                       for every child process.
-      # Counts above are measured on Windows at the time of writing, not
-      # estimated: a stale count makes the zero-match tripwire's coverage
-      # claim a guess. Total collected: 91.
-      # cli::service_windows is NOT in the slice yet: its carrier belongs to
-      # #1821 and does not exist here, so listing it would make this step
-      # permanently red on a zero-match and defeat the flip noted below.
-      # This step is a HARD GATE (`continue-on-error: false`): it was soft only
-      # while the slice was red, and the receipt below is why it is green now.
+      # The test harness is a different artifact from the bin above and takes
+      # its own thin-LTO link of a ~197 MB binary (#2944). Linking it in THIS
+      # job, under a cap that budgets for it, is what lets the slice run under a
+      # cap that prices only the six filters. Before the split both shared one
+      # 90m budget: the build took 72m24s cold, the slice inherited 16m39s, and
+      # it was cancelled mid-link with zero `test result:` lines.
+      - name: "Build (windows): the test harness the slice executes"
+        shell: bash
+        env:
+          AWS_LC_SYS_CMAKE_BUILDER: '1'
+        run: |
+          # --no-run: link the harness, execute nothing. The filters run in
+          # windows-slice against the executable this produces.
+          # --message-format=json is how the exact path is read without parsing
+          # cargo's human output, which spells it differently per profile and
+          # per rustc version.
+          cargo test --locked --profile ci --target x86_64-pc-windows-msvc \
+            --lib --no-run --message-format=json > windows-test-build.json
+          python - <<'PY'
+          import json
+          import pathlib
+
+          exes = []
+          for line in pathlib.Path("windows-test-build.json").read_text(encoding="utf-8").splitlines():
+              if not line.startswith("{"):
+                  continue
+              msg = json.loads(line)
+              if msg.get("executable"):
+                  exes.append(msg["executable"])
+          if len(exes) != 1:
+              raise SystemExit(f"::error::expected exactly one test executable, found {exes}")
+          pathlib.Path("windows-test-exe.txt").write_text(exes[0], encoding="utf-8")
+          print(f"test harness: {exes[0]}")
+          PY
+
+      # Only the executable and the app-local runtime travel. Uploading the
+      # whole `ci` directory would drag every dependency rlib with it, and the
+      # slice needs neither a compiler nor a cache: it runs one already-linked
+      # binary six times.
+      - name: "Stage (windows): the slice's inputs in one artifact"
+        shell: bash
+        run: |
+          mkdir -p windows-slice
+          cp "$(cat windows-test-exe.txt)" windows-slice/
+          # The staged runtime beside the exe mirrors the layout users get
+          # (#2257). windows-latest already carries vc_redist, so this is belt
+          # and braces rather than what makes the binary start.
+          cp target/x86_64-pc-windows-msvc/ci/*.dll windows-slice/ 2>/dev/null || true
+          ls -la windows-slice
+
+      - name: "Upload (windows): the slice's inputs"
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-slice-inputs
+          path: windows-slice
+          if-no-files-found: error
+          # Three days: a job in this same run consumes it, so a longer
+          # retention would bill storage for something already read.
+          retention-days: 3
+
+      # Fail fast from inside the job that failed (#2595): the fan-in `abort`
+      # job cannot do it, because `needs` holds it until the run is over.
+      - name: Cancel this run on failure
+        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
+        uses: ./.github/actions/cancel-run
+        with:
+          token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+
+  # ── Windows scoped slice (its own cap, so it can render a verdict) ─────
+  # Split out of windows-build (#2944). A cold windows-latest build consumed
+  # 72m24s of that job's 90m cap and left the slice 16m39s, so the slice was
+  # cancelled mid-link: no MODULE line, no `test result:` line, no verdict in
+  # either direction. Here the cap prices only the six filter runs, against a
+  # binary that is already linked.
+  #
+  # Modules, with the counts measured on Windows when the gate was written. A
+  # stale count would make the zero-match tripwire a guess rather than a gate:
+  #   config::winlock                     3  cross-handle contention and the
+  #                                          fail-closed terminate proof,
+  #                                          cfg(windows): runs nowhere else
+  #   tests::utils_shell_test             4  the shell_pair probe contract
+  #   tests::utils_cwd_test               4  drive-letter and lookalike dirs
+  #   tests::browser_default_windows_test 6  browser path detection
+  #   tests::profile_test                69  13 #[ignore]d for touching the
+  #                                          live ~/.opencrabs. The round-9
+  #                                          Windows-only failure lived here
+  #                                          and no CI job could have seen it
+  #   tests::rtk_path_test                5  PATH separator shape: a `:`
+  #                                          join fused the rtk dir to the
+  #                                          first PATH entry and deleted
+  #                                          System32 for every child
+  # Total collected: 91.
+  # cli::service_windows is NOT in the slice: its carrier belongs to #1821 and
+  # does not exist here, so listing it would make this permanently red on a
+  # zero-match.
+  #
+  # Outside ci-gate's required set for the same reason windows-build is (2x
+  # Windows billing). It reaches the run the way that job does: a red here
+  # cancels the run, and a cancelled run cannot report a green required gate.
+  windows-slice:
+    name: Test (windows slice)
+    needs: [windows-build]
+    # Job-level, like windows-build (#1831): when the path filter says no, that
+    # job is skipped and this one follows it instead of running a slice with no
+    # binary to execute.
+    if: needs.windows-build.result == 'success'
+    runs-on: windows-latest
+    # 20 min: executing an already-linked binary six times. The 16m39s the old
+    # step spent was linking, not testing.
+    timeout-minutes: 20
+    steps:
+      # checkout is required by the cancel step below, which is a local action.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-slice-inputs
+          path: windows-slice
+
+      # One filter per module, each individually judged. A combined
+      # `<exe> a b c` that silently matches nothing looks green; per-module
+      # zero-detection here is a SCREAM (a module renamed by a sibling PR), not
+      # a pass, the same anti-fake-green principle the footgun gate's
+      # --self-test enforces.
       #
-      # Measured on Windows 11 (26320), x86_64-pc-windows-msvc, rustc 1.98.1
-      # (pinned by rust-toolchain.toml), --profile ci, --locked, one filter
-      # per module, against origin/main 2bbe80c57: 78 passed / 0 failed /
-      # 13 ignored across the 91 collected. Per-module counts and the exact
-      # command lines are on #2942.
+      # Actions' bash runs with -e, so an unguarded substitution exits AT the
+      # assignment and `rc=$?` below is never reached: the loop would abort on
+      # the first failing module, print none of the captured output, and skip
+      # every module after it. One more trap: libtest writes
+      # "test result: FAILED. N passed" on failure, so parsing $out must not
+      # assume the ok-form.
       #
-      # The slice previously reported three failures out of 91 collected.
-      # None of them was a test bug, and none was caused by the rtk change —
-      # all were product bugs, and all are now fixed:
-      #   - config::winlock::non_blocking_second_handle_reports_held
-      #     (#1863, fixed by 21c7b4021).
-      #   - tests::profile_test::create_profile_seeds_all_brain_templates
-      #     and ::create_profile_brain_files_are_non_trivial_size, both
-      #     "failed to lock profiles.toml.lock: invalid byte range
-      #     (os error 307)" — the same winlock overflow, so the same fix.
-      #
-      # That root cause, kept because it is why this step was soft at all,
-      # is a PRODUCT bug and not a test bug:
-      # winlock::exclusive asks LockFileEx for a range starting at the 1 MiB
-      # sentinel with length (u32::MAX, u32::MAX) = 2^64-1 bytes. 1 MiB plus
-      # (2^64-1) overflows the 64-bit range, so Windows rejects the call with
-      # ERROR 307 before any lock is attempted. A 2 GiB length at the same
-      # offset acquires fine, and the same 2^64-1 length at offset 0 acquires
-      # fine, which isolates the overflow as the cause.
-      #
-      # Both blockers named above have landed on main: 4c7658766 (rtk PATH) and
-      # 21c7b4021 (winlock sentinel range). The flip is the follow-up #1863
-      # asked for, and #2942 carries the receipts that justify it: six modules
-      # green on 2bbe80c57 — 78 passed, 0 failed, 13 pre-existing #[ignore]s —
-      # measured on Windows x64 / MSVC with --profile ci, because `citest`
-      # cannot link on that host (LNK2038: esaxx /MT against llama /MD, with no
-      # LTO to dead-strip it). As of this change the slice is a hard gate.
-      #
-      # If it goes red on a GitHub Windows runner, the gap is in that
-      # measurement's environment, not a reason to soften this step again.
-      #
-      # Scope, so the reach of this gate is not over-read either:
-      # windows-build is NOT in ci-gate's needs (2x billing, 51m cold), so a
-      # red here does not set the required check by itself. It reaches the run
-      # through the `abort` job, which DOES need windows-build: red here
-      # cancels the run, and a cancelled run cannot report a green required
-      # gate. The smoke step above is deliberately NOT soft, because a binary
-      # that does not start is a hard fail.
+      # This is a HARD GATE (`continue-on-error: false`): it was soft only
+      # while the slice was red, and #2942 carries the receipts that justify
+      # the flip #1863 asked for.
       - name: "Scoped tests (windows): platform-behaviour slice"
         continue-on-error: false
         shell: bash
         run: |
-          # One filter per module, each individually judged. A combined
-          # `cargo test -- a b c` that silently matches nothing looks green;
-          # per-module zero-detection here is a SCREAM (a module renamed by a
-          # sibling PR), not a pass, the same anti-fake-green principle the
-          # footgun gate's --self-test enforces.
-          # Actions' bash runs with -e, so an unguarded substitution exits AT
-          # the assignment and `rc=$?` below is never reached: the loop would
-          # abort on the first failing module, print none of the captured
-          # output, and skip every module after it. The smoke step carries
-          # the same guard for the same reason. One more trap: with `--lib`,
-          # cargo writes "test result: FAILED. N passed" on failure, so
-          # parsing $out must not assume the ok-form.
-          #
-          # --profile ci, not the cheap `citest` the Linux leg uses: `citest`
-          # cannot link on Windows at all (LNK2038, see the note above), so
-          # `ci` is the only profile this slice has ever been measured green
-          # on. It is also the profile this job's build step already used, so
-          # the dependency graph is warm here either way.
+          # A glob loop rather than `ls | head`: the artifact holds exactly one
+          # exe, and the loop also fails closed when it holds none (no
+          # nullglob here, so the literal pattern is tested with -e).
+          exe=""
+          for f in windows-slice/*.exe; do
+            if [ -e "$f" ]; then exe=$f; break; fi
+          done
+          if [ -z "$exe" ]; then
+            echo "::error::no test executable in the windows-slice-inputs artifact"
+            exit 1
+          fi
+          echo "slice binary: $exe"
           status=0
           for m in config::winlock tests::utils_shell_test \
                    tests::utils_cwd_test tests::browser_default_windows_test \
                    tests::profile_test tests::rtk_path_test; do
+            # Emitted before the run, so the log names the module even when it
+            # is the one that fails (#2944 asks for MODULE lines as the receipt).
+            echo "MODULE $m"
             set +e
-            out=$(cargo test --locked --profile ci --target x86_64-pc-windows-msvc \
-                    --lib -- "$m" 2>&1)
+            out=$("$exe" "$m" 2>&1)
             rc=$?
             set -e
             n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
@@ -655,7 +706,7 @@ jobs:
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
       - name: Cancel this run on failure
-        if: "always() && !success()"  # always() required: GitHub skips steps of a cancelled job
+        if: "always() && !success()"
         uses: ./.github/actions/cancel-run
         with:
           token: ${{ github.token }}
@@ -1351,7 +1402,7 @@ jobs:
   abort:
     name: Abort run on failure
     if: failure()
-    needs: [lint, build, test, test-linux, audit, windows-footguns, windows-build, coverage]
+    needs: [lint, build, test, test-linux, audit, windows-footguns, windows-build, windows-slice, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
