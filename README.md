@@ -2118,6 +2118,15 @@ The agent has a built-in `a2a_send` tool to communicate with remote A2A agents:
 
 The tool supports optional `api_key` for authenticated endpoints and `context_id` for multi-turn conversations.
 
+`send` is at-least-once from your side, because a relay-free gateway keeps no
+spool for a message it never received (#2874). When nothing answers, the tool
+says `NOT DELIVERED` and hands back an `idempotency_key`; pass that same key on
+the retry and the remote answers with the task the first attempt created
+instead of running the agent a second time. A timeout reports `DELIVERY
+UNKNOWN`, since the request may have arrived, and the same key makes the
+resend safe. The key travels as the message's `messageId`, which is a standard
+A2A field rather than a new one.
+
 ### Connecting Two Agents
 
 **VPS agent** (`config.toml`):
