@@ -387,6 +387,7 @@ pub mod gui_focus_report_test;
 pub mod gui_font_test;
 pub mod gui_footer_title_test;
 pub mod gui_help_cards_test;
+pub mod gui_lane_3033_test;
 pub mod gui_layout_test;
 #[cfg(feature = "gui")]
 pub mod gui_markdown_theme_test;

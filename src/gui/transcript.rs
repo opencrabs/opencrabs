@@ -1115,8 +1115,8 @@ async fn reactions_for(
 
 /// Toggle one reaction on one stored row (#2825).
 ///
-/// Its own thread with a real stack and its own runtime, the same shape as
-/// [`load_recent`]: the window never blocks a frame on a write, and the reply
+/// Its own worker thread with a real stack and its own runtime, the same shape
+/// as [`load_recent`]: the window never blocks a frame on a write, and the reply
 /// is whether the reaction is there afterwards so the caller can say which way
 /// the click went without a second read.
 pub async fn toggle_reaction(
@@ -1125,26 +1125,17 @@ pub async fn toggle_reaction(
     emoji: String,
 ) -> Result<bool, String> {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<bool, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("message-reaction".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        MessageReactionRepository::new(db.pool().clone())
-                            .toggle(message_id, &emoji)
-                            .await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
+    let spawned = super::agent_bridge::spawn_worker("message-reaction", move |runtime| {
+        let result = runtime
+            .block_on(async {
+                let db = Database::connect(&db_path).await?;
+                MessageReactionRepository::new(db.pool().clone())
+                    .toggle(message_id, &emoji)
+                    .await
+            })
+            .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
     match spawned {
         Ok(_) => match rx.await {
             Ok(result) => result,
@@ -1155,7 +1146,7 @@ pub async fn toggle_reaction(
 }
 
 /// Drop every row after a point in one session (#2826), off the UI thread the
-/// same way [`load_recent`] reads: a std thread carrying its own runtime, so
+/// same way [`load_recent`] reads: a worker thread carrying its own runtime, so
 /// the window's executor never blocks on the pool.
 ///
 /// The row at `sequence` survives, because the edit replaces it and the resend
@@ -1166,25 +1157,16 @@ pub async fn truncate_after(
     sequence: i32,
 ) -> Result<usize, String> {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("transcript-truncate".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = MessageRepository::new(db.pool().clone());
-                        repo.delete_after(session_id, sequence).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
+    let spawned = super::agent_bridge::spawn_worker("transcript-truncate", move |runtime| {
+        let result = runtime
+            .block_on(async {
+                let db = Database::connect(&db_path).await?;
+                let repo = MessageRepository::new(db.pool().clone());
+                repo.delete_after(session_id, sequence).await
+            })
+            .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
     match spawned {
         Ok(_) => match rx.await {
             Ok(result) => result,
@@ -1209,7 +1191,7 @@ fn family_row_order(m: &Message) -> (chrono::DateTime<chrono::Utc>, i32, uuid::U
 }
 
 /// Fetch the newest window of the conversation plus the session's total row
-/// count, on a thread with a real stack (crash receipt in `main.rs`).
+/// count, on a worker thread with a real stack (crash receipt in `main.rs`).
 /// `Database::connect` runs pragmas only, never migrations.
 ///
 /// A session that has topics comes back as its whole family: the parent plus
@@ -1221,77 +1203,68 @@ pub async fn load_recent(
     session_id: uuid::Uuid,
 ) -> Result<Loaded, String> {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Loaded, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("transcript-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = MessageRepository::new(db.pool().clone());
-                        let sessions = SessionRepository::new(db.pool().clone());
-                        let family = sessions.family_of(session_id).await?;
-                        // One row in the family is the ordinary read this
-                        // function has always made.
-                        if family.len() <= 1 {
-                            let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
-                            let total = repo.count_by_session(session_id).await?;
-                            let reactions = reactions_for(&db, &rows).await;
-                            return Ok::<_, anyhow::Error>(Loaded {
-                                rows,
-                                total,
-                                origins: HashMap::new(),
-                                reactions,
-                            });
-                        }
-                        let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
-                        let mut total: i64 = 0;
-                        for id in &ids {
-                            total += repo.count_by_session(*id).await?;
-                        }
-                        // One conversation, one window (#2805). A window per
-                        // member drew 3,627 rows for a 44-member family into a
-                        // pane built to show 200, and every one of them was
-                        // rebuilt on every keystroke.
-                        let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
-                        let labels: HashMap<uuid::Uuid, String> = family
-                            .iter()
-                            .filter_map(|(id, title)| {
-                                topic_family_label(title).map(|label| (*id, label))
-                            })
-                            .collect();
-                        let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
-                        for row in &rows {
-                            if let Some(label) = labels.get(&row.session_id) {
-                                origins.insert(row.id, label.clone());
-                            }
-                        }
-                        // Same order the TUI's reader gets from SQL (#3018).
-                        // `created_at` places rows from different topics in
-                        // one stream, but it cannot order a turn: the answer
-                        // row is created at turn start, so it is stamped the
-                        // same second as the question it answers. `sequence`
-                        // is the per-session order the single-session read
-                        // already trusts, and `id` only keeps two different
-                        // sessions stamped the same second stable.
-                        rows.sort_by_key(family_row_order);
-                        let reactions = reactions_for(&db, &rows).await;
-                        Ok::<_, anyhow::Error>(Loaded {
-                            rows,
-                            total,
-                            origins,
-                            reactions,
-                        })
+    let spawned = super::agent_bridge::spawn_worker("transcript-fetch", move |runtime| {
+        let result = runtime
+            .block_on(async {
+                let db = Database::connect(&db_path).await?;
+                let repo = MessageRepository::new(db.pool().clone());
+                let sessions = SessionRepository::new(db.pool().clone());
+                let family = sessions.family_of(session_id).await?;
+                // One row in the family is the ordinary read this
+                // function has always made.
+                if family.len() <= 1 {
+                    let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
+                    let total = repo.count_by_session(session_id).await?;
+                    let reactions = reactions_for(&db, &rows).await;
+                    return Ok::<_, anyhow::Error>(Loaded {
+                        rows,
+                        total,
+                        origins: HashMap::new(),
+                        reactions,
+                    });
+                }
+                let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
+                let mut total: i64 = 0;
+                for id in &ids {
+                    total += repo.count_by_session(*id).await?;
+                }
+                // One conversation, one window (#2805). A window per
+                // member drew 3,627 rows for a 44-member family into a
+                // pane built to show 200, and every one of them was
+                // rebuilt on every keystroke.
+                let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
+                let labels: HashMap<uuid::Uuid, String> = family
+                    .iter()
+                    .filter_map(|(id, title)| {
+                        topic_family_label(title).map(|label| (*id, label))
                     })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
+                    .collect();
+                let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
+                for row in &rows {
+                    if let Some(label) = labels.get(&row.session_id) {
+                        origins.insert(row.id, label.clone());
+                    }
+                }
+                // Same order the TUI's reader gets from SQL (#3018).
+                // `created_at` places rows from different topics in
+                // one stream, but it cannot order a turn: the answer
+                // row is created at turn start, so it is stamped the
+                // same second as the question it answers. `sequence`
+                // is the per-session order the single-session read
+                // already trusts, and `id` only keeps two different
+                // sessions stamped the same second stable.
+                rows.sort_by_key(family_row_order);
+                let reactions = reactions_for(&db, &rows).await;
+                Ok::<_, anyhow::Error>(Loaded {
+                    rows,
+                    total,
+                    origins,
+                    reactions,
+                })
+            })
+            .map_err(|e| format!("{e:#}"));
+        let _ = tx.send(result);
+    });
     let result = match spawned {
         Ok(_) => match rx.await {
             Ok(result) => result,

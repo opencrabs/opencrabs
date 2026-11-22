@@ -206,38 +206,128 @@ pub struct AgentBridge {
 /// worker threads; drained by the window's poll tick.
 pub type EventSink = std::sync::mpsc::Sender<TurnEvent>;
 
+/// The stack every worker here runs on: sqlx and the provider clients recurse
+/// deeper than gpui's dispatch-queue threads allow.
+const WORKER_STACK: usize = 4 * 1024 * 1024;
+
+/// How many threads one operation may hold at once (#3033). A turn in each pane
+/// of a split needs its own; past this a burst queues on the lane instead of
+/// paying for another 4 MB stack.
+const LANE_THREADS: usize = 4;
+
+/// One operation's work, with the runtime it runs on already inside it.
+type WorkerJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// One thread of an operation's lane, and whether it is waiting for work.
+struct LaneThread {
+    queue: tokio::sync::mpsc::UnboundedSender<WorkerJob>,
+    free: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The threads each operation has started, by operation name.
+static LANES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<&'static str, Vec<LaneThread>>>,
+> = std::sync::OnceLock::new();
+
+/// Run `job` on the lane named `name` (#3033).
+///
+/// The guarantee is the one every copy this replaces spelled out: the work runs
+/// off the window's thread on a 4 MB stack with its own `current_thread`
+/// runtime, so every DB path in this file has a reactor. What
+/// changes is who pays for it. The runtime is built here, on the caller's
+/// thread, so a failed build comes back as `Err` and the operation reports it
+/// through the same arm it used for a failed thread spawn. The thread is
+/// reused: a repeat of one operation costs a channel send instead of a thread,
+/// a runtime and a stack, which is why the process used to gain a thread every
+/// time the window did anything. A burst grows the lane to [`LANE_THREADS`] and
+/// then queues, so two panes can still run two turns while a fifth waits.
+pub(crate) fn spawn_worker<F>(name: &'static str, job: F) -> Result<(), String>
+where
+    F: FnOnce(&tokio::runtime::Runtime) + Send + 'static,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("{name} runtime: {e}"))?;
+    let job: WorkerJob = Box::new(move || job(&runtime));
+
+    let mut lanes = LANES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lane = lanes.entry(name).or_default();
+    // A job that panics takes its thread with it, so a lane whose receiver is
+    // closed holds a dead thread, not a place to hand work.
+    lane.retain(|thread| !thread.queue.is_closed());
+
+    // A parked thread takes the job: this is the reuse.
+    let parked = lane
+        .iter()
+        .find(|thread| thread.free.swap(false, std::sync::atomic::Ordering::AcqRel))
+        .map(|thread| thread.queue.clone());
+
+    let queue = match parked {
+        Some(queue) => queue,
+        None if lane.len() < LANE_THREADS => {
+            let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel::<WorkerJob>();
+            // Born busy: this thread is about to take the job below, so a
+            // second caller must not mistake it for a parked one and stack its
+            // work behind the same thread. It marks itself free only after a
+            // job finishes, which is exactly when reuse is safe.
+            let free = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_free = free.clone();
+            std::thread::Builder::new()
+                .name(name.to_string())
+                .stack_size(WORKER_STACK)
+                .spawn(move || {
+                    loop {
+                        let Some(job) = receiver.blocking_recv() else {
+                            break;
+                        };
+                        job();
+                        // Free before the next wait, so a job sent right after
+                        // this one still finds a thread instead of making one.
+                        thread_free.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                })
+                .map_err(|e| format!("{name} thread: {e}"))?;
+            lane.push(LaneThread {
+                queue: queue.clone(),
+                free,
+            });
+            queue
+        }
+        // At the cap: queue behind a thread that is already running. A burst
+        // waits here instead of reserving another stack.
+        None => match lane.first() {
+            Some(thread) => thread.queue.clone(),
+            None => return Err(format!("{name}: no worker to take the job")),
+        },
+    };
+    queue
+        .send(job)
+        .map_err(|_| format!("{name}: the worker stopped before it took the job"))
+}
+
 /// How often the window asks GitHub for a newer release: twice a day (#2406).
 const UPDATE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
 
 /// Check for a newer release now and then twice a day, on its own thread. A
 /// release found comes back as `UpdateAvailable` (#2406).
 pub fn spawn_update_checks(sink: EventSink) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-update-check".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("update check runtime: {e}"));
+    let spawned = spawn_worker("gui-update-check", move |runtime| {
+        runtime.block_on(async move {
+            loop {
+                if let Some(latest) = opencrabs::brain::tools::evolve::check_for_update().await
+                    && let Err(e) = sink.send(TurnEvent::UpdateAvailable(latest))
+                {
+                    crate::logging::error(&format!("update notice not delivered: {e}"));
                     return;
                 }
-            };
-            runtime.block_on(async move {
-                loop {
-                    if let Some(latest) = opencrabs::brain::tools::evolve::check_for_update().await
-                        && let Err(e) = sink.send(TurnEvent::UpdateAvailable(latest))
-                    {
-                        crate::logging::error(&format!("update notice not delivered: {e}"));
-                        return;
-                    }
-                    tokio::time::sleep(UPDATE_CHECK_EVERY).await;
-                }
-            });
+                tokio::time::sleep(UPDATE_CHECK_EVERY).await;
+            }
         });
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("update check thread: {e}"));
     }
@@ -246,87 +336,65 @@ pub fn spawn_update_checks(sink: EventSink) {
 /// Delete one session's messages from the ledger, as the TUI's ctrl+k does. The
 /// session row stays, so the conversation is kept and only its history clears (#2430).
 pub fn spawn_clear_messages(db_path: PathBuf, session_id: Uuid, sink: EventSink) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-clear-messages".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("clear runtime: {e}"));
-                    let _ = sink.send(TurnEvent::ClearFailed(format!("clear: {e}")));
-                    return;
-                }
+    // Both arms report: the job may fail to reach a worker, and the worker may
+    // fail to run it, and the window must not keep the old rows either way.
+    let thread_sink = sink.clone();
+    let spawned = spawn_worker("gui-clear-messages", move |runtime| {
+        let event = runtime.block_on(async move {
+            let db = match Database::connect(&db_path).await {
+                Ok(db) => db,
+                Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
             };
-            let event = runtime.block_on(async move {
-                let db = match Database::connect(&db_path).await {
-                    Ok(db) => db,
-                    Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
-                };
-                let service = opencrabs::services::MessageService::new(ServiceContext::new(
-                    db.pool().clone(),
-                ));
-                match service.delete_messages_for_session(session_id).await {
-                    Ok(()) => TurnEvent::MessagesCleared(session_id),
-                    Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
-                }
-            });
-            if let Err(e) = sink.send(event) {
-                crate::logging::error(&format!("clear result not delivered: {e}"));
+            let service = opencrabs::services::MessageService::new(ServiceContext::new(
+                db.pool().clone(),
+            ));
+            match service.delete_messages_for_session(session_id).await {
+                Ok(()) => TurnEvent::MessagesCleared(session_id),
+                Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
             }
         });
+        if let Err(e) = thread_sink.send(event) {
+            crate::logging::error(&format!("clear result not delivered: {e}"));
+        }
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("clear thread: {e}"));
+        let _ = sink.send(TurnEvent::ClearFailed(format!("clear: {e}")));
     }
 }
 
 /// Run `/evolve` on its own thread, as the TUI does: download the latest
 /// release and report the outcome. The text comes back as `EvolveDone` (#2406).
 pub fn spawn_evolve(sink: EventSink, session_id: Uuid) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-evolve".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
+    let thread_sink = sink.clone();
+    let spawned = spawn_worker("gui-evolve", move |runtime| {
+        let text = runtime.block_on(async move {
+            let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
+            let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
+            match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx)
+                .await
             {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("evolve runtime: {e}"));
-                    let _ = sink.send(TurnEvent::EvolveDone(format!("Evolve error: {e}")));
-                    return;
-                }
-            };
-            let text = runtime.block_on(async move {
-                let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
-                let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
-                match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx)
-                    .await
-                {
-                    Ok(result) if result.success => {
-                        if result.output.is_empty() {
-                            "Evolve finished.".to_string()
-                        } else {
-                            result.output
-                        }
+                Ok(result) if result.success => {
+                    if result.output.is_empty() {
+                        "Evolve finished.".to_string()
+                    } else {
+                        result.output
                     }
-                    Ok(result) => format!(
-                        "Evolve failed: {}",
-                        result.error.unwrap_or_else(|| "unknown error".to_string())
-                    ),
-                    Err(e) => format!("Evolve error: {e}"),
                 }
-            });
-            if let Err(e) = sink.send(TurnEvent::EvolveDone(text)) {
-                crate::logging::error(&format!("evolve result not delivered: {e}"));
+                Ok(result) => format!(
+                    "Evolve failed: {}",
+                    result.error.unwrap_or_else(|| "unknown error".to_string())
+                ),
+                Err(e) => format!("Evolve error: {e}"),
             }
         });
+        if let Err(e) = thread_sink.send(TurnEvent::EvolveDone(text)) {
+            crate::logging::error(&format!("evolve result not delivered: {e}"));
+        }
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("evolve thread: {e}"));
+        let _ = sink.send(TurnEvent::EvolveDone(format!("Evolve error: {e}")));
     }
 }
 
@@ -696,55 +764,40 @@ pub fn spawn_create_session(
     model: Option<String>,
 ) {
     let thread_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-session-create".into())
-        .spawn(move || {
-            let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::SessionCreateFailed(format!(
-                        "session runtime: {e}"
-                    )));
-                    return;
-                }
-            };
-            let result = runtime.block_on(async move {
-                let db = Database::connect(&db_path)
-                    .await
-                    .map_err(|e| format!("db connect: {e}"))?;
-                let service = opencrabs::services::SessionService::new(ServiceContext::new(
-                    db.pool().clone(),
-                ));
-                let working_directory = Some(
-                    opencrabs::utils::cwd::launch_cwd()
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                service
-                    .create_session_with_provider(
-                        Some("New Chat".to_string()),
-                        provider,
-                        model,
-                        working_directory,
-                    )
-                    .await
-                    .map(|s| s.id)
-                    .map_err(|e| format!("create session: {e}"))
-            });
-            match result {
-                Ok(id) => {
-                    let _ = sink.send(TurnEvent::SessionCreated(id));
-                }
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::SessionCreateFailed(e));
-                }
-            }
+    let spawned = spawn_worker("gui-session-create", move |runtime| {
+        let sink = thread_sink;
+        let result = runtime.block_on(async move {
+            let db = Database::connect(&db_path)
+                .await
+                .map_err(|e| format!("db connect: {e}"))?;
+            let service = opencrabs::services::SessionService::new(ServiceContext::new(
+                db.pool().clone(),
+            ));
+            let working_directory = Some(
+                opencrabs::utils::cwd::launch_cwd()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            service
+                .create_session_with_provider(
+                    Some("New Chat".to_string()),
+                    provider,
+                    model,
+                    working_directory,
+                )
+                .await
+                .map(|s| s.id)
+                .map_err(|e| format!("create session: {e}"))
         });
+        match result {
+            Ok(id) => {
+                let _ = sink.send(TurnEvent::SessionCreated(id));
+            }
+            Err(e) => {
+                let _ = sink.send(TurnEvent::SessionCreateFailed(e));
+            }
+        }
+    });
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionCreateFailed(format!(
             "session thread spawn: {e}"
@@ -771,40 +824,27 @@ pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>
     if paths.is_empty() {
         return;
     }
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-file-track".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
+    let spawned = spawn_worker("gui-file-track", move |runtime| {
+        runtime.block_on(async move {
+            let db = match Database::connect(&db_path).await {
+                Ok(db) => db,
                 Err(e) => {
-                    crate::logging::error(&format!("file track runtime: {e}"));
+                    crate::logging::error(&format!("file track db connect: {e}"));
                     return;
                 }
             };
-            runtime.block_on(async move {
-                let db = match Database::connect(&db_path).await {
-                    Ok(db) => db,
-                    Err(e) => {
-                        crate::logging::error(&format!("file track db connect: {e}"));
-                        return;
-                    }
-                };
-                let service =
-                    opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-                for path in paths {
-                    // The name in the log is the file's own: a failure has to
-                    // say which attachment did not get tracked.
-                    let name = path.display().to_string();
-                    if let Err(e) = service.get_or_create_file(session_id, path, None).await {
-                        crate::logging::error(&format!("file track {name}: {e}"));
-                    }
+            let service =
+                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
+            for path in paths {
+                // The name in the log is the file's own: a failure has to
+                // say which attachment did not get tracked.
+                let name = path.display().to_string();
+                if let Err(e) = service.get_or_create_file(session_id, path, None).await {
+                    crate::logging::error(&format!("file track {name}: {e}"));
                 }
-            });
+            }
         });
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("file track thread spawn: {e}"));
     }
@@ -850,112 +890,108 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
     if text.trim().is_empty() {
         return;
     }
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-voice-reply".into())
-        .spawn(move || {
-            let voice = Config::current().voice_config();
-            if !voice.tts_enabled {
-                // A recording is answered in text when speech output is off.
-                // The mic works either way; this is the same switch that
-                // decides whether a Telegram voice note gets a voice back.
-                crate::logging::info("voice reply: tts disabled, answering in text only");
+    // The job reports through `thread_sink`; the outer `sink` stays here for
+    // the arm where the job never reached a worker (#3092).
+    let thread_sink = sink.clone();
+    let spawned = spawn_worker("gui-voice-reply", move |runtime| {
+        let voice = Config::current().voice_config();
+        if !voice.tts_enabled {
+            // A recording is answered in text when speech output is off.
+            // The mic works either way; this is the same switch that
+            // decides whether a Telegram voice note gets a voice back.
+            crate::logging::info("voice reply: tts disabled, answering in text only");
+            return;
+        }
+        // The card already carries the whole report, so only the spoken
+        // half is needed here. A model that skipped the block is still
+        // read aloud, from the paragraph it led with: a voice turn gets a
+        // voice back either way (#3092).
+        let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
+        let speech = match spoken {
+            Some(spoken) => spoken,
+            None => {
+                crate::logging::warn(
+                    "voice reply: no spoken block, reading the first paragraph",
+                );
+                opencrabs::channels::voice::spoken::first_paragraph(&answer)
+            }
+        };
+        // The card is told the clip is coming before the first chunk goes
+        // out (#3092). Synthesis is a network round trip per chunk, and the
+        // window has nothing else to paint in the meantime.
+        let _ = thread_sink.send(TurnEvent::VoiceReplyPending {
+            session: session_id,
+        });
+        let _cleared = VoiceReplyGuard {
+            sink: thread_sink.clone(),
+            session: session_id,
+        };
+        let audio = match runtime
+            .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                crate::logging::error(&format!("voice reply synthesis: {e:#}"));
                 return;
             }
-            // The card already carries the whole report, so only the spoken
-            // half is needed here. A model that skipped the block is still
-            // read aloud, from the paragraph it led with: a voice turn gets a
-            // voice back either way (#3092).
-            let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
-            let speech = match spoken {
-                Some(spoken) => spoken,
-                None => {
-                    crate::logging::warn(
-                        "voice reply: no spoken block, reading the first paragraph",
-                    );
-                    opencrabs::channels::voice::spoken::first_paragraph(&answer)
-                }
-            };
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
+        };
+        let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
+            Ok(path) => path,
+            Err(e) => {
+                crate::logging::error(&format!("voice reply save: {e}"));
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let db = match Database::connect(&db_path).await {
+                Ok(db) => db,
                 Err(e) => {
-                    crate::logging::error(&format!("voice reply runtime: {e}"));
+                    crate::logging::error(&format!("voice reply db connect: {e}"));
                     return;
                 }
             };
-            // The card is told the clip is coming before the first chunk goes
-            // out (#3092). Synthesis is a network round trip per chunk, and the
-            // window has nothing else to paint in the meantime.
-            let _ = sink.send(TurnEvent::VoiceReplyPending {
+            let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
+            // The row this turn wrote. It settles just before this thread
+            // starts, so the last assistant row in the session is the
+            // answer being spoken.
+            let row = match repo.get_last_assistant_message(session_id).await {
+                Ok(row) => row,
+                Err(e) => {
+                    crate::logging::error(&format!("voice reply row lookup: {e}"));
+                    return;
+                }
+            };
+            let Some(row) = row else {
+                crate::logging::error("voice reply: the answer row is not in the ledger");
+                return;
+            };
+            let marker = format!("\n\n<<AUD:{}>>", path.display());
+            if let Err(e) = repo.append_content(row.id, &marker).await {
+                crate::logging::error(&format!("voice reply marker: {e}"));
+                return;
+            }
+            crate::logging::info(&format!(
+                "voice reply: {} bytes spoken into {}",
+                audio.len(),
+                path.display()
+            ));
+            let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
                 session: session_id,
-            });
-            let _cleared = VoiceReplyGuard {
-                sink: sink.clone(),
-                session: session_id,
-            };
-            let audio = match runtime
-                .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
-            {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply synthesis: {e:#}"));
-                    return;
-                }
-            };
-            let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
-                Ok(path) => path,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply save: {e}"));
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let db = match Database::connect(&db_path).await {
-                    Ok(db) => db,
-                    Err(e) => {
-                        crate::logging::error(&format!("voice reply db connect: {e}"));
-                        return;
-                    }
-                };
-                let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
-                // The row this turn wrote. It settles just before this thread
-                // starts, so the last assistant row in the session is the
-                // answer being spoken.
-                let row = match repo.get_last_assistant_message(session_id).await {
-                    Ok(row) => row,
-                    Err(e) => {
-                        crate::logging::error(&format!("voice reply row lookup: {e}"));
-                        return;
-                    }
-                };
-                let Some(row) = row else {
-                    crate::logging::error("voice reply: the answer row is not in the ledger");
-                    return;
-                };
-                let marker = format!("\n\n<<AUD:{}>>", path.display());
-                if let Err(e) = repo.append_content(row.id, &marker).await {
-                    crate::logging::error(&format!("voice reply marker: {e}"));
-                    return;
-                }
-                crate::logging::info(&format!(
-                    "voice reply: {} bytes spoken into {}",
-                    audio.len(),
-                    path.display()
-                ));
-                let _ = sink.send(TurnEvent::VoiceReplySaved {
-                    session: session_id,
-                    // The thread is done with it: the marker above is the last
-                    // read of the file, so the event takes ownership instead of
-                    // leaving a clone to be dropped (#3092).
-                    path,
-                });
+                // The thread is done with it: the marker above is the last
+                // read of the file, so the event takes ownership instead of
+                // leaving a clone to be dropped (#3092).
+                path,
             });
         });
+    });
     if let Err(e) = spawned {
+        // The job never reached a worker, so the guard that clears the card
+        // never existed. Clear it here or the card says "speaking the reply"
+        // for the rest of the session (#3092).
         crate::logging::error(&format!("voice reply thread spawn: {e}"));
+        let _ = sink.send(TurnEvent::VoiceReplyDone {
+            session: session_id,
+        });
     }
 }
 
@@ -973,89 +1009,61 @@ pub struct SessionFile {
 /// stacks and sqlx needs a Tokio reactor.
 pub async fn load_files(db_path: PathBuf, session_id: Uuid) -> Result<Vec<SessionFile>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-file-list".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = tx.send(Err(format!("tokio runtime failed: {e}")));
-                    return;
-                }
-            };
-            let result = runtime.block_on(async move {
-                let db = Database::connect(&db_path)
-                    .await
-                    .map_err(|e| format!("db connect: {e:#}"))?;
-                let service =
-                    opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-                let files = service
-                    .list_files_for_session(session_id)
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
-                Ok(files
-                    .into_iter()
-                    .map(|f| SessionFile {
-                        path: f.path,
-                        size: f.size,
-                    })
-                    .collect())
-            });
-            let _ = tx.send(result);
+    let spawned = spawn_worker("gui-file-list", move |runtime| {
+        let result = runtime.block_on(async move {
+            let db = Database::connect(&db_path)
+                .await
+                .map_err(|e| format!("db connect: {e:#}"))?;
+            let service =
+                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
+            let files = service
+                .list_files_for_session(session_id)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            Ok(files
+                .into_iter()
+                .map(|f| SessionFile {
+                    path: f.path,
+                    size: f.size,
+                })
+                .collect())
         });
+        let _ = tx.send(result);
+    });
     match spawned {
         Ok(_) => match rx.await {
             Ok(result) => result,
             Err(_) => Err("file list thread dropped its result".into()),
         },
-        Err(e) => Err(format!("file list thread failed to spawn: {e}")),
+        Err(e) => Err(format!("file list worker: {e}")),
     }
 }
 
 pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
     let thread_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-session-delete".into())
-        .spawn(move || {
-            let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::SessionDeleteFailed(format!(
-                        "session runtime: {e}"
-                    )));
-                    return;
-                }
-            };
-            let result = runtime.block_on(async move {
-                let db = Database::connect(&db_path)
-                    .await
-                    .map_err(|e| format!("db connect: {e}"))?;
-                let service = opencrabs::services::SessionService::new(ServiceContext::new(
-                    db.pool().clone(),
-                ));
-                service
-                    .delete_session(session_id)
-                    .await
-                    .map_err(|e| format!("delete session: {e}"))
-            });
-            match result {
-                Ok(()) => {
-                    let _ = sink.send(TurnEvent::SessionDeleted(session_id));
-                }
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::SessionDeleteFailed(e));
-                }
-            }
+    let spawned = spawn_worker("gui-session-delete", move |runtime| {
+        let sink = thread_sink;
+        let result = runtime.block_on(async move {
+            let db = Database::connect(&db_path)
+                .await
+                .map_err(|e| format!("db connect: {e}"))?;
+            let service = opencrabs::services::SessionService::new(ServiceContext::new(
+                db.pool().clone(),
+            ));
+            service
+                .delete_session(session_id)
+                .await
+                .map_err(|e| format!("delete session: {e}"))
         });
+        match result {
+            Ok(()) => {
+                let _ = sink.send(TurnEvent::SessionDeleted(session_id));
+            }
+            Err(e) => {
+                let _ = sink.send(TurnEvent::SessionDeleteFailed(e));
+            }
+        }
+    });
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionDeleteFailed(format!(
             "session delete thread spawn: {e}"
@@ -1071,48 +1079,31 @@ pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink:
 /// result back over the event channel.
 pub fn spawn_plan_path(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
     let thread_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-plan-path".into())
-        .spawn(move || {
-            let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::PlanPath {
-                        session: session_id,
-                        path: None,
-                    });
-                    crate::logging::error(&format!("plan path runtime: {e}"));
-                    return;
-                }
-            };
-            // Reproduce `plan_json_path`'s resolution: the project dir when
-            // the session is bound, the profile `session/` fallback when it
-            // is not (or the DB is unreachable). Never the global pool.
-            let dir = runtime
-                .block_on(async move {
-                    match Database::connect(&db_path).await {
-                        Ok(db) => {
-                            opencrabs::utils::plan_files::project_session_dir(session_id, db.pool())
-                                .await
-                        }
-                        Err(e) => {
-                            crate::logging::error(&format!("plan path db: {e}"));
-                            None
-                        }
+    let spawned = spawn_worker("gui-plan-path", move |runtime| {
+        let sink = thread_sink;
+        // Reproduce `plan_json_path`'s resolution: the project dir when
+        // the session is bound, the profile `session/` fallback when it
+        // is not (or the DB is unreachable). Never the global pool.
+        let dir = runtime
+            .block_on(async move {
+                match Database::connect(&db_path).await {
+                    Ok(db) => {
+                        opencrabs::utils::plan_files::project_session_dir(session_id, db.pool())
+                            .await
                     }
-                })
-                .unwrap_or_else(|| opencrabs::config::opencrabs_home().join("session"));
-            let path = dir.join(format!(".opencrabs_plan_{session_id}.json"));
-            let _ = sink.send(TurnEvent::PlanPath {
-                session: session_id,
-                path: Some(path),
-            });
+                    Err(e) => {
+                        crate::logging::error(&format!("plan path db: {e}"));
+                        None
+                    }
+                }
+            })
+            .unwrap_or_else(|| opencrabs::config::opencrabs_home().join("session"));
+        let path = dir.join(format!(".opencrabs_plan_{session_id}.json"));
+        let _ = sink.send(TurnEvent::PlanPath {
+            session: session_id,
+            path: Some(path),
         });
+    });
     if spawned.is_err() {
         let _ = sink.send(TurnEvent::PlanPath {
             session: session_id,
@@ -1234,85 +1225,69 @@ pub fn spawn_turn(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let thread_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-agent-turn".into())
-        .spawn(move || {
-            let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
+    let spawned = spawn_worker("gui-agent-turn", move |runtime| {
+        let sink = thread_sink;
+        runtime.block_on(async move {
+            // Before the turn writes its rows: a resend of the text an
+            // unanswered turn left behind must not stack a second copy of
+            // it in history (#2697).
+            // Compare against the row history will actually hold, which is
+            // the display line when a turn hides its prompt (#2756).
+            let persisted = display.as_deref().unwrap_or(&content);
+            let messages = opencrabs::services::MessageService::new(service.context().clone());
+            drop_unanswered_duplicate(&messages, session_id, persisted).await;
+            let turn = service.send_message_with_tools_and_display(
+                session_id,
+                content,
+                display,
+                None,
+                Some(cancel.clone()),
+                None,
+                None,
+                "tui",
+                None,
+                None,
+            );
+            // A cooperative token only lands where the service looks for
+            // it, and inside one provider stream it never looks (#2657).
+            let Some(outcome) = race_turn(turn, &cancel).await else {
+                let _ = sink.send(TurnEvent::Cancelled {
+                    session: session_id,
+                });
+                return;
+            };
+            match outcome {
+                Ok(response) => {
+                    // A text turn never carries a spoken block (#3096). The
+                    // model is told to write one only when the message
+                    // begins with the voice note, and a model that drifts
+                    // must not print it into the card or hand it to any
+                    // later reader. Stripped here, before the settle draws
+                    // the answer and before anything can speak it.
+                    let content = if voice {
+                        response.content
+                    } else {
+                        opencrabs::channels::voice::spoken::visible(&response.content)
+                    };
+                    let _ = sink.send(TurnEvent::Done {
+                        session: session_id,
+                        content,
+                        context_tokens: response.context_tokens,
+                        tokens_per_second: response.tokens_per_second,
+                        voice,
+                        completed_plan: response.completed_plan.map(Box::new),
+                    });
+                }
                 Err(e) => {
+                    let msg = opencrabs::brain::agent::format_user_error(&e);
                     let _ = sink.send(TurnEvent::Failed {
                         session: session_id,
-                        text: format!("turn runtime: {e}"),
+                        text: msg,
                     });
-                    return;
                 }
-            };
-            runtime.block_on(async move {
-                // Before the turn writes its rows: a resend of the text an
-                // unanswered turn left behind must not stack a second copy of
-                // it in history (#2697).
-                // Compare against the row history will actually hold, which is
-                // the display line when a turn hides its prompt (#2756).
-                let persisted = display.as_deref().unwrap_or(&content);
-                let messages = opencrabs::services::MessageService::new(service.context().clone());
-                drop_unanswered_duplicate(&messages, session_id, persisted).await;
-                let turn = service.send_message_with_tools_and_display(
-                    session_id,
-                    content,
-                    display,
-                    None,
-                    Some(cancel.clone()),
-                    None,
-                    None,
-                    "tui",
-                    None,
-                    None,
-                );
-                // A cooperative token only lands where the service looks for
-                // it, and inside one provider stream it never looks (#2657).
-                let Some(outcome) = race_turn(turn, &cancel).await else {
-                    let _ = sink.send(TurnEvent::Cancelled {
-                        session: session_id,
-                    });
-                    return;
-                };
-                match outcome {
-                    Ok(response) => {
-                        // A text turn never carries a spoken block (#3096). The
-                        // model is told to write one only when the message
-                        // begins with the voice note, and a model that drifts
-                        // must not print it into the card or hand it to any
-                        // later reader. Stripped here, before the settle draws
-                        // the answer and before anything can speak it.
-                        let content = if voice {
-                            response.content
-                        } else {
-                            opencrabs::channels::voice::spoken::visible(&response.content)
-                        };
-                        let _ = sink.send(TurnEvent::Done {
-                            session: session_id,
-                            content,
-                            context_tokens: response.context_tokens,
-                            tokens_per_second: response.tokens_per_second,
-                            voice,
-                            completed_plan: response.completed_plan.map(Box::new),
-                        });
-                    }
-                    Err(e) => {
-                        let msg = opencrabs::brain::agent::format_user_error(&e);
-                        let _ = sink.send(TurnEvent::Failed {
-                            session: session_id,
-                            text: msg,
-                        });
-                    }
-                }
-            });
+            }
         });
+    });
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::Failed {
             session: session_id,
@@ -1337,81 +1312,68 @@ fn spawn_resume(
 ) {
     let thread_sink = sink.clone();
     let thread_pending = pending.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-agent-resume".into())
-        .spawn(move || {
-            let sink = thread_sink;
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::Failed {
-                        session: session_id,
-                        text: format!("resume runtime: {e}"),
-                    });
-                    finish_boot_resume(&thread_pending, &sink);
-                    return;
-                }
+    let spawned = spawn_worker("gui-agent-resume", move |runtime| {
+        let sink = thread_sink;
+        let turn_sink = sink.clone();
+        runtime.block_on(async move {
+            let turn = service.resume_interrupted_turn(
+                session_id,
+                content,
+                None,
+                Some(cancel.clone()),
+                None,
+                None,
+                "tui",
+                None,
+            );
+            // A resumed turn is a turn: the same stop applies, and the
+            // same cooperative gap (#2657).
+            let Some(outcome) = race_turn(turn, &cancel).await else {
+                // It answered nobody, so it is not a delivered resume; the
+                // summary must not claim otherwise.
+                opencrabs::brain::agent::service::boot_report::record_failed();
+                let _ = turn_sink.send(TurnEvent::Cancelled {
+                    session: session_id,
+                });
+                return;
             };
-            let turn_sink = sink.clone();
-            runtime.block_on(async move {
-                let turn = service.resume_interrupted_turn(
-                    session_id,
-                    content,
-                    None,
-                    Some(cancel.clone()),
-                    None,
-                    None,
-                    "tui",
-                    None,
-                );
-                // A resumed turn is a turn: the same stop applies, and the
-                // same cooperative gap (#2657).
-                let Some(outcome) = race_turn(turn, &cancel).await else {
-                    // It answered nobody, so it is not a delivered resume; the
-                    // summary must not claim otherwise.
-                    opencrabs::brain::agent::service::boot_report::record_failed();
-                    let _ = turn_sink.send(TurnEvent::Cancelled {
+            match outcome {
+                Ok(response) => {
+                    opencrabs::brain::agent::service::boot_report::record_delivered();
+                    let _ = turn_sink.send(TurnEvent::Done {
                         session: session_id,
+                        content: response.content,
+                        context_tokens: response.context_tokens,
+                        tokens_per_second: response.tokens_per_second,
+                        // A resumed turn re-runs a prompt parked by a dead
+                        // process, and that prompt is the words only: the
+                        // recording it came from is not in hand here. It
+                        // answers in text rather than guessing at speech
+                        // (#3096).
+                        voice: false,
+                        completed_plan: response.completed_plan.map(Box::new),
                     });
-                    return;
-                };
-                match outcome {
-                    Ok(response) => {
-                        opencrabs::brain::agent::service::boot_report::record_delivered();
-                        let _ = turn_sink.send(TurnEvent::Done {
-                            session: session_id,
-                            content: response.content,
-                            context_tokens: response.context_tokens,
-                            tokens_per_second: response.tokens_per_second,
-                            // A resumed turn re-runs a prompt parked by a dead
-                            // process, and that prompt is the words only: the
-                            // recording it came from is not in hand here. It
-                            // answers in text rather than guessing at speech
-                            // (#3096).
-                            voice: false,
-                            completed_plan: response.completed_plan.map(Box::new),
-                        });
-                    }
-                    Err(e) => {
-                        opencrabs::brain::agent::service::boot_report::record_failed();
-                        let msg = opencrabs::brain::agent::format_user_error(&e);
-                        let _ = turn_sink.send(TurnEvent::Failed {
-                            session: session_id,
-                            text: msg,
-                        });
-                    }
                 }
-            });
-            finish_boot_resume(&thread_pending, &sink);
+                Err(e) => {
+                    opencrabs::brain::agent::service::boot_report::record_failed();
+                    let msg = opencrabs::brain::agent::format_user_error(&e);
+                    let _ = turn_sink.send(TurnEvent::Failed {
+                        session: session_id,
+                        text: msg,
+                    });
+                }
+            }
         });
+        finish_boot_resume(&thread_pending, &sink);
+    });
     if let Err(e) = spawned {
-        // A thread that never started must still resolve the boot line, or the
-        // summary is never emitted at all.
+        // A worker that never took the job must still resolve the boot line, or
+        // the summary is never emitted at all.
         crate::logging::error(&format!("resume thread spawn failed: {e}"));
+        let _ = sink.send(TurnEvent::Failed {
+            session: session_id,
+            text: format!("resume runtime: {e}"),
+        });
         finish_boot_resume(&pending, &sink);
     }
 }
@@ -1458,22 +1420,9 @@ fn short_session(id: Uuid) -> String {
 /// turn could double-execute the side effect, so it is re-delivered through the
 /// wake path instead, exactly as the terminal does (#12).
 pub fn spawn_boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink: EventSink) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-boot-resume".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("boot resume runtime: {e}"));
-                    return;
-                }
-            };
-            runtime.block_on(boot_resume(service, pool, sink));
-        });
+    let spawned = spawn_worker("gui-boot-resume", move |runtime| {
+        runtime.block_on(boot_resume(service, pool, sink));
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("boot resume thread spawn: {e}"));
     }
@@ -1957,31 +1906,15 @@ pub fn spawn_switch_model(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-model-switch".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::ModelSwitchFailed {
-                        session: session_id,
-                        error: format!("switch runtime: {e}"),
-                    });
-                    return;
-                }
-            };
-            let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
-                &service, session_id, &pair,
-            ));
-            let _ = sink.send(TurnEvent::ModelSwitched {
-                session: session_id,
-                line,
-            });
+    let spawned = spawn_worker("gui-model-switch", move |runtime| {
+        let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
+            &service, session_id, &pair,
+        ));
+        let _ = sink.send(TurnEvent::ModelSwitched {
+            session: session_id,
+            line,
         });
+    });
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
@@ -2004,40 +1937,24 @@ pub fn spawn_scope_count(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-model-scope".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::ModelSwitchFailed {
-                        session: session_id,
-                        error: format!("scope count runtime: {e}"),
-                    });
-                    return;
-                }
+    let spawned = spawn_worker("gui-model-scope", move |runtime| {
+        let count = runtime.block_on(async {
+            let Some((provider, model)) = pair.split_once('/') else {
+                return 0;
             };
-            let count = runtime.block_on(async {
-                let Some((provider, model)) = pair.split_once('/') else {
-                    return 0;
-                };
-                let sessions =
-                    opencrabs::services::SessionService::new(service.context().clone());
-                sessions
-                    .count_provider_model_all_sessions(provider, model)
-                    .await
-                    .unwrap_or(0)
-            });
-            let _ = sink.send(TurnEvent::ModelScopeCounted {
-                session: session_id,
-                pair,
-                count,
-            });
+            let sessions =
+                opencrabs::services::SessionService::new(service.context().clone());
+            sessions
+                .count_provider_model_all_sessions(provider, model)
+                .await
+                .unwrap_or(0)
         });
+        let _ = sink.send(TurnEvent::ModelScopeCounted {
+            session: session_id,
+            pair,
+            count,
+        });
+    });
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
@@ -2056,62 +1973,46 @@ pub fn spawn_scope_count(
 /// turn, or anything a tool wrote, stops the walk.
 pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: EventSink) {
     let done_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-turn-undo".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
+    let spawned = spawn_worker("gui-turn-undo", move |runtime| {
+        runtime.block_on(async move {
+            let messages = opencrabs::services::MessageService::new(service.context().clone());
+            let rows = match messages.list_messages_for_session(session_id).await {
+                Ok(rows) => rows,
                 Err(e) => {
-                    crate::logging::error(&format!("turn undo runtime: {e}"));
-                    let _ = done_sink.send(TurnEvent::TurnReverted {
-                        session: session_id,
-                    });
+                    crate::logging::error(&format!("turn undo read: {e}"));
                     return;
                 }
             };
-            runtime.block_on(async move {
-                let messages = opencrabs::services::MessageService::new(service.context().clone());
-                let rows = match messages.list_messages_for_session(session_id).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        crate::logging::error(&format!("turn undo read: {e}"));
-                        return;
-                    }
-                };
-                // Newest first: the placeholder, then the question it echoed.
-                let Some(placeholder) = rows.last() else {
-                    return;
-                };
-                if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
-                    // The turn had already answered, or wrote nothing yet. An
-                    // answer that landed between the stop and this thread is
-                    // the user's: only the empty placeholder is ever cut.
-                    return;
-                }
-                if let Err(e) = messages.delete_message(placeholder.id).await {
-                    crate::logging::error(&format!("turn undo assistant row: {e}"));
-                    return;
-                }
-                let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-                    let _ = done_sink.send(TurnEvent::TurnReverted {
-                        session: session_id,
-                    });
-                    return;
-                };
-                if question.role == "user"
-                    && let Err(e) = messages.delete_message(question.id).await
-                {
-                    crate::logging::error(&format!("turn undo user row: {e}"));
-                }
+            // Newest first: the placeholder, then the question it echoed.
+            let Some(placeholder) = rows.last() else {
+                return;
+            };
+            if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
+                // The turn had already answered, or wrote nothing yet. An
+                // answer that landed between the stop and this thread is
+                // the user's: only the empty placeholder is ever cut.
+                return;
+            }
+            if let Err(e) = messages.delete_message(placeholder.id).await {
+                crate::logging::error(&format!("turn undo assistant row: {e}"));
+                return;
+            }
+            let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
                 let _ = done_sink.send(TurnEvent::TurnReverted {
                     session: session_id,
                 });
+                return;
+            };
+            if question.role == "user"
+                && let Err(e) = messages.delete_message(question.id).await
+            {
+                crate::logging::error(&format!("turn undo user row: {e}"));
+            }
+            let _ = done_sink.send(TurnEvent::TurnReverted {
+                session: session_id,
             });
         });
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn undo thread: {e}"));
         let _ = sink.send(TurnEvent::TurnReverted {
@@ -2147,36 +2048,23 @@ pub fn spawn_record_turn_stopped(
     session_id: Uuid,
     answer: Option<String>,
 ) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(1024 * 1024)
-        .name("gui-turn-stopped".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("turn stopped runtime: {e}"));
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let messages = opencrabs::services::MessageService::new(service.context().clone());
-                // What the card streamed goes in first (#2851), so the turn
-                // reads question, answer, verdict, the order the user saw.
-                if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
-                    crate::logging::error(&format!("turn stopped row: {e}"));
-                }
-                // The recovery ticket goes with it (#2850): the turn is over
-                // because the user ended it, so no later boot may replay it.
-                let pending =
-                    opencrabs::db::PendingRequestRepository::new(service.context().pool());
-                if let Err(e) = pending.delete_session(session_id).await {
-                    crate::logging::error(&format!("turn stopped recovery row: {e}"));
-                }
-            });
+    let spawned = spawn_worker("gui-turn-stopped", move |runtime| {
+        runtime.block_on(async move {
+            let messages = opencrabs::services::MessageService::new(service.context().clone());
+            // What the card streamed goes in first (#2851), so the turn
+            // reads question, answer, verdict, the order the user saw.
+            if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
+                crate::logging::error(&format!("turn stopped row: {e}"));
+            }
+            // The recovery ticket goes with it (#2850): the turn is over
+            // because the user ended it, so no later boot may replay it.
+            let pending =
+                opencrabs::db::PendingRequestRepository::new(service.context().pool());
+            if let Err(e) = pending.delete_session(session_id).await {
+                crate::logging::error(&format!("turn stopped recovery row: {e}"));
+            }
         });
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn stopped thread: {e}"));
     }
@@ -2196,77 +2084,64 @@ pub fn spawn_brain_generation(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-brain-gen".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
+    let spawned = spawn_worker("gui-brain-gen", move |runtime| {
+        let provider = service.provider().clone();
+        let model = service.provider_model().to_string();
+        let request = opencrabs::brain::provider::LLMRequest::new(
+            model,
+            vec![opencrabs::brain::provider::Message::user(prompt)],
+        )
+        .with_max_tokens(65536);
+        let result = runtime.block_on(async move {
+            match tokio::time::timeout(Duration::from_secs(120), provider.complete(request))
+                .await
             {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = sink.send(TurnEvent::BrainFailed(format!("runtime: {e}")));
-                    return;
-                }
-            };
-            let provider = service.provider().clone();
-            let model = service.provider_model().to_string();
-            let request = opencrabs::brain::provider::LLMRequest::new(
-                model,
-                vec![opencrabs::brain::provider::Message::user(prompt)],
-            )
-            .with_max_tokens(65536);
-            let result = runtime.block_on(async move {
-                match tokio::time::timeout(Duration::from_secs(120), provider.complete(request))
-                    .await
-                {
-                    Ok(Ok(response)) => {
-                        let text: String = response
-                            .content
-                            .iter()
-                            .filter_map(|block| match block {
-                                opencrabs::brain::provider::ContentBlock::Text { text } => {
-                                    Some(text.as_str())
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        let parsed = opencrabs::tui::onboarding::parse_brain_sections(&text);
-                        // SOUL and USER are the two a setup cannot do without;
-                        // without them the reply was prose, not sections.
-                        if parsed[0].is_none() || parsed[1].is_none() {
-                            return Err("the answer had no brain sections".to_string());
-                        }
-                        let files = [
-                            ("SOUL.md", &parsed[0]),
-                            ("USER.md", &parsed[1]),
-                            ("AGENTS.md", &parsed[2]),
-                            ("TOOLS.md", &parsed[3]),
-                            ("MEMORY.md", &parsed[4]),
-                        ];
-                        let mut written = 0;
-                        for (name, content) in &files {
-                            if let Some(content) = content {
-                                if let Err(e) = std::fs::write(workspace.join(name), content) {
-                                    return Err(format!("writing {name}: {e}"));
-                                }
-                                written += 1;
+                Ok(Ok(response)) => {
+                    let text: String = response
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            opencrabs::brain::provider::ContentBlock::Text { text } => {
+                                Some(text.as_str())
                             }
-                        }
-                        Ok(written)
+                            _ => None,
+                        })
+                        .collect();
+                    let parsed = opencrabs::tui::onboarding::parse_brain_sections(&text);
+                    // SOUL and USER are the two a setup cannot do without;
+                    // without them the reply was prose, not sections.
+                    if parsed[0].is_none() || parsed[1].is_none() {
+                        return Err("the answer had no brain sections".to_string());
                     }
-                    Ok(Err(e)) => Err(format!("generation failed: {e}")),
-                    Err(_) => Err("generation timed out after 120s".to_string()),
+                    let files = [
+                        ("SOUL.md", &parsed[0]),
+                        ("USER.md", &parsed[1]),
+                        ("AGENTS.md", &parsed[2]),
+                        ("TOOLS.md", &parsed[3]),
+                        ("MEMORY.md", &parsed[4]),
+                    ];
+                    let mut written = 0;
+                    for (name, content) in &files {
+                        if let Some(content) = content {
+                            if let Err(e) = std::fs::write(workspace.join(name), content) {
+                                return Err(format!("writing {name}: {e}"));
+                            }
+                            written += 1;
+                        }
+                    }
+                    Ok(written)
                 }
-            });
-            let _ = match result {
-                Ok(written) => sink.send(TurnEvent::BrainReady(format!(
-                    "{written} brain files personalized"
-                ))),
-                Err(e) => sink.send(TurnEvent::BrainFailed(e)),
-            };
+                Ok(Err(e)) => Err(format!("generation failed: {e}")),
+                Err(_) => Err("generation timed out after 120s".to_string()),
+            }
         });
+        let _ = match result {
+            Ok(written) => sink.send(TurnEvent::BrainReady(format!(
+                "{written} brain files personalized"
+            ))),
+            Err(e) => sink.send(TurnEvent::BrainFailed(e)),
+        };
+    });
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::BrainFailed(format!("thread: {e}")));
     }
@@ -2295,34 +2170,17 @@ pub fn spawn_apply_operator_cd(
     sink: EventSink,
 ) {
     let done_sink = sink.clone();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-operator-cd".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("operator cd runtime: {e}"));
-                    let _ = done_sink.send(TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("/cd: {e}"),
-                    });
-                    return;
-                }
-            };
-            let applied = runtime.block_on(service.apply_operator_cd(session_id, &dir));
-            crate::logging::info(&format!(
-                "operator cd: session {session_id} -> {}",
-                applied.display()
-            ));
-            let _ = done_sink.send(TurnEvent::CommandReply {
-                session: Some(session_id),
-                text: super::text_commands::cd_reply(&applied.display().to_string()),
-            });
+    let spawned = spawn_worker("gui-operator-cd", move |runtime| {
+        let applied = runtime.block_on(service.apply_operator_cd(session_id, &dir));
+        crate::logging::info(&format!(
+            "operator cd: session {session_id} -> {}",
+            applied.display()
+        ));
+        let _ = done_sink.send(TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: super::text_commands::cd_reply(&applied.display().to_string()),
         });
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("operator cd thread: {e}"));
         let _ = sink.send(TurnEvent::CommandReply {
@@ -2347,34 +2205,22 @@ pub fn spawn_text_command(
     arg: String,
     sink: EventSink,
 ) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-text-command".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    crate::logging::error(&format!("command runtime: {e}"));
-                    let _ = sink.send(TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("command: {e}"),
-                    });
-                    return;
-                }
-            };
-            let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));
-            for event in events {
-                if let Err(e) = sink.send(event) {
-                    crate::logging::error(&format!("command result not delivered: {e}"));
-                    break;
-                }
+    let thread_sink = sink.clone();
+    let spawned = spawn_worker("gui-text-command", move |runtime| {
+        let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));
+        for event in events {
+            if let Err(e) = thread_sink.send(event) {
+                crate::logging::error(&format!("command result not delivered: {e}"));
+                break;
             }
-        });
+        }
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("command thread: {e}"));
+        let _ = sink.send(TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: format!("command: {e}"),
+        });
     }
 }
 

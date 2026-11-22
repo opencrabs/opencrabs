@@ -17,13 +17,16 @@
 //! 1. No file under `gui/` names a pool entry point in code. Comments may,
 //!    and do: that is where the trap is written down. Code asks the service,
 //!    and the service owns the pool.
-//! 2. No synchronous function under `gui/` opens the database without
-//!    building a reactor first. Async functions are exempt because they run
-//!    on whatever reactor polls them, and every spawn that polls one builds
-//!    it in the same function.
+//! 2. No synchronous function under `gui/` opens the database without a
+//!    reactor either in its own body or in the lane it hands the work to.
+//!    Async functions are exempt because they run on whatever reactor polls
+//!    them, and every spawn that polls one builds it in the same function.
 //! 3. Every thread `agent_bridge.rs` spawns builds a reactor in the function
 //!    that spawns it: `new_current_thread` for a one-shot call, and
-//!    `new_multi_thread` for the surface that outlives the boot.
+//!    `new_multi_thread` for the surface that outlives the boot. Since #3033
+//!    that is one thread builder in `spawn_worker` and one in
+//!    `spawn_bootstrap`; a `spawn_*` that opens the database hands the job to
+//!    the lane, which builds the runtime on the caller before it sends.
 //!
 //! What this cannot prove: a path that reaches the pool through an async
 //! function nobody polls on a reactor. The panic is the only witness to
@@ -39,6 +42,12 @@ const POOL_ENTRY_POINTS: &[&str] = &["interact(", "deadpool_sqlite::", "Pool<"];
 /// The two ways this crate builds a reactor. Anything that blocks on the pool
 /// has to be inside one of them.
 const REACTOR_BUILDS: &[&str] = &["new_current_thread()", "new_multi_thread()"];
+
+/// The one handoff that carries a reactor without naming one (#3033). A job
+/// sent to `spawn_worker` runs inside the runtime that helper builds, so a
+/// function whose database work is all inside a lane job is as covered as one
+/// that blocks on its own runtime.
+const LANE_HANDOFF: &str = "spawn_worker(";
 
 /// The window's only DB door. It holds the service handle and every thread it
 /// spawns is expected to carry its own reactor.
@@ -156,6 +165,15 @@ fn carries_a_reactor(lines: &[&str]) -> bool {
     })
 }
 
+/// The job runs on the lane's thread, inside the runtime `spawn_worker` built
+/// before it sent. Exempting this is only honest because the test below pins
+/// that the helper really does build one.
+fn hands_work_to_a_lane(lines: &[&str]) -> bool {
+    lines
+        .iter()
+        .any(|line| code_of(line).contains(LANE_HANDOFF))
+}
+
 #[test]
 fn the_window_never_names_the_pool() {
     let mut hits = Vec::new();
@@ -202,7 +220,7 @@ fn no_window_thread_opens_the_database_without_a_reactor() {
                 continue;
             }
             checked += 1;
-            if !carries_a_reactor(lines_of_fn) {
+            if !carries_a_reactor(lines_of_fn) && !hands_work_to_a_lane(lines_of_fn) {
                 offenders.push(format!(
                     "{}:{} fn {}",
                     path.display(),
@@ -220,8 +238,8 @@ fn no_window_thread_opens_the_database_without_a_reactor() {
         offenders.is_empty(),
         "a synchronous function opens the database without building a reactor, so \
          the first pool call in it panics with \"there is no reactor running\" \
-         (#2973). Spawn a 4 MB thread and block on a `current_thread` runtime, the \
-         shape `spawn_apply_operator_cd` uses:\n{}",
+         (#2973). Hand the work to `spawn_worker`, the shape every `spawn_*` in \
+         {DOOR} uses, or block on a `current_thread` runtime you built first:\n{}",
         offenders.join("\n")
     );
 }
@@ -259,5 +277,32 @@ fn the_bridge_spawns_every_thread_with_a_reactor() {
          use are `new_current_thread` for a one-shot call and `new_multi_thread` \
          for the surface that outlives the boot:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// The lane exemption above is only safe if the helper it names really builds
+/// the runtime (#3033). This pins the source of that promise, so a helper that
+/// stops building one fails here instead of quietly widening rule 2.
+#[test]
+fn the_lane_handoff_builds_the_reactor_it_promises() {
+    let path = gui_dir().join(DOOR);
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {:?}: {e}", path));
+    let lines = production_lines(&text);
+    let spans = fn_spans(&lines);
+    let helper = spans
+        .iter()
+        .find(|span| span.name == "spawn_worker")
+        .unwrap_or_else(|| panic!("{DOOR} has no spawn_worker, so rule 2 exempts nothing"));
+    let body = &lines[helper.start..helper.end];
+    assert!(
+        carries_a_reactor(body),
+        "`spawn_worker` must build the reactor its jobs run on, or every \
+         synchronous function that hands it database work panics on the first \
+         pool call (#2973, #3033)"
+    );
+    assert!(
+        body.iter()
+            .any(|line| code_of(line).contains("std::thread::Builder::new()")),
+        "`spawn_worker` is also the thread it hands the job to"
     );
 }
