@@ -444,7 +444,17 @@ codegen-units = 16
 [profile.citest]
 inherits = "dev"
 opt-level = 1
-debug = 1
+# `debug` is pinned to 0 rather than inheriting `dev`'s `true`. It was `1`,
+# which is the same value, and it is the one line in this profile that nobody
+# documented. It also drags `split-debuginfo = "unpacked"` in from
+# `[profile.dev]`, so every codegen unit wrote its own `.dwo` beside it.
+#
+# Measured over the 11 runs of this leg after it landed, the median is 60m29s
+# against 48m21s for the `ci` profile on the same job, and none of the 11 beat
+# that baseline (min 50m52s, max 111m43s). A leg that compiles 250k lines of
+# test code once, to run a suite that finishes in under three minutes, should
+# not pay for line tables nothing reads (#2934).
+debug = 0
 codegen-units = 256
 lto = false
 debug-assertions = false
