@@ -119,7 +119,17 @@ impl Dashboard {
         // Half-typed words belong to the crab they were typed for. Keeping
         // them would let Enter, pressed after coming back and opening another
         // crab, send one crab's draft to a different machine.
-        self.remote_draft = text_field::TextField::new();
+        self.reset_remote_field(cx);
+        // And the keyboard goes back to this window's own composer: the remote
+        // field is about to leave the tree, and focus on a field nobody can see
+        // is focus nothing answers.
+        // The focused pane's field, not necessarily the window's: a split
+        // draws one composer per leaf (#2610), and the caret has to go back to
+        // the one that is actually on screen.
+        let back = self.composer_entity(cx);
+        back.update(cx, |editor, _| {
+            editor.focus_pending = true;
+        });
         cx.notify();
     }
 
@@ -135,7 +145,11 @@ impl Dashboard {
         self.remote_transcript = None;
         // Closing the view drops the draft with it, for the same reason
         // `instance_clear` does: the words were addressed to that crab.
-        self.remote_draft = text_field::TextField::new();
+        self.reset_remote_field(cx);
+        let back = self.composer_entity(cx);
+        back.update(cx, |editor, _| {
+            editor.focus_pending = true;
+        });
         cx.notify();
     }
 
@@ -558,73 +572,36 @@ impl Dashboard {
         .detach();
     }
 
+    /// The keys the remote panel still answers itself.
     ///
-    /// While a remote crab is open the only composer on screen belongs to it,
-    /// so every printable character, every editing chord and Enter must land
-    /// here rather than in the local editor, which is not drawn and whose
-    /// contents would be sent to this window's own agent if it were.
+    /// The field is the chat's own `Editor` (#3133), so typing, editing chords,
+    /// history, the emoji list and Enter all belong to it, and a send reaches
+    /// the panel through its `Sent` event exactly as it reaches the chat. What
+    /// is left here is the one key the field has no opinion about: Esc leaves
+    /// the crab and goes back to this window's rail.
+    ///
+    /// This used to be a whole second keyboard: a `TextField`, a chord table
+    /// and a character feed, re-deciding what the local composer already did.
+    /// That is the shape of the owner's report: "parece quase que tu
+    /// re-escreveste em vez de reutilizar o que ja existe".
     pub(crate) fn remote_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
-        match ks.key.as_str() {
-            "enter" => {
-                self.send_remote(cx);
-                true
-            }
-            "escape" => {
-                // Esc leaves the crab and goes back to this window's own rail.
-                self.instance_clear(cx);
-                true
-            }
-            _ => {
-                if let Some(edit) = text_field::editing_chord(
-                    &ks.key,
-                    ks.modifiers.control,
-                    ks.modifiers.platform,
-                    ks.modifiers.alt,
-                    ks.modifiers.shift,
-                ) {
-                    self.apply_remote_edit(edit, cx);
-                    return true;
-                }
-                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
-                    // A chord this field does not implement belongs to nobody
-                    // here: swallowing it would eat a window shortcut, and
-                    // letting it through would type into an unseen editor.
-                    return true;
-                }
-                let typed = if ks.key == "space" {
-                    Some(' ')
-                } else {
-                    ks.key_char.as_ref().and_then(|s| s.chars().next())
-                };
-                match typed {
-                    Some(ch) => {
-                        if self.remote_draft.type_char(ch) {
-                            cx.notify();
-                        }
-                        true
-                    }
-                    // Arrows, page keys, function keys: the field has no line
-                    // to walk, so they change nothing and stop here.
-                    None => true,
-                }
-            }
+        if ks.key == "escape" {
+            // Esc leaves the crab and goes back to this window's own rail.
+            self.instance_clear(cx);
+            return true;
         }
+        false
     }
 
-    /// Apply one editing chord to the remote composer, clipboard included.
-    fn apply_remote_edit(&mut self, edit: text_field::TextFieldEdit, cx: &mut Context<Self>) {
-        match text_field::apply(&mut self.remote_draft, edit) {
-            Some(text_field::ClipboardRequest::Write(text)) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            Some(text_field::ClipboardRequest::Read) => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.remote_draft.insert_text(&text);
-                }
-            }
-            None => {}
-        }
-        cx.notify();
+    /// Empty the remote field without touching the conversation.
+    ///
+    /// The field is an entity shared with the subscription `main` makes, so it
+    /// is emptied in place rather than replaced: a fresh `Editor` would be a
+    /// field the window's own listener is no longer subscribed to, and Enter in
+    /// it would type into nothing.
+    fn reset_remote_field(&mut self, cx: &mut Context<Self>) {
+        self.remote_editor
+            .update(cx, |editor, cx| editor.restore_draft(String::new(), cx));
     }
 
     /// The pairing form's keyboard: three fields, Tab between them, Enter to
@@ -1226,7 +1203,7 @@ impl Dashboard {
             self.rem,
             handlers,
             copy,
-            &self.remote_draft,
+            self.remote_editor.clone(),
             move |ev, window, app| send(ev, window, app),
             move |ev, window, app| close(ev, window, app),
         );
@@ -1261,11 +1238,24 @@ impl Dashboard {
     ///
     /// This is `message/send`, the same call the A2A tool makes, so a remote
     /// crab treats it exactly as any other peer's task. The task id comes back
-    /// and is dropped into the notice: this panel reads, it does not follow the
-    /// task's progress, and saying so is better than pretending otherwise.
+    /// and the follow loop below turns it into the answer.
+    ///
+    /// The field is the chat's own `Editor` (#3133), so this is reached two
+    /// ways that are really one: Enter in the field, and the "enviar" button,
+    /// which submits the same field rather than reading it from a second place.
     pub(crate) fn send_remote(&mut self, cx: &mut Context<Self>) {
-        let text = self.remote_draft.trimmed().to_string();
-        if text.is_empty() {
+        let editor = self.remote_editor.clone();
+        editor.update(cx, |editor, cx| editor.submit(cx));
+    }
+
+    /// Put one payload on the wire, and follow the task it creates.
+    ///
+    /// `text` is what the field emitted, already carrying whatever the editor
+    /// adds to a send (a quoted reply, attachment markers). The field has
+    /// emptied itself by the time this runs, which is the local composer's
+    /// behaviour too: a send that fails hands the words back below.
+    pub(crate) fn send_remote_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
             return;
         }
         let Some(remote) = self.instance_remote.as_ref() else {
@@ -1298,7 +1288,6 @@ impl Dashboard {
         if let Some(transcript) = self.remote_transcript.as_mut() {
             transcript.sending = true;
         }
-        self.remote_draft = text_field::TextField::new();
         cx.notify();
 
         // Cloned before the spawn takes `url` and `token`: the follow loop
@@ -1348,8 +1337,14 @@ impl Dashboard {
                 }
                 if result.is_err() {
                     // Give the words back: losing a typed message to a network
-                    // error is the one thing a composer must never do.
-                    this.remote_draft = text_field::TextField::from_text(&text);
+                    // error is the one thing a composer must never do. The
+                    // field is an entity, so the words go back into it rather
+                    // than into a copy the paint would have to notice.
+                    let editor = this.remote_editor.clone();
+                    editor.update(cx, |editor, cx| {
+                        editor.restore_draft(text.clone(), cx);
+                        editor.focus_pending = true;
+                    });
                 }
                 cx.notify();
             });
@@ -1561,7 +1556,14 @@ impl Dashboard {
         // Every way into a crab lands here: the badge, the pairing form, and
         // the Ctrl+Alt+Up/Down switch. The draft is per crab, so it is dropped
         // at the one door they all use.
-        self.remote_draft = text_field::TextField::new();
+        self.reset_remote_field(cx);
+        // And the field takes the keyboard, the way a freshly opened chat puts
+        // the caret in its composer: a remote you have to click before typing
+        // reads as broken, and the local composer is not on screen to hold
+        // focus instead.
+        self.remote_editor.update(cx, |editor, _| {
+            editor.focus_pending = true;
+        });
         let url = entry.url().to_string();
         let token = entry.known.token.clone();
         self.instance_remote = Some(RemoteView::loading(host_id.clone()));

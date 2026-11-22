@@ -718,11 +718,12 @@ pub(crate) struct Dashboard {
     /// rather than a variant of the view above, because the list and the
     /// transcript arrive from two different calls.
     pub(crate) remote_transcript: Option<dashboard_instances::RemoteTranscript>,
-    /// What the remote composer holds. Kept apart from the local draft: the
-    /// two go to different machines and must not leak into each other. A real
-    /// field, not a `String`, so the caret, the selection and the editing
-    /// chords behave the way they do in the topic prompt.
-    pub(crate) remote_draft: text_field::TextField,
+    /// The remote composer's field. Kept apart from the local draft: the two go
+    /// to different machines and must not leak into each other. A real
+    /// `Editor`, built beside the chat's own, because the panel used to paint
+    /// spans and a fake caret and a remote question could not be edited,
+    /// selected or wrapped the way a local one can (#3133).
+    pub(crate) remote_editor: Entity<editor::Editor>,
     /// The last instance error, said in one line at the bottom of the strip's
     /// column. `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,

@@ -777,3 +777,55 @@ fn a_remote_transcript_follows_its_own_bottom() {
         "the follow is re-armed on every pass, the way a split leaf re-arms it"
     );
 }
+
+#[test]
+fn the_remote_composer_is_the_chats_own_editor() {
+    // The owner's report: "parece quase que tu re-escreveste em vez de
+    // reutilizar o que ja existe. o look nao parece o mesmo, a forma de
+    // funcionar parece muito diferente". He was reading the remote composer,
+    // which was a `TextField` painted by hand: its own spans, its own caret, its
+    // own chord table, its own character feed. Typing in it could not select,
+    // could not wrap onto a second line, and answered none of the editing chords
+    // the chat's field answers, because it was a second implementation of the
+    // same control.
+    //
+    // The fix is one `Editor` entity, the same one the chat draws. This test
+    // pins the reuse: the panel must take an `Entity<Editor>`, must not paint
+    // spans or a caret of its own, and the window must not keep a parallel
+    // keyboard for it.
+    let panel = include_str!("../remote_panel.rs");
+    assert!(
+        panel.contains("editor: gpui::Entity<crate::editor::Editor>"),
+        "the panel's composer has to be the chat's editor"
+    );
+    assert!(
+        !panel.contains("render_spans"),
+        "a painted span run is the second implementation this test forbids"
+    );
+    assert!(
+        !panel.contains("text_field::TextField"),
+        "a TextField here is a composer the chat does not have"
+    );
+
+    let dash = include_str!("../dashboard_instances.rs");
+    assert!(
+        !dash.contains("remote_draft"),
+        "one field, not two: a stored TextField beside the editor is the drift"
+    );
+    let keys = fn_body(dash, "pub(crate) fn remote_key(")
+        .expect("the remote's own keys live in remote_key");
+    assert!(
+        !keys.contains("type_char") && !keys.contains("editing_chord"),
+        "typing and editing chords are the editor's, not a table re-decided here: {keys}"
+    );
+    assert!(
+        keys.contains("escape"),
+        "what is left for the window is the key the field has no opinion about"
+    );
+    let send = fn_body(dash, "pub(crate) fn send_remote(")
+        .expect("the button's send lands in send_remote");
+    assert!(
+        send.contains("submit(cx)"),
+        "the button and Enter must go through the same submit: {send}"
+    );
+}

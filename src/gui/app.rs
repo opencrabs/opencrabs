@@ -295,6 +295,18 @@ pub(crate) fn run() {
                     let history_path = history_path.clone();
                     move |cx| editor::Editor::new_with_history(history, history_path, cx)
                 });
+                // The remote panel's field, built here beside the chat's so
+                // both walk the same history: a message typed to another crab
+                // is recalled the way one typed to this one is. It is a real
+                // `Editor`, not a `TextField`, because the panel used to paint
+                // its own spans and a fake caret, and a remote question could
+                // not be edited, selected or multi-lined the way a local one
+                // can (#3133).
+                let remote_editor = cx.new({
+                    let history = history.clone();
+                    let history_path = history_path.clone();
+                    move |cx| editor::Editor::new_with_history(history, history_path, cx)
+                });
                 // A drag-copied range lands on the clipboard inside the
                 // transcript, which cannot see the composer. The dashboard owns
                 // both halves, so it is the one that turns a landed copy into
@@ -334,6 +346,16 @@ pub(crate) fn run() {
                             if let Some(session) = this.chat_session {
                                 this.focus_options(session, cx);
                             }
+                        }
+                    })
+                    .detach();
+                    // Enter in the remote field is a send to the other crab,
+                    // the same event the chat's own field emits. One path for
+                    // the key and the "enviar" button, so the two cannot
+                    // disagree about what is being sent.
+                    cx.subscribe(&remote_editor, |this, _editor, event, cx| {
+                        if let editor::EditorEvent::Sent(text) = event {
+                            this.send_remote_text(text.clone(), cx);
                         }
                     })
                     .detach();
@@ -684,7 +706,7 @@ pub(crate) fn run() {
                         instance_remote: None,
                         instance_error: None,
                         remote_transcript: None,
-                        remote_draft: text_field::TextField::new(),
+                        remote_editor,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,

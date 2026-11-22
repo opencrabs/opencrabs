@@ -211,9 +211,11 @@ pub(crate) fn view(
     // can read a remote answer but not take it, which is half the interaction
     // a local answer offers (#2750).
     copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
-    // The field itself, not its text: the composer draws a caret from the
-    // spans, and a `SharedString` cannot say where the next character lands.
-    draft: &opencrabs::ui_core::text_field::TextField,
+    // The chat's own editor, the same entity the local composer draws (#3133).
+    // Not a copy of its text, not a second field with a painted caret: one
+    // editor, so typing, editing chords, history, the emoji list and Enter
+    // behave identically here and in the chat, because it *is* the same code.
+    editor: gpui::Entity<crate::editor::Editor>,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -322,85 +324,17 @@ pub(crate) fn view(
 
     // The composer closes the panel the way the local one closes the chat:
     // the same shell (glass fill, hairline border, the messages' radius, a
-    // one pixel divider above the hints) and a field that shows a caret. A
-    // remote that drew a plain box with a green button read as another
-    // product, which is what the owner called out (#3133).
-    let (before, selected, after) = draft.render_spans();
-    let empty = draft.is_empty();
-    // A caret of its own: the field is not a real text input, so without this
-    // bar there is no way to see where the next character lands.
-    // 2 px, the local caret's width. The blink is the editor's own clock and
-    // this field has none: a bar that stays lit is the honest version of a
-    // caret nobody is animating.
-    let caret = div().flex_none().w(px(2.)).h(rems(0.95)).bg(rgb(p.accent));
-    let mut line = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .w_full()
-        .min_w_0();
-    // The bar belongs where the next character will land, not at the
-    // selection's far edge: after a backwards selection (shift+Left) the
-    // caret sits at the selection's start, and painting it after the
-    // highlighted run put it a word away from the text it would replace.
-    let caret_at_start = draft
-        .selection()
-        .is_some_and(|(start, _)| draft.caret() == start);
-    if empty {
-        // The placeholder is text, not a position: the bar goes before it, so
-        // an empty composer reads as "typing starts here" instead of putting
-        // the caret past the hint.
-        line = line.child(caret).child(
-            div()
-                .text_color(rgb(p.text_faint))
-                // The local composer's own string, from the constant it
-                // paints with: same field, same words (#3133).
-                .child(SharedString::from(crate::editor::PLACEHOLDER)),
-        );
-    } else if caret_at_start {
-        line = line.child(div().child(SharedString::from(before.to_string())));
-        line = line.child(caret);
-        if !selected.is_empty() {
-            line = line.child(
-                div()
-                    .bg(rgb(p.selection))
-                    .child(SharedString::from(selected.to_string())),
-            );
-        }
-        line = line.child(div().child(SharedString::from(after.to_string())));
-    } else {
-        line = line.child(div().child(SharedString::from(before.to_string())));
-        if !selected.is_empty() {
-            line = line.child(
-                div()
-                    .bg(rgb(p.selection))
-                    .child(SharedString::from(selected.to_string())),
-            );
-        }
-        line = line
-            .child(caret)
-            .child(div().child(SharedString::from(after.to_string())));
-    }
-
-    // The field's own box, to the local composer's measurements: `card_inset`
-    // for the side step so the words land on the messages' column, `py_3` and a
-    // 44 px floor so the empty box is the same slab as the one in the chat, and
-    // 14 px on a 22 px line so a line of text is the same height in both
-    // (#3114, #3133). A remote field that was 13 px in a 32 px box read as a
-    // different control even with the same shell around it.
-    let field = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .min_w_0()
-        .px(transcript::card_inset())
-        .py_3()
-        .line_height(px(22.))
-        .text_size(px(14.))
-        .min_h(px(44.))
-        .text_color(rgb(p.text))
-        .child(line);
+    // one pixel divider above the hints) around the same field. A remote that
+    // drew a plain box with a green button read as another product, which is
+    // what the owner called out (#3133).
+    //
+    // The field is the editor's, measurements included: it pads itself to the
+    // conversation's column and holds the 44 px floor, so there is nothing left
+    // for this module to draw. Everything the hand-built field re-decided here
+    // (the spans, the caret, the blink it had no clock for, the placeholder,
+    // the selection highlight) is already the editor's, and re-deciding it is
+    // how the two composers drifted apart in the first place.
+    let field = editor.into_any_element();
 
     // The footer carries the two chords instead of a second button: Enter is
     // the send, exactly as it is in the local composer, and Esc is the way

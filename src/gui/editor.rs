@@ -1937,7 +1937,10 @@ impl Editor {
     /// read with `cx` alone, and nothing in the body below ever touched the
     /// window. So the emoji branch stays in `send`, where the key belongs, and
     /// everything that builds a payload lives here, where a tick can reach it.
-    fn submit(&mut self, cx: &mut Context<Self>) {
+    /// Visible to the window so a composer that is not the chat's can send
+    /// through the same path: the remote panel's "enviar" button has no key
+    /// behind it either (#3133).
+    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
