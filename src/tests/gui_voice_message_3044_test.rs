@@ -598,9 +598,16 @@ fn a_spoken_turn_is_answered_aloud() {
         speak.contains("tts_enabled"),
         "a profile with no synthesis engine answers in text, as it does on Telegram"
     );
+    // The synthesis needs a stack of its own: gpui workers are far too small
+    // for a provider call. Since #3033 the thread is built by the lane helper,
+    // so the speak lane asks for one instead of spelling out the builder.
     assert!(
-        region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}").contains("Builder::new()"),
-        "the synthesis runs on its own stack: gpui workers are far too small for a provider call"
+        speak.contains("spawn_worker(\"gui-voice-reply\""),
+        "the synthesis asks the lane helper for a worker thread"
+    );
+    assert!(
+        region_in(AGENT_BRIDGE, "pub(crate) fn spawn_worker<F>(", "\n}").contains("Builder::new()"),
+        "the lane helper is where the thread and its stack come from"
     );
 }
 
