@@ -273,27 +273,12 @@ impl PaneView {
         // The plan file is re-read on this path, with its mtime as the cache
         // key: a rewritten plan redraws on the next frame.
         self.plan.refresh();
-        if let Some(view) = self
-            .plan
-            .editing_view(Some(&actions), window)
-            .or_else(|| self.plan.pane_view(density, expanded, window))
-        {
-            // A click trades the conversation's room for the whole checklist,
-            // per pane (#2624). The handler stops the event so the press does
-            // not also hand the leaf the keyboard.
-            let weak = self.window.clone();
-            above = above.child(
-                view.id(SharedString::from(format!("plan-strip-{session}")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
-                            cx.stop_propagation();
-                            let _ = weak.update(cx, |this, cx| this.toggle_pane_plan(session, cx));
-                        },
-                    ),
-            );
-            above_used = true;
-        }
+        // The offers and the live plan card are rows of the conversation now
+        // (#3139): they scroll with the pane's history instead of holding the
+        // bottom of it, the way the window's chat already does. The order is
+        // the chat's order: the offers waiting on a click, then the plan the
+        // work belongs to.
+        let mut pane_rows: Vec<AnyElement> = Vec::new();
         let queued = agent_bridge::queue_snapshot(session);
         if !queued.is_empty() {
             // Only a folded queue is worth a click, so a two-message list does
@@ -318,8 +303,9 @@ impl PaneView {
             );
             above_used = true;
         }
-        // The follow-up offer sits with the queue, above the composer it will
-        // send into (#2708).
+        // The follow-up offer is a row of the conversation now (#3139): it is
+        // drawn under the pane's last turn, which is where the click that sends
+        // it comes from (#2708).
         let offers = agent_bridge::options_snapshot(session);
         if !offers.is_empty() {
             let rows: Vec<(SuggestionItem, ClickHandler)> = offers
@@ -342,8 +328,30 @@ impl PaneView {
                     (item, pick)
                 })
                 .collect();
-            above = above.child(options_strip(&rows, option_at));
-            above_used = true;
+            pane_rows.push(options_strip(&rows, option_at).into_any_element());
+        }
+        // The plan card is the last row of the pane's conversation: it is the
+        // thing the work belongs to, so it sits under the offers and scrolls
+        // away with the history. A click trades the conversation's room for the
+        // whole checklist, per pane (#2624). The handler stops the event so the
+        // press does not also hand the leaf the keyboard.
+        if let Some(view) = self
+            .plan
+            .editing_view(Some(&actions), window)
+            .or_else(|| self.plan.pane_view(density, expanded, window))
+        {
+            let weak = self.window.clone();
+            pane_rows.push(
+                view.id(SharedString::from(format!("plan-strip-{session}")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        move |_ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                            cx.stop_propagation();
+                            let _ = weak.update(cx, |this, cx| this.toggle_pane_plan(session, cx));
+                        },
+                    )
+                    .into_any_element(),
+            );
         }
         if let Some(label) = running
             && let Some(area) =
@@ -776,6 +784,9 @@ impl Render for PaneView {
                     Some(owner) => owner.read(cx).voice_pending.contains(&self.session),
                     None => false,
                 },
+                // The offers and the live plan card, drawn under the pane's
+                // last turn inside its own scroll (#3139).
+                trailing: pane_rows,
                 ..Default::default()
             },
         )

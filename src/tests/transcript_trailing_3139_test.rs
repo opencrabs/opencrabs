@@ -151,3 +151,46 @@ fn the_rows_are_built_in_the_order_that_was_asked_for() {
         "the hint comments on the turn above it, then what is waiting, then the plan"
     );
 }
+
+const PANE_VIEW: &str = include_str!("../gui/pane_view.rs");
+
+/// The pane's own box between its history and its input.
+fn pane_above_box() -> &'static str {
+    let start = PANE_VIEW
+        .find("let mut above = div()")
+        .expect("a pane keeps a box under its history too");
+    let end = PANE_VIEW[start..]
+        .find("if above_used {")
+        .expect("and appends it only when something went in it");
+    &PANE_VIEW[start..start + end]
+}
+
+#[test]
+fn a_split_pane_hands_its_rows_over_too() {
+    assert!(
+        PANE_VIEW.contains("trailing: pane_rows,"),
+        "the pane passes its rows to its own transcript"
+    );
+    let handed: Vec<&str> = PANE_VIEW.split("pane_rows.push(").skip(1).collect();
+    assert_eq!(handed.len(), 2, "the pane hands over exactly two rows");
+    assert!(
+        handed[0].starts_with("options_strip("),
+        "the offers waiting on a click come first"
+    );
+    assert!(
+        handed[1].contains("plan-strip-"),
+        "then the plan card the work belongs to"
+    );
+    assert!(
+        !PANE_VIEW.contains("above = above.child(options_strip"),
+        "the offers are no longer appended above the input"
+    );
+    assert!(
+        pane_above_box().contains("queue_strip("),
+        "the queue keeps its row above the input"
+    );
+    assert!(
+        PANE_VIEW.contains("toggle_pane_plan(session, cx)"),
+        "and the plan card keeps the tap that folds it"
+    );
+}
