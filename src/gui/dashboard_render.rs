@@ -2972,7 +2972,7 @@ impl Render for Dashboard {
         // measure, different source. The strip picked the crab, so what sits
         // here is that crab's transcript, not this window's.
         let right = if self.instance_remote_open() && self.screen == Screen::Chat {
-            self.remote_panel_element(chat_measure_px, cx)
+            self.remote_panel_element(chat_measure_px, centred_chat, cx)
         } else {
             right.into_any_element()
         };

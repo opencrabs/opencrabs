@@ -722,3 +722,30 @@ fn the_card_copies_the_whole_pairing_in_one_click() {
         "one button per field is the state the owner complained about"
     );
 }
+
+#[test]
+fn the_remote_panel_sits_on_the_chats_own_measure() {
+    // The owner read a remote session and saw a different product: the text ran
+    // edge to edge while the local chat sits on a 760 px column. The panel is a
+    // sibling of the chat's column, not a child of it, so nothing above it caps
+    // or centres it: it has to do both itself, from the same two facts the
+    // local column is laid out by.
+    let source = include_str!("../dashboard_instances.rs");
+    let body = fn_body(source, "pub(crate) fn remote_panel_element(")
+        .expect("the panel is the only place that frames a remote");
+    assert!(
+        body.contains("centred: bool"),
+        "the panel has to be told whether the chat is centred, or it cannot match it"
+    );
+    assert!(
+        body.contains(".justify_center()") && body.contains(".w(px(measure))"),
+        "a centred remote caps at the measure and centres, the way the local column does"
+    );
+    // And the window has to hand it the fact it already computes for the chat,
+    // or the flag above is always false and the panel stays edge to edge.
+    let render = include_str!("../dashboard_render.rs");
+    assert!(
+        render.contains("remote_panel_element(chat_measure_px, centred_chat, cx)"),
+        "the render passes the chat's own measure and centring to the remote"
+    );
+}

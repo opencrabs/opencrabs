@@ -1106,9 +1106,18 @@ impl Dashboard {
     }
 
     /// The panel column: the banner, the transcript and the remote composer.
+    ///
+    /// `centred` is the same fact the local conversation is laid out by
+    /// (`chat_measure_px < primary_width`): a single pane draws at a readable
+    /// measure and centres it, a split pane keeps its own span. Without it the
+    /// remote stretched across the whole pane while the local chat sat on a
+    /// 760 px column, so the two screens had different axes and the remote read
+    /// as a different product. The owner's words: "nao parece estar centrado
+    /// como o chat normal".
     pub(crate) fn remote_panel_element(
         &mut self,
         measure: f32,
+        centred: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(remote) = self.instance_remote.as_ref() else {
@@ -1195,7 +1204,7 @@ impl Dashboard {
             .remote_transcript
             .as_ref()
             .map(|t| (&t.state, &t.scroll));
-        remote_panel::view(
+        let panel = remote_panel::view(
             &frame,
             body,
             measure,
@@ -1205,7 +1214,32 @@ impl Dashboard {
             &self.remote_draft,
             move |ev, window, app| send(ev, window, app),
             move |ev, window, app| close(ev, window, app),
-        )
+        );
+        // The measure and the centre, the way the local conversation gets them
+        // (#2586): the transcript caps itself, and the column it sits in is
+        // what has to be capped and centred here, because this panel is a
+        // sibling of the chat's column rather than a child of it.
+        if !centred {
+            return panel;
+        }
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .min_h_0()
+                    .min_w_0()
+                    .w(px(measure))
+                    .child(panel),
+            )
+            .into_any_element()
     }
 
     /// Send the composer's text to the selected crab as a task.
