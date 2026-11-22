@@ -46,6 +46,51 @@ pub async fn handle_send_message(
     }
 
     let task_id = Uuid::new_v4().to_string();
+
+    // Caller-side retry contract (#2874): a resend carrying the same
+    // caller-minted `messageId` is the SAME send, so it answers with the task
+    // the first attempt created instead of running the agent twice. A send
+    // without a messageId cannot be retried safely and behaves as it always
+    // has, so older callers keep working.
+    let idem_key = send_params
+        .message
+        .message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    if let Some(key) = idem_key
+        && let Some(existing_id) =
+            persistence::claim_idempotency_key(&service_context.pool(), key, &task_id).await
+    {
+        let cached = {
+            let tasks = store.read().await;
+            tasks.get(&existing_id).cloned()
+        };
+        let existing = match cached {
+            Some(task) => Some(task),
+            None => persistence::load_task(&service_context.pool(), &existing_id).await,
+        };
+        match existing {
+            Some(task) => {
+                tracing::info!(
+                    "A2A: duplicate send (messageId {key}) answered with task {existing_id}"
+                );
+                let json = serde_json::to_value(&task)
+                    .unwrap_or_else(|_| serde_json::json!({"id": existing_id.as_str()}));
+                return JsonRpcResponse::success(id, json);
+            }
+            None => {
+                tracing::warn!(
+                    "A2A: messageId {key} maps to task {existing_id}, which is gone; \
+                     treating this send as new"
+                );
+                // Re-point the claim, or every later resend of this key would
+                // hit the same missing task and never deliver.
+                persistence::repoint_idempotency_key(&service_context.pool(), key, &task_id).await;
+            }
+        }
+    }
+
     let context_id = send_params
         .message
         .context_id

@@ -195,6 +195,12 @@ pub(crate) const MIGRATION_SQL: &[&str] = &[
     // reworded. Idempotent CREATE, nothing to backfill. Appended last per the
     // list invariant above.
     include_str!("../migrations/20261121000001_add_hint_dismissals.sql"),
+    // #2874: the caller-side retry contract. A resend carrying the same
+    // caller-minted `messageId` must return the task the first attempt
+    // created instead of dispatching a second one, which needs a durable
+    // key to task mapping. Idempotent CREATE, nothing to backfill. Appended
+    // last per the list invariant above.
+    include_str!("../migrations/20261121000002_add_a2a_idempotency.sql"),
 ];
 
 pub(crate) fn build_migrations() -> Migrations<'static> {

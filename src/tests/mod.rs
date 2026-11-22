@@ -21,6 +21,7 @@ pub mod a2a_debate_test;
 pub mod a2a_gate_auth_test;
 pub mod a2a_handler_tasks_test;
 pub mod a2a_handler_test;
+pub mod a2a_idempotency_test;
 pub mod a2a_notify_handler_test;
 pub mod a2a_pair_auth_test;
 pub mod a2a_routes_test;

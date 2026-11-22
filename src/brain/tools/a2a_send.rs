@@ -65,6 +65,10 @@ impl Tool for A2aSendTool {
                     "type": "string",
                     "description": "Optional context ID for continuing a conversation"
                 },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional key that makes a resend safe for 'send': reuse the same value to retry a send whose outcome is unknown, and the remote answers with the task the first attempt created instead of running the agent twice"
+                },
                 "api_key": {
                     "type": "string",
                     "description": "Optional Bearer token for authenticated A2A endpoints"
@@ -157,7 +161,8 @@ impl Tool for A2aSendTool {
                     }
                 };
                 let context_id = input.get("context_id").and_then(|v| v.as_str());
-                send_message(base_url, api_key, message, context_id).await
+                let idempotency_key = input.get("idempotency_key").and_then(|v| v.as_str());
+                send_message(base_url, api_key, message, context_id, idempotency_key).await
             }
             "get" => {
                 let task_id = match input.get("task_id").and_then(|v| v.as_str()) {
@@ -229,48 +234,147 @@ async fn discover(base_url: &str, api_key: Option<&str>) -> Result<ToolResult> {
     )))
 }
 
-/// Send a message/task to a remote A2A agent.
-async fn send_message(
-    base_url: &str,
-    api_key: Option<&str>,
-    message: &str,
-    context_id: Option<&str>,
-) -> Result<ToolResult> {
-    let url = format!("{}/a2a/v1", base_url);
+/// Attempts per send. A refused connection fails instantly, so three tries
+/// cost nothing when the daemon is down and cover a restart in progress
+/// (#2874).
+const SEND_ATTEMPTS: usize = 3;
 
+/// Delay between connection attempts, milliseconds. Doubles per attempt.
+const SEND_BACKOFF_MS: u64 = 250;
+
+/// Build the JSON-RPC envelope for `message/send`.
+///
+/// Split out so the placement of the idempotency key is pinned by a test: the
+/// server dedupes on `params.message.messageId` (#2874), so a key that never
+/// lands in that field protects nothing.
+fn build_send_body(message: &str, context_id: Option<&str>, message_id: &str) -> Value {
     let mut msg = serde_json::json!({
         "role": "user",
+        "messageId": message_id,
         "parts": [{"text": message}]
     });
     if let Some(ctx) = context_id {
         msg["contextId"] = serde_json::json!(ctx);
     }
 
-    let body = serde_json::json!({
+    serde_json::json!({
         "jsonrpc": "2.0",
         "method": "message/send",
         "params": {
             "message": msg
         },
         "id": 1
-    });
+    })
+}
+
+/// Send a message/task to a remote A2A agent.
+///
+/// Delivery contract (#2874): the caller owns the retry. A relay-free gateway
+/// keeps no spool (#2274), so a send that cannot reach it is gone, not
+/// queued, and this function says so instead of reporting success. Every
+/// attempt of one send carries the same `messageId`, and a caller resend can
+/// carry it too, which is what stops a retry from running the agent twice.
+async fn send_message(
+    base_url: &str,
+    api_key: Option<&str>,
+    message: &str,
+    context_id: Option<&str>,
+    idempotency_key: Option<&str>,
+) -> Result<ToolResult> {
+    let url = format!("{}/a2a/v1", base_url);
+
+    let message_id = match idempotency_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    let body = build_send_body(message, context_id, &message_id);
 
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .headers(auth_headers(api_key))
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| super::error::ToolError::Execution(format!("HTTP error: {}", e)))?;
+    let mut last_transport_error = String::new();
+    let mut resp = None;
+
+    for attempt in 1..=SEND_ATTEMPTS {
+        if attempt > 1 {
+            let backoff = SEND_BACKOFF_MS * (1u64 << (attempt - 2));
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+        }
+
+        match client
+            .post(&url)
+            .headers(auth_headers(api_key))
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await
+        {
+            Ok(ok) => {
+                resp = Some(ok);
+                break;
+            }
+            Err(e) => {
+                if e.is_timeout() {
+                    // The connection was accepted, so the request may have
+                    // arrived and been acted on. Retrying blind would be safe
+                    // server-side, but the caller deserves the truth: the
+                    // outcome is unknown, and the key makes a resend harmless.
+                    let mut result = ToolResult::error(format!(
+                        "DELIVERY UNKNOWN: {base_url} accepted the connection but did not answer in time. \
+                         The task may exist. Resend with idempotency_key \"{message_id}\" and the remote \
+                         answers with the same task instead of running the agent twice."
+                    ));
+                    result
+                        .metadata
+                        .insert("idempotency_key".to_string(), message_id.clone());
+                    return Ok(result);
+                }
+                last_transport_error = e.to_string();
+            }
+        }
+    }
+
+    let resp = match resp {
+        Some(resp) => resp,
+        None => {
+            let mut result = ToolResult::error(format!(
+                "NOT DELIVERED: nothing answered at {url} after {SEND_ATTEMPTS} attempts \
+                 (last error: {last_transport_error}). The message is not queued and will not \
+                 arrive later: a relay-free gateway has no spool to hold it. Retry when the \
+                 remote is reachable, passing idempotency_key \"{message_id}\" so a resend \
+                 cannot create a second task."
+            ));
+            result
+                .metadata
+                .insert("idempotency_key".to_string(), message_id.clone());
+            return Ok(result);
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let text = resp.text().await.unwrap_or_default();
+
+        // 429 and 503 are the server saying "not now", not "not ever", and it
+        // usually names how long. Passing that number on beats a blind retry.
+        if matches!(status.as_u16(), 429 | 503) {
+            let wait = retry_after.unwrap_or_else(|| "an unspecified delay".to_string());
+            let mut result = ToolResult::error(format!(
+                "NOT DELIVERED: {base_url} answered HTTP {status} and asked to retry after {wait}. \
+                 Retry then, passing idempotency_key \"{message_id}\" so the resend cannot create \
+                 a second task."
+            ));
+            result
+                .metadata
+                .insert("idempotency_key".to_string(), message_id.clone());
+            return Ok(result);
+        }
+
         return Ok(ToolResult::error(format!(
-            "A2A send failed: HTTP {} — {}",
-            status, text
+            "A2A send failed: HTTP {status}: {text}"
         )));
     }
 
@@ -471,4 +575,75 @@ fn resolve_profile_target(name: &str) -> std::result::Result<String, String> {
         return Err(profile_disabled_error(name));
     }
     Ok(super::profile_list::effective_a2a_url(&cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A port nothing is listening on: bind, read the port, drop the socket.
+    /// A refused connection is the offline case from #2874, and it fails
+    /// instantly so the retry loop stays cheap in a test.
+    fn dead_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn the_idempotency_key_travels_where_the_server_reads_it() {
+        // The server dedupes on params.message.messageId (#2874). A key that
+        // landed anywhere else would protect nothing, so pin the path.
+        let body = build_send_body("hi", Some("ctx-1"), "key-123");
+        assert_eq!(body["params"]["message"]["messageId"], "key-123");
+        assert_eq!(body["params"]["message"]["contextId"], "ctx-1");
+        assert_eq!(body["method"], "message/send");
+    }
+
+    #[test]
+    fn a_send_without_a_context_still_carries_the_key() {
+        let body = build_send_body("hi", None, "key-123");
+        assert_eq!(body["params"]["message"]["messageId"], "key-123");
+        assert!(body["params"]["message"].get("contextId").is_none());
+    }
+
+    #[tokio::test]
+    async fn offline_send_reports_not_delivered_instead_of_success() {
+        let base = format!("http://127.0.0.1:{}", dead_port());
+        let result = send_message(&base, None, "hello", None, Some("retry-key-1"))
+            .await
+            .expect("tool result");
+
+        assert!(
+            !result.success,
+            "an unreachable gateway must not report success: {:?}",
+            result.error
+        );
+        let message = result.error.as_deref().unwrap_or("");
+        assert!(
+            message.contains("NOT DELIVERED"),
+            "the caller needs the words, not a bare transport error: {message}"
+        );
+        // The key is handed back so a resend cannot duplicate the task.
+        assert_eq!(
+            result.metadata.get("idempotency_key").map(String::as_str),
+            Some("retry-key-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_send_mints_a_key_when_the_caller_did_not() {
+        let base = format!("http://127.0.0.1:{}", dead_port());
+        let result = send_message(&base, None, "hello", None, None)
+            .await
+            .expect("tool result");
+
+        assert!(!result.success);
+        let key = result
+            .metadata
+            .get("idempotency_key")
+            .expect("a minted key is still reported back");
+        assert!(!key.is_empty());
+    }
 }

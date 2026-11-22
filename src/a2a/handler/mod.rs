@@ -18,4 +18,5 @@ pub mod stream;
 pub(crate) mod tasks;
 
 pub use dispatch::dispatch;
+pub(crate) use send::handle_send_message;
 pub use stores::{CancelStore, TaskStore, new_cancel_store, new_task_store};
