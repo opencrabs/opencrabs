@@ -591,6 +591,7 @@ pub mod session_search_empty_query_test;
 pub mod session_search_query_test;
 pub mod session_search_tail_test;
 pub mod session_search_tokenized_test;
+pub mod session_search_visible_text_test;
 pub mod session_token_count_test;
 pub mod settle_ledger_test;
 pub mod shared_session_memory_gate_test;
