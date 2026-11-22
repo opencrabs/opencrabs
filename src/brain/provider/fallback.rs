@@ -3,11 +3,17 @@
 //! Wraps a primary provider with an ordered list of fallbacks.
 //! When a provider returns a rate-limit (or other retryable) error, the
 //! next provider in the chain is tried. After a hard failure the chosen
-//! fallback becomes **sticky** — subsequent calls skip the dead primary
-//! entirely until the process exits, so a single 500 doesn't cost 60s of
-//! retries on every following turn. A 429 that declares a wait does not
-//! make the fallback sticky: the primary is parked until the window lapses
-//! and re-enters on its own (see `cooldown.rs`).
+//! fallback becomes **sticky**: subsequent calls skip the dead primary, so
+//! a single 500 doesn't cost 60s of retries on every following turn. A 429
+//! that declares a wait does not make the fallback sticky: the primary is
+//! parked until the window lapses and re-enters on its own (see
+//! `cooldown.rs`).
+//!
+//! Stickiness is not permanent. A hard failure (DNS, connect, 502) declares
+//! no window, so the primary would never earn a cooldown record and would be
+//! skipped for the life of the process; instead the chain re-probes it once
+//! every [`PRIMARY_REPROBE_TTL`], and a successful probe moves `active` back
+//! (#3081).
 
 use super::cooldown::CooldownRegistry;
 use super::error::{ProviderError, Result};
@@ -17,7 +23,16 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a sticky chain skips the primary before probing it again.
+///
+/// Only a 429 that declares a wait ever created a cooldown record, so a DNS
+/// failure, a connect timeout or a 502 left the primary skipped until the
+/// process exited while the tool loop told the user it would be "tried again
+/// next turn" (#3081). The probe costs one request per window, and
+/// `settle_success` already moves `active` back when it answers.
+pub const PRIMARY_REPROBE_TTL: Duration = Duration::from_secs(60);
 
 /// Description of a swap that just occurred — consumed once by the
 /// caller (typically the agent service) so it can surface a UI alert.
@@ -33,7 +48,8 @@ pub struct SwapEvent {
 /// A provider that tries a chain of providers in order on failure.
 ///
 /// `active` indexes into the chain: 0 = primary, 1..=fallbacks.len() = the
-/// (n-1)-th fallback. After a hard failure `active` advances and stays there,
+/// (n-1)-th fallback. After a hard failure `active` advances and stays there
+/// until the primary is probed again ([`PRIMARY_REPROBE_TTL`]) or answers,
 /// and a success on an earlier entry moves it back. An entry that answered
 /// while the primary was parked by a declared 429 wait does not move `active`.
 ///
@@ -49,6 +65,14 @@ pub struct FallbackProvider {
     served: AtomicUsize,
     pending_swap: Mutex<Option<SwapEvent>>,
     cooldowns: CooldownRegistry,
+    /// When the primary was last actually attempted. `None` means "not since
+    /// this chain was built", which counts as due: a chain that has never
+    /// tried its primary should try it.
+    primary_probe: Mutex<Option<Instant>>,
+    /// Window between primary re-probes. Held as a field rather than read from
+    /// [`PRIMARY_REPROBE_TTL`] directly so a test can shrink it instead of
+    /// waiting a minute.
+    reprobe_ttl: Duration,
 }
 
 impl FallbackProvider {
@@ -60,7 +84,33 @@ impl FallbackProvider {
             served: AtomicUsize::new(0),
             pending_swap: Mutex::new(None),
             cooldowns: CooldownRegistry::default(),
+            primary_probe: Mutex::new(None),
+            reprobe_ttl: PRIMARY_REPROBE_TTL,
         }
+    }
+
+    /// The same chain with a different re-probe window, for tests that would
+    /// otherwise have to sleep for [`PRIMARY_REPROBE_TTL`].
+    #[cfg(test)]
+    pub(crate) fn with_reprobe_ttl(mut self, ttl: Duration) -> Self {
+        self.reprobe_ttl = ttl;
+        self
+    }
+
+    /// Note that the primary was just attempted, so the next probe is one
+    /// window away. Called for index 0 only.
+    fn note_primary_attempt(&self, idx: usize) {
+        if idx == 0 {
+            let mut slot = self.primary_probe.lock().unwrap_or_else(|p| p.into_inner());
+            *slot = Some(Instant::now());
+        }
+    }
+
+    /// True when a sticky chain should try the primary again: never attempted,
+    /// or last attempted at least `reprobe_ttl` ago.
+    fn primary_reprobe_due(&self) -> bool {
+        let slot = self.primary_probe.lock().unwrap_or_else(|p| p.into_inner());
+        slot.is_none_or(|last| last.elapsed() >= self.reprobe_ttl)
     }
 
     /// The chain entry at `idx`: 0 = primary, n = `fallbacks[n - 1]`.
@@ -74,12 +124,18 @@ impl FallbackProvider {
 
     /// Chain indexes to try, in order. The sticky entry and everything after
     /// it are eligible, plus any earlier entry that has a cooldown record, so
-    /// a lapsed primary is tried again. Cooling entries move to the back: they
-    /// are used only once everything else has failed.
+    /// a lapsed primary is tried again, plus the primary once its re-probe
+    /// window has lapsed, so a hard failure is not a life sentence (#3081).
+    /// Cooling entries move to the back: they are used only once everything
+    /// else has failed.
     fn candidate_order(&self, start_idx: usize) -> Vec<usize> {
         let total = 1 + self.fallbacks.len();
-        let eligible = (0..total)
-            .filter(|&i| i >= start_idx || self.cooldowns.has_record(self.entry_at(i).name()));
+        let probe_primary = self.primary_reprobe_due();
+        let eligible = (0..total).filter(|&i| {
+            i >= start_idx
+                || self.cooldowns.has_record(self.entry_at(i).name())
+                || (i == 0 && probe_primary)
+        });
         let (cool, warm): (Vec<usize>, Vec<usize>) =
             eligible.partition(|&i| self.cooldowns.is_cooling(self.entry_at(i).name()));
         warm.into_iter().chain(cool).collect()
@@ -140,7 +196,9 @@ impl FallbackProvider {
     /// declared wait is not promoted: the primary re-enters on its own when
     /// the window lapses. A hard failure keeps the original behaviour, sticky
     /// on the entry that answered. Answering from an earlier entry always
-    /// moves `active` back, which is how a recovered primary is picked up.
+    /// moves `active` back, which is how a recovered primary is picked up,
+    /// whether it recovered because its cooldown lapsed or because a re-probe
+    /// reached it (#3081).
     fn settle_success(
         &self,
         idx: usize,
@@ -152,7 +210,14 @@ impl FallbackProvider {
     ) {
         self.served.store(idx, Ordering::Release);
         if idx < start_idx || (idx != start_idx && hard_failure) {
-            self.promote(idx, &Self::reason_for(last_err), requested, served_model);
+            let reason = if idx == 0 && last_err.is_none() {
+                // Nothing failed this call: the re-probe window lapsed and the
+                // primary answered it (#3081).
+                "primary re-probe".to_string()
+            } else {
+                Self::reason_for(last_err)
+            };
+            self.promote(idx, &reason, requested, served_model);
         }
     }
 
@@ -282,6 +347,7 @@ impl Provider for FallbackProvider {
 
         for idx in self.candidate_order(start_idx) {
             let entry = self.entry_at(idx);
+            self.note_primary_attempt(idx);
             // Always remap for the sticky entry: after a restart the sticky
             // index resets to 0 but the request may still carry a model from a
             // previously-active provider (#1374: a swap never invents a model).
@@ -329,6 +395,7 @@ impl Provider for FallbackProvider {
 
         for idx in self.candidate_order(start_idx) {
             let entry = self.entry_at(idx);
+            self.note_primary_attempt(idx);
             let req = if idx == start_idx {
                 Self::remap_request_for_fallback(entry, &request)
             } else {

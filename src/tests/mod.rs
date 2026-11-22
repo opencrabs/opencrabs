@@ -731,6 +731,7 @@ pub mod failure_window_test;
 pub mod fallback_chain_hot_reload_test;
 pub mod fallback_cli_tool_ownership_test;
 pub mod fallback_provenance_test;
+pub mod fallback_reprobe_test;
 pub mod fallback_streak_test;
 pub mod fallback_swap_model_report_test;
 pub mod fallback_vision_test;
