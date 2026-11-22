@@ -2272,6 +2272,58 @@ pub(crate) async fn handle_message(
                 // FIFO for the drainer; order is preserved across flush.
                 let rl_jid = reply_jid.to_string();
                 let rl_owner = wa_cfg.is_owner(rl_jid.split('@').next().unwrap_or(&rl_jid));
+
+                // #2927: a reply that carries a markdown table goes out as one
+                // rich message, so the reader gets a grid instead of a line of
+                // pipe characters. Whether WhatsApp draws this for a
+                // third-party account is unproven, so only a table takes the
+                // path, a refused or failed send falls through to the plain
+                // chunks below, and the log line names what went out.
+                let rich_text = if footer.is_empty() {
+                    tagged.clone()
+                } else {
+                    format!("{tagged}\n\n{footer}")
+                };
+                let mut rich_sent = false;
+                if let Some(rich) = super::rich_response::build(&rich_text) {
+                    let carried = super::rich_response::summary(&rich_text);
+                    // Same gate as a plain chunk: a capped chat queues the
+                    // reply in its plain form rather than jumping the limiter.
+                    match wa_state
+                        .rate_limiter
+                        .gate(&wa_cfg.rate_limit, &rl_jid, &rich_text, rl_owner)
+                        .await
+                    {
+                        super::rate_limit::GateOutcome::Queued { .. } => {}
+                        super::rate_limit::GateOutcome::SendNow => {
+                            match send_resilient(&client, reply_jid.clone(), rich).await {
+                                Some(message_id) => {
+                                    tracing::info!(
+                                        target: "whatsapp",
+                                        "rich reply sent ({carried}) as one message"
+                                    );
+                                    wa_state
+                                        .record_outbound(
+                                            session_id,
+                                            super::outbox::OutboxEntry::new(message_id, &rich_text),
+                                        )
+                                        .await;
+                                    rich_sent = true;
+                                }
+                                None => tracing::warn!(
+                                    target: "whatsapp",
+                                    "rich reply send failed ({carried}); sending plain text"
+                                ),
+                            }
+                        }
+                    }
+                }
+
+                // The rich message carried the whole reply, so the plain
+                // chunks have nothing left to send.
+                if rich_sent {
+                    chunks.clear();
+                }
                 let mut rl_queued = 0usize;
                 for chunk in &chunks {
                     match wa_state

@@ -39,6 +39,7 @@ pub(crate) mod rate_limit;
 pub(crate) mod reaction;
 pub(crate) mod recent;
 pub(crate) mod resume;
+pub(crate) mod rich_response;
 mod sessions;
 mod state;
 pub(crate) mod store;
