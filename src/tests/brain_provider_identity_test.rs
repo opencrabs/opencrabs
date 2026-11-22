@@ -11,6 +11,9 @@ const ZAI: &str = "https://api.z.ai/api/coding/paas/v4";
 const MODELSCOPE: &str = "https://api-inference.modelscope.ai/v1";
 const KIMI: &str = "https://api.kimi.com/coding/v1";
 const DEEPSEEK: &str = "https://api.deepseek.com";
+/// The endpoint we own. It is the one host whose gate depends on the answer
+/// rather than merely preferring it (#3138).
+const OPENCRABS: &str = "https://inference.opencrabs.com/v1";
 
 fn get<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
     h.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
@@ -25,6 +28,52 @@ fn each_gateway_resolves_from_its_host() {
     assert_eq!(Vendor::from_base_url(MODELSCOPE), Some(Vendor::ModelScope));
     assert_eq!(Vendor::from_base_url(KIMI), Some(Vendor::Kimi));
     assert_eq!(Vendor::from_base_url(DEEPSEEK), Some(Vendor::DeepSeek));
+    assert_eq!(Vendor::from_base_url(OPENCRABS), Some(Vendor::OpenCrabs));
+}
+
+/// Our own host is matched by parsed host, never by substring: a URL that
+/// merely carries the name, or a lookalike domain, must not resolve to it.
+/// The proxy trusts this answer to decide who is calling (#3138).
+#[test]
+fn our_endpoint_is_matched_by_host_and_never_by_substring() {
+    for url in [
+        "https://inference.opencrabs.com",
+        "https://inference.opencrabs.com/",
+        "https://inference.opencrabs.com:443/v1",
+        "inference.opencrabs.com/v1",
+        "  https://inference.opencrabs.com/v1  ",
+    ] {
+        assert_eq!(
+            Vendor::from_base_url(url),
+            Some(Vendor::OpenCrabs),
+            "should resolve: {url}"
+        );
+    }
+    for url in [
+        "https://inference.opencrabs.com.attacker.example/v1",
+        "https://notinference.opencrabs.com/v1",
+        "https://evil.example/?x=inference.opencrabs.com",
+        "https://proxy.example/inference.opencrabs.com",
+        "https://inference.opencrabs.org/v1",
+    ] {
+        assert_eq!(Vendor::from_base_url(url), None, "must not resolve: {url}");
+    }
+}
+
+/// The whole point of #3138: before this, a request to our own endpoint went
+/// out with no `User-Agent` at all, so the proxy could not tell an OpenCrabs
+/// install from any other HTTP client.
+#[test]
+fn our_endpoint_receives_the_opencrabs_user_agent() {
+    let h = headers_for(OPENCRABS, Some(Uuid::new_v4()));
+    assert_eq!(
+        get(&h, "User-Agent"),
+        Some(user_agent().as_str()),
+        "our own endpoint saw no identity before #3138"
+    );
+    // Nothing else is added: the proxy asks for the User-Agent and no more,
+    // and a header it does not expect is a fingerprint difference.
+    assert_eq!(h.len(), 1, "unexpected extra headers: {h:?}");
 }
 
 /// The documented ModelScope endpoint is `.cn`; this deployment is configured
@@ -102,7 +151,7 @@ fn a_deepseek_model_on_another_host_gets_no_deepseek_identity() {
 #[test]
 fn every_identified_gateway_gets_a_user_agent() {
     assert!(user_agent().starts_with("OpenCrabs/"));
-    for url in [ZEN, ZAI, MODELSCOPE, KIMI, DEEPSEEK] {
+    for url in [ZEN, ZAI, MODELSCOPE, KIMI, DEEPSEEK, OPENCRABS] {
         assert_eq!(
             get(&headers_for(url, Some(Uuid::new_v4())), "User-Agent"),
             Some(user_agent().as_str()),
@@ -184,7 +233,7 @@ fn a_sessionless_call_still_sends_a_stable_well_formed_id() {
 /// silently ship a request without the identity the gateway requires.
 #[test]
 fn every_emitted_header_is_valid_on_the_wire() {
-    for url in [ZEN, ZAI, MODELSCOPE, KIMI, DEEPSEEK] {
+    for url in [ZEN, ZAI, MODELSCOPE, KIMI, DEEPSEEK, OPENCRABS] {
         for (k, v) in headers_for(url, Some(Uuid::new_v4())) {
             assert!(
                 k.parse::<reqwest::header::HeaderName>().is_ok(),

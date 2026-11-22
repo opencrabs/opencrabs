@@ -53,6 +53,9 @@ pub async fn transcribe_audio(
     let response = client
         .post(&transcribe_url)
         .header("Authorization", format!("Bearer {}", api_key))
+        // The proxy tells an OpenCrabs caller from any other client by this
+        // header (#3138); transcription is another way in.
+        .header("User-Agent", crate::brain::provider::identity::user_agent())
         .multipart(form)
         .send()
         .await
@@ -130,6 +133,8 @@ pub async fn transcribe_audio_chat(
     let response = Client::new()
         .post(&chat_url)
         .header("Authorization", format!("Bearer {}", api_key))
+        // Same identity on the chat-shaped transcription route (#3138).
+        .header("User-Agent", crate::brain::provider::identity::user_agent())
         .json(&body)
         .send()
         .await

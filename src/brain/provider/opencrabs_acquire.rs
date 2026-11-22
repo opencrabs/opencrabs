@@ -40,6 +40,9 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
 
     let client = reqwest::Client::builder()
         .timeout(TIMEOUT)
+        // The proxy recognises an install by this header (#3138). Without it
+        // the handshake reaches the endpoint as an anonymous HTTP client.
+        .user_agent(crate::brain::provider::identity::user_agent())
         .build()
         .map_err(|e| {
             tracing::error!("Could not build the HTTP client for the built-in provider: {e}");

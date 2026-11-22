@@ -46,6 +46,9 @@ pub async fn synthesize_speech(
         .post(&speech_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
+        // The proxy tells an OpenCrabs caller from any other client by this
+        // header (#3138); the voice route is another way in.
+        .header("User-Agent", crate::brain::provider::identity::user_agent())
         .json(&body)
         .send()
         .await

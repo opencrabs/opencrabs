@@ -478,6 +478,10 @@ impl GenerateImageTool {
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            // Same identity the chat path sends (#3138): image generation is
+            // another route into the built-in endpoint, and it builds its own
+            // headers, so it never inherited the chat client's.
+            .user_agent(crate::brain::provider::identity::user_agent())
             .build()
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
 

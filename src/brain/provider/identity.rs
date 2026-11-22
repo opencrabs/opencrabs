@@ -51,6 +51,10 @@ pub enum Vendor {
     Kimi,
     /// #1334.
     DeepSeek,
+    /// Our own inference endpoint (#3138). It asks for nothing beyond the
+    /// User-Agent, and it is the one host whose gate depends on that answer:
+    /// the proxy tells an OpenCrabs install from any other client by it.
+    OpenCrabs,
 }
 
 /// The host of `base_url`, lowercased, with any scheme, userinfo, port and
@@ -104,6 +108,12 @@ impl Vendor {
         if is_host(&host, "deepseek.com") {
             return Some(Self::DeepSeek);
         }
+        // The endpoint we own. Every other entry here is a courtesy to a
+        // gateway that asked; this one is the only host where the header is
+        // also what the server uses to recognise us (#3138).
+        if is_host(&host, "inference.opencrabs.com") {
+            return Some(Self::OpenCrabs);
+        }
         None
     }
 }
@@ -153,9 +163,10 @@ pub fn headers_for(base_url: &str, session: Option<Uuid>) -> Vec<(String, String
         // the right default for a surface whose logs and errors are read in
         // English; there is no locale setting to derive it from.
         Vendor::Zai => headers.push(("Accept-Language".to_string(), "en-US,en".to_string())),
-        // These three document only Authorization and Content-Type. The
-        // User-Agent above is the whole contract.
-        Vendor::ModelScope | Vendor::Kimi | Vendor::DeepSeek => {}
+        // These document only Authorization and Content-Type. The
+        // User-Agent above is the whole contract, and for our own endpoint it
+        // is the only one the proxy reads (#3138).
+        Vendor::ModelScope | Vendor::Kimi | Vendor::DeepSeek | Vendor::OpenCrabs => {}
     }
 
     headers
