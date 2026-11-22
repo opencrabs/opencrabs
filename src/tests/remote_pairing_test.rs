@@ -2,7 +2,8 @@
 //! hashed-at-rest tokens, revocation, permissions, sweep, corruption.
 
 use crate::remote::pairing::{
-    CODE_ALPHABET, CODE_LEN, MAX_FAIL_STREAK, PairingStore, TOKEN_PREFIX, VerifyError, sha_b64,
+    CODE_ALPHABET, CODE_LEN, GUEST_TTL_SECS, MAX_FAIL_STREAK, PairingStore, TOKEN_PREFIX,
+    TOKEN_TTL_SECS, VerifyError, parse_ttl, sha_b64,
 };
 use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
 #[cfg(unix)]
@@ -258,5 +259,99 @@ fn corrupt_store_is_an_error_not_a_wipe() {
             .unwrap()
             .contains("not json"),
         "corrupt file must survive"
+    );
+}
+
+#[test]
+fn guest_ttl_grants_an_hour_and_then_refuses() {
+    let (_d, st) = store();
+    let code = st
+        .mint_code_with_ttl(&full_scopes(), GUEST_TTL_SECS)
+        .expect("mint guest code");
+    let (token, session) = st.verify_code(&code, "guest").expect("verify");
+    assert_eq!(
+        session.expires_at - session.created_at,
+        GUEST_TTL_SECS,
+        "a guest grant must live one hour, not the 30-day session"
+    );
+    assert!(st.verify_token(&token).is_some(), "grant is live at issue");
+
+    // Same wall clock, expired deadline: the per-request check has to refuse
+    // it, or "time-boxed" would only be a promise made at issue time.
+    let mut raw = read_raw(&st);
+    raw["sessions"][0]["expires_at"] = serde_json::json!(session.created_at);
+    write_raw(&st, &raw);
+    assert!(
+        st.verify_token(&token).is_none(),
+        "expired guest grant must be refused on the next request"
+    );
+}
+
+#[test]
+fn default_code_still_grants_the_full_session() {
+    let (_d, st) = store();
+    let code = st.mint_code(&full_scopes()).expect("mint");
+    let (_t, session) = st.verify_code(&code, "owner").expect("verify");
+    assert_eq!(session.expires_at - session.created_at, TOKEN_TTL_SECS);
+}
+
+#[test]
+fn ttl_is_capped_and_never_zero() {
+    let (_d, st) = store();
+    assert!(
+        st.mint_code_with_ttl(&full_scopes(), 0).is_err(),
+        "zero would mint a code that redeems into a dead token"
+    );
+    assert!(
+        st.mint_code_with_ttl(&full_scopes(), TOKEN_TTL_SECS + 1)
+            .is_err(),
+        "a grant must never outlive the session maximum"
+    );
+    assert!(st.mint_code_with_ttl(&full_scopes(), TOKEN_TTL_SECS).is_ok());
+    assert!(st.mint_code_with_ttl(&full_scopes(), 1).is_ok());
+}
+
+#[test]
+fn code_written_before_the_ttl_field_keeps_its_full_session() {
+    let (_d, st) = store();
+    let code = st.mint_code(&full_scopes()).unwrap();
+    let mut raw = read_raw(&st);
+    assert!(
+        raw["codes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_ttl_secs")
+            .is_some(),
+        "the minted code must carry the field this test removes"
+    );
+    write_raw(&st, &raw);
+    let (_t, session) = st.verify_code(&code, "legacy").expect("verify");
+    assert_eq!(
+        session.expires_at - session.created_at,
+        TOKEN_TTL_SECS,
+        "a pre-#2873 code on disk must keep the 30-day session it was minted under"
+    );
+}
+
+#[test]
+fn parse_ttl_reads_units_and_refuses_nonsense() {
+    assert_eq!(parse_ttl("900").unwrap(), 900);
+    assert_eq!(parse_ttl("900s").unwrap(), 900);
+    assert_eq!(parse_ttl("30m").unwrap(), 1_800);
+    assert_eq!(parse_ttl("1h").unwrap(), 3_600);
+    assert_eq!(parse_ttl("7d").unwrap(), 604_800);
+    assert_eq!(parse_ttl(" 1H ").unwrap(), 3_600, "trim and case");
+    assert_eq!(parse_ttl("30d").unwrap(), TOKEN_TTL_SECS);
+
+    for bad in ["", "0", "0h", "1w", "abc", "h", "-5", "1.5h"] {
+        assert!(parse_ttl(bad).is_err(), "{bad:?} must be refused");
+    }
+    assert!(
+        parse_ttl("31d").is_err(),
+        "above the 30-day session maximum"
+    );
+    assert!(
+        parse_ttl("99999999999999999999d").is_err(),
+        "overflow must be an error, not a wrapped value"
     );
 }

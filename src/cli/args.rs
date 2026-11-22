@@ -176,6 +176,12 @@ pub enum Commands {
         #[arg(long, default_value = "read,send")]
         scopes: String,
 
+        /// Lifetime of the session the code redeems into: `900`, `30m`, `1h`,
+        /// `7d`. Defaults to 30 days; pass `1h` to let a guest in for one
+        /// sitting instead of handing them a month.
+        #[arg(long, value_name = "DUR")]
+        ttl: Option<String>,
+
         /// Label recorded with the paired session (shown in --list-sessions)
         #[arg(long, default_value = "connect-cli")]
         label: String,
@@ -836,6 +842,7 @@ pub async fn run() -> Result<()> {
         Some(Commands::Connect {
             port,
             scopes,
+            ttl,
             label,
             status,
             stop,
@@ -845,6 +852,7 @@ pub async fn run() -> Result<()> {
             &config,
             port,
             &scopes,
+            ttl.as_deref(),
             &label,
             status,
             stop,

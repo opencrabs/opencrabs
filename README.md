@@ -2193,6 +2193,7 @@ Reach this machine's agent from anywhere without an open gate. Three pieces, bui
 
 ```bash
 opencrabs connect                     # tunnel + one-time pairing code
+opencrabs connect --ttl 1h            # guest link: the token dies after an hour
 opencrabs connect --status            # the current tunnel
 opencrabs connect --stop
 opencrabs connect --list-sessions     # paired clients (no secrets)
@@ -2200,6 +2201,8 @@ opencrabs connect --revoke <id|label>
 ```
 
 `connect` manages a pinned `cloudflared` quick tunnel (an existing binary on PATH wins; otherwise the pinned release is downloaded into `state/remote/bin/` and version-smoke-checked) in front of the A2A gateway, prints the public HTTPS URL plus a single-use 8-char pairing code (5-minute TTL), and refuses to run against a keyless gateway.
+
+A code redeems into a session token that lives 30 days by default. `--ttl` shortens that grant (`900`, `30m`, `1h`, `7d`, capped at 30 days) and the lifetime is stored with the code, so the client cannot ask for more than the operator minted. `--ttl 1h` is the guest case: someone can be let in for one sitting without holding a month of access, and `--revoke` still kills the token immediately.
 
 ### Pairing & scopes
 

@@ -10,6 +10,12 @@
 //! Secrets at rest: codes and tokens are stored only as SHA-256 (base64url).
 //! Plaintext exists exactly once, at mint/issue time, in the returning
 //! process. Verification hashes the presented secret and compares digests.
+//!
+//! A code also carries the lifetime of the session it redeems into (#2873):
+//! `opencrabs connect` mints the 30-day default, `--ttl` shortens it so a
+//! guest can be let in for an hour without holding a month of access. The
+//! lifetime travels on the stored code, never on the wire, so the client
+//! cannot ask for more than the operator minted.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -34,6 +40,9 @@ pub const CODE_LEN: usize = 8;
 pub const CODE_TTL_SECS: u64 = 300;
 /// Session token lifetime, seconds (30 days).
 pub const TOKEN_TTL_SECS: u64 = 30 * 86_400;
+/// Guest grant lifetime, seconds (1 hour). A time-boxed link lets someone
+/// in for one sitting instead of handing out a month of access (#2873).
+pub const GUEST_TTL_SECS: u64 = 3_600;
 /// Prefix on every issued token: greppable, recognizable, revocable.
 pub const TOKEN_PREFIX: &str = "ocpair_";
 /// Consecutive failed verifies before the whole store locks out pairing.
@@ -70,6 +79,39 @@ fn sanitize_label(label: &str) -> String {
     }
 }
 
+/// Parse a human session lifetime: `900` (seconds), `30m`, `1h`, `7d`.
+/// Case-insensitive, one unit only, capped at [`TOKEN_TTL_SECS`] because the
+/// longest session the store can issue is the 30-day default (#2873).
+pub fn parse_ttl(raw: &str) -> Result<u64> {
+    let s = raw.trim().to_ascii_lowercase();
+    let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+    let unit: String = s.chars().skip_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        anyhow::bail!("TTL {raw:?} needs a number first, e.g. 1h, 30m, 7d");
+    }
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| anyhow::anyhow!("TTL {raw:?} is out of range"))?;
+    let secs = match unit.as_str() {
+        "" | "s" => n,
+        "m" => n.checked_mul(60),
+        "h" => n.checked_mul(3_600),
+        "d" => n.checked_mul(86_400),
+        other => anyhow::bail!("unknown TTL unit {other:?} (expected s, m, h or d)"),
+    }
+    .ok_or_else(|| anyhow::anyhow!("TTL {raw:?} is out of range"))?;
+    if secs == 0 {
+        anyhow::bail!("TTL {raw:?} must be at least 1 second");
+    }
+    if secs > TOKEN_TTL_SECS {
+        anyhow::bail!(
+            "TTL {raw:?} exceeds the {}-day session maximum",
+            TOKEN_TTL_SECS / 86_400
+        );
+    }
+    Ok(secs)
+}
+
 /// A minted, not-yet-redeemed pairing code. Only the hash is stored.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PendingCode {
@@ -77,6 +119,15 @@ pub struct PendingCode {
     pub scopes: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
+    /// Lifetime of the session this code mints on redemption, seconds.
+    /// A code written before #2873 has no such field on disk; those keep the
+    /// full 30-day session they were minted under.
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_secs: u64,
+}
+
+fn default_session_ttl() -> u64 {
+    TOKEN_TTL_SECS
 }
 
 /// An issued session. The token itself only ever existed at issue time.
@@ -195,9 +246,23 @@ impl PairingStore {
         &self.path
     }
 
-    /// Mint a single-use code carrying `scopes` (validated, deduped).
+    /// Mint a single-use code carrying `scopes` (validated, deduped) that
+    /// redeems into a full-lifetime session.
     /// Returns the plaintext code — the only moment it exists.
     pub fn mint_code(&self, scopes: &[String]) -> Result<String> {
+        self.mint_code_with_ttl(scopes, TOKEN_TTL_SECS)
+    }
+
+    /// Mint a single-use code whose redeemed session lives `session_ttl_secs`
+    /// instead of the 30-day default (#2873). Returns the plaintext code.
+    ///
+    /// The lifetime is a property of the grant, so it is stored on the code
+    /// and applied when the code is redeemed: the client cannot ask for a
+    /// longer one, and the server has nothing to recompute. Capped at
+    /// [`TOKEN_TTL_SECS`] because a grant must never outlive the session
+    /// shape it is issued into, and zero is refused rather than minting a
+    /// code that redeems into an already-dead token.
+    pub fn mint_code_with_ttl(&self, scopes: &[String], session_ttl_secs: u64) -> Result<String> {
         if scopes.is_empty() {
             anyhow::bail!("a pairing code must carry at least one scope");
         }
@@ -205,6 +270,14 @@ impl PairingStore {
             if !is_known_scope(s) {
                 anyhow::bail!("unknown scope {s:?}");
             }
+        }
+        if session_ttl_secs == 0 {
+            anyhow::bail!("a session TTL must be at least 1 second");
+        }
+        if session_ttl_secs > TOKEN_TTL_SECS {
+            anyhow::bail!(
+                "session TTL {session_ttl_secs}s exceeds the {TOKEN_TTL_SECS}s session maximum"
+            );
         }
         let mut dedup = scopes.to_vec();
         dedup.sort();
@@ -223,6 +296,7 @@ impl PairingStore {
                 scopes: dedup,
                 created_at: now,
                 expires_at: now + CODE_TTL_SECS,
+                session_ttl_secs,
             });
             Ok(())
         })?;
@@ -265,6 +339,10 @@ impl PairingStore {
                 };
                 let pending = st.codes.remove(idx);
                 st.fail_streak = 0;
+                // Clamped at issue time too: the store is owner-writable, and
+                // a hand-edited TTL must not mint a session longer than the
+                // 30-day shape (#2873).
+                let grant_ttl = pending.session_ttl_secs.clamp(1, TOKEN_TTL_SECS);
 
                 let token = format!(
                     "{TOKEN_PREFIX}{}",
@@ -281,7 +359,7 @@ impl PairingStore {
                     label,
                     scopes: pending.scopes,
                     created_at: now,
-                    expires_at: now + TOKEN_TTL_SECS,
+                    expires_at: now + grant_ttl,
                     revoked_at: None,
                 };
                 st.sessions.push(session.clone());

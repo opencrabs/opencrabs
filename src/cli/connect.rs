@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 
 use crate::config::Config;
-use crate::remote::pairing::PairingStore;
+use crate::remote::pairing::{GUEST_TTL_SECS, PairingStore, TOKEN_TTL_SECS, parse_ttl};
 use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
 use crate::remote::tunnel::{self, TunnelSpec};
 
@@ -40,6 +40,7 @@ pub fn cmd_connect(
     config: &Config,
     port: Option<u16>,
     scopes: &str,
+    ttl: Option<&str>,
     label: &str,
     status: bool,
     stop: bool,
@@ -132,6 +133,13 @@ pub fn cmd_connect(
     }
     let port = port.unwrap_or(config.a2a.port);
     let scope_list = parse_scopes(scopes)?;
+    // Session lifetime for whatever this code redeems into. Absent means the
+    // 30-day default the CLI has always issued; `--ttl 1h` is the guest case
+    // (#2873). Resolved before the tunnel so a bad duration fails fast.
+    let session_ttl = match ttl {
+        Some(raw) => parse_ttl(raw)?,
+        None => TOKEN_TTL_SECS,
+    };
 
     // A running tunnel for THIS port is reused — `connect` means "make me
     // reachable and give me a code", not "start a second tunnel". A tunnel
@@ -150,7 +158,9 @@ pub fn cmd_connect(
 
     // Mint BEFORE the tunnel so the code's 5-minute TTL covers the
     // (up to 60 s) URL wait, not just the moment it's printed.
-    let code = store.mint_code(&scope_list).context("mint pairing code")?;
+    let code = store
+        .mint_code_with_ttl(&scope_list, session_ttl)
+        .context("mint pairing code")?;
 
     let state = match existing {
         Some(st) => {
@@ -178,6 +188,17 @@ pub fn cmd_connect(
     println!();
     println!("Pairing code (single use, 5 min):  {code}");
     println!("Scopes granted: {}", scope_list.join(" "));
+    match ttl {
+        Some(_) => println!(
+            "Token lifetime: {} (revocable with --revoke)",
+            human_ttl(session_ttl)
+        ),
+        None => println!(
+            "Token lifetime: {} (revocable with --revoke; --ttl {} for a guest)",
+            human_ttl(session_ttl),
+            human_ttl(GUEST_TTL_SECS)
+        ),
+    }
     println!();
     println!("From the remote machine, pair with:");
     println!(
@@ -203,6 +224,17 @@ fn truncate(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
     }
+}
+
+/// Print form for a resolved session lifetime: whole days, hours or minutes
+/// when it divides evenly, seconds otherwise.
+fn human_ttl(secs: u64) -> String {
+    for (unit, size) in [("d", 86_400u64), ("h", 3_600), ("m", 60)] {
+        if secs % size == 0 {
+            return format!("{}{unit}", secs / size);
+        }
+    }
+    format!("{secs}s")
 }
 
 #[cfg(test)]
@@ -233,5 +265,14 @@ mod tests {
     fn truncate_marks_cut_strings() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn human_ttl_prints_whole_units() {
+        assert_eq!(human_ttl(TOKEN_TTL_SECS), "30d");
+        assert_eq!(human_ttl(GUEST_TTL_SECS), "1h");
+        assert_eq!(human_ttl(1_800), "30m");
+        assert_eq!(human_ttl(900), "15m");
+        assert_eq!(human_ttl(45), "45s");
     }
 }
