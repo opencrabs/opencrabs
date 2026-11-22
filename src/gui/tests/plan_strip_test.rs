@@ -510,3 +510,53 @@ fn every_plan_card_is_as_wide_as_its_words() {
         "and no card cuts a title by character count any more"
     );
 }
+
+#[test]
+fn a_split_draws_the_plan_once_and_the_hint_still_rides_the_chat() {
+    // #3145: the chat leaf of a split draws its plan card and its offers in
+    // its own chrome (#2530), compact for the width the leaf has (#2624) and
+    // pinned so a waiting plan's taps cannot scroll away (#2755). The trailing
+    // rows added in #3139 are the unsplit window's copy. Building them in a
+    // split as well put two plan cards, and two offer cards, on the chat leaf
+    // of every split.
+    let src = include_str!("../dashboard_render.rs");
+    let body = src
+        .split("fn chat_trailing(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn session_row(").next())
+        .expect("chat trailing");
+    assert!(
+        body.contains("let split = self.window_is_split();"),
+        "the trailing rows ask whether the window is split"
+    );
+    // The hint is built before the gate, because no pane draws one.
+    let before_gate = body
+        .split("let split = self.window_is_split();")
+        .next()
+        .expect("the gate");
+    assert!(
+        before_gate.contains("hint_line(&hint, cx)"),
+        "the hint is built for every window, split or not"
+    );
+    assert_eq!(
+        body.matches("if !split").count(),
+        2,
+        "both the offers card and the plan card are gated on not being split"
+    );
+    let offers = body
+        .split("if !split")
+        .nth(1)
+        .expect("the first gate");
+    assert!(
+        offers.contains("options_strip("),
+        "the offers card stands down in a split"
+    );
+    let plan = body
+        .split("if !split")
+        .nth(2)
+        .expect("the second gate");
+    assert!(
+        plan.contains("editing_view("),
+        "the plan card stands down in a split"
+    );
+}

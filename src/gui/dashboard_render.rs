@@ -3775,13 +3775,25 @@ impl Dashboard {
 /// the plan the work belongs to. The queue strip and the detached-task row stay
 /// outside, because each is one line and each names something the window is
 /// doing right now rather than something the conversation said.
+///
+/// A split is the exception (#3145): the chat leaf is a pane there, and a pane
+/// already draws its plan card and its offers in its own chrome, compact for
+/// the width it has and pinned so the taps cannot scroll away. Only the hint
+/// is built here in that case, because no pane draws one.
 impl Dashboard {
     fn chat_trailing(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(hint) = self.task_hint() {
             rows.push(hint_line(&hint, cx).into_any_element());
         }
-        if let Some(sid) = self.chat_session {
+        // The offers and the plan card belong to the chrome in a split
+        // (#3145). The chat leaf draws both from its pane chrome there, the
+        // same compact strip every other leaf draws (#2624), pinned to the
+        // pane's bottom so a waiting plan's taps are never scrolled out of
+        // reach (#2755). Building them here as well put two of each on the
+        // chat leaf of every split. The hint has no pane copy, so it stays.
+        let split = self.window_is_split();
+        if !split && let Some(sid) = self.chat_session {
             let offers = agent_bridge::options_snapshot(sid);
             if !offers.is_empty() {
                 let buttons = self.option_rows(sid, offers, cx);
@@ -3798,15 +3810,17 @@ impl Dashboard {
         // In a split every pane carries its own plan, queue and composer
         // (#2530), so the window-level copies stand down: drawing both would
         // give the chat two composers.
-        let open = self.chat_session;
-        let actions = open.map(|session| self.plan_actions(session, cx));
-        self.plan.refresh();
-        let card = self
-            .plan
-            .editing_view(actions.as_ref(), window)
-            .or_else(|| self.plan.view(window));
-        if let Some(plan_view) = card {
-            rows.push(plan_view.into_any_element());
+        if !split {
+            let open = self.chat_session;
+            let actions = open.map(|session| self.plan_actions(session, cx));
+            self.plan.refresh();
+            let card = self
+                .plan
+                .editing_view(actions.as_ref(), window)
+                .or_else(|| self.plan.view(window));
+            if let Some(plan_view) = card {
+                rows.push(plan_view.into_any_element());
+            }
         }
         rows
     }
