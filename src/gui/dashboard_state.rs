@@ -600,6 +600,14 @@ pub(crate) struct Dashboard {
     /// The session whose switch is in flight. A second Enter while this is
     /// set is ignored, so one pick cannot write the same confirmation twice.
     pub(crate) models_switching: Option<Uuid>,
+    /// Whether the picker's next pick applies to every non-archived session
+    /// (#3035). All-sessions is an explicit act, so it starts off and every
+    /// opening of the picker leaves it off.
+    pub(crate) models_scope_all: bool,
+    /// A scope-all pick that has been counted and is waiting for its second
+    /// tap (#3035): the pair, and how many other sessions the write would
+    /// change. The prompt names that number before anything is written.
+    pub(crate) models_apply_confirm: Option<(String, usize)>,
     /// Shared request lifecycle and pending providers. Static rows are only a
     /// fallback; every configured provider gets a live discovery request.
     pub(crate) models_fetch: Option<std::sync::mpsc::Receiver<(u64, model_fetch::FetchOutcome)>>,

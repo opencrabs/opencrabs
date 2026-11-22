@@ -31,6 +31,10 @@ impl Dashboard {
     ) {
         let target = session.or_else(|| self.focused_pane());
         self.models_session = target;
+        // Every opening starts on this session (#3035). All-sessions is an
+        // explicit act each time, never a setting that survives the picker.
+        self.models_scope_all = false;
+        self.models_apply_confirm = None;
         // The catalogue is read once, here, so a frame never walks it. A pane
         // carries its own pair, so the picker marks that pair rather than the
         // window's when the command came from a split.
@@ -261,6 +265,23 @@ impl Dashboard {
         onboarding: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A scope-all pick waits here for its second tap (#3035). The keys are
+        // consumed before the list can move, so Enter cannot both confirm a
+        // bulk write and switch a row.
+        if !onboarding && let Some((pair, _)) = self.models_apply_confirm.clone() {
+            match ev.keystroke.key.as_str() {
+                "enter" | "y" => {
+                    self.models_apply_confirm = None;
+                    self.switch_model(format!("{pair} all"), cx);
+                }
+                "escape" | "n" => {
+                    self.models_apply_confirm = None;
+                    cx.notify();
+                }
+                _ => {}
+            }
+            return true;
+        }
         let visible = self.visible_model_rows();
         let last = visible.len().saturating_sub(1);
         let mut query_changed = false;
@@ -299,7 +320,7 @@ impl Dashboard {
                         self.select_onboard_pair(&pair);
                         return false;
                     }
-                    self.switch_model(pair, cx);
+                    self.pick_model(pair, cx);
                 }
                 return !onboarding;
             }
@@ -316,6 +337,13 @@ impl Dashboard {
                     self.models_query.clear();
                     self.models_index = 0;
                 }
+                return true;
+            }
+            // The scope control's keystroke (#3035). Tab is free in the
+            // standalone picker and the wizard keeps it for field walking.
+            "tab" if !onboarding => {
+                self.models_scope_all = !self.models_scope_all;
+                cx.notify();
                 return true;
             }
             "tab" | "escape" if onboarding => return false,
@@ -794,5 +822,62 @@ impl Dashboard {
         self.models_switching = Some(session);
         agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
         cx.notify();
+    }
+
+    /// One pick, routed by the picker's scope (#3035).
+    ///
+    /// This-session switches immediately, as it always has. All-sessions is a
+    /// bulk write across every non-archived session, so it is counted first
+    /// and applied only on a second tap: the same count-then-confirm the chat
+    /// channels have had since #2042, which the window never had.
+    pub(crate) fn pick_model(&mut self, pair: String, cx: &mut Context<Self>) {
+        if self.models_scope_all {
+            self.begin_scope_all(pair, cx);
+        } else {
+            self.switch_model(pair, cx);
+        }
+    }
+
+    /// Count what an all-sessions pick would change, off the UI thread.
+    ///
+    /// The answer comes back as `ModelScopeCounted`, and only then does the
+    /// window ask. A prompt that cannot say how many sessions it changes is a
+    /// prompt nobody can answer.
+    fn begin_scope_all(&mut self, pair: String, cx: &mut Context<Self>) {
+        let Some(session) = self.models_session.or_else(|| self.focused_pane()) else {
+            self.turn.live.notices.push(
+                "No conversation is open, so there is nothing to switch. Type /new first."
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        if self.models_switching.is_some() {
+            logging::debug("model switch already in flight");
+            return;
+        }
+        let Some(bridge) = agent_bridge::bridge() else {
+            self.push_session_notice(
+                session,
+                "The agent is still starting. Try again in a moment.".to_string(),
+                cx,
+            );
+            cx.notify();
+            return;
+        };
+        self.models_switching = Some(session);
+        agent_bridge::spawn_scope_count(bridge.service.clone(), session, pair, self.sink.clone());
+        cx.notify();
+    }
+
+    /// The confirmation line a scope-all pick shows before it writes (#3035).
+    /// Built from the same text the chat channels use, so the window and
+    /// Telegram cannot describe the same write differently.
+    pub(crate) fn models_scope_prompt(&self) -> Option<String> {
+        let (pair, count) = self.models_apply_confirm.as_ref()?;
+        let (provider, model) = pair.split_once('/').unwrap_or((pair.as_str(), ""));
+        Some(opencrabs::channels::commands::apply_all_prompt_text(
+            provider, model, *count,
+        ))
     }
 }

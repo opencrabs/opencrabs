@@ -1419,3 +1419,4 @@ pub mod agent_config_off_stack_2661_test;
 pub mod gui_layout_boot_test;
 
 pub mod tool_runtime_shape_2975_test;
+pub mod gui_models_scope_3035_test;

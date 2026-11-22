@@ -23,6 +23,15 @@ impl Dashboard {
             .as_ref()
             .map(|(provider, model)| format!("{provider} / {model}"))
             .unwrap_or_else(|| "Choose a model for this session".to_string());
+        // The scope is spelled out here as well as on the chip (#3035): the
+        // header is the one line that is always on screen, and a bulk write
+        // the reader cannot see is the defect this fixes.
+        let scope_all = self.models_scope_all;
+        let subtitle = if scope_all {
+            format!("{pair} · all sessions")
+        } else {
+            format!("{pair} · this session")
+        };
         let active_provider = self.models_provider.as_deref().unwrap_or_else(|| {
             live.as_ref()
                 .map(|(provider, _)| provider.as_str())
@@ -68,7 +77,7 @@ impl Dashboard {
                     this.models_provider = Some(id.clone());
                     this.models_index = 0;
                     if let Some(pair) = single.clone() {
-                        this.switch_model(pair, cx);
+                        this.pick_model(pair, cx);
                     }
                     cx.notify();
                 })));
@@ -146,15 +155,59 @@ impl Dashboard {
                     .bg(rgb(shown.bg))
                     .child(picker.body),
             );
-        let footer =
+        // A pending all-sessions pick owns the footer (#3035): the count and
+        // the second tap are the whole point, so the normal hint steps aside
+        // until the reader answers.
+        let footer = if let Some(prompt) = self.models_scope_prompt() {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(text(prompt, Size::Sm, shown.text))
+                .child(modal_shell::footer(
+                    "enter apply to all  esc cancel".to_string(),
+                ))
+        } else {
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(picker.footer)
                 .child(modal_shell::footer(
-                    "type filter or custom id  enter switch  esc close".to_string(),
-                ));
+                    "type filter or custom id  enter switch  tab scope  esc close".to_string(),
+                ))
+        };
+        // The scope control (#3035): two states, this session or all
+        // sessions, in the header slot the modal already reserves. Tab flips
+        // it as well, and the subtitle spells the state out either way.
+        let scope_chip = div()
+            .id("models-scope")
+            .flex()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(px(concentric_radius(6.0)))
+            .border_1()
+            .border_color(rgb(if scope_all { shown.accent } else { shown.track }))
+            .cursor_pointer()
+            .hover(|d| d.border_color(rgb(shown.accent)))
+            .child(text(
+                if scope_all {
+                    "scope: all sessions"
+                } else {
+                    "scope: this session"
+                },
+                Size::Xs,
+                if scope_all { shown.accent } else { shown.text_muted },
+            ))
+            .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.models_scope_all = !this.models_scope_all;
+                cx.notify();
+            }));
+
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.screen = Screen::Chat;
             this.refocus_screen();
@@ -164,8 +217,8 @@ impl Dashboard {
             modal_shell::ModalView {
                 id: "models-modal",
                 title: "Models".to_string(),
-                subtitle: pair,
-                actions: None,
+                subtitle,
+                actions: Some(scope_chip.into_any_element()),
                 header_close: true,
                 body: body.into_any_element(),
                 footer: Some(footer.into_any_element()),

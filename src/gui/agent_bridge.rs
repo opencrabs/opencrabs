@@ -139,6 +139,13 @@ pub enum TurnEvent {
     /// A model switch could not be attempted; carries the session that asked
     /// and the reason.
     ModelSwitchFailed { session: Uuid, error: String },
+    /// A scope-all pick has been counted and waits for its second tap
+    /// (#3035): the pair, and how many other sessions it would change.
+    ModelScopeCounted {
+        session: Uuid,
+        pair: String,
+        count: usize,
+    },
     /// A stopped turn's rows are gone: reload the conversation without the
     /// user bubble that was handed back to the composer (#2635).
     TurnReverted { session: Uuid },
@@ -1970,6 +1977,62 @@ pub fn spawn_switch_model(
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
             error: format!("switch thread: {e}"),
+        });
+    }
+}
+
+/// Count what a scope-all pick would change, so the window can ask before it
+/// writes (#3035).
+///
+/// Same worker shape as `spawn_switch_model`: the count is a database read,
+/// so it runs on its own thread with its own runtime and answers over the
+/// event sink. Nothing is written here; the switch itself still goes through
+/// `direct_model_switch`, which owns the bulk write and its receipt.
+pub fn spawn_scope_count(
+    service: Arc<AgentService>,
+    session_id: Uuid,
+    pair: String,
+    sink: EventSink,
+) {
+    let error_sink = sink.clone();
+    let spawned = std::thread::Builder::new()
+        .stack_size(4 * 1024 * 1024)
+        .name("gui-model-scope".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = sink.send(TurnEvent::ModelSwitchFailed {
+                        session: session_id,
+                        error: format!("scope count runtime: {e}"),
+                    });
+                    return;
+                }
+            };
+            let count = runtime.block_on(async {
+                let Some((provider, model)) = pair.split_once('/') else {
+                    return 0;
+                };
+                let sessions =
+                    opencrabs::services::SessionService::new(service.context().clone());
+                sessions
+                    .count_provider_model_all_sessions(provider, model)
+                    .await
+                    .unwrap_or(0)
+            });
+            let _ = sink.send(TurnEvent::ModelScopeCounted {
+                session: session_id,
+                pair,
+                count,
+            });
+        });
+    if let Err(e) = spawned {
+        let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
+            session: session_id,
+            error: format!("scope count thread: {e}"),
         });
     }
 }

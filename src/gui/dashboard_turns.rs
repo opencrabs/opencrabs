@@ -1314,6 +1314,26 @@ impl Dashboard {
                     self.push_session_notice(session, format!("model switch: {error}"), cx);
                     cx.notify();
                 }
+                agent_bridge::TurnEvent::ModelScopeCounted {
+                    session,
+                    pair,
+                    count,
+                } => {
+                    if self.models_switching.take() != Some(session) {
+                        logging::debug("stale model scope count ignored");
+                        continue;
+                    }
+                    // Nothing to confirm when no other session would change:
+                    // the pick is already this-session-only in effect, and a
+                    // prompt that says "0 other sessions" only adds a tap.
+                    if count == 0 {
+                        self.models_apply_confirm = None;
+                        self.switch_model(pair, cx);
+                        continue;
+                    }
+                    self.models_apply_confirm = Some((pair, count));
+                    cx.notify();
+                }
                 agent_bridge::TurnEvent::BrainReady(line) => {
                     logging::info(&format!("brain: {line}"));
                     self.turn.live.notices.push(format!("brain: {line}"));

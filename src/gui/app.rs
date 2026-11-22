@@ -626,6 +626,8 @@ pub(crate) fn run() {
                         models_provider: None,
                         models_session: None,
                         models_switching: None,
+                        models_scope_all: false,
+                        models_apply_confirm: None,
                         models_fetch: None,
                         models_fetch_lifecycle:
                             opencrabs::ui_core::model_selector::FetchLifecycle::default(),
