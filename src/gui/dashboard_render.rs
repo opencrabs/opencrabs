@@ -583,6 +583,12 @@ impl Render for Dashboard {
                     .into_iter()
                     .collect();
                 self.copy_drag.set_roots(click_roots);
+                // The rows that follow the last turn ride INSIDE the
+                // conversation now (#3139), so they are built before the
+                // view that draws them: a plan waiting on approval has to
+                // scroll away with the chat instead of holding the bottom
+                // of the window.
+                let trailing = self.chat_trailing(window, cx);
                 let primary = transcript::view(
                     &self.chat_state.transcript,
                     &self.chat_state.scroll,
@@ -632,6 +638,10 @@ impl Render for Dashboard {
                         voice_pending: self
                             .chat_session
                             .is_some_and(|id| self.voice_pending.contains(&id)),
+                        // The hint, the offers and the live plan card,
+                        // drawn under the last turn inside the scroll
+                        // (#3139).
+                        trailing,
                     },
                 );
                 // The conversation takes the measure and the column centres it
@@ -2506,46 +2516,13 @@ impl Render for Dashboard {
                         session = session.child(central(bar, centred_chat, chat_measure_px));
                     }
                     session = session.child(middle);
-                    // The hint card opens the stack, directly under the last
-                    // card of the conversation (#3124). It used to close the
-                    // stack, under the plan, the queue and the offers, and the
-                    // owner read that as a tip answering a plan it has nothing
-                    // to do with: the line comments on the turn that just
-                    // finished, so it belongs under that turn. Everything below
-                    // it is about what is waiting to happen next.
-                    if let Some(hint) = self.task_hint() {
-                        above = above.child(session_row(
-                            hint_line(&hint, cx).into_any_element(),
-                            centred_chat,
-                            chat_measure_px,
-                        ));
-                        above_used = true;
-                    }
-                    // In a split every pane carries its own plan, queue and
-                    // composer (#2530), so the window-level copies stand down:
-                    // drawing both would give the chat two composers. An unsplit
-                    // window keeps exactly the layout it has always had, measure
-                    // wrapper included (#2594).
-                    let open = self.chat_session;
-                    let actions = open.map(|session| self.plan_actions(session, cx));
-                    self.plan.refresh();
-                    let card = self
-                        .plan
-                        .editing_view(actions.as_ref(), window)
-                        .or_else(|| self.plan.view(window));
-                    if let Some(plan_view) = card {
-                        // The session is already capped to the conversation's
-                        // measure and centred as a whole, so a child of it is
-                        // on that axis by construction: `central` here would
-                        // wrap a width it already has. What the strips were
-                        // missing is the bubbles' side gutter (#3110).
-                        above = above.child(session_row(
-                            plan_view.into_any_element(),
-                            centred_chat,
-                            chat_measure_px,
-                        ));
-                        above_used = true;
-                    }
+                    // The hint, the offers and the live plan card are
+                    // rows of the conversation now (#3139): they are built
+                    // in `chat_trailing` and handed to the transcript, so
+                    // they scroll with the turns instead of holding the
+                    // bottom of the window. What stays here is what names
+                    // something the window is doing right now, one line at
+                    // a time: the queue and the detached command.
                     let waiting = self.queued_for_strip();
                     if !waiting.is_empty() {
                         above = above.child(session_row(
@@ -2566,24 +2543,6 @@ impl Render for Dashboard {
                             chat_measure_px,
                         ));
                         above_used = true;
-                    }
-                    // The follow-up offer sits where the queue does, directly
-                    // above the composer it sends into (#2708).
-                    if let Some(sid) = self.chat_session {
-                        let offers = agent_bridge::options_snapshot(sid);
-                        if !offers.is_empty() {
-                            let rows = self.option_rows(sid, offers, cx);
-                            let focus = self
-                                .options_focus
-                                .filter(|(session, _)| *session == sid)
-                                .map(|(_, at)| at);
-                            above = above.child(session_row(
-                                options_strip(&rows, focus).into_any_element(),
-                                centred_chat,
-                                chat_measure_px,
-                            ));
-                            above_used = true;
-                        }
                     }
                     // A detached command sits directly above the editor: the same
                     // place the TUI puts it (on the input box's top border), which
@@ -3794,6 +3753,58 @@ impl Dashboard {
                 .unwrap_or(0);
         }
         state
+    }
+}
+
+/// The rows that follow the last turn, inside the conversation (#3139).
+///
+/// The hint, the follow-up offers and the live plan card used to be children of
+/// the `above` box, which is a sibling of the scroll container: each of them
+/// took its height from the conversation, so a live plan plus a waiting offer
+/// plus the hint was most of the lower half of the window with no way to scroll
+/// any of it away. They are rows of the conversation now, handed to
+/// `transcript::view` and drawn under the turn they belong to, so they move
+/// with the chat and the reader gets that height back.
+///
+/// The order is the one the owner asked for: the hint comments on the turn that
+/// just finished, so it comes first; then the offers waiting on a click; then
+/// the plan the work belongs to. The queue strip and the detached-task row stay
+/// outside, because each is one line and each names something the window is
+/// doing right now rather than something the conversation said.
+impl Dashboard {
+    fn chat_trailing(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(hint) = self.task_hint() {
+            rows.push(hint_line(&hint, cx).into_any_element());
+        }
+        if let Some(sid) = self.chat_session {
+            let offers = agent_bridge::options_snapshot(sid);
+            if !offers.is_empty() {
+                let buttons = self.option_rows(sid, offers, cx);
+                // The keyboard's ring, if this is the session it stands on
+                // (#3101). A ring left over from another session must not
+                // appear on this one's card.
+                let focus = self
+                    .options_focus
+                    .filter(|(session, _)| *session == sid)
+                    .map(|(_, at)| at);
+                rows.push(options_strip(&buttons, focus).into_any_element());
+            }
+        }
+        // In a split every pane carries its own plan, queue and composer
+        // (#2530), so the window-level copies stand down: drawing both would
+        // give the chat two composers.
+        let open = self.chat_session;
+        let actions = open.map(|session| self.plan_actions(session, cx));
+        self.plan.refresh();
+        let card = self
+            .plan
+            .editing_view(actions.as_ref(), window)
+            .or_else(|| self.plan.view(window));
+        if let Some(plan_view) = card {
+            rows.push(plan_view.into_any_element());
+        }
+        rows
     }
 }
 

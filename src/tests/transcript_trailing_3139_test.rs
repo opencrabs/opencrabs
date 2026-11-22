@@ -85,3 +85,69 @@ fn the_fold_keeps_the_callers_order() {
         "and takes the transcript's own measure, with no second gutter: {body}"
     );
 }
+
+const DASHBOARD_RENDER: &str = include_str!("../gui/dashboard_render.rs");
+
+/// The `above` box: from the line that opens it to the frame that decides
+/// whether it is drawn at all.
+fn above_box() -> &'static str {
+    let start = DASHBOARD_RENDER
+        .find("let mut above = div()")
+        .expect("the chat keeps a box between the history and the field");
+    let end = DASHBOARD_RENDER[start..]
+        .find("if above_used {")
+        .expect("and it is appended only when something went in it");
+    &DASHBOARD_RENDER[start..start + end]
+}
+
+/// The body of the row builder.
+fn trailing_body() -> &'static str {
+    let start = DASHBOARD_RENDER
+        .find("fn chat_trailing(")
+        .expect("the chat builds its rows in one place");
+    DASHBOARD_RENDER[start..]
+        .split("\n    }\n")
+        .next()
+        .expect("the method ends at its closing brace")
+}
+
+#[test]
+fn the_chat_hands_its_rows_to_the_transcript() {
+    assert!(
+        DASHBOARD_RENDER.contains("let trailing = self.chat_trailing(window, cx);"),
+        "the rows are built before the view that draws them"
+    );
+    assert!(
+        DASHBOARD_RENDER.contains("\n                        trailing,\n                    },\n"),
+        "and handed over in the hooks"
+    );
+}
+
+#[test]
+fn the_rows_are_no_longer_in_the_above_box() {
+    let above = above_box();
+    for gone in ["hint_line(", "options_strip(", "editing_view("] {
+        assert!(
+            !above.contains(gone),
+            "{gone} still draws outside the scroll: {above}"
+        );
+    }
+    // What names something the window is doing right now stays where it was.
+    assert!(above.contains("queue_strip("), "the queue keeps its row");
+    assert!(
+        above.contains("running_tasks_label()"),
+        "so does the detached command"
+    );
+}
+
+#[test]
+fn the_rows_are_built_in_the_order_that_was_asked_for() {
+    let body = trailing_body();
+    let hint = body.find("hint_line(").expect("the hint is a row");
+    let offers = body.find("options_strip(").expect("the offers are a row");
+    let plan = body.find("editing_view(").expect("the plan card is a row");
+    assert!(
+        hint < offers && offers < plan,
+        "the hint comments on the turn above it, then what is waiting, then the plan"
+    );
+}
