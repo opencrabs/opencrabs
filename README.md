@@ -2105,6 +2105,30 @@ port = 18790          # Gateway port
 | `/a2a/v1` | POST | JSON-RPC 2.0 — `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel` |
 | `/a2a/health` | GET | Health check |
 
+### Authentication
+
+`/a2a/v1` sits behind `Authorization: Bearer <token>`. Two kinds of credential
+are accepted, and they differ in what they grant:
+
+| Credential | Grants | How it is obtained |
+|------------|--------|--------------------|
+| `[a2a].api_key` | every scope | you write it in `config.toml` |
+| `ocpair_` session token | only the scopes its pairing code carried | `opencrabs connect` prints a one-time code, the client trades it at `POST /a2a/pair` |
+
+Discovery (`/.well-known/agent.json`), `/a2a/health` and `POST /a2a/pair` are
+public, so a client can find the agent and earn a token without one. When no
+`api_key` is set the gateway accepts every caller, and startup refuses a
+non-loopback bind in that state rather than exposing the tool surface (#1473).
+
+**No OAuth, so an MCP client cannot authorize itself.** The MCP authorization
+specification expects an OAuth 2.1 authorization server, and none of that
+exists here (#2875): no protected resource metadata (RFC 9728), no
+authorization server metadata (RFC 8414), no PKCE (RFC 7636), no resource
+indicator (RFC 8707). An MCP client pointed at this gateway has to be handed a
+bearer out of band, through its own header configuration, instead of running a
+discovery and consent flow. Everything else in the MCP transport works, which
+is why clients that accept a static header run fine today.
+
 ### `a2a_send` Tool
 
 The agent has a built-in `a2a_send` tool to communicate with remote A2A agents:
