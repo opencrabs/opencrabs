@@ -5111,6 +5111,10 @@ impl PendingClick {
     }
 }
 
+/// How close two identical misses must be to count as one gesture logged
+/// twice (#3085). The pairs in the report were ~300 ms apart.
+const REPEAT_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Drag-to-copy over transcript rows (#2383) and their UTF-8 text ranges
 /// (#2529). Each row records the text its selectable segments render. GPUI's
 /// `TextLayout` turns a pointer into a byte offset; this state orders the two
@@ -5128,6 +5132,12 @@ pub struct CopyDrag {
     /// each used to run the whole release again: one click logged three times
     /// and refreshed the window three times (#2805).
     released: Cell<bool>,
+    /// The last miss the log wrote: when, which token, and at which offset.
+    /// One gesture reaches several elements, so the same miss could be
+    /// written more than once and nothing on the line said whether a pair was
+    /// one gesture or two (#3085). Two lines that agree on all three inside
+    /// the repeat window are one gesture.
+    last_miss: RefCell<Option<(std::time::Instant, String, usize)>>,
     /// Fired once a release or a copy chord actually put text on the
     /// clipboard, so the composer can say so (#2587). Empty until the view
     /// that owns the composer hands one over.
@@ -5244,15 +5254,7 @@ impl CopyDrag {
             return false;
         };
         let Some(target) = pending.target() else {
-            // A click that found nothing still gets a line, so "I clicked and
-            // nothing happened" can be told apart from a click that never
-            // arrived instead of guessed at. The line names the token the
-            // resolver tried and where the pointer sat (#3085).
-            crate::logging::info(&format!(
-                "transcript link: nothing to open at {:?} (offset {})",
-                pending.token(),
-                pending.offset
-            ));
+            self.note_miss(&pending);
             return false;
         };
         crate::logging::info(&format!("transcript link: open {}", target.label()));
@@ -5262,6 +5264,39 @@ impl CopyDrag {
         };
         listener(target, app);
         true
+    }
+
+    /// Write the miss line for a click that resolved to nothing (#3085).
+    ///
+    /// Two rules keep the log readable. A click on ordinary prose named no
+    /// file and no url, so it is not a miss at all and stays silent: only a
+    /// token the resolver would have probed is worth a line. And one gesture
+    /// reaches several elements, so the same token at the same offset inside
+    /// the repeat window is the gesture already written, not a new one.
+    fn note_miss(&self, pending: &PendingClick) {
+        if !links::click_names_target(&pending.text, pending.offset) {
+            return;
+        }
+        let token = pending.token();
+        let now = std::time::Instant::now();
+        let mut last = self.last_miss.borrow_mut();
+        let repeated = match last.as_ref() {
+            Some((at, last_token, last_offset)) => {
+                *last_offset == pending.offset
+                    && *last_token == token
+                    && now.duration_since(*at) < REPEAT_CLICK_WINDOW
+            }
+            None => false,
+        };
+        if repeated {
+            return;
+        }
+        *last = Some((now, token.clone(), pending.offset));
+        drop(last);
+        crate::logging::info(&format!(
+            "transcript link: nothing to open at {token:?} (offset {})",
+            pending.offset
+        ));
     }
 
     fn points(&self) -> Option<(TextPoint, TextPoint)> {
