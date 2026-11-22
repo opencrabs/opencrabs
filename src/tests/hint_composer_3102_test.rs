@@ -290,28 +290,31 @@ fn the_card_does_not_rotate() {
 #[test]
 fn the_card_is_its_own_card_above_the_composer() {
     let render = include_str!("../gui/dashboard_render.rs");
-    // The card is asked for once, and that call sits above the composer's
-    // shell: a card painted after the field would float over it.
+    // The card is asked for once, and that call hands it to the conversation
+    // as a trailing row (#3139): it rides the transcript's own column and
+    // scrolls with the chat, which still sits above the composer's shell. A
+    // card painted after the field would float over it.
     let card = render
         .find("if let Some(hint) = self.task_hint()")
         .expect("the card is asked for once, with its id");
-    let composer = render
-        .find("shell.child(dock.child(footer))")
-        .expect("the composer card is what it stands above");
+    let trailing = render
+        .find("fn chat_trailing(")
+        .expect("the conversation's trailing rows are built in one place");
     assert!(
-        card < composer,
-        "the card is added to the column before the composer"
+        trailing < card,
+        "the card is a row of the conversation, not a box beside its scroll"
     );
-    // It rides the strips' column, so its edge lands where a message's does.
-    let call = render
+    // It is the first of those rows: it comments on the turn that just
+    // finished, so it reads before the offers and the plan that turn left.
+    let first_row = render
         .get(card..)
         .expect("the call starts on a char boundary")
-        .split("above_used = true;")
+        .split("if let Some(sid) = self.chat_session")
         .next()
-        .expect("the call ends where the flag is raised");
+        .expect("the card's row ends where the offers begin");
     assert!(
-        call.contains("session_row("),
-        "the card takes the conversation's column, not the pane's: {call}"
+        first_row.contains("rows.push(hint_line(&hint, cx).into_any_element())"),
+        "the card is its own row, ahead of the offers and the plan: {first_row}"
     );
     // And the composer's shell is the field and the footer alone.
     let shell_start = render
