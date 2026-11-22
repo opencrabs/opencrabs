@@ -594,7 +594,9 @@ pub async fn run_debate(mut config: DebateConfig) -> Result<DebateSession, Debat
         // Send to all bees concurrently
         let mut handles = Vec::new();
         for (i, (endpoint, msg)) in messages.into_iter().enumerate() {
-            let client = client.clone();
+            // shared() hands back a &'static Client and &T is Copy, so the
+            // spawned task takes the reference itself. Cloning here would
+            // resolve to Client::clone and build an owned client per message.
             handles.push(tokio::spawn(async move {
                 let result = send_a2a_message(client, &endpoint, msg).await;
                 (i, endpoint, result)
