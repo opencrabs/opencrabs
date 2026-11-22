@@ -543,18 +543,12 @@ fn a_split_draws_the_plan_once_and_the_hint_still_rides_the_chat() {
         2,
         "both the offers card and the plan card are gated on not being split"
     );
-    let offers = body
-        .split("if !split")
-        .nth(1)
-        .expect("the first gate");
+    let offers = body.split("if !split").nth(1).expect("the first gate");
     assert!(
         offers.contains("options_strip("),
         "the offers card stands down in a split"
     );
-    let plan = body
-        .split("if !split")
-        .nth(2)
-        .expect("the second gate");
+    let plan = body.split("if !split").nth(2).expect("the second gate");
     assert!(
         plan.contains("editing_view("),
         "the plan card stands down in a split"
