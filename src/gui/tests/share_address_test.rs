@@ -22,6 +22,7 @@ fn live(url: &str) -> TunnelState {
         pid: 4242,
         url: url.to_string(),
         port: 18790,
+        origin_host: "127.0.0.1".to_string(),
         binary: "/tmp/cloudflared".to_string(),
         started_at: 1_700_000_000,
     }

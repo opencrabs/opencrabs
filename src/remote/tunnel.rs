@@ -113,8 +113,22 @@ pub struct TunnelState {
     pub pid: u32,
     pub url: String,
     pub port: u16,
+    /// The host cloudflared actually dials, as derived from `[a2a] bind` when
+    /// the tunnel started. It is recorded because `connect --status` used to
+    /// print `127.0.0.1` from a literal: on a gateway bound to a tailnet
+    /// address the status claimed loopback while the tunnel dialled something
+    /// else, which is the same lie that hid the 502 for a day (2026-11-21).
+    /// Defaulted so a `tunnel.json` written by an older build still loads: a
+    /// tunnel that predates this field really did dial loopback.
+    #[serde(default = "loopback_host")]
+    pub origin_host: String,
     pub binary: String,
     pub started_at: u64,
+}
+
+/// What every tunnel started before `origin_host` was recorded dialled.
+fn loopback_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 /// `<opencrabs_home>/state/remote`
@@ -287,6 +301,7 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
                 pid,
                 url,
                 port: spec.port,
+                origin_host: spec.origin_host.clone(),
                 binary: binary.display().to_string(),
                 started_at: now_secs(),
             };

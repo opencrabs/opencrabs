@@ -122,7 +122,10 @@ fn start_status_stop_lifecycle_with_stub() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub_script(dir.path(), true);
     let spec = TunnelSpec {
-        origin_host: "127.0.0.1".to_string(),
+        // A tailnet address, not loopback: the recorded host has to survive
+        // the round trip, or `connect --status` goes back to claiming a target
+        // the tunnel is not dialling (2026-11-21).
+        origin_host: "100.125.20.50".to_string(),
         port: 18999,
         state_dir: dir.path().to_path_buf(),
         binary: Some(stub),
@@ -131,6 +134,7 @@ fn start_status_stop_lifecycle_with_stub() {
     let state = start(&spec).expect("stub start");
     assert_eq!(state.url, "https://stub-abc-123.trycloudflare.com");
     assert_eq!(state.port, 18999);
+    assert_eq!(state.origin_host, "100.125.20.50");
     assert!(pid_alive(state.pid));
     assert!(state.started_at > 0);
 
@@ -141,6 +145,10 @@ fn start_status_stop_lifecycle_with_stub() {
     let st = status(dir.path()).unwrap().expect("state file present");
     assert_eq!(st.pid, state.pid);
     assert_eq!(st.url, state.url);
+    assert_eq!(
+        st.origin_host, "100.125.20.50",
+        "the target the status prints must be the one the tunnel dials"
+    );
 
     assert!(stop(dir.path()).unwrap());
     assert!(status(dir.path()).unwrap().is_none());
@@ -244,6 +252,7 @@ fn status_and_stop_refuse_a_recycled_pid_and_clean_state() {
         pid: innocent.id(),
         url: "https://stolen.trycloudflare.com".into(),
         port: 1,
+        origin_host: "127.0.0.1".into(),
         binary: "/nonexistent".into(),
         started_at: 1,
     };
@@ -293,6 +302,7 @@ fn status_clears_dead_pid() {
         pid: (i32::MAX as u32) - 7, // guaranteed ESRCH, never -1 semantics
         url: "https://dead-one.trycloudflare.com".into(),
         port: 1,
+        origin_host: "127.0.0.1".into(),
         binary: "/nonexistent".into(),
         started_at: 1,
     };
@@ -305,6 +315,18 @@ fn status_clears_dead_pid() {
 fn status_absent_is_none() {
     let dir = tempfile::tempdir().unwrap();
     assert!(status(dir.path()).unwrap().is_none());
+}
+
+#[test]
+fn a_state_file_from_before_the_host_was_recorded_still_loads() {
+    // Builds before this field existed wrote `tunnel.json` without
+    // `origin_host`, and an upgrade must not turn that into a parse error that
+    // reads as "no tunnel" (or, worse, a blank host printed as `Target: :18790`).
+    // Those tunnels really did dial loopback, so the default is the truth.
+    let json = br#"{"pid":1,"url":"https://old.trycloudflare.com","port":18790,"binary":"/tmp/cloudflared","started_at":1}"#;
+    let state: TunnelState = serde_json::from_slice(json).expect("old state file parses");
+    assert_eq!(state.origin_host, "127.0.0.1");
+    assert_eq!(state.port, 18790);
 }
 
 #[test]
