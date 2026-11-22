@@ -831,6 +831,62 @@ fn the_remote_composer_is_the_chats_own_editor() {
 }
 
 #[test]
+fn a_remote_rail_row_offers_only_what_the_host_answers() {
+    // The owner's report: "as opcoes de enable topics etc nao funcionam". They
+    // did not, and could not: a remote row was drawn by the local rail, so its
+    // menu was the local one (pin, rename, assign project, enable topics, group
+    // topics, split, delete) and every one of those verbs writes to *this*
+    // window's database with the other crab's session id. The menu opened, the
+    // card closed, and nothing on either machine changed.
+    //
+    // A menu row that cannot do anything is worse than a row that is not
+    // there, so the remote menu is its own: open the conversation, take its id.
+    // This pins both halves: the branch, and the absence of the local verbs.
+    let rail = include_str!("../dashboard_rail.rs");
+    let popover = fn_body(rail, "pub(crate) fn rail_menu_popover_for(")
+        .expect("the rail's menu is built in rail_menu_popover_for");
+    let branch = popover
+        .find("instance_remote_open()")
+        .expect("the remote has to be asked before the local verbs are offered");
+    let local = popover
+        .find("rail_menu_entries(")
+        .expect("the local menu is the fallback");
+    assert!(
+        branch < local,
+        "the remote branch has to come first, or a remote row gets the local menu"
+    );
+    assert!(
+        popover.contains("self.remote_rail_menu(id, cx)"),
+        "and it has to hand off to the remote's own menu: {popover}"
+    );
+
+    let menu = fn_body(rail, "pub(crate) fn remote_rail_menu(")
+        .expect("the remote's own menu sits beside the local one it replaces");
+    for verb in [
+        "enable_topics",
+        "start_rename",
+        "request_delete",
+        "toggle_favorite",
+        "open_session_project_assignment",
+        "rail_menu_entries",
+    ] {
+        assert!(
+            !menu.contains(verb),
+            "a remote row must not offer {verb}: it writes to a database this \
+             window does not own"
+        );
+    }
+    assert!(
+        menu.contains("open_remote_session"),
+        "opening the conversation is something the host answers: {menu}"
+    );
+    assert!(
+        menu.contains("write_to_clipboard"),
+        "the id is the one thing worth taking from a remote row: {menu}"
+    );
+}
+
+#[test]
 fn the_caret_goes_to_the_field_the_frame_draws() {
     // The remote composer became the chat's own editor (#3133), but the frame
     // kept putting the caret in the local one: the reconciler focuses
