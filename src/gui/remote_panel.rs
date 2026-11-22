@@ -125,6 +125,10 @@ pub(crate) struct RemotePanelFrame {
     pub(crate) notice: Option<SharedString>,
     /// A send is in flight; the composer says so and refuses a second.
     pub(crate) sending: bool,
+    /// The far side is still working on the last send. A2A cannot stream, so
+    /// this is the only sign of life between the send and the answer: without
+    /// it the panel looked dead for however long the other crab took.
+    pub(crate) running: bool,
     /// The row whose copy just landed, so its icon shows the check and then
     /// loses it. This is the window's own mark, which is what makes a remote
     /// answer acknowledge a copy exactly as a local one does.
@@ -402,8 +406,16 @@ pub(crate) fn view(
             div()
                 .flex_none()
                 .text_size(rems(0.625))
-                .text_color(rgb(p.text_faint))
-                .child(SharedString::from("enter envia · esc volta ao meu crab")),
+                .text_color(rgb(if frame.running {
+                    p.accent
+                } else {
+                    p.text_faint
+                }))
+                .child(SharedString::from(if frame.running {
+                    "o outro crab está a trabalhar…"
+                } else {
+                    "enter envia · esc volta ao meu crab"
+                })),
         )
         .child(div().flex_1())
         .child(

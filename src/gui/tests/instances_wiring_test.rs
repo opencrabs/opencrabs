@@ -549,6 +549,61 @@ fn a_remote_send_carries_the_conversation_on_screen() {
     );
 }
 
+/// A send follows its task all the way to the answer.
+///
+/// A2A hands back a task id, not the words: the reply is written into the
+/// host's own session and is only visible by reading that session again. The
+/// panel used to wait 700 ms, read once and stop, so any answer slower than
+/// that never appeared and the owner had to leave the session and come back
+/// ("o A2A parece funcionar super mal", 22 Nov). This pins the follow, which
+/// is what makes the remote pane behave like talking to a machine at all.
+#[test]
+fn a_remote_send_follows_the_task_to_its_answer() {
+    let source = include_str!("../dashboard_instances.rs");
+    let body =
+        fn_body(source, "pub(crate) fn send_remote").expect("send_remote is the window's send");
+    assert!(
+        body.contains("transcript.following = Some(task.id.clone())"),
+        "the send claims the follow slot with the id the host handed back"
+    );
+    assert!(
+        body.contains("instance_client::task("),
+        "a task id with no poll is a reply nobody ever sees"
+    );
+    assert!(
+        body.contains("snapshot.settled()"),
+        "the poll has to stop on the settled state, or it never ends"
+    );
+    assert!(
+        body.contains("reload_remote_tail"),
+        "the rows only reach the screen through a tail re-read"
+    );
+    assert!(
+        !body.contains("from_millis(700)"),
+        "the fixed wait was the bug: 700 ms cannot know when the far side \
+         finished, so it must not come back"
+    );
+    // A follow tick must not fork the conversation: only a context that was
+    // never known is filled in, so the one a send adopted survives every read.
+    let tail = fn_body(source, "pub(crate) fn reload_remote_tail")
+        .expect("the in-place re-read is what the loop calls");
+    assert!(
+        tail.contains("if transcript.context_id.is_none()"),
+        "a re-read that overwrites a known context forks the next send (#3133)"
+    );
+    // The panel says the far side is working: without it the composer looks
+    // dead for however long the other crab takes.
+    let panel = include_str!("../remote_panel.rs");
+    assert!(
+        panel.contains("o outro crab está a trabalhar"),
+        "the composer must name the wait it is in"
+    );
+    assert!(
+        source.contains("running: transcript.is_some_and(|t| t.following.is_some())"),
+        "the frame has to carry the follow state to the painter"
+    );
+}
+
 #[test]
 fn the_remote_composer_takes_the_local_ones_measurements() {
     // The owner's report was not "make it prettier", it was that the remote

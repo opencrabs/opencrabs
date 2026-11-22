@@ -399,6 +399,7 @@ impl Dashboard {
             has_rows: false,
             notice: None,
             sending: false,
+            following: None,
             scroll: ScrollHandle::new(),
         });
         cx.notify();
@@ -474,7 +475,72 @@ impl Dashboard {
         .detach();
     }
 
-    /// The remote composer's keyboard. Returns whether the key was consumed.
+    /// Re-read the remote session's tail and install it in place.
+    ///
+    /// The same read `open_remote_session` does, without rebuilding the panel:
+    /// the scroll the reader holds and the context the next send needs both
+    /// survive, so a follow tick does not yank the view to the top or fork the
+    /// conversation (#3133). The follow loop is the only way a reply becomes
+    /// visible at all, because A2A answers a send with a task id rather than
+    /// with the words.
+    pub(crate) fn reload_remote_tail(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let Some(remote) = self.instance_remote.as_ref() else {
+            return;
+        };
+        let url = remote.url.clone();
+        let host_id = remote.host_id.clone();
+        let Some(entry) = self.instances.get(&host_id) else {
+            return;
+        };
+        let token = entry.known.token.clone();
+        cx.spawn(async move |this, cx| {
+            let fetch_url = url.clone();
+            let fetch_id = session_id.clone();
+            let build_id = session_id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let read = on_remote_runtime(async {
+                        let target = Target::new(&fetch_url, Some(&token));
+                        instance_client::transcript(&target, &fetch_id, 40).await
+                    })?;
+                    let state = remote_panel::state_for(&build_id, &read.messages);
+                    let has_rows = state.turns.iter().any(|t| !t.blocks.is_empty());
+                    Ok::<_, anyhow::Error>((read.title, read.context_id, state, has_rows))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(transcript) = this.remote_transcript.as_mut() else {
+                    return;
+                };
+                if transcript.session_id != session_id {
+                    return;
+                }
+                match result {
+                    Ok((title, context_id, state, has_rows)) => {
+                        transcript.state = state;
+                        transcript.has_rows = has_rows;
+                        if !title.is_empty() {
+                            transcript.title = SharedString::from(title);
+                        }
+                        // Only fill a context that was never known: the one a
+                        // send adopted is the one the conversation lives in.
+                        if transcript.context_id.is_none() {
+                            transcript.context_id = context_id;
+                        }
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        transcript.notice =
+                            Some(SharedString::from(format!("não consegui ler: {e:#}")));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     ///
     /// While a remote crab is open the only composer on screen belongs to it,
     /// so every printable character, every editing chord and Enter must land
@@ -1054,6 +1120,7 @@ impl Dashboard {
             has_rows: transcript.is_some_and(|t| t.has_rows),
             notice,
             sending: transcript.is_some_and(|t| t.sending),
+            running: transcript.is_some_and(|t| t.following.is_some()),
             copied: self.copied_row(),
         };
         // One fold click per turn anchor, minted here because only this `cx`
@@ -1168,6 +1235,12 @@ impl Dashboard {
         self.remote_draft = text_field::TextField::new();
         cx.notify();
 
+        // Cloned before the spawn takes `url` and `token`: the follow loop
+        // needs its own copy of both, and an `async move` closure takes every
+        // name it touches.
+        let follow_url = url.clone();
+        let follow_token = token.clone();
+
         cx.spawn(async move |this, cx| {
             let send_url = url.clone();
             let body = text.clone();
@@ -1181,7 +1254,7 @@ impl Dashboard {
                     })
                 })
                 .await;
-            let sent = result.is_ok();
+            let sent_task = result.as_ref().ok().map(|t| t.id.clone());
 
             let _ = this.update(cx, |this, cx| {
                 if let Some(transcript) = this.remote_transcript.as_mut() {
@@ -1194,8 +1267,12 @@ impl Dashboard {
                             if transcript.context_id.is_none() {
                                 transcript.context_id = task.context_id.clone();
                             }
-                            transcript.notice =
-                                Some(SharedString::from(format!("tarefa criada: {}", task.id)));
+                            // The reply is not in this answer: A2A hands back
+                            // a task id, and the words land in the host's own
+                            // session a moment later. The follow loop below is
+                            // what makes them visible.
+                            transcript.following = Some(task.id.clone());
+                            transcript.notice = None;
                         }
                         Err(e) => {
                             transcript.notice =
@@ -1211,43 +1288,96 @@ impl Dashboard {
                 cx.notify();
             });
 
-            if !sent {
-                return;
-            }
-            // The host writes the user's row when it starts the task, a beat
-            // after it answers. One short wait and one re-read, so the words
-            // appear in the conversation instead of only in a notice line.
-            let Some(session_id) = session_id else {
+            let (Some(task_id), Some(session_id)) = (sent_task, session_id) else {
                 return;
             };
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(700))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                let still_here = this
-                    .remote_transcript
-                    .as_ref()
-                    .is_some_and(|t| t.session_id == session_id);
-                if !still_here {
+            // Follow the task to its answer.
+            //
+            // A2A answers a send with a task id, not with the words: the reply
+            // is written into the host's own session, and the only way to see
+            // it is to read that session again. This panel used to wait 700 ms,
+            // read once and stop, so any answer slower than that never appeared
+            // and the owner had to leave the session and come back ("o A2A
+            // parece funcionar super mal", 22 Nov). The task poll is one small
+            // JSON and says when the far side has stopped; the tail re-read is
+            // what puts the rows on screen. Both run until the task settles.
+            let follow_session = session_id.clone();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20 * 60);
+            let mut tick: u32 = 0;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(1500))
+                    .await;
+                // Stop the moment the panel moved on, or another send
+                // claimed the follow slot: this loop must never write into
+                // a conversation the reader is no longer looking at.
+                let alive = this
+                    .update(cx, |this, _| {
+                        this.remote_transcript.as_ref().is_some_and(|t| {
+                            t.session_id == follow_session
+                                && t.following.as_deref() == Some(task_id.as_str())
+                        })
+                    })
+                    .unwrap_or(false);
+                if !alive {
                     return;
                 }
-                // Re-reading rebuilds the panel, so the context has to survive
-                // the rebuild: the fetch fills it from the host a moment later,
-                // and losing it in between would fork the very next send.
-                let keep = this
-                    .remote_transcript
-                    .as_ref()
-                    .and_then(|t| t.context_id.clone());
-                let title = this
-                    .remote_transcript
-                    .as_ref()
-                    .map(|t| t.title.to_string())
-                    .unwrap_or_default();
-                this.open_remote_session(session_id.clone(), title, cx);
-                if let Some(transcript) = this.remote_transcript.as_mut() {
-                    transcript.context_id = keep;
+                if std::time::Instant::now() > deadline {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(t) = this.remote_transcript.as_mut()
+                            && t.following.as_deref() == Some(task_id.as_str())
+                        {
+                            t.following = None;
+                            t.notice = Some(SharedString::from(
+                                "a tarefa continua no outro crab; reabre a sessão",
+                            ));
+                        }
+                        cx.notify();
+                    });
+                    return;
                 }
-            });
+                // The rows, every other tick: often enough to watch the
+                // answer being written, rare enough not to re-parse a long
+                // session three times a second.
+                if tick % 2 == 0 {
+                    let _ = this.update(cx, |this, cx| {
+                        this.reload_remote_tail(follow_session.clone(), cx);
+                    });
+                }
+                tick += 1;
+                let probe = {
+                    let url = follow_url.clone();
+                    let token = follow_token.clone();
+                    let id = task_id.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            on_remote_runtime(async {
+                                let target = Target::new(&url, Some(&token));
+                                instance_client::task(&target, &id).await
+                            })
+                        })
+                        .await
+                };
+                match probe {
+                    Ok(snapshot) if snapshot.settled() => {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(t) = this.remote_transcript.as_mut()
+                                && t.following.as_deref() == Some(task_id.as_str())
+                            {
+                                t.following = None;
+                            }
+                            this.reload_remote_tail(follow_session.clone(), cx);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    // Still working: the next tick reads the rows again.
+                    Ok(_) => {}
+                    // A dropped poll is not a lost reply: the tail keeps
+                    // re-reading, so this only costs one tick.
+                    Err(e) => logging::info(&format!("a2a follow: {e:#}")),
+                }
+            }
         })
         .detach();
     }
@@ -2375,6 +2505,11 @@ pub(crate) struct RemoteTranscript {
     /// Why the body is empty or what the last send did, in one line.
     pub(crate) notice: Option<SharedString>,
     pub(crate) sending: bool,
+    /// The task this panel is following to its answer, when one is running on
+    /// the far side. A2A has no stream to subscribe to, so the reply is only
+    /// visible by reading the session again; this is the id the follow loop
+    /// polls, and the flag the composer reads to say the other crab is working.
+    pub(crate) following: Option<String>,
     /// The body's own scroll, tracked by the transcript painter it is handed to.
     pub(crate) scroll: ScrollHandle,
 }
