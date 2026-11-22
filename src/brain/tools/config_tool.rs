@@ -101,7 +101,7 @@ impl Tool for ConfigTool {
             "add_command" => self.add_command(&input),
             "remove_command" => self.remove_command(&input),
             "reload" => self.reload_config(),
-            "set_working_directory" => self.set_working_directory(&input, context),
+            "set_working_directory" => self.set_working_directory(&input, context).await,
             _ => Ok(ToolResult::error(format!(
                 "Unknown operation: '{}'. Valid: read_config, write_config, \
                  read_commands, add_command, remove_command, reload, set_working_directory",
@@ -325,7 +325,10 @@ impl ConfigTool {
         }
     }
 
-    fn set_working_directory(
+    /// Async because it writes the session row: the old shape reached for
+    /// `block_in_place`, which panics on the current-thread runtime the
+    /// window's turns run on (#2975).
+    async fn set_working_directory(
         &self,
         input: &Value,
         context: &ToolExecutionContext,
@@ -371,13 +374,9 @@ impl ConfigTool {
             let session_svc = crate::services::SessionService::new(svc_ctx.clone());
             let sid = context.session_id;
             let dir_str = canonical.to_string_lossy().to_string();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let _ = session_svc
-                        .update_session_working_directory(sid, Some(dir_str))
-                        .await;
-                });
-            });
+            let _ = session_svc
+                .update_session_working_directory(sid, Some(dir_str))
+                .await;
         }
 
         Ok(ToolResult::success(format!(

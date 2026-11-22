@@ -358,7 +358,7 @@ impl Tool for SlashCommandTool {
         }
 
         match command {
-            "/cd" => self.handle_cd(args, context),
+            "/cd" => self.handle_cd(args, context).await,
             "/compact" => Ok(ToolResult::success(
                 "Compaction requested. Summarize the current conversation for continuity, \
                  then the system will trim context automatically."
@@ -441,7 +441,11 @@ fn channel_command_guidance(command: &str) -> String {
 }
 
 impl SlashCommandTool {
-    fn handle_cd(&self, args: &str, context: &ToolExecutionContext) -> Result<ToolResult> {
+    async fn handle_cd(
+        &self,
+        args: &str,
+        context: &ToolExecutionContext,
+    ) -> Result<ToolResult> {
         let path_str = args.trim();
         if path_str.is_empty() {
             return Ok(ToolResult::error(
@@ -481,48 +485,52 @@ impl SlashCommandTool {
             let project_svc = crate::services::ProjectService::new(svc_ctx);
             let sid = context.session_id;
             let dir_str = canonical.to_string_lossy().to_string();
-            assigned_project = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let _ = session_svc
-                        .update_session_working_directory(sid, Some(dir_str.clone()))
-                        .await;
+            // Already inside `async fn execute`, so the body is awaited
+            // directly. The old `block_in_place(|| Handle::current()
+            // .block_on(..))` asked the caller's runtime what shape it was,
+            // and the window's turns run on a current-thread runtime, where
+            // that call panics by construction (#2975).
+            assigned_project = async {
+                let _ = session_svc
+                    .update_session_working_directory(sid, Some(dir_str.clone()))
+                    .await;
 
-                    // Auto-assign session to project if WD matches a known project dir (#220).
-                    // Through the shared matcher so this and the first-turn
-                    // link (#1445) cannot answer the same question differently,
-                    // and through the same git identity so /cd records the
-                    // remote it just proved (#1510).
-                    let identity =
-                        crate::services::project_match::resolve_directory_identity(&dir_str);
-                    if let Ok(projects) = project_svc.list_projects().await
-                        && let Some(project) =
-                            crate::services::project_match::match_by_directory(&identity, &projects)
+                // Auto-assign session to project if WD matches a known project dir (#220).
+                // Through the shared matcher so this and the first-turn
+                // link (#1445) cannot answer the same question differently,
+                // and through the same git identity so /cd records the
+                // remote it just proved (#1510).
+                let identity =
+                    crate::services::project_match::resolve_directory_identity(&dir_str);
+                if let Ok(projects) = project_svc.list_projects().await
+                    && let Some(project) =
+                        crate::services::project_match::match_by_directory(&identity, &projects)
+                {
+                    if let Err(e) = project_svc.assign_session(sid, project.id).await {
+                        tracing::warn!(error = %e, "failed to assign session to project");
+                    }
+                    if project.repo_remote.is_none()
+                        && let Some(ref remote) = identity.remote
+                        && let Err(e) = project_svc
+                            .set_project_repo_remote(project.id, remote)
+                            .await
                     {
-                        if let Err(e) = project_svc.assign_session(sid, project.id).await {
-                            tracing::warn!(error = %e, "failed to assign session to project");
-                        }
-                        if project.repo_remote.is_none()
-                            && let Some(ref remote) = identity.remote
-                            && let Err(e) = project_svc
-                                .set_project_repo_remote(project.id, remote)
-                                .await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "failed to adopt repo remote for project '{}'",
-                                project.name
-                            );
-                        }
-                        tracing::info!(
-                            "Auto-assigned session {} to project '{}'",
-                            sid,
+                        tracing::warn!(
+                            error = %e,
+                            "failed to adopt repo remote for project '{}'",
                             project.name
                         );
-                        return Some(project.name.clone());
                     }
-                    None
-                })
-            });
+                    tracing::info!(
+                        "Auto-assigned session {} to project '{}'",
+                        sid,
+                        project.name
+                    );
+                    return Some(project.name.clone());
+                }
+                None
+            }
+            .await;
         }
 
         if let Some(ref name) = assigned_project {

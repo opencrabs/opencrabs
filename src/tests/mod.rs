@@ -1417,3 +1417,5 @@ pub mod session_switch_transcript_test;
 
 pub mod agent_config_off_stack_2661_test;
 pub mod gui_layout_boot_test;
+
+pub mod tool_runtime_shape_2975_test;
