@@ -6072,6 +6072,14 @@ pub struct ViewHooks {
     /// transcript needs it to know whether a row running past its box is a
     /// frame to correct or a place the reader chose to be.
     pub following: bool,
+    /// Rows the caller wants under the last turn (#3139).
+    ///
+    /// The strips above the composer used to be siblings of the scroll
+    /// container, so each one took its height from the conversation and none of
+    /// them could be scrolled away. A row handed over here is a row of the
+    /// conversation: it scrolls with the turns and the reader keeps the height.
+    /// The order is the caller's, first handed over first drawn.
+    pub trailing: Vec<AnyElement>,
 }
 
 /// The callers measure the transcript's outer box. Its `.px_2()` spends half
@@ -6235,6 +6243,24 @@ pub fn row_reach(scroll: &ScrollHandle) -> RowReach {
     }
 }
 
+/// Appends the caller's trailing rows inside the transcript's own scroll
+/// (#3139).
+///
+/// The strips above the composer used to be siblings of the scroll container,
+/// so each one took its height from the conversation and none of them could be
+/// scrolled away. A row appended here is a row of the conversation: it moves
+/// with the turns and gives the reader their height back.
+///
+/// The column has already spent half a rem of gutter on each side, so the
+/// wrapper adds no inset of its own and a card handed in lands on the same
+/// column the messages do. `flex_none` keeps a tall card tall: a plan with eight
+/// tasks scrolls rather than being squeezed into what is left of the box.
+fn with_trailing(col: Stateful<Div>, trailing: Vec<AnyElement>) -> Stateful<Div> {
+    trailing.into_iter().fold(col, |col, row| {
+        col.child(div().flex_none().w_full().min_w_0().child(row))
+    })
+}
+
 // A render entry point, so its arguments are the frame it draws rather than a
 // bundle a caller could assemble differently (#2972). Same shape as the other
 // render fns this tree already allows.
@@ -6277,6 +6303,7 @@ pub fn view(
         copied,
         following,
         voice_pending,
+        trailing,
     } = hooks;
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
@@ -6378,7 +6405,7 @@ pub fn view(
                 .text_color(rgb(palette::current().text_muted))
                 .child("Select a session to read its transcript"),
         );
-        return col;
+        return with_trailing(col, trailing);
     }
     // A read that failed must not erase a conversation the window already
     // holds (#2981). The error used to replace the whole transcript with one
@@ -6396,7 +6423,7 @@ pub fn view(
                 .text_color(rgb(palette::current().text_muted))
                 .child(err.clone()),
         );
-        return col;
+        return with_trailing(col, trailing);
     }
     if state.turns.is_empty() && live.is_empty() {
         col = col.child(
@@ -6405,7 +6432,7 @@ pub fn view(
                 .text_color(rgb(palette::current().text_muted))
                 .child("No messages in this session"),
         );
-        return col;
+        return with_trailing(col, trailing);
     }
 
     // The same notice, above the rows that are still there. It is the reason
@@ -6740,7 +6767,7 @@ pub fn view(
             on_out.release(window, app)
         });
     }
-    col
+    with_trailing(col, trailing)
 }
 
 /// The owner's test feedback, pinned as logic: a stored assistant row with a

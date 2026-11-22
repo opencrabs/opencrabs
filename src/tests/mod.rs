@@ -656,6 +656,7 @@ pub mod test_stall_watchdog_test;
 pub mod timeout_resolution_test;
 pub mod tool_search_child_registry_test;
 pub mod tools_md_regression_test;
+pub mod transcript_trailing_3139_test;
 pub mod tui_panes_fresh_test;
 pub mod tui_themes_shortcut_test;
 pub mod ui_core_model_selector_test;
