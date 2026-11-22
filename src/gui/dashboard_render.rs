@@ -60,8 +60,10 @@ impl Render for Dashboard {
                 FocusTarget::Composer => {
                     // The keyboard follows the pane, not the window (#2610):
                     // a rotated caret that left focus on the chat leaf typed
-                    // into a field the split was not drawing.
-                    let composer = self.composer_entity(cx);
+                    // into a field the split was not drawing. And it follows
+                    // the crab: while a remote is open the field drawn is the
+                    // remote's (#3133).
+                    let composer = self.keyboard_field(cx);
                     let handle = composer.read(cx).focus_handle.clone();
                     // `before` is true when gpui turned the request into a
                     // no-op, because it returns early on the handle that is
@@ -92,7 +94,7 @@ impl Render for Dashboard {
         // composer. The transition above cannot see that, so the drift is read
         // off the window instead and repaired before the user types (#2741).
         if owner == KeyboardOwner::Composer {
-            let composer = self.composer_entity(cx);
+            let composer = self.keyboard_field(cx);
             let drifted = !composer.read(cx).focus_handle.is_focused(window)
                 && window.focused(cx).is_none_or(|handle| handle == self.focus);
             if drifted {
@@ -108,8 +110,9 @@ impl Render for Dashboard {
             // (#2767): an overlay or a screen took the keys while the composer
             // kept the caret, so everything typed into the prompt also landed
             // in the message field and Enter submitted it. A field the overlay
-            // owns is not this drift; only the composer is.
-            let composer = self.composer_entity(cx);
+            // owns is not this drift; only the composer is, and with a remote
+            // open the field on screen is the remote's (#3133).
+            let composer = self.keyboard_field(cx);
             let leaked = composer.read(cx).focus_handle.is_focused(window);
             if leaked {
                 window.focus(&self.focus);

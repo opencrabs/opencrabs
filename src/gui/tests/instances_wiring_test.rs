@@ -829,3 +829,33 @@ fn the_remote_composer_is_the_chats_own_editor() {
         "the button and Enter must go through the same submit: {send}"
     );
 }
+
+#[test]
+fn the_caret_goes_to_the_field_the_frame_draws() {
+    // The remote composer became the chat's own editor (#3133), but the frame
+    // kept putting the caret in the local one: the reconciler focuses
+    // `composer_entity` every frame and repairs the drift the same way, so the
+    // remote field could be drawn, clicked, and never typed into, and a
+    // keystroke that did land would have gone to this machine's own agent.
+    let panes = include_str!("../dashboard_panes.rs");
+    let field = fn_body(panes, "pub(crate) fn keyboard_field(")
+        .expect("the field the keyboard belongs to is resolved in one place");
+    assert!(
+        field.contains("instance_remote_open()") && field.contains("remote_editor"),
+        "with a crab open the field on screen is the remote's: {field}"
+    );
+
+    let render = include_str!("../dashboard_render.rs");
+    let arm = render
+        .split("FocusTarget::Composer =>")
+        .nth(1)
+        .expect("the composer arm is where the caret is put in");
+    let arm = arm
+        .split("FocusTarget::Root =>")
+        .next()
+        .expect("the arm ends where the root's begins");
+    assert!(
+        arm.contains("self.keyboard_field(cx)"),
+        "the caret must follow the field that is drawn: {arm}"
+    );
+}

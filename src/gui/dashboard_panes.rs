@@ -319,6 +319,22 @@ impl Dashboard {
         }
     }
 
+    /// The field the keyboard belongs to while the chat is on screen (#3133).
+    ///
+    /// Normally the focused pane's composer. While a remote crab is open the
+    /// only field drawn is the remote's, so the caret has to go there: leaving
+    /// it in the local composer types this window's words into a field nobody
+    /// can see, and Enter would send them to this machine's own agent instead
+    /// of to the crab on screen. That is exactly what the remote panel's old
+    /// hand-written keyboard was patching around, and it is why the field has
+    /// to be the one the frame puts focus in.
+    pub(crate) fn keyboard_field(&self, cx: &App) -> Entity<editor::Editor> {
+        if self.screen == Screen::Chat && self.instance_remote_open() {
+            return self.remote_editor.clone();
+        }
+        self.composer_entity(cx)
+    }
+
     /// Name the element the window gives the keys to, for the caret receipt
     /// (#2741). Three answers: the composer that is drawn, the window root
     /// that owns overlays and non-chat screens, or a field the dashboard does
@@ -327,7 +343,7 @@ impl Dashboard {
         let Some(handle) = window.focused(cx) else {
             return "none";
         };
-        if handle == self.composer_entity(cx).read(cx).focus_handle {
+        if handle == self.keyboard_field(cx).read(cx).focus_handle {
             "composer"
         } else if handle == self.focus {
             "root"

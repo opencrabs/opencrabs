@@ -781,7 +781,11 @@ impl Dashboard {
     /// being built, after that press is done. `refocus_screen` stays the one
     /// decision point, so the two can never disagree about who owns the keys.
     pub(crate) fn request_composer_caret(&mut self, cx: &mut Context<Self>) {
-        let composer = self.composer_entity(cx);
+        // The field on screen, which with a remote open is the remote's
+        // (#3133): asking the local composer to re-assert a caret nobody can
+        // see is what the remote panel's hand-written keyboard was working
+        // around.
+        let composer = self.keyboard_field(cx);
         composer.update(cx, |editor, cx| {
             editor.focus_pending = true;
             cx.notify();
