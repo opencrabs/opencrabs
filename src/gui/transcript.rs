@@ -5097,15 +5097,17 @@ impl PendingClick {
         )
     }
 
-    /// The word the pointer was on, for the log line a miss writes. Clipped by
+    /// What the resolver tried at this offset, for the log line a miss writes.
+    ///
+    /// The whole token the pointer sat inside, not the text trailing it: a
+    /// click in the middle of `brain-audit-2026-11-17.md` logged
+    /// `26-11-17.md`, a string no resolver ever considered (#3085). Clipped by
     /// characters, never by bytes (#2271).
-    fn word(&self) -> String {
-        let start = self.offset.min(self.text.len());
-        let tail = self.text.get(start..).unwrap_or_default();
-        tail.chars()
-            .take_while(|c| !c.is_whitespace())
-            .take(40)
-            .collect()
+    fn token(&self) -> String {
+        match links::token_at_byte(&self.text, self.offset) {
+            Some(token) => token.chars().take(60).collect(),
+            None => "<no token>".to_string(),
+        }
     }
 }
 
@@ -5244,10 +5246,12 @@ impl CopyDrag {
         let Some(target) = pending.target() else {
             // A click that found nothing still gets a line, so "I clicked and
             // nothing happened" can be told apart from a click that never
-            // arrived instead of guessed at.
+            // arrived instead of guessed at. The line names the token the
+            // resolver tried and where the pointer sat (#3085).
             crate::logging::info(&format!(
-                "transcript link: nothing to open at {:?}",
-                pending.word()
+                "transcript link: nothing to open at {:?} (offset {})",
+                pending.token(),
+                pending.offset
             ));
             return false;
         };

@@ -227,6 +227,16 @@ fn token_at(line: &str, col: usize) -> Option<&str> {
     line.get(start..end)
 }
 
+/// The token a click at `byte` sits inside, expanded both ways along the text.
+///
+/// This is the same span [`target_at_roots`] tries first, so a miss can name
+/// what the resolver actually looked at. The pointer's own tail is not that
+/// span: a click in the middle of `brain-audit-2026-11-17.md` used to log
+/// `26-11-17.md`, a string no resolver ever considered (#3085).
+pub fn token_at_byte(text: &str, byte: usize) -> Option<&str> {
+    token_at(text, char_col(text, byte))
+}
+
 /// How many adjacent words one click may join when it names a file that holds
 /// a space (#2846). Six covers the shape the agent writes most: a generated
 /// artifact whose name is separated from its timestamp by one space.

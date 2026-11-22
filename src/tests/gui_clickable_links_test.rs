@@ -10,7 +10,7 @@
 
 use crate::ui_core::links::{
     ClickTarget, target_at_byte_with, target_at_roots, target_at_with, target_for_click,
-    target_for_click_roots, target_for_click_with,
+    target_for_click_roots, target_for_click_with, token_at_byte,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -503,5 +503,74 @@ fn both_surfaces_pass_the_session_directory() {
     assert!(
         terminal.contains("links::target_at_roots"),
         "the terminal must resolve through the roots form too"
+    );
+}
+
+/// A click miss logs the token the resolver tried, not the text trailing the
+/// pointer (#3085).
+///
+/// `PendingClick::word` started at the click offset and ran to the next break,
+/// so a press in the middle of `brain-audit-2026-11-17.md` logged
+/// `26-11-17.md`, a string that never existed as a candidate. The log now asks
+/// the resolver's own span walker.
+#[test]
+fn a_miss_names_the_whole_token_the_pointer_sat_inside() {
+    let text = "see brain-audit-2026-11-17.md for the details";
+    let middle = text.find("2026").expect("fixture year") + 2;
+
+    assert_eq!(
+        token_at_byte(text, middle),
+        Some("brain-audit-2026-11-17.md"),
+        "the logged name must be the token, not the tail from the pointer"
+    );
+    assert_eq!(
+        token_at_byte(text, text.find("brain").expect("fixture name")),
+        Some("brain-audit-2026-11-17.md"),
+        "a press on the first character is the same token"
+    );
+    assert_eq!(
+        token_at_byte(text, text.len()),
+        None,
+        "a press past the end names nothing rather than inventing a token"
+    );
+    assert_eq!(
+        token_at_byte("a row   with  gaps", 7),
+        None,
+        "a press on whitespace names nothing"
+    );
+}
+
+/// The byte offset a shaped layout reports can land inside a multibyte
+/// character; the log must not slice it apart (#2271).
+#[test]
+fn the_miss_log_survives_a_multibyte_offset() {
+    let text = "the report is café-notes.md today";
+    let token = "café-notes.md";
+    let start = text.find(token).expect("fixture token");
+    let inside_e_acute = start + "caf".len() + 1;
+
+    assert_eq!(
+        token_at_byte(text, inside_e_acute),
+        Some(token),
+        "an offset inside a character rounds down to that character's start"
+    );
+}
+
+/// The window's miss arm writes the token and the offset, and never calls the
+/// old tail-only helper (#3085).
+#[test]
+fn the_miss_line_reports_the_token_and_the_offset() {
+    let open = flat(TRANSCRIPT);
+    assert!(
+        open.contains("transcript link: nothing to open at {:?} (offset {})"),
+        "the miss line must carry the offset so a log can be matched to a row"
+    );
+    assert!(
+        open.contains("pending.token()"),
+        "the miss line must name what the resolver tried"
+    );
+    assert!(
+        !open.contains("pending.word()") && !open.contains("fnword(&self)"),
+        "the tail-only helper must be gone, not left beside the fix"
     );
 }
