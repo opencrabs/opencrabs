@@ -1124,6 +1124,20 @@ impl Dashboard {
             return div().into_any_element();
         };
         let entry = self.instances.get(&remote.host_id);
+        // Re-arm the follow on every pass, the way a split leaf does in
+        // `PaneView::snap_if_following`. One snap at the moment the state is
+        // installed is not enough: the layout that follows can leave the newest
+        // row a few pixels past the box, and the reader then sits one row short
+        // of the bottom for the rest of the conversation. Only the reader's own
+        // scroll up releases it, so a reader parked in history keeps their place
+        // (#2698).
+        if let Some(t) = self.remote_transcript.as_mut() {
+            let offset = scrolled_from_top(f32::from(t.scroll.offset().y));
+            let max = f32::from(t.scroll.max_offset().height);
+            if t.follow.update(offset, max) {
+                t.scroll.scroll_to_bottom();
+            }
+        }
         let transcript = self.remote_transcript.as_ref();
         let notice = match (&remote.state, transcript) {
             (RemoteState::Loading, _) => Some(SharedString::from("a falar com o crab…")),
@@ -1147,6 +1161,7 @@ impl Dashboard {
             notice,
             sending: transcript.is_some_and(|t| t.sending),
             running: transcript.is_some_and(|t| t.following.is_some()),
+            following: transcript.is_some_and(|t| t.follow.is_following()),
             copied: self.copied_row(),
         };
         // One fold click per turn anchor, minted here because only this `cx`

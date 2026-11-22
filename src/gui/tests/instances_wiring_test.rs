@@ -749,3 +749,31 @@ fn the_remote_panel_sits_on_the_chats_own_measure() {
         "the render passes the chat's own measure and centring to the remote"
     );
 }
+
+#[test]
+fn a_remote_transcript_follows_its_own_bottom() {
+    // The owner read a remote answer and the panel never moved to it. Two
+    // things kept it still: the painter had been told the transcript follows
+    // nothing, which turns off its own offset correction, and the only snap was
+    // the one taken before the layout had measured the rows.
+    let panel = include_str!("../remote_panel.rs");
+    assert!(
+        panel.contains("following: bool,"),
+        "the frame has to carry the reader's place, or the painter cannot use it"
+    );
+    assert!(
+        panel.contains("read_only_hooks(copy, frame.copied, frame.following)"),
+        "and it has to reach the hooks that the transcript reads"
+    );
+    assert!(
+        !panel.contains("following: false,"),
+        "a hardcoded false is the bug this test exists for"
+    );
+    let source = include_str!("../dashboard_instances.rs");
+    let body = fn_body(source, "pub(crate) fn remote_panel_element(")
+        .expect("the panel is the only place that frames a remote");
+    assert!(
+        body.contains("follow.update(") && body.contains("scroll_to_bottom()"),
+        "the follow is re-armed on every pass, the way a split leaf re-arms it"
+    );
+}

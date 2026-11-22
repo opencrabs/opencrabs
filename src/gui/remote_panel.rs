@@ -129,6 +129,13 @@ pub(crate) struct RemotePanelFrame {
     /// this is the only sign of life between the send and the answer: without
     /// it the panel looked dead for however long the other crab took.
     pub(crate) running: bool,
+    /// Whether this transcript is keeping its own bottom. The painter reads it
+    /// for two things: the offset correction that keeps the newest row from
+    /// being cut by the box's edge, and nothing else. It was hardcoded to
+    /// `false` for a remote, which is exactly why a remote answer landed below
+    /// the fold and stayed there: the panel had no auto-scroll because the
+    /// transcript had been told it was not following anything.
+    pub(crate) following: bool,
     /// The row whose copy just landed, so its icon shows the check and then
     /// loses it. This is the window's own mark, which is what makes a remote
     /// answer acknowledge a copy exactly as a local one does.
@@ -148,6 +155,7 @@ pub(crate) struct RemotePanelFrame {
 fn read_only_hooks(
     copy: HashMap<uuid::Uuid, transcript::ClickHandler>,
     copied: Option<uuid::Uuid>,
+    following: bool,
 ) -> transcript::ViewHooks {
     transcript::ViewHooks {
         attachments: HashMap::new(),
@@ -171,9 +179,12 @@ fn read_only_hooks(
         copied,
         edit_row: None,
         voice_pending: false,
-        // A remote transcript follows nothing: no live turn lands under it, so
-        // there is no bottom to chase.
-        following: false,
+        // The reader's place on the transcript's own rule (#2685). A remote
+        // follows its bottom exactly like a local one: the answer to a send
+        // lands at the end of the conversation, which is where the reader is
+        // looking. Claiming `false` here left every remote answer below the
+        // fold, and the panel read as one that had stopped updating.
+        following,
     }
 }
 
@@ -292,7 +303,7 @@ pub(crate) fn view(
             measure,
             rem_size,
             handlers,
-            read_only_hooks(copy, frame.copied),
+            read_only_hooks(copy, frame.copied, frame.following),
         )
         .into_any_element(),
         None => {
