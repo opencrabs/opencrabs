@@ -167,8 +167,28 @@ fn pane_above_box() -> &'static str {
 
 #[test]
 fn a_split_pane_hands_its_rows_over_too() {
+    // The pane builds its column and its trailing rows in one pass: the offers
+    // and the plan card are read from the window the pane belongs to, so they
+    // cannot be built from the row list alone. The column hands them back with
+    // itself, and the render hands them to the transcript. A test that only
+    // looked for the hook's name passed while the pane named a value it never
+    // built, so the shape of the hand-back is what is pinned here.
     assert!(
-        PANE_VIEW.contains("trailing: pane_rows,"),
+        PANE_VIEW.contains(
+            "fn chrome(&mut self, window: &Window, cx: &mut Context<Self>) -> (Div, Vec<AnyElement>)"
+        ),
+        "the column hands the trailing rows back with itself"
+    );
+    assert!(
+        PANE_VIEW.contains("(col.child(composer), pane_rows)"),
+        "which is where the pane's rows leave it"
+    );
+    assert!(
+        PANE_VIEW.contains("let (chrome_col, trailing) = self.chrome(window, cx);"),
+        "the pane builds them before the transcript that draws them"
+    );
+    assert!(
+        PANE_VIEW.contains("\n                trailing,\n"),
         "the pane passes its rows to its own transcript"
     );
     let handed: Vec<&str> = PANE_VIEW.split("pane_rows.push(").skip(1).collect();

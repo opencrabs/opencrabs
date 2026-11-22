@@ -204,7 +204,11 @@ impl PaneView {
     /// reads it through its weak handle and mints its listeners against the
     /// same handle. Nothing here is built by the walk and handed over: the
     /// column, its ids and its handlers all belong to the leaf.
-    fn chrome(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// The column also hands back the rows that belong under the pane's last
+    /// turn (#3139). They are built here because the pane's offers and its plan
+    /// are read from the window that owns them, and the caller draws them
+    /// inside the transcript's own scroll.
+    fn chrome(&mut self, window: &Window, cx: &mut Context<Self>) -> (Div, Vec<AnyElement>) {
         // The strips share one box that may shrink and clip (#2980), and the
         // composer is appended after it so the input is never the row that
         // gets cut. `flex_none` on the column as a whole is what let the
@@ -232,7 +236,7 @@ impl PaneView {
         // were one name, and the shadowing handed the entity to a call that
         // wanted the frame.
         let Some(owner) = self.window.upgrade() else {
-            return col;
+            return (col, Vec::new());
         };
         let session = self.session;
         // The window's own answers, read once, so its state is not borrowed
@@ -394,7 +398,7 @@ impl PaneView {
         // is why nothing here pads the composer's top: a second gutter on the
         // field would make the two surfaces disagree about the step between
         // them the way the old full-bleed cards did.
-        col.child(composer)
+        (col.child(composer), pane_rows)
     }
 
     /// One tap on the approval card (#2755): the pane sends the same command
@@ -725,6 +729,10 @@ impl Render for PaneView {
             .into_iter()
             .collect();
         self.copy_drag.set_roots(click_roots);
+        // The column comes first now: it is what builds the rows that follow
+        // the pane's last turn (#3139), and the transcript draws them under
+        // that turn.
+        let (chrome_col, trailing) = self.chrome(window, cx);
         let body = transcript::view(
             &self.transcript,
             &self.scroll,
@@ -786,7 +794,7 @@ impl Render for PaneView {
                 },
                 // The offers and the live plan card, drawn under the pane's
                 // last turn inside its own scroll (#3139).
-                trailing: pane_rows,
+                trailing,
                 ..Default::default()
             },
         )
@@ -796,7 +804,7 @@ impl Render for PaneView {
         // redraws itself must not lose the strip the window built last frame
         // (#2686, #2687).
         let topics = owner.update(cx, |win, cx| win.pane_topics(session, cx));
-        let chrome = self.chrome(window, cx).into_any_element();
+        let chrome = chrome_col.into_any_element();
         // The frame fills a box of its own, and that box is what the cached
         // view path lays out (`pane_root`, #2805).
         pane_root()
