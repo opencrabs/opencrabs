@@ -78,10 +78,11 @@ fn window_sources() -> Vec<PathBuf> {
 /// not handled, which only ever hides text: the checks below look for tokens,
 /// and truncating can never invent one.
 fn code_of(line: &str) -> &str {
-    match line.find("//") {
-        Some(at) => &line[..at],
-        None => line,
-    }
+    // `split_once` rather than slicing at `find`'s byte index: the index is
+    // always on a boundary because the needle is ASCII, but a byte slice is a
+    // panic waiting for the next edit and the ratchet in
+    // scripts/check-byte-slice-ratchet.py counts every one of them (#2973).
+    line.split_once("//").map_or(line, |(code, _)| code)
 }
 
 /// The file up to the first `#[cfg(test)]` marker. Test code is exempt: the
