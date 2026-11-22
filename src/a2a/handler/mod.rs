@@ -18,5 +18,9 @@ pub mod stream;
 pub(crate) mod tasks;
 
 pub use dispatch::dispatch;
+// Only the handler tests drive the send path directly; dispatch reaches it as
+// `send::handle_send_message`. Re-exporting it unconditionally is an unused
+// import in the plain library build, which `-D warnings` refuses (#2874).
+#[cfg(test)]
 pub(crate) use send::handle_send_message;
 pub use stores::{CancelStore, TaskStore, new_cancel_store, new_task_store};

@@ -209,8 +209,14 @@ pub async fn claim_idempotency_key(pool: &Pool, key: &str, task_id: &str) -> Opt
         Err(e) => Err(anyhow::anyhow!("Failed to get connection: {}", e)),
     };
 
+    // `interact` hands back its own `Result` inside the outer one: the outer
+    // Err is "the pool never gave us a connection", the inner is the query.
     match result {
-        Ok(found) => found,
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => {
+            tracing::warn!("A2A persistence: idempotency claim query failed for {key:?}: {e}");
+            None
+        }
         Err(e) => {
             tracing::warn!("A2A persistence: idempotency claim failed for {key:?}: {e}");
             None
@@ -241,8 +247,12 @@ pub async fn repoint_idempotency_key(pool: &Pool, key: &str, task_id: &str) {
         Err(e) => Err(anyhow::anyhow!("Failed to get connection: {}", e)),
     };
 
-    if let Err(e) = result {
-        tracing::warn!("A2A persistence: idempotency repoint failed for {key:?}: {e}");
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!("A2A persistence: idempotency repoint query failed for {key:?}: {e}");
+        }
+        Err(e) => tracing::warn!("A2A persistence: idempotency repoint failed for {key:?}: {e}"),
     }
 }
 
@@ -268,14 +278,18 @@ pub async fn load_task(pool: &Pool, task_id: &str) -> Option<Task> {
     };
 
     match result {
-        Ok(Some(json)) => match serde_json::from_str::<Task>(&json) {
+        Ok(Ok(Some(json))) => match serde_json::from_str::<Task>(&json) {
             Ok(task) => Some(task),
             Err(e) => {
                 tracing::warn!("A2A persistence: task {task_id} unreadable: {e}");
                 None
             }
         },
-        Ok(None) => None,
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("A2A persistence: load task {task_id} query failed: {e}");
+            None
+        }
         Err(e) => {
             tracing::warn!("A2A persistence: load task {task_id} failed: {e}");
             None
