@@ -2310,6 +2310,17 @@ curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/la
 curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo cp -R "OpenCrabs Desktop.app" /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
 ```
 
+> **macOS first launch: the bundles are unsigned.** A copy downloaded with a browser carries the quarantine flag, so the first launch fails with "'OpenCrabs Desktop' is damaged and can't be opened. You should move it to the Bin." That dialog offers only Cancel and Move to Bin, with no Open Anyway button. Two ways past it:
+>
+> - Install with the one-line installer instead: `curl -fsSL https://opencrabs.com/install.sh | bash -s -- --client desktop`. Files fetched by curl carry no quarantine flag, so the app opens straight away.
+> - Keep the browser download, move the app into `/Applications`, then clear the flag once:
+
+```bash
+xattr -cr "/Applications/OpenCrabs Desktop.app"
+```
+
+Double-click the app after that and it opens.
+
 ```powershell
 # Windows (PowerShell): installs to %LOCALAPPDATA%\OpenCrabs\bin and adds it to your user PATH
 iwr -useb https://opencrabs.com/install.ps1 | iex
