@@ -259,14 +259,20 @@ fn the_approval_card_is_drawn_where_the_taps_can_be_pressed() {
         panes.contains("editing_view(Some(&actions), window)"),
         "a split pane draws the waiting plan, not just the running one"
     );
-    // The unsplit arm is the `else` of the split gate (#3110 moved the
-    // check from a `!window_is_split()` wrapper to the branch itself), so
-    // the slice starts at the gate and ends where the queue is read.
+    // The unsplit card moved out of the strip block and into the
+    // conversation's trailing rows (#3139): the hint, the offers and the
+    // plan card are rows under the last turn now, and a split stands them
+    // down because its panes draw their own (#3145). The slice starts at
+    // that function and ends where the next one's doc begins, so the card
+    // the unsplit window builds is inside it.
     let unsplit = main
-        .split("if self.window_is_split() {")
+        .split("fn chat_trailing(")
         .nth(1)
-        .and_then(|rest| rest.split("let waiting = self.queued_for_strip();").next())
-        .expect("the unsplit strip block");
+        .and_then(|rest| {
+            rest.split("/// One card, on the bubbles' own column")
+                .next()
+        })
+        .expect("the trailing rows block");
     assert!(
         unsplit.contains("editing_view(actions.as_ref(), window)"),
         "the unsplit window draws the waiting plan"
