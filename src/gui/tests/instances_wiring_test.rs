@@ -620,8 +620,12 @@ fn the_card_copies_the_whole_pairing_in_one_click() {
     // solve by hand: the paste target wants the whole block, so the button has
     // to hand over the whole block.
     let source = include_str!("../dashboard_instances.rs");
-    let body = fn_body(source, "pub(crate) fn instance_share_tunnel")
-        .expect("instance_share_tunnel is the card that shows the pairing");
+    // The render function, not `instance_share_tunnel`: the latter only starts
+    // the cloudflared process, and anchoring there made this test fail on the
+    // first CI run against code that was already correct (2026-11-22). The
+    // control lives wherever the card is drawn.
+    let body = fn_body(source, "pub(crate) fn instance_share_modal")
+        .expect("instance_share_modal is the card that draws the pairing");
     assert!(
         body.contains("instance-share-copy-all"),
         "the card needs a control whose whole job is the one-click copy"
