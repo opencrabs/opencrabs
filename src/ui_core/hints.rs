@@ -64,6 +64,16 @@ pub const COMPACTION_TIP_AT: f64 = 55.0;
 /// that keep earning their line.
 pub const SEEKER_TIP_TURNS: usize = 3;
 
+/// Exchanges after which the rail is worth naming its chord.
+///
+/// Later than the Seeker because the rail has two click doors of its own: a
+/// reader who never learns `ctrl+s` can still open it with the sidebar icon in
+/// the rail header or the button on the collapsed rail. So this is not a door
+/// being opened, it is the keyboard path for someone who already has the habit
+/// of reaching for the mouse. Early enough to matter, late enough that the
+/// Seeker introduction has had its turns (#3143).
+pub const SIDEBAR_TIP_TURNS: usize = 5;
+
 /// Exchanges after which the per-session isolation tip is worth a line.
 ///
 /// The same dozen as [`LONG_SESSION_TURNS`]: a reader with that much history in
@@ -293,6 +303,21 @@ pub fn candidates(state: &HintState) -> Vec<Hint> {
         hints.push(Hint {
             id: "seeker",
             text: "meet the Seeker · alt+space finds anything, so you can stop pretending you knew where it was"
+                .to_string(),
+            command: "",
+        });
+    }
+
+    // The chord the footer used to print permanently (#3143). Both surfaces
+    // answer it: `help_keys.rs` declares ctrl+s as List sessions, and the
+    // terminal's `is_list_sessions` accepts it beside its ctrl+l alias, so the
+    // line is honest on either frontend and needs no support filter. The rail
+    // has two click doors of its own, which is why this is advice and not a
+    // warning: a reader who never presses it still finds the list.
+    if state.turns >= SIDEBAR_TIP_TURNS {
+        hints.push(Hint {
+            id: "sidebar",
+            text: "ctrl+s opens the sessions rail · every chat you started is in there, including the ones you swore you would finish"
                 .to_string(),
             command: "",
         });

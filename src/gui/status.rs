@@ -8,21 +8,16 @@
 //! functions and their comments are unchanged, only the module boundary is
 //! new.
 
-/// The footer's identity line: who is answering, from where, on what branch,
-/// and how fast this turn is streaming. Every field is read live; a field
-/// with no value prints a dash instead of a guess.
-pub(crate) fn status_identity(
-    provider: &str,
-    model: &str,
-    cwd: &str,
-    branch: &str,
-    tps: f32,
-) -> String {
-    if tps > 0.0 {
-        format!("{provider} · {model} · {cwd} · {branch} · {tps:.1} tok/s")
-    } else {
-        format!("{provider} · {model} · {cwd} · {branch}")
-    }
+/// The footer's identity line: who is answering, from where, and on what
+/// branch. Every field is read live; a field with no value prints a dash
+/// instead of a guess.
+///
+/// No streaming rate here (#3143). tok/s is a per-turn measurement, not an
+/// identity: it changes several times a second while an answer is written and
+/// says nothing about who is answering or from where, so it spent the widest
+/// field on the row on a number that is stale the moment the turn ends.
+pub(crate) fn status_identity(provider: &str, model: &str, cwd: &str, branch: &str) -> String {
+    format!("{provider} · {model} · {cwd} · {branch}")
 }
 
 /// A path with the home directory collapsed to `~`, the way a shell prompt

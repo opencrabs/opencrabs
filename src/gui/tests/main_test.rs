@@ -2998,31 +2998,67 @@ fn tui_chords_bind_the_window_like_the_terminal() {
 #[test]
 fn chat_footer_points_at_the_seeker() {
     // The footer stopped being a hand-maintained keymap (#2321). It carries
-    // live state (provider, model, directory, branch, tokens per second,
-    // ctx budget), the door to the Seeker card, and the sidebar chord
-    // (#2877): ctrl+s opens and closes the rail, and a user who does not
-    // know the chord had no on-screen way to learn it. The rest of the
-    // retired strip taught keys the window no longer binds and went stale
-    // the moment a binding moved, so it stays banned below.
+    // live state (provider, model, directory, branch, ctx budget) and one door:
+    // the Seeker pill. The chords that used to sit beside it (#2877, #2894) are
+    // gone from THIS row (#3143): the pill already names alt+space and is
+    // clickable, ctrl+s has its own hint-line tip, and the rail has two click
+    // doors of its own, so the labels spent the identity string's width on
+    // advice the hint line gives for free and the reader can dismiss.
+    //
+    // The Usage and Files screens keep both labels. Neither has a Seeker pill
+    // or a rail of its own to click, so the sentence is the only thing naming
+    // either chord there. That is why the counts below are 2 and not 3 or 0.
+    // The rest of the retired strip taught keys the window no longer binds and
+    // went stale the moment a binding moved, so it stays banned.
     let src = DASHBOARD;
-    // The chat footer prints the default chord beside that door (#2894),
-    // so the static sentence now stands on the two screens that have no
-    // chord of their own to print.
-    let door = ["\"alt+space · ", "seek help\""].concat();
+    // The needles are split so the scan cannot count this test's own source.
+    let seeker_door = ["\"alt+space · ", "seek help\""].concat();
     assert_eq!(
-        src.matches(&door).count(),
+        src.matches(&seeker_door).count(),
         2,
-        "usage and files carry the static Seeker door"
+        "usage and files carry the static Seeker sentence"
+    );
+    let sidebar_label = ["\"ctrl+s · ", "sidebar\""].concat();
+    assert_eq!(
+        src.matches(&sidebar_label).count(),
+        2,
+        "usage and files carry the sidebar chord; the chat dock does not"
+    );
+    // And the chat dock's row really is the one without it, rather than this
+    // count happening to match some other pair: slice from the pill to the
+    // identity string, which is the whole row between them.
+    let dock_start = src
+        .find("id(\"seeker-hint\")")
+        .expect("the chat footer still carries the Seeker pill");
+    let dock_tail = src.get(dock_start..).expect("a find lands on a char boundary");
+    let dock_end = dock_tail
+        .find("SharedString::from(identity)")
+        .expect("the identity string closes the row");
+    let dock = dock_tail
+        .get(..dock_end)
+        .expect("a find lands on a char boundary");
+    assert!(
+        !dock.contains(&sidebar_label),
+        "the chat dock prints no chord label beside the Seeker pill"
     );
     assert!(
-        src.contains("palette::seeker_chord_label()"),
+        dock.contains(".on_click(cx.listener("),
+        "the one door on the row stays: the Seeker pill is a click target"
+    );
+    assert!(
+        dock.contains("palette::seeker_chord_label()"),
         "the chat door names the chord the window answers"
     );
-    let sidebar = ["\"ctrl+s · ", "sidebar\""].concat();
-    assert_eq!(
-        src.matches(&sidebar).count(),
-        3,
-        "chat, usage and files each advertise the sidebar's real chord"
+    // And ctrl+s is taught by the line built for teaching one thing at a time,
+    // where the reader can hide it for a week.
+    let engine = include_str!("../../ui_core/hints.rs");
+    assert!(
+        engine.contains("id: \"sidebar\"") && engine.contains("ctrl+s opens the sessions rail"),
+        "the sidebar chord is taught by the hint line, not the footer"
+    );
+    assert!(
+        engine.contains("alt+space finds anything"),
+        "the Seeker chord keeps its own tip"
     );
     assert!(
         !src.contains(&["back to ", "chat"].concat()),
@@ -3048,11 +3084,18 @@ fn chat_footer_points_at_the_seeker() {
             "the footer must not advertise {needle} any more"
         );
     }
-    // The identity line survives: it is live state, which the strip was
-    // not. It lives in `status.rs` now (#2817 follow-up), so the scan names
-    // that file. The ctx budget that used to sit beside it is gone on
-    // purpose (#2628): the tool block's own footer already prints it.
-    assert!(include_str!("../status.rs").contains("fn status_identity"));
+    // The identity line survives: it is live state, which the strip was not.
+    // It lives in `status.rs` now (#2817 follow-up), so the scan names that
+    // file. The ctx budget that used to sit beside it is gone on purpose
+    // (#2628): the tool block's own footer already prints it. The streaming
+    // rate is gone too (#3143): a number that changes several times a second
+    // is a measurement of the turn, not of who is answering.
+    let status = include_str!("../status.rs");
+    assert!(status.contains("fn status_identity"));
+    assert!(
+        !status.contains("tok/s"),
+        "the identity line carries no streaming rate"
+    );
 }
 
 /// The manager is born in ONE setter, and the bridge calls it. A second

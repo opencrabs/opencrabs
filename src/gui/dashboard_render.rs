@@ -723,13 +723,7 @@ impl Render for Dashboard {
                         let identity = format!(
                             "{} · {}",
                             self.session_title().unwrap_or_else(|| "chat".to_string()),
-                            status_identity(
-                                &provider,
-                                &model,
-                                &cwd,
-                                &branch,
-                                self.turn.live.tokens_per_sec(),
-                            )
+                            status_identity(&provider, &model, &cwd, &branch)
                         );
                         div()
                             .flex()
@@ -786,15 +780,15 @@ impl Render for Dashboard {
                                     ))
                                     .child("· seek"),
                             )
-                            .child(
-                                div()
-                                    // The pill's own 4, so the label lands on
-                                    // the row's 24 column (#3114).
-                                    .px(transcript::hover_pill_inset())
-                                    .text_xs()
-                                    .text_color(rgb(palette::current().text_muted))
-                                    .child("ctrl+s · sidebar"),
-                            )
+                            // No sidebar chord label on this row (#3143).
+                            // It carries live state and the one door that has no
+                            // other mouse path, the Seeker pill above. The chord
+                            // is taught by the hint line, and the rail already
+                            // has two click doors of its own, so a permanent
+                            // label here bought nothing and took its width from
+                            // the identity string, which truncates first. The
+                            // Usage and Files footers keep their labels: neither
+                            // has a Seeker pill or a rail of its own to click.
                             .child(
                                 div()
                                     .flex_1()

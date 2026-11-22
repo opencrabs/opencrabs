@@ -7,7 +7,8 @@
 //! that explains the machine after it already acted is worse than no line.
 
 use crate::ui_core::hints::{
-    COMPACTION_TIP_AT, CONTEXT_TIGHT, HintState, candidates, dismissible, task_line,
+    COMPACTION_TIP_AT, CONTEXT_TIGHT, HintState, SIDEBAR_TIP_TURNS, candidates, dismissible,
+    task_line,
 };
 
 /// The terminal's filter: it dispatches the whole shared table.
@@ -43,21 +44,29 @@ fn dismissing_a_tip_reveals_the_next_one() {
     let after = candidates(&state);
     assert_eq!(
         after.first().map(|hint| hint.id),
-        Some("isolated-sessions"),
+        Some("sidebar"),
         "the next rung takes the row"
     );
 
-    state.dismissed.push("isolated-sessions".to_string());
+    state.dismissed.push("sidebar".to_string());
     let later = candidates(&state);
     assert_eq!(
         later.first().map(|hint| hint.id),
+        Some("isolated-sessions"),
+        "and the one behind that"
+    );
+
+    state.dismissed.push("isolated-sessions".to_string());
+    let last = candidates(&state);
+    assert_eq!(
+        last.first().map(|hint| hint.id),
         Some("usage"),
         "and the one behind that"
     );
     assert!(
-        later
-            .iter()
-            .all(|hint| hint.id != "fresh-start" && hint.id != "isolated-sessions"),
+        last.iter().all(|hint| hint.id != "fresh-start"
+            && hint.id != "sidebar"
+            && hint.id != "isolated-sessions"),
         "a dismissed line does not come back inside its window"
     );
 }
@@ -70,7 +79,7 @@ fn a_functional_line_cannot_be_dismissed() {
     for id in ["offers", "rail", "rail-split", "context", "update"] {
         assert!(!dismissible(id), "{id} is not advice, so it stays");
     }
-    for id in ["seeker", "usage", "compaction", "fresh-start", "whisper"] {
+    for id in ["seeker", "sidebar", "usage", "compaction", "fresh-start", "whisper"] {
         assert!(dismissible(id), "{id} is advice, so it can be hidden");
     }
 }
@@ -142,6 +151,41 @@ fn the_seeker_tip_waits_for_the_first_exchange() {
     assert!(
         candidates(&settled).iter().all(|hint| hint.id != "seeker"),
         "later it is nagging, not an introduction"
+    );
+}
+
+#[test]
+fn the_rail_chord_is_taught_where_the_footer_stopped_printing_it() {
+    // #3143: the footer printed `ctrl+s · sidebar` permanently on three
+    // surfaces, spending the identity string's width on a chord. The hint line
+    // carries it now. It waits for the fifth exchange so the Seeker
+    // introduction gets its turns first, and it names the chord because a tip
+    // about a keyboard path that does not print the keys is a riddle.
+    let early = HintState {
+        turns: SIDEBAR_TIP_TURNS - 1,
+        ..HintState::default()
+    };
+    assert!(
+        candidates(&early).iter().all(|hint| hint.id != "sidebar"),
+        "the introduction goes first"
+    );
+
+    let ready = HintState {
+        turns: SIDEBAR_TIP_TURNS,
+        ..HintState::default()
+    };
+    let hint = candidates(&ready)
+        .into_iter()
+        .find(|hint| hint.id == "sidebar")
+        .expect("the rail's chord has a rung of its own");
+    assert!(
+        hint.text.contains("ctrl+s"),
+        "the tip names the chord the window and the terminal both answer: {}",
+        hint.text
+    );
+    assert!(
+        dismissible(hint.id),
+        "the rail has two click doors, so the line is advice and can be hidden"
     );
 }
 

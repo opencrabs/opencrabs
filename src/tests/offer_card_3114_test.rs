@@ -246,8 +246,8 @@ fn the_field_pads_the_same_sides_as_the_card_around_it() {
         footer
             .matches(".px(transcript::hover_pill_inset())")
             .count(),
-        3,
-        "and all three of its labels pad the pill, so every glyph starts on the column"
+        2,
+        "and both of its labels pad the pill, so every glyph starts on the column"
     );
 }
 
