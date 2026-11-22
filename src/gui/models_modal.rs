@@ -201,7 +201,11 @@ impl Dashboard {
                     "scope: this session"
                 },
                 Size::Xs,
-                if scope_all { shown.accent } else { shown.text_muted },
+                if scope_all {
+                    shown.accent
+                } else {
+                    shown.text_muted
+                },
             ))
             .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
                 this.models_scope_all = !this.models_scope_all;

@@ -11,7 +11,7 @@
 
 #![cfg(feature = "whatsapp")]
 
-use crate::channels::whatsapp::rich_response::{build, summary, RICH_MAX};
+use crate::channels::whatsapp::rich_response::{RICH_MAX, build, summary};
 
 const TABLE: &str = "\
 Here is the comparison:
@@ -71,11 +71,13 @@ fn the_text_around_a_table_rides_along_in_order() {
         ],
         "the lead-in comes before the grid"
     );
-    assert!(rich.submessages[0]
-        .message_text
-        .as_deref()
-        .unwrap_or_default()
-        .contains("Here is the comparison:"));
+    assert!(
+        rich.submessages[0]
+            .message_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Here is the comparison:")
+    );
 }
 
 /// A fenced block beside the table keeps its language and its content, and the

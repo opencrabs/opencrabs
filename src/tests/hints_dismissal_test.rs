@@ -79,7 +79,14 @@ fn a_functional_line_cannot_be_dismissed() {
     for id in ["offers", "rail", "rail-split", "context", "update"] {
         assert!(!dismissible(id), "{id} is not advice, so it stays");
     }
-    for id in ["seeker", "sidebar", "usage", "compaction", "fresh-start", "whisper"] {
+    for id in [
+        "seeker",
+        "sidebar",
+        "usage",
+        "compaction",
+        "fresh-start",
+        "whisper",
+    ] {
         assert!(dismissible(id), "{id} is advice, so it can be hidden");
     }
 }

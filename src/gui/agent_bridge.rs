@@ -340,9 +340,8 @@ pub fn spawn_clear_messages(db_path: PathBuf, session_id: Uuid, sink: EventSink)
                 Ok(db) => db,
                 Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
             };
-            let service = opencrabs::services::MessageService::new(ServiceContext::new(
-                db.pool().clone(),
-            ));
+            let service =
+                opencrabs::services::MessageService::new(ServiceContext::new(db.pool().clone()));
             match service.delete_messages_for_session(session_id).await {
                 Ok(()) => TurnEvent::MessagesCleared(session_id),
                 Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
@@ -366,9 +365,7 @@ pub fn spawn_evolve(sink: EventSink, session_id: Uuid) {
         let text = runtime.block_on(async move {
             let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
             let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
-            match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx)
-                .await
-            {
+            match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx).await {
                 Ok(result) if result.success => {
                     if result.output.is_empty() {
                         "Evolve finished.".to_string()
@@ -765,9 +762,8 @@ pub fn spawn_create_session(
             let db = Database::connect(&db_path)
                 .await
                 .map_err(|e| format!("db connect: {e}"))?;
-            let service = opencrabs::services::SessionService::new(ServiceContext::new(
-                db.pool().clone(),
-            ));
+            let service =
+                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
             let working_directory = Some(
                 opencrabs::utils::cwd::launch_cwd()
                     .to_string_lossy()
@@ -905,9 +901,7 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
         let speech = match spoken {
             Some(spoken) => spoken,
             None => {
-                crate::logging::warn(
-                    "voice reply: no spoken block, reading the first paragraph",
-                );
+                crate::logging::warn("voice reply: no spoken block, reading the first paragraph");
                 opencrabs::channels::voice::spoken::first_paragraph(&answer)
             }
         };
@@ -1042,9 +1036,8 @@ pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink:
             let db = Database::connect(&db_path)
                 .await
                 .map_err(|e| format!("db connect: {e}"))?;
-            let service = opencrabs::services::SessionService::new(ServiceContext::new(
-                db.pool().clone(),
-            ));
+            let service =
+                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
             service
                 .delete_session(session_id)
                 .await
@@ -1937,8 +1930,7 @@ pub fn spawn_scope_count(
             let Some((provider, model)) = pair.split_once('/') else {
                 return 0;
             };
-            let sessions =
-                opencrabs::services::SessionService::new(service.context().clone());
+            let sessions = opencrabs::services::SessionService::new(service.context().clone());
             sessions
                 .count_provider_model_all_sessions(provider, model)
                 .await
@@ -2053,8 +2045,7 @@ pub fn spawn_record_turn_stopped(
             }
             // The recovery ticket goes with it (#2850): the turn is over
             // because the user ended it, so no later boot may replay it.
-            let pending =
-                opencrabs::db::PendingRequestRepository::new(service.context().pool());
+            let pending = opencrabs::db::PendingRequestRepository::new(service.context().pool());
             if let Err(e) = pending.delete_session(session_id).await {
                 crate::logging::error(&format!("turn stopped recovery row: {e}"));
             }
@@ -2088,9 +2079,7 @@ pub fn spawn_brain_generation(
         )
         .with_max_tokens(65536);
         let result = runtime.block_on(async move {
-            match tokio::time::timeout(Duration::from_secs(120), provider.complete(request))
-                .await
-            {
+            match tokio::time::timeout(Duration::from_secs(120), provider.complete(request)).await {
                 Ok(Ok(response)) => {
                     let text: String = response
                         .content

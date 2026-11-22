@@ -1235,9 +1235,7 @@ pub async fn load_recent(
                 let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
                 let labels: HashMap<uuid::Uuid, String> = family
                     .iter()
-                    .filter_map(|(id, title)| {
-                        topic_family_label(title).map(|label| (*id, label))
-                    })
+                    .filter_map(|(id, title)| topic_family_label(title).map(|label| (*id, label)))
                     .collect();
                 let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
                 for row in &rows {

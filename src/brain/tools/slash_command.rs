@@ -441,11 +441,7 @@ fn channel_command_guidance(command: &str) -> String {
 }
 
 impl SlashCommandTool {
-    async fn handle_cd(
-        &self,
-        args: &str,
-        context: &ToolExecutionContext,
-    ) -> Result<ToolResult> {
+    async fn handle_cd(&self, args: &str, context: &ToolExecutionContext) -> Result<ToolResult> {
         let path_str = args.trim();
         if path_str.is_empty() {
             return Ok(ToolResult::error(
@@ -500,8 +496,7 @@ impl SlashCommandTool {
                 // link (#1445) cannot answer the same question differently,
                 // and through the same git identity so /cd records the
                 // remote it just proved (#1510).
-                let identity =
-                    crate::services::project_match::resolve_directory_identity(&dir_str);
+                let identity = crate::services::project_match::resolve_directory_identity(&dir_str);
                 if let Ok(projects) = project_svc.list_projects().await
                     && let Some(project) =
                         crate::services::project_match::match_by_directory(&identity, &projects)

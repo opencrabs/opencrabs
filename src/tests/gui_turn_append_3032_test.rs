@@ -109,7 +109,9 @@ fn the_append_resolves_the_settle_expectation_it_skips() {
 #[test]
 fn the_builder_produces_a_whole_turn() {
     assert!(
-        TRANSCRIPT.contains("pub fn turn_from_live(live: &LiveTurn, metrics: Option<TurnMetrics>) -> Option<Turn>"),
+        TRANSCRIPT.contains(
+            "pub fn turn_from_live(live: &LiveTurn, metrics: Option<TurnMetrics>) -> Option<Turn>"
+        ),
         "the builder signature is part of the contract"
     );
     let builder = TRANSCRIPT
