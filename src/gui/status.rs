@@ -12,8 +12,8 @@
 /// branch. Every field is read live; a field with no value prints a dash
 /// instead of a guess.
 ///
-/// No streaming rate here (#3143). tok/s is a per-turn measurement, not an
-/// identity: it changes several times a second while an answer is written and
+/// No streaming rate here (#3143). A number that moves several times a second
+/// while an answer is written is a per-turn measurement, not an identity: it
 /// says nothing about who is answering or from where, so it spent the widest
 /// field on the row on a number that is stale the moment the turn ends.
 pub(crate) fn status_identity(provider: &str, model: &str, cwd: &str, branch: &str) -> String {
