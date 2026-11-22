@@ -408,9 +408,15 @@ fn the_cards_share_the_message_curve_and_fill() {
         chip.contains(".border_1()"),
         "a chip is a button, so it shows an edge: {chip}"
     );
+    // The card's size, not the offer row's (#3140). The chips sit inside the
+    // plan card, so they follow the title and the task rows it holds: at the
+    // words of a message they read larger than the plan they were approving,
+    // which is the one thing on that card a reader should not notice first.
+    // The offer rows keep the body size for the opposite reason (#3124): they
+    // stand alone, with no card around them to set the measure.
     assert!(
-        chip.contains(".text_size(px(PLAIN_TEXT_SIZE))"),
-        "and the body size the offer rows took, not the small print"
+        chip.contains(".text_size(px(SMALL_TEXT_SIZE))"),
+        "the chips take the card's own size, not the answer's body size"
     );
     assert!(
         !chip.contains("CARD_RADIUS"),

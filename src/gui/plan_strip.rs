@@ -15,8 +15,8 @@
 use super::icon::disclosure_icon;
 use crate::palette;
 use crate::transcript::{
-    ClickHandler, MESSAGE_RADIUS, PLAIN_TEXT_SIZE, SMALL_TEXT_SIZE, SelectionContext,
-    message_card_surface, selectable_styled_text, small_style,
+    ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
+    selectable_styled_text, small_style,
 };
 use opencrabs::ui_core::card::{glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
@@ -458,9 +458,14 @@ fn action_chip(id: String, label: &str, handler: ClickHandler) -> Stateful<Div> 
         .bg(rgba(0xffffff0d))
         .hover(|d| d.bg(rgba(0xffffff14)).border_color(rgba(0xffffff33)))
         .cursor_pointer()
-        // The answer's body size, not the small print: the same reason the
-        // offer rows took it in #3124.
-        .text_size(px(PLAIN_TEXT_SIZE))
+        // The card's own size, not the answer's body size (#3140). These two
+        // chips sit in the plan card, so they follow the title and the task
+        // rows it holds; at the words of a message they came out larger than
+        // the plan they were approving, which is the one thing on the card a
+        // reader should not notice first. The offer rows keep the body size
+        // for the opposite reason (#3124): they stand on their own, with no
+        // card around them to set the measure.
+        .text_size(px(SMALL_TEXT_SIZE))
         .text_color(rgb(p.text_normal))
         .child(SharedString::from(label.to_string()))
         // A tap on a chip is not a tap on the card it sits in: the pane's card
@@ -923,8 +928,12 @@ fn task_row_width(window: &Window, task: &PlanTask) -> f32 {
         + line_width(window, &task_line(task), SMALL_TEXT_SIZE)
 }
 
-/// The width of one approval chip: its label at the body size, the padding
-/// inside the pill, and the 1px edge on both sides (#3124).
+/// The width of one approval chip: its label at the card's size, the padding
+/// inside the pill, and the 1px edge on both sides (#3124, #3140).
+///
+/// The size has to be the one the chip draws with. Measuring at the answer's
+/// body size while the chip drew at the card's would budget a pixel per
+/// character of slack the label never needs, and the card is sized from this.
 fn action_chip_width(window: &Window, label: &str) -> f32 {
-    line_width(window, label, PLAIN_TEXT_SIZE) + CHIP_PAD_X + CARD_EDGE
+    line_width(window, label, SMALL_TEXT_SIZE) + CHIP_PAD_X + CARD_EDGE
 }
