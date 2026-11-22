@@ -4847,14 +4847,21 @@ fn live_row_body(
 /// A turn in flight is exactly when the reader wants to act on what he just
 /// said, so the row that says it cannot be the one row on screen with no menu
 /// and no pencil. Its identity is the slot it fills, because nothing has been
-/// stored under an id yet.
+/// stored under an id yet. Once the field is open the pencil goes, the same
+/// way the stored row's does (#3141).
 fn live_user_row(
     slot: LiveSlot,
     child: AnyElement,
     press: Option<&PressHandler>,
     edit: Option<&ClickHandler>,
+    edit_row: Option<&InlineEditView>,
 ) -> Stateful<Div> {
     let name = live_slot_name(slot);
+    // A row whose field is already open gets no second pencil on top of it:
+    // the field's confirm chip lands in the corner the pencil sits in, so the
+    // two would draw over each other (#3141). The stored row has carried this
+    // rule since the rewrite shipped; the live row had no way to know.
+    let edit = edit.filter(|_| !edit_row.is_some_and(|open| open.id == live_edit_id(slot)));
     let group = SharedString::from(format!("live-msg-hover-{name}"));
     let mut row = div()
         .id(SharedString::from(format!("live-msg-{name}")))
@@ -4956,6 +4963,7 @@ fn live_view(
             ),
             press.get(&LiveRow::User(LiveSlot::Question)),
             edit.get(&LiveSlot::Question),
+            edit_row,
         ));
     }
     for notice in &live.notices {
@@ -4992,6 +5000,7 @@ fn live_view(
             ),
             press.get(&LiveRow::User(slot)),
             edit.get(&slot),
+            edit_row,
         ));
     }
     // ONE card for the whole turn: header, body when open, footer. The three

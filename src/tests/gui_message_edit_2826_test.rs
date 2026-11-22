@@ -261,3 +261,56 @@ fn the_edit_button_draws_a_pencil() {
         "and no longer prints the word"
     );
 }
+
+/// #3141: a live row whose field is open draws no pencil.
+///
+/// The stored row has gated its handler on the open field since the rewrite
+/// shipped: a row that is already a field gets no second pencil drawn over it.
+/// The live row was never told which field was open, so its pencil stayed on
+/// screen and landed in the same corner as the field's confirm chip.
+#[test]
+fn a_live_row_drops_its_pencil_while_its_field_is_open() {
+    let live = TRANSCRIPT
+        .split("fn live_user_row(")
+        .nth(1)
+        .expect("the live row builder")
+        .split("fn live_view(")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        live.contains("edit_row: Option<&InlineEditView>,"),
+        "the builder has to be told which field is open"
+    );
+    let gate = live
+        .find("let edit = edit.filter(")
+        .expect("the live row gates its pencil the way the stored row does");
+    let drawn = live.find("if edit.is_some()").expect("the pencil block");
+    assert!(
+        gate < drawn,
+        "the gate runs before the button is drawn, or it gates nothing"
+    );
+    assert!(
+        live.contains("live_edit_id(slot)"),
+        "the gate compares the open field with the slot the row fills"
+    );
+
+    // Both live rows of a turn are drawn by that builder, so both have to hand
+    // it the open field. A call site that forgets leaves its pencil behind.
+    let view = TRANSCRIPT
+        .split("fn live_view(")
+        .nth(1)
+        .expect("the live turn")
+        .split("fn selection_rgba(")
+        .next()
+        .unwrap_or_default();
+    assert_eq!(
+        view.matches("live_user_row(").count(),
+        2,
+        "the question and the injected rows are the two live rows"
+    );
+    assert_eq!(
+        view.matches("\n            edit_row,\n        ));").count(),
+        2,
+        "each of them passes the open field to the builder"
+    );
+}
