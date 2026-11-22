@@ -42,14 +42,14 @@ pub async fn fetch_static(url: &str, timeout_secs: u64) -> Result<String, String
         .send()
         .await
         .map_err(|e| {
-        if e.is_timeout() {
-            format!("Request timed out after {timeout_secs}s")
-        } else if e.is_connect() {
-            format!("Connection failed: {e}")
-        } else {
-            format!("Request failed: {e}")
-        }
-    })?;
+            if e.is_timeout() {
+                format!("Request timed out after {timeout_secs}s")
+            } else if e.is_connect() {
+                format!("Connection failed: {e}")
+            } else {
+                format!("Request failed: {e}")
+            }
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
