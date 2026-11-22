@@ -1339,6 +1339,27 @@ fn is_model_change_notice(content: &str) -> bool {
     text.starts_with("[Model changed to ") && text.ends_with(']')
 }
 
+/// The durable checklist row as the transcript draws it, or nothing when the
+/// row is not one.
+///
+/// A turn that finishes a plan writes this row at settle and hands the record
+/// back on its response, which is how the terminal shows the card without a
+/// second read (#2255). The window appends a finished turn from its own live
+/// state instead of refetching the window (#3032), and live state holds no
+/// database rows: without this the card only appeared once something else
+/// triggered a reload, so it vanished from the conversation it had just
+/// finished in.
+pub fn completed_plan_block(message: &Message) -> Option<Block> {
+    if message.role != PLAN_COMPLETED_ROLE {
+        return None;
+    }
+    let payload = CompletedPlanPayload::from_message(message)?;
+    Some(Block::CompletedPlan {
+        message_id: message.id,
+        plan: CompletedPlanView::new(&payload.plan),
+    })
+}
+
 /// Expand ONE stored row into its renderable blocks. Mirrors
 /// `TuiApp::expand_message` (`tui/app/messaging.rs`): compaction markers are
 /// context and never shown; tool ledgers become `Tools` blocks; reasoning
@@ -1349,11 +1370,8 @@ fn is_model_change_notice(content: &str) -> bool {
 fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     if m.role == PLAN_COMPLETED_ROLE {
-        if let Some(payload) = CompletedPlanPayload::from_message(m) {
-            blocks.push(Block::CompletedPlan {
-                message_id: m.id,
-                plan: CompletedPlanView::new(&payload.plan),
-            });
+        if let Some(block) = completed_plan_block(m) {
+            blocks.push(block);
         }
         return blocks;
     }

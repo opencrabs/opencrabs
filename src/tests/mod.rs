@@ -1423,3 +1423,4 @@ pub mod tool_runtime_shape_2975_test;
 pub mod gui_models_scope_3035_test;
 
 pub mod gui_turn_append_3032_test;
+pub mod gui_completed_plan_append_3142_test;

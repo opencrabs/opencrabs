@@ -1568,6 +1568,7 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                     voice,
+                    completed_plan,
                 } => {
                     // The card's live line belongs to this turn (#2718), so
                     // it retires with it: the preview under it is the ledger's
@@ -1734,7 +1735,19 @@ impl Dashboard {
                     // next reload reconciles it.
                     match self.chat_state.session() {
                         Some(sid) => match transcript::turn_from_live(&self.turn.live, None) {
-                            Some(turn) => {
+                            Some(mut turn) => {
+                                // The checklist this turn finished is a row in
+                                // the ledger, not something the card painted,
+                                // so the append has to carry it: without it the
+                                // card only came back on the next reload, and a
+                                // conversation that finishes a plan and keeps
+                                // talking never had one (#3142).
+                                if let Some(block) = completed_plan
+                                    .as_deref()
+                                    .and_then(transcript::completed_plan_block)
+                                {
+                                    turn.blocks.push(block);
+                                }
                                 logging::info(&format!(
                                     "turn appended: {} blocks, anchor {}",
                                     turn.blocks.len(),
