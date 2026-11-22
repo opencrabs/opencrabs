@@ -6298,6 +6298,50 @@ fn with_trailing(col: Stateful<Div>, trailing: Vec<AnyElement>) -> Stateful<Div>
     })
 }
 
+/// What a prepaint reading asks the transcript to do about its offset (#3009).
+///
+/// Split out of the prepaint closure so the rule that ends the frame chain can
+/// be tested without a window. The chain has no screenshot: an idle window that
+/// asks for every frame looks exactly like an idle window that asks for none,
+/// and the only symptom is a core burning behind a window doing nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SnapStep {
+    /// Nothing an offset can fix: leave it alone and ask for nothing.
+    Settle,
+    /// Write this offset. This frame paints it, and another frame cannot change
+    /// anything, so none is asked for.
+    Paint(f32),
+    /// Write this offset and ask for the one extra frame that shows it.
+    Repaint(f32),
+}
+
+/// The correction this reading is worth, given what the last one asked for.
+///
+/// `last_snap` is the offset the previous frame requested. The correction is
+/// written after the container has clamped its own offset for the frame, so the
+/// frame paints right, but the next prepaint clamps it straight back: the
+/// maximum is derived from the content size the previous layout measured, which
+/// is the number that was short to begin with (#3027). So the same correction
+/// comes back needing itself, and asking for another frame then repaints the
+/// same pixels at the platform's maximum rate, which is the idle burn in #3009.
+/// One retry per correction is what the reader needs; the second is the loop.
+pub fn snap_step(reach: RowReach, following: bool, last_snap: Option<f32>) -> SnapStep {
+    // No rows, or no box to put them in: an offset fixes neither, and asking
+    // for a frame here repaints the same pixels forever (#2985).
+    if matches!(reach.frame(), Frame::NoRows | Frame::NoBox) {
+        return SnapStep::Settle;
+    }
+    if !(reach.is_blank() || (following && reach.overflows_below())) {
+        return SnapStep::Settle;
+    }
+    let wanted = reach.bottom_offset();
+    if last_snap.is_some_and(|prev| (prev - wanted).abs() < SCROLL_SLOP) {
+        SnapStep::Paint(wanted)
+    } else {
+        SnapStep::Repaint(wanted)
+    }
+}
+
 // A render entry point, so its arguments are the frame it draws rather than a
 // bundle a caller could assemble differently (#2972). Same shape as the other
 // render fns this tree already allows.
@@ -6369,12 +6413,34 @@ pub fn view(
         // a reader parked in history keeps the place they chose.
         .on_children_prepainted({
             let reach_scroll = scroll.clone();
+            // The last offset this handler asked a frame for (#3009). The
+            // correction is written after the container has clamped its own
+            // offset for this frame, so this frame paints it correctly, but the
+            // next prepaint clamps it straight back: the maximum comes from the
+            // content size the previous layout measured, which is the very
+            // number that was short in the first place (#3027). So the same
+            // correction can be needed again immediately, and asking for
+            // another frame then cannot change anything. Remembering the value
+            // stops the chain at the one extra frame that shows the corrected
+            // paint, instead of running back to back for as long as the window
+            // is visible, which is the idle burn in #3009.
+            let last_snap = Rc::new(Cell::new(None::<f32>));
             move |_children, window, _cx| {
                 let reach = row_reach(&reach_scroll);
-                let short = reach.is_blank() || (following && reach.overflows_below());
-                if short {
-                    let x = reach_scroll.offset().x;
-                    reach_scroll.set_offset(point(x, px(reach.bottom_offset())));
+                let (wanted, again) = match snap_step(reach, following, last_snap.get()) {
+                    SnapStep::Settle => {
+                        last_snap.set(None);
+                        return;
+                    }
+                    SnapStep::Paint(wanted) => (wanted, false),
+                    SnapStep::Repaint(wanted) => (wanted, true),
+                };
+                // Written every time, because prepaint has already clamped the
+                // offset back and this is the value this frame has to paint at.
+                let x = reach_scroll.offset().x;
+                reach_scroll.set_offset(point(x, px(wanted)));
+                if again {
+                    last_snap.set(Some(wanted));
                     window.request_animation_frame();
                 }
             }
@@ -7033,10 +7099,117 @@ mod tests {
         assert!(!corrected.is_blank());
     }
 
-    /// A stopped turn keeps the numbers it measured, and a turn that never
-    /// streamed keeps none (#2953). The record was removed when the stop
-    /// landed and never written back, so the card showed ctx and rate on
-    /// screen and lost both on the next read of the session.
+    /// The frame chain that burned a core in an idle window (#3009). The
+    /// correction is written after the container clamped its own offset, so the
+    /// next prepaint clamps it back and the same correction is needed again:
+    /// asking for a frame every time repaints identical pixels at the platform's
+    /// maximum rate for as long as the window is visible. One retry shows the
+    /// corrected paint; the second is the loop.
+    #[test]
+    fn a_blank_frame_asks_for_one_retry_then_settles() {
+        let blank = reach(1_042.0, -5_000.0, 26);
+        assert!(blank.is_blank(), "every row sits above the box");
+        assert_eq!(
+            snap_step(blank, true, None),
+            SnapStep::Repaint(-108.0),
+            "the first reading is the one worth a frame"
+        );
+        assert_eq!(
+            snap_step(blank, true, Some(-108.0)),
+            SnapStep::Paint(-108.0),
+            "the same correction again cannot change anything, so it paints \
+             and stops"
+        );
+        // And it stays settled on every later frame, not just the second.
+        assert_eq!(
+            snap_step(blank, true, Some(-108.0)),
+            SnapStep::Paint(-108.0)
+        );
+    }
+
+    /// The degenerate reading that made the chain unconditional: rows are
+    /// counted but no child bounds came back, so `row_reach` leaves the content
+    /// bottom at `f32::MIN`, the frame reads as blank, and the correction is
+    /// "offset 0" when the offset is already 0. Writing 0 over 0 changes
+    /// nothing, so asking for a frame there is a loop with no visible symptom
+    /// at all (#3009). It must stop on the second frame like every other
+    /// correction.
+    #[test]
+    fn a_blank_frame_already_at_offset_zero_asks_once() {
+        let nowhere = RowReach {
+            content_bottom: f32::MIN,
+            offset: 0.0,
+            ..reach(0.0, 0.0, 26)
+        };
+        assert_eq!(nowhere.frame(), Frame::RowsAbove);
+        assert_eq!(nowhere.bottom_offset(), 0.0, "nothing to move it to");
+        assert_eq!(snap_step(nowhere, true, None), SnapStep::Repaint(0.0));
+        assert_eq!(
+            snap_step(nowhere, true, Some(0.0)),
+            SnapStep::Paint(0.0),
+            "the same no-op correction again cannot change the frame"
+        );
+    }
+
+    /// The #3027 half of the same rule: a following transcript one row short of
+    /// its bottom is corrected once, and the retry is where it ends.
+    #[test]
+    fn an_overflowing_following_frame_asks_for_one_retry_then_settles() {
+        let short = reach(1_042.0, -84.0, 26);
+        assert!(short.overflows_below());
+        assert_eq!(snap_step(short, true, None), SnapStep::Repaint(-108.0));
+        assert_eq!(
+            snap_step(short, true, Some(-108.0)),
+            SnapStep::Paint(-108.0)
+        );
+    }
+
+    /// A reader parked in history keeps the place they chose, so the overflow
+    /// correction never runs for them (#3027).
+    #[test]
+    fn a_parked_reader_is_never_snapped_past_the_box() {
+        let short = reach(1_042.0, -84.0, 26);
+        assert_eq!(snap_step(short, false, None), SnapStep::Settle);
+    }
+
+    /// Nothing drawn and nothing to draw into: both are frames an offset cannot
+    /// fix, so neither asks for one (#2985).
+    #[test]
+    fn an_empty_surface_and_a_heightless_box_ask_for_no_frame() {
+        let empty = reach(0.0, -9_000.0, 0);
+        assert_eq!(empty.frame(), Frame::NoRows);
+        assert_eq!(snap_step(empty, true, None), SnapStep::Settle);
+        let collapsed = RowReach {
+            viewport_bottom: 42.0,
+            ..reach(1_042.0, -108.0, 26)
+        };
+        assert_eq!(collapsed.frame(), Frame::NoBox);
+        assert_eq!(snap_step(collapsed, true, None), SnapStep::Settle);
+    }
+
+    /// A correction that lands somewhere new is a new correction, and it gets
+    /// its own frame. Only the repeat of the same offset is the loop.
+    #[test]
+    fn a_correction_that_moves_again_asks_again() {
+        let blank = reach(1_042.0, -5_000.0, 26);
+        assert_eq!(
+            snap_step(blank, true, Some(-84.0)),
+            SnapStep::Repaint(-108.0),
+            "a stale request from a different frame must not silence this one"
+        );
+    }
+
+    /// A landed transcript settles and clears the memory of the last request,
+    /// so the next genuine short frame is corrected instead of being mistaken
+    /// for a repeat.
+    #[test]
+    fn a_landed_frame_settles_and_forgets_the_last_request() {
+        let landed = reach(1_042.0, -108.0, 26);
+        assert!(!landed.is_blank());
+        assert!(!landed.overflows_below());
+        assert_eq!(snap_step(landed, true, Some(-108.0)), SnapStep::Settle);
+    }
+
     #[test]
     fn a_stopped_turn_keeps_only_a_reading_of_its_own() {
         let kept = TurnMetrics::measured(120, Some(4_000), 200_000, 42.0, 6)
