@@ -5,8 +5,8 @@
 //! operation, exit. A thread per call is why the GUI process held 51 to 56
 //! threads at rest, and why a single session create showed up as nine threads
 //! born in one minute. The work now goes through `spawn_worker`, which reuses a
-//! thread per operation name and queues a burst instead of reserving another
-//! stack.
+//! thread per operation name and grows the lane instead of queueing a burst
+//! behind work that is already running.
 //!
 //! The window has no headless harness, so these are source pins: the shape of
 //! the helper, the two threads that are still allowed to exist, and the call
@@ -104,22 +104,31 @@ fn the_helper_builds_the_runtime_before_the_thread() {
     );
 }
 
-/// A burst grows the lane to the cap and then queues. Without the cap, a burst
-/// of turns would reserve a stack each, which is the cost this issue removed.
+/// Nothing waits behind another job. A lane grows by one thread per concurrent
+/// operation, so ten panes of a split run ten turns. A cap here would stall a
+/// pane for the whole length of somebody else's turn, which is the one thing
+/// this runtime is not allowed to do.
 #[test]
-fn the_lane_is_capped() {
+fn a_busy_lane_grows_instead_of_queueing() {
     let helper = fn_body(AGENT_BRIDGE, "fn spawn_worker<F>(");
     assert!(
-        AGENT_BRIDGE.contains("const LANE_THREADS: usize = 4;"),
-        "the lane cap is missing"
+        !AGENT_BRIDGE.contains("LANE_THREADS"),
+        "a lane cap makes a pane wait behind another pane's work"
     );
     assert!(
-        helper.contains("lane.len() < LANE_THREADS"),
-        "the helper has to consult the cap before it spawns"
+        !helper.contains("lane.first()"),
+        "a job must never be handed to a thread that is already running one"
     );
     assert!(
-        helper.contains("lane.first()"),
-        "at the cap the job queues behind a thread that is already running"
+        !helper.contains("lane.len() <"),
+        "the helper has to spawn whenever no thread is parked"
+    );
+    // The only two arms: a parked thread, or a new one. There is no third
+    // branch, so there is no path that queues.
+    assert_eq!(
+        helper.matches("        None => {").count(),
+        1,
+        "the spawn arm has to be the sole fallback"
     );
 }
 

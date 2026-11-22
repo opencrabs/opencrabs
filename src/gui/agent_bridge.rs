@@ -210,11 +210,6 @@ pub type EventSink = std::sync::mpsc::Sender<TurnEvent>;
 /// deeper than gpui's dispatch-queue threads allow.
 const WORKER_STACK: usize = 4 * 1024 * 1024;
 
-/// How many threads one operation may hold at once (#3033). A turn in each pane
-/// of a split needs its own; past this a burst queues on the lane instead of
-/// paying for another 4 MB stack.
-const LANE_THREADS: usize = 4;
-
 /// One operation's work, with the runtime it runs on already inside it.
 type WorkerJob = Box<dyn FnOnce() + Send + 'static>;
 
@@ -239,8 +234,9 @@ static LANES: std::sync::OnceLock<
 /// through the same arm it used for a failed thread spawn. The thread is
 /// reused: a repeat of one operation costs a channel send instead of a thread,
 /// a runtime and a stack, which is why the process used to gain a thread every
-/// time the window did anything. A burst grows the lane to [`LANE_THREADS`] and
-/// then queues, so two panes can still run two turns while a fifth waits.
+/// time the window did anything. A burst grows the lane and every job in it
+/// runs at once: a split with ten panes runs ten turns, because waiting behind
+/// another operation's job is never the right trade (#3033).
 pub(crate) fn spawn_worker<F>(name: &'static str, job: F) -> Result<(), String>
 where
     F: FnOnce(&tokio::runtime::Runtime) + Send + 'static,
@@ -268,7 +264,12 @@ where
 
     let queue = match parked {
         Some(queue) => queue,
-        None if lane.len() < LANE_THREADS => {
+        // Every thread in the lane is busy, so this operation gets its own.
+        // Nothing ever waits behind another job: the runtime is async but a job
+        // here is a whole turn, and a turn can run for minutes, so queueing one
+        // behind another would stall a pane for the length of someone else's
+        // work (#3033).
+        None => {
             let (queue, mut receiver) = tokio::sync::mpsc::unbounded_channel::<WorkerJob>();
             // Born busy: this thread is about to take the job below, so a
             // second caller must not mistake it for a parked one and stack its
@@ -297,12 +298,6 @@ where
             });
             queue
         }
-        // At the cap: queue behind a thread that is already running. A burst
-        // waits here instead of reserving another stack.
-        None => match lane.first() {
-            Some(thread) => thread.queue.clone(),
-            None => return Err(format!("{name}: no worker to take the job")),
-        },
     };
     queue
         .send(job)
