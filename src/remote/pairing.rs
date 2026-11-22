@@ -93,7 +93,7 @@ pub fn parse_ttl(raw: &str) -> Result<u64> {
         .parse()
         .map_err(|_| anyhow::anyhow!("TTL {raw:?} is out of range"))?;
     let secs = match unit.as_str() {
-        "" | "s" => n,
+        "" | "s" => Some(n),
         "m" => n.checked_mul(60),
         "h" => n.checked_mul(3_600),
         "d" => n.checked_mul(86_400),

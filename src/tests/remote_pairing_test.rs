@@ -307,7 +307,10 @@ fn ttl_is_capped_and_never_zero() {
             .is_err(),
         "a grant must never outlive the session maximum"
     );
-    assert!(st.mint_code_with_ttl(&full_scopes(), TOKEN_TTL_SECS).is_ok());
+    assert!(
+        st.mint_code_with_ttl(&full_scopes(), TOKEN_TTL_SECS)
+            .is_ok()
+    );
     assert!(st.mint_code_with_ttl(&full_scopes(), 1).is_ok());
 }
 
