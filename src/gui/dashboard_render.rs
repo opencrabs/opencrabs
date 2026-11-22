@@ -684,12 +684,14 @@ impl Render for Dashboard {
                         // above it named another.
                         div().into_any_element()
                     } else {
-                        // Key hints left, identity right. The ctx budget used
-                        // to sit at the right edge too, and it was the same
-                        // number the tool block's own footer already carries:
-                        // read twice, on every turn (#2631).
-                        // Who is answering, from where, on what branch, and how
-                        // fast: the same fields the TUI's footer carries.
+                        // Identity left, the one key hint right. The ctx
+                        // budget used to sit at the right edge too, and it was
+                        // the same number the tool block's own footer already
+                        // carries: read twice, on every turn (#2631).
+                        // Who is answering, from where and on what branch: the
+                        // same fields the TUI's footer carries. Session,
+                        // provider, model and directory all read from the left
+                        // edge; the Seeker pill takes the right (#3143).
                         // The open conversation's own pair, not the window's
                         // bootstrap provider: a pick pins the model per
                         // session, so the global slot never moves and this row
@@ -751,11 +753,42 @@ impl Render for Dashboard {
                             // this row's step is the card's, not the pane's.
                             .px(transcript::card_row_inset())
                             .py_2()
+                            // The live identity leads the row: session,
+                            // provider, model, directory and branch all start
+                            // on the left edge, where state is read from
+                            // (#3143 follow-up). It used to open second,
+                            // behind the Seeker pill, which pushed live state
+                            // off that edge for a permanent chord label.
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    // Same 4 as the row's other labels: the
+                                    // truncated text starts and ends on the
+                                    // composer's column, not on the raw pad
+                                    // (#3114).
+                                    .px(transcript::hover_pill_inset())
+                                    .text_xs()
+                                    .text_color(rgb(palette::current().text_faint))
+                                    .child(SharedString::from(identity)),
+                            )
                             // The Seeker opens with a chord nothing on
                             // screen named (#2747). The hint is permanent and
                             // clickable: a hover tooltip is invisible to
                             // exactly the people who need it, and the chord
                             // printed matches the platform the window runs on.
+                            // It closes the row on the right edge now, so the
+                            // identity keeps the left one (#3143).
+                            //
+                            // No sidebar chord label on this row (#3143).
+                            // It carries live state and the one door that has
+                            // no other mouse path, the Seeker pill. The chord
+                            // is taught by the hint line, and the rail already
+                            // has two click doors of its own, so a permanent
+                            // label here bought nothing. The Usage and Files
+                            // footers keep their labels: neither has a Seeker
+                            // pill or a rail of its own to click.
                             .child(
                                 div()
                                     .id("seeker-hint")
@@ -779,29 +812,6 @@ impl Render for Dashboard {
                                         opencrabs::ui_core::palette::seeker_chord_label(),
                                     ))
                                     .child("· seek"),
-                            )
-                            // No sidebar chord label on this row (#3143).
-                            // It carries live state and the one door that has no
-                            // other mouse path, the Seeker pill above. The chord
-                            // is taught by the hint line, and the rail already
-                            // has two click doors of its own, so a permanent
-                            // label here bought nothing and took its width from
-                            // the identity string, which truncates first. The
-                            // Usage and Files footers keep their labels: neither
-                            // has a Seeker pill or a rail of its own to click.
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    // Same 4 as the row's other labels: the
-                                    // truncated text starts and ends on the
-                                    // composer's column, not on the raw pad
-                                    // (#3114).
-                                    .px(transcript::hover_pill_inset())
-                                    .text_xs()
-                                    .text_color(rgb(palette::current().text_faint))
-                                    .child(SharedString::from(identity)),
                             )
                             .into_any_element()
                     },

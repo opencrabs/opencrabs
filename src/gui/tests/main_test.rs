@@ -3005,6 +3005,11 @@ fn chat_footer_points_at_the_seeker() {
     // doors of its own, so the labels spent the identity string's width on
     // advice the hint line gives for free and the reader can dismiss.
     //
+    // The row reads identity first, door last (#3144): live state starts on
+    // the left edge where the eye lands, and the pill closes the row on the
+    // right, so the chords never push session, provider, model and path off
+    // the column the reader starts from.
+    //
     // The Usage and Files screens keep both labels. Neither has a Seeker pill
     // or a rail of its own to click, so the sentence is the only thing naming
     // either chord there. That is why the counts below are 2 and not 3 or 0.
@@ -3025,15 +3030,25 @@ fn chat_footer_points_at_the_seeker() {
         "usage and files carry the sidebar chord; the chat dock does not"
     );
     // And the chat dock's row really is the one without it, rather than this
-    // count happening to match some other pair: slice from the pill to the
-    // identity string, which is the whole row between them.
+    // count happening to match some other pair: the row opens on the identity
+    // string and closes after the Seeker pill, so slice from the first to the
+    // element that ends it (#3144).
+    let identity_start = src
+        .find("SharedString::from(identity)")
+        .expect("the identity string opens the dock row");
     let dock_start = src
         .find("id(\"seeker-hint\")")
         .expect("the chat footer still carries the Seeker pill");
-    let dock_tail = src.get(dock_start..).expect("a find lands on a char boundary");
+    assert!(
+        identity_start < dock_start,
+        "the live identity leads the row and the Seeker pill closes it on the right"
+    );
+    let dock_tail = src
+        .get(identity_start..)
+        .expect("a find lands on a char boundary");
     let dock_end = dock_tail
-        .find("SharedString::from(identity)")
-        .expect("the identity string closes the row");
+        .find(".into_any_element()")
+        .expect("the row ends after the Seeker pill");
     let dock = dock_tail
         .get(..dock_end)
         .expect("a find lands on a char boundary");
