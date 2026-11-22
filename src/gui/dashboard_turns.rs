@@ -1678,7 +1678,7 @@ impl Dashboard {
                     // from the log (chunks=0 means the provider never
                     // streamed, not that the window failed to draw).
                     logging::info(&format!(
-                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), reloading transcript",
+                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), appending to the transcript",
                         content.len(),
                         self.turn.live.chunks,
                         self.turn.live.chunk_bytes,
@@ -1689,7 +1689,6 @@ impl Dashboard {
                         self.turn.live.tokens_per_sec(),
                         tokens_per_second
                     ));
-                    reload = self.chat_state.session();
                     // A turn that began as a recording is answered the way a
                     // channel answers a voice note (#3044): aloud, when speech
                     // output is configured. `spawn_speak_reply` runs
@@ -1717,6 +1716,50 @@ impl Dashboard {
                             session,
                             spoken,
                         );
+                    }
+                    // The finished turn joins the list as it stands (#3032).
+                    // The card has been painting this exchange all along, so
+                    // refetching the window and rebuilding every turn only
+                    // proved what this state already holds: a thread, a fresh
+                    // runtime, its own DB connection and a 200-row read, once
+                    // per turn, 1:1 with the turns themselves. The reload is
+                    // kept for the reads that need the rows, which is a
+                    // resumed task with no question of its own and the settle
+                    // path that proves a slow write landed.
+                    //
+                    // `rows` stays behind by one on purpose: the turn's row id
+                    // only exists once a read returns it, and inventing one
+                    // would put an id in the copy order that no row carries.
+                    // That is the state the live card was already in, and the
+                    // next reload reconciles it.
+                    match self.chat_state.session() {
+                        Some(sid) => match transcript::turn_from_live(&self.turn.live, None) {
+                            Some(turn) => {
+                                logging::info(&format!(
+                                    "turn appended: {} blocks, anchor {}",
+                                    turn.blocks.len(),
+                                    turn.anchor
+                                ));
+                                self.chat_state.transcript.turns.push(turn);
+                                // The numbers recorded at `Done` belong to the
+                                // turn that just went on the list (#2324).
+                                self.attach_pending_metrics(sid);
+                                // No read compares a total against these, so
+                                // they must not outlive the turn: a stale
+                                // expectation would turn the next reload's
+                                // first short read into a phantom retry
+                                // (#2705).
+                                self.turn.settle.expect = None;
+                                self.turn.settle.retries = 0;
+                                self.turn.settle.deadline = None;
+                                self.turn.settle.rechecks = 0;
+                                self.turn.live.clear();
+                            }
+                            // Nothing to append from, so the rows are the only
+                            // record of this turn.
+                            None => reload = Some(sid),
+                        },
+                        None => {}
                     }
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {

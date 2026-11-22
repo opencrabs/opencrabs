@@ -1621,6 +1621,141 @@ pub fn turns_with_origins(
     (hidden, out)
 }
 
+/// The finished turn as a transcript entry, built from the card that was
+/// painting it instead of from a refetched window (#3032).
+///
+/// Every finished turn used to buy a new OS thread, a fresh tokio runtime, its
+/// own `Database::connect`, a 200-row read and a rebuild of every turn in the
+/// window, only to learn that the rows it had just written were there. The
+/// content never needed reading: the card had it all along. This produces the
+/// same `Turn` that rebuild would have produced for that turn, so the list
+/// grows by one instead of being re-derived. The reload is kept for the reads
+/// that genuinely need the rows: a session switch, a ledger that moved under
+/// us, and the settle path that proves a slow write landed.
+///
+/// The anchor is spelled the way `turns_with_origins` spells it, from the
+/// question row and the second it was sent, so an opened turn stays open. A
+/// turn with no question of its own (a resumed task) has no anchor it could
+/// honestly claim, so it returns `None` and the caller reloads.
+pub fn turn_from_live(live: &LiveTurn, metrics: Option<TurnMetrics>) -> Option<Turn> {
+    let question = live.user.as_deref()?;
+    if question.trim().is_empty() {
+        return None;
+    }
+    // The stamp is what the rows would carry: the second the question went
+    // out. Without it there is no anchor to match a reload against.
+    let sent = live.sent_at?;
+    let mut blocks: Vec<Block> = vec![Block::Msg {
+        role: "user".into(),
+        content: question.to_string(),
+        time: live_time(Some(sent)),
+        placeholder: false,
+        message_id: None,
+        forward: None,
+    }];
+    // The body in the order the card drew it: calls, narration and reasoning
+    // interleaved. Consecutive calls collapse into one ledger, the way a
+    // persisted row's own ledger reads.
+    let mut open: Option<Vec<ToolCall>> = None;
+    let mut listed = vec![false; live.tools.len()];
+    let flush = |open: &mut Option<Vec<ToolCall>>, blocks: &mut Vec<Block>| {
+        if let Some(calls) = open.take() {
+            blocks.push(Block::Tools { calls });
+        }
+    };
+    for entry in &live.entries {
+        match entry {
+            LiveEntry::Tool(i) => {
+                let Some(call) = live.tools.get(*i) else {
+                    continue;
+                };
+                if let Some(slot) = listed.get_mut(*i) {
+                    *slot = true;
+                }
+                open.get_or_insert_with(Vec::new).push(call.clone());
+            }
+            LiveEntry::Narration(text) => {
+                flush(&mut open, &mut blocks);
+                if !text.trim().is_empty() {
+                    blocks.push(Block::Msg {
+                        role: "assistant".into(),
+                        content: text.clone(),
+                        time: String::new(),
+                        placeholder: false,
+                        message_id: None,
+                        forward: None,
+                    });
+                }
+            }
+            LiveEntry::Reasoning(text) => {
+                flush(&mut open, &mut blocks);
+                if !text.trim().is_empty() {
+                    blocks.push(Block::Thinking {
+                        content: text.clone(),
+                    });
+                }
+            }
+        }
+    }
+    // A call that never reached the entry list still belongs to the turn: an
+    // approval waiting when the turn ended, or a ledger the card appended out
+    // of order. Dropping it would hide work the reader watched.
+    for (i, call) in live.tools.iter().enumerate() {
+        if !listed.get(i).copied().unwrap_or(true) {
+            open.get_or_insert_with(Vec::new).push(call.clone());
+        }
+    }
+    flush(&mut open, &mut blocks);
+    // The answer last, so it is the turn's final block and the fold keeps it.
+    if let Some(answer) = live.answer()
+        && !answer.trim().is_empty()
+    {
+        blocks.push(Block::Msg {
+            role: "assistant".into(),
+            content: answer.to_string(),
+            time: live_time(live.answer_at),
+            placeholder: false,
+            message_id: None,
+            forward: None,
+        });
+    }
+    let final_idx = blocks.iter().enumerate().rev().find_map(|(i, b)| match b {
+        Block::Msg {
+            role,
+            content,
+            placeholder,
+            ..
+        } if role == "assistant" && !*placeholder && !content.trim().is_empty() => Some(i),
+        _ => None,
+    });
+    let mut summary = TurnSummary::default();
+    for b in &blocks {
+        match b {
+            Block::Tools { calls } => {
+                summary.tool_calls += calls.len();
+                summary.failed += calls.iter().filter(|c| !c.success).count();
+            }
+            Block::Msg { role, .. } if role == "error" => summary.has_error = true,
+            _ => {}
+        }
+    }
+    summary.stopped = live.stopped;
+    summary.duration_secs = live.elapsed_secs() as i64;
+    let steps = (0..blocks.len())
+        .filter(|&i| !visible_when_folded(&blocks[i], final_idx, i))
+        .count();
+    let header = format_turn_header(summary, steps);
+    Some(Turn {
+        header,
+        summary,
+        metrics,
+        anchor: format!("user@{}", sent.timestamp()),
+        blocks,
+        final_idx,
+        origin: None,
+    })
+}
+
 /// Whether the persisted rows of one turn stay out of the conversation
 /// because the live card is already drawing that same exchange.
 ///
