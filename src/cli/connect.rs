@@ -230,7 +230,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// when it divides evenly, seconds otherwise.
 fn human_ttl(secs: u64) -> String {
     for (unit, size) in [("d", 86_400u64), ("h", 3_600), ("m", 60)] {
-        if secs % size == 0 {
+        if secs.is_multiple_of(size) {
             return format!("{}{unit}", secs / size);
         }
     }
