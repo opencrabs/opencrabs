@@ -206,7 +206,7 @@ pub(crate) fn auth_headers(api_key: Option<&str>) -> reqwest::header::HeaderMap 
 /// Discover a remote agent's capabilities via their Agent Card.
 async fn discover(base_url: &str, api_key: Option<&str>) -> Result<ToolResult> {
     let url = format!("{}/.well-known/agent.json", base_url);
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .get(&url)
         .headers(auth_headers(api_key))
@@ -289,7 +289,7 @@ async fn send_message(
     };
     let body = build_send_body(message, context_id, &message_id);
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut last_transport_error = String::new();
     let mut resp = None;
 
@@ -423,7 +423,7 @@ async fn get_task(base_url: &str, api_key: Option<&str>, task_id: &str) -> Resul
         "id": 1
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .post(&url)
         .headers(auth_headers(api_key))
@@ -479,7 +479,7 @@ async fn cancel_task(base_url: &str, api_key: Option<&str>, task_id: &str) -> Re
         "id": 1
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .post(&url)
         .headers(auth_headers(api_key))

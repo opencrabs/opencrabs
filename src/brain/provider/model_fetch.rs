@@ -4,7 +4,6 @@
 //! OpenAI-compatible `/v1/models` endpoint or Ollama `/api/tags`.
 //! Used by custom providers, Ollama, onboarding, and the /models dialog.
 
-use reqwest::Client;
 use std::time::Duration;
 
 /// Response shape for OpenAI-compatible `/v1/models` endpoint.
@@ -94,16 +93,13 @@ pub(crate) fn normalize_base_url(base_url: &str) -> String {
 pub async fn fetch_models_from_endpoint(base_url: &str, api_key: Option<&str>) -> Vec<String> {
     let base = normalize_base_url(base_url);
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .ok();
-
-    let Some(client) = client else {
-        tracing::debug!("[model_fetch] failed to build HTTP client");
-        return Vec::new();
-    };
+    // Two attempts, one client. The ceilings are client-level settings, so the
+    // slot builds it once instead of per discovery call.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = crate::utils::http::cached_client(&CLIENT, |b| {
+        b.timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+    });
 
     // Attempt 1: OpenAI-compatible /v1/models
     let models_url = format!("{}/v1/models", base);

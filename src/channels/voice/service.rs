@@ -4,7 +4,6 @@
 //! used by the Telegram bot for voice note support.
 
 use anyhow::{Context, Result};
-use reqwest::Client;
 use serde::Deserialize;
 
 use crate::config::{SttMode, TtsMode, VoiceConfig};
@@ -363,7 +362,7 @@ pub(crate) async fn transcribe_audio_with_language(
     api_key: &str,
     url: &str,
 ) -> Result<(String, Option<String>)> {
-    let client = Client::new();
+    let client = crate::utils::http::shared();
 
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
         .file_name("voice.ogg")
@@ -952,7 +951,7 @@ pub(crate) async fn synthesize_speech_with_url(
     model: &str,
     url: &str,
 ) -> Result<Vec<u8>> {
-    let client = Client::new();
+    let client = crate::utils::http::shared();
 
     let body = serde_json::json!({
         "model": model,

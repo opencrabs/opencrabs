@@ -35,31 +35,18 @@ use crate::brain::tools::brain_file_safety;
 /// entry carries its own repo-relative path (#819).
 const TEMPLATE_BASE_URL: &str = "https://raw.githubusercontent.com/opencrabs/opencrabs/main";
 
-/// Connect budget for a template fetch, matching the house pattern already in
-/// `embedding.rs`, `gemini.rs`, `anthropic.rs` and
-/// `custom_openai_compatible.rs`. `reqwest`'s own default is no timeout at
-/// all, which is how a blackholed connection once wedged an embedding call
-/// forever (#1062). The sync runs on the RSI task ahead of the startup digest
-/// and the analysis loop, so an unbounded fetch there stalls the whole engine
-/// rather than just the download (#2169).
-const TEMPLATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Total budget for one fetch, headers and body together. A template is a few
-/// KB, so 60s only ever binds on a server that accepts and then stalls.
+/// KB, so 60s only ever binds on a server that accepts and then stalls. The
+/// handshake is bounded by the shared client's own connect budget, and this
+/// deadline rides on the request so the fetch never needs a client of its own
+/// (#2169). The sync runs on the RSI task ahead of the startup digest and the
+/// analysis loop, so an unbounded fetch there stalls the whole engine rather
+/// than just the download.
 const TEMPLATE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Attempts per template. One retry absorbs a single DNS flap; more than that
 /// turns a real outage into a longer wall of the same error.
 const TEMPLATE_MAX_ATTEMPTS: u8 = 2;
-
-/// Build the bounded client used for every template fetch.
-fn template_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(TEMPLATE_CONNECT_TIMEOUT)
-        .timeout(TEMPLATE_REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| format!("Failed to build template sync client: {e}"))
-}
 
 /// A brain file: same name locally and under the templates directory.
 macro_rules! md {
@@ -626,10 +613,10 @@ pub(crate) fn classify_send_error(err: &reqwest::Error) -> FetchError {
 /// replace with a fake.
 async fn fetch_once(path: &str) -> Result<String, FetchError> {
     let url = format!("{TEMPLATE_BASE_URL}/{path}");
-    let client = template_client().map_err(|e| FetchError::Transport { detail: e })?;
 
-    let response = client
+    let response = crate::utils::http::shared()
         .get(&url)
+        .timeout(TEMPLATE_REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| classify_send_error(&e))?;
@@ -689,8 +676,9 @@ where
 
 /// Fetch a single template. `path` is relative to the repository root.
 ///
-/// Bounded twice over (#2169). The client caps the connect and the whole
-/// request, so a blackholed host can no longer wedge the RSI task forever,
+/// Bounded twice over (#2169). The shared client caps the connect and the
+/// request carries the total deadline, so a blackholed host can no longer wedge
+/// the RSI task forever,
 /// and a transport or body failure gets one more attempt so a single DNS
 /// flap does not fail every tracked file in the pass.
 pub(crate) async fn fetch_template(path: &str) -> Result<String, FetchError> {

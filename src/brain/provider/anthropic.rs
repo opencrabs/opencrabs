@@ -26,46 +26,6 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300); // Total request timeout
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10); // Connection timeout
-const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90); // Keep connections alive
-// TCP keepalive: OS-level probes detect silent connection drops without
-// waiting for the 300s request timeout. Critical for long-running streams
-// where the server crashes/network drops mid-response — without this, the
-// stream hangs until the full timeout. With it, the kernel kills the dead
-// socket in ~15-45s and reqwest surfaces an error so retry logic kicks in.
-const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
-
-/// The streaming client: same pool and keepalive tuning as the request client,
-/// deliberately NO total request timeout. reqwest's `.timeout()` bounds the
-/// whole exchange including the body read, so on an SSE stream it is a
-/// wall-clock guillotine on healthy responses (#1687). Inter-chunk silence is
-/// guarded at the app level in `brain/agent/service/helpers.rs`; a handshake
-/// that never lands is still bounded by `connect_timeout`.
-fn build_stream_client() -> Client {
-    Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create streaming HTTP client")
-}
-
-/// The NON-streaming request client: same pool and keepalive tuning as the
-/// stream client, plus a total ceiling. That ceiling is a budget on a call that
-/// buffers its whole body (title generation, compaction, `/models`); streams
-/// never touch this client, so `with_timeout` can only ever change how long a
-/// non-streaming call is allowed to hang (#1687).
-fn build_request_client(timeout: Duration) -> Client {
-    Client::builder()
-        .timeout(timeout)
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create HTTP client")
-}
 
 /// Anthropic provider for Claude models
 #[derive(Clone)]
@@ -96,8 +56,8 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     /// Create a new Anthropic provider
     pub fn new(api_key: String) -> Self {
-        let client = build_request_client(DEFAULT_TIMEOUT);
-        let stream_client = build_stream_client();
+        let client = crate::utils::http::buffered_transport(DEFAULT_TIMEOUT);
+        let stream_client = crate::utils::http::streaming_transport();
 
         Self {
             api_key,
@@ -113,14 +73,14 @@ impl AnthropicProvider {
 
     /// Create with a custom HTTP client for NON-STREAMING calls.
     ///
-    /// The stream client is always the total-timeout-free one built by
-    /// `build_stream_client`, so an injected client can never reintroduce the
-    /// #1687 ceiling on an SSE body.
+    /// The stream client is always the total-timeout-free one from
+    /// `utils::http::streaming_transport`, so an injected client can never
+    /// reintroduce the #1687 ceiling on an SSE body.
     pub fn with_client(api_key: String, client: Client) -> Self {
         Self {
             api_key,
             client,
-            stream_client: build_stream_client(),
+            stream_client: crate::utils::http::streaming_transport(),
             // An injected client's ceiling is opaque (reqwest does not read it
             // back), so the accessor reports "no user override" rather than
             // guessing a number.
@@ -138,7 +98,7 @@ impl AnthropicProvider {
     /// `timeout_secs` cannot put a wall clock back on an SSE body (#1687).
     /// Pairs with the `request_timeout()` trait accessor.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.client = build_request_client(timeout);
+        self.client = crate::utils::http::buffered_transport(timeout);
         self.request_timeout = Some(timeout);
         self
     }

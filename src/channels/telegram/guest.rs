@@ -949,7 +949,7 @@ impl GuestRunner {
             "https://api.telegram.org/bot{}/answerGuestQuery",
             self.token
         );
-        let resp = reqwest::Client::new()
+        let resp = crate::utils::http::shared()
             .post(&url)
             .json(body)
             .send()
@@ -1046,7 +1046,7 @@ impl GuestRunner {
     /// both shapes.
     async fn post_edit(&self, body: &Value) -> Result<(), EditError> {
         let url = format!("https://api.telegram.org/bot{}/editMessageText", self.token);
-        let resp = reqwest::Client::new()
+        let resp = crate::utils::http::shared()
             .post(&url)
             .json(body)
             .send()

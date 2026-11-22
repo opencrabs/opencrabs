@@ -288,13 +288,11 @@ async fn download_and_install_rtk() -> Option<String> {
     let url = format!("https://github.com/rtk-ai/rtk/releases/download/v{RTK_VERSION}/{asset}");
     tracing::info!(url = %url, "RTK auto-download: fetching release asset");
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .ok()?;
+    let client = crate::utils::http::shared();
     let resp = match client
         .get(&url)
         .header("User-Agent", "opencrabs")
+        .timeout(Duration::from_secs(60))
         .send()
         .await
     {

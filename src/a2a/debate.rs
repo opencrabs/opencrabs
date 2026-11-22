@@ -578,7 +578,7 @@ pub async fn run_debate(mut config: DebateConfig) -> Result<DebateSession, Debat
     }
 
     let mut session = DebateSession::new(config);
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
 
     for round_num in 1..=session.config.max_rounds {
         session.state = DebateState::InRound;

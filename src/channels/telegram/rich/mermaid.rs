@@ -582,16 +582,15 @@ pub(crate) async fn resolve(source: &str) -> MermaidResult {
 
     let url = ink_url(source);
 
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(
+    // Every retry and body read below shares this client, and the ceilings are
+    // client-level settings, so the slot builds it once.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = crate::utils::http::cached_client(&CLIENT, |b| {
+        b.connect_timeout(std::time::Duration::from_secs(
             PREVALIDATE_CONNECT_TIMEOUT_SECS,
         ))
         .timeout(std::time::Duration::from_secs(PREVALIDATE_TIMEOUT_SECS))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return fail("client", source, "diagram renderer unavailable", Some(&e)),
-    };
+    });
 
     let resp = match send_with_retry(&client, &url, source, "connect").await {
         Ok(r) => r,

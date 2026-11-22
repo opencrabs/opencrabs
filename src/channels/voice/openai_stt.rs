@@ -8,7 +8,6 @@
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use reqwest::Client;
 use serde::Deserialize;
 
 use super::openai_tts::build_endpoint_url;
@@ -31,7 +30,7 @@ pub async fn transcribe_audio(
 ) -> Result<String> {
     let transcribe_url = build_endpoint_url(base_url, "v1/audio/transcriptions")?;
 
-    let client = Client::new();
+    let client = crate::utils::http::shared();
 
     let model_owned = model.to_string();
 
@@ -130,7 +129,7 @@ pub async fn transcribe_audio_chat(
         }]
     });
 
-    let response = Client::new()
+    let response = crate::utils::http::shared()
         .post(&chat_url)
         .header("Authorization", format!("Bearer {}", api_key))
         // Same identity on the chat-shaped transcription route (#3138).

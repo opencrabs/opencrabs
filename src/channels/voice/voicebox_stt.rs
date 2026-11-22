@@ -4,7 +4,6 @@
 //! Returns transcription text.
 
 use anyhow::{Context, Result};
-use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -28,12 +27,10 @@ const OGG_MAGIC: &[u8; 4] = b"OggS";
 /// try the next provider in the chain.
 pub async fn probe_liveness(base_url: &str) -> Result<()> {
     let url = build_endpoint_url(base_url, "")?;
-    let client = Client::builder()
-        .timeout(LIVENESS_TIMEOUT)
-        .build()
-        .context("Failed to build liveness probe client")?;
+    let client = crate::utils::http::shared();
     client
         .get(&url)
+        .timeout(LIVENESS_TIMEOUT)
         .send()
         .await
         .with_context(|| format!("Voicebox liveness probe failed at {url}"))?;
@@ -87,7 +84,10 @@ pub async fn transcribe(audio_bytes: Vec<u8>, base_url: &str) -> Result<String> 
 
     let transcribe_url = build_endpoint_url(base_url, "transcribe")?;
 
-    let client = Client::new();
+    // No total deadline on purpose: a long voice note takes as long as it
+    // takes on a localhost model. The shared client still bounds the
+    // handshake, and the liveness probe above already proved the server is up.
+    let client = crate::utils::http::shared();
 
     // Voicebox v0.5.0 cannot decode OGG/Opus (Telegram voice note format).
     // Convert to WAV when local-stt is available; otherwise send raw bytes.

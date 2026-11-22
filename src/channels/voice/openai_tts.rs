@@ -6,7 +6,6 @@
 //! - LocalAI, OMLX, Unsloth, etc.
 
 use anyhow::{Context, Result};
-use reqwest::Client;
 use url::Url;
 
 /// Synthesize speech using an OpenAI-compatible TTS endpoint.
@@ -33,7 +32,7 @@ pub async fn synthesize_speech(
 
     let speech_url = build_endpoint_url(base_url, "v1/audio/speech")?;
 
-    let client = Client::new();
+    let client = crate::utils::http::shared();
 
     let body = serde_json::json!({
         "model": model,

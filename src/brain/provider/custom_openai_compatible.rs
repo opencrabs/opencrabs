@@ -29,46 +29,11 @@ const DEFAULT_OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions
 // (`factory.rs` calls `with_timeout` only when the key is present and > 0),
 // and it sat at 60s from #217 until #1635 moved it to 300s, which relocated
 // the wall instead of taking it off the stream path. Streams are served by
-// `build_stream_http_client` instead, which carries no total
+// `utils::http::streaming_transport` instead, which carries no total
 // ceiling; inter-chunk silence stays the app-level guard in
 // `brain/agent/service/helpers.rs` (`stream_idle_timeout_secs`). Matches the
 // Anthropic and Gemini providers.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-// TCP keepalive: OS-level probes detect silent connection drops without
-// waiting for the request timeout. Critical for streaming.
-const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
-
-fn build_http_client(timeout: Duration) -> Client {
-    Client::builder()
-        .timeout(timeout)
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create HTTP client")
-}
-
-/// The streaming client: handshake bound by `connect_timeout`, pool and TCP
-/// keepalive preserved, and deliberately NO total request timeout.
-///
-/// reqwest's `.timeout()` is a wall-clock ceiling on the whole exchange
-/// INCLUDING the response body read, so on an SSE stream it fires no matter how
-/// healthily chunks are arriving (#1687). A dead stream is the app-level
-/// inter-chunk guard's job (`brain/agent/service/helpers.rs`,
-/// `stream_idle_timeout_secs`), and a handshake that never lands is still
-/// bounded by `connect_timeout`.
-fn build_stream_http_client() -> Client {
-    Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create streaming HTTP client")
-}
 
 /// Open/close tag pairs to strip from streaming/non-streaming content.
 /// Covers DeepSeek-style `<think>` and Kimi-style `<!-- reasoning -->` blocks.
@@ -2332,8 +2297,8 @@ impl OpenAIProvider {
 
     /// Create a new OpenAI provider with official API
     pub fn new(api_key: String) -> Self {
-        let client = build_http_client(DEFAULT_TIMEOUT);
-        let stream_client = build_stream_http_client();
+        let client = crate::utils::http::buffered_transport(DEFAULT_TIMEOUT);
+        let stream_client = crate::utils::http::streaming_transport();
 
         Self {
             api_key,
@@ -2367,8 +2332,8 @@ impl OpenAIProvider {
 
     /// Create provider for local LLM (LM Studio, Ollama, etc.)
     pub fn local(base_url: String) -> Self {
-        let client = build_http_client(DEFAULT_TIMEOUT);
-        let stream_client = build_stream_http_client();
+        let client = crate::utils::http::buffered_transport(DEFAULT_TIMEOUT);
+        let stream_client = crate::utils::http::streaming_transport();
 
         Self {
             api_key: "not-needed".to_string(),
@@ -2402,8 +2367,8 @@ impl OpenAIProvider {
 
     /// Create with custom base URL
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        let client = build_http_client(DEFAULT_TIMEOUT);
-        let stream_client = build_stream_http_client();
+        let client = crate::utils::http::buffered_transport(DEFAULT_TIMEOUT);
+        let stream_client = crate::utils::http::streaming_transport();
 
         Self {
             api_key,
@@ -2575,7 +2540,7 @@ impl OpenAIProvider {
     /// Streams are unaffected: they run on `stream_client`, which has no total
     /// timeout by construction (#1687).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.client = build_http_client(timeout);
+        self.client = crate::utils::http::buffered_transport(timeout);
         self.request_timeout = Some(timeout);
         self
     }

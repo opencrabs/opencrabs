@@ -70,7 +70,7 @@ fn copilot_headers() -> Vec<(&'static str, &'static str)> {
 
 /// Start the OAuth device flow. Returns device code + user code for display.
 pub async fn start_device_flow() -> anyhow::Result<DeviceFlowResponse> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .post(DEVICE_CODE_URL)
         .header("content-type", "application/json")
@@ -93,7 +93,7 @@ pub async fn start_device_flow() -> anyhow::Result<DeviceFlowResponse> {
 /// Poll until the user authorizes the device. Returns the OAuth access token.
 /// Blocks (with sleeps) until authorized, denied, or expired.
 pub async fn poll_for_oauth_token(device_code: &str, interval: u64) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut poll_interval = Duration::from_secs(interval.max(5));
 
     loop {
@@ -178,7 +178,7 @@ impl CopilotTokenManager {
 
     /// Exchange the OAuth token for a fresh Copilot API token.
     pub async fn refresh(&self) -> anyhow::Result<()> {
-        let client = reqwest::Client::new();
+        let client = crate::utils::http::shared();
         let mut req = client
             .get(COPILOT_TOKEN_URL)
             .header("authorization", format!("token {}", self.oauth_token))
@@ -265,7 +265,7 @@ pub async fn fetch_copilot_models(oauth_token: &str) -> anyhow::Result<Vec<Strin
     let manager = CopilotTokenManager::new(oauth_token.to_string());
     let copilot_token = manager.ensure_token().await?;
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut req = client
         .get(COPILOT_MODELS_URL)
         .header("authorization", format!("Bearer {}", copilot_token));

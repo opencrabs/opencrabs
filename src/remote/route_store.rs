@@ -378,7 +378,7 @@ fn normalize_url(url: &str) -> String {
 /// outcome that completed before the win — callers record success/failure
 /// from those and ignore absent (aborted) routes.
 pub async fn race_best(routes: &[RouteEntry], now: u64) -> (Option<String>, Vec<RaceOutcome>) {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared().clone();
     let mut set = tokio::task::JoinSet::new();
     for r in routes {
         let url = r.url.clone();

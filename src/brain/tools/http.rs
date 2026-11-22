@@ -5,10 +5,11 @@
 use super::error::{Result, ToolError};
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
-use reqwest::{Client, Method, header::HeaderMap};
+use reqwest::{Method, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 
 /// HTTP client tool for external API integration
@@ -247,30 +248,36 @@ impl Tool for HttpClientTool {
 
         let method = parse_method(&input.method)?;
 
-        // Build client with timeout. Always set a default User-Agent —
-        // GitHub's API (and a long tail of other services that follow the
-        // same convention) returns 403 Forbidden when the UA header is
-        // missing, and reqwest ships with no UA by default. The error
-        // body literally says "Request forbidden by administrative
-        // rules. Please make sure your request has a User-Agent header."
-        // The caller's `headers` map can still override this: reqwest's
-        // per-request header setters win over client-level defaults, so
-        // explicit `User-Agent` in the tool input replaces ours.
-        let client = Client::builder()
-            .timeout(StdDuration::from_secs(input.timeout_secs))
-            .user_agent(concat!("opencrabs/", env!("CARGO_PKG_VERSION")))
-            .redirect(if input.follow_redirects {
-                // Re-validate every hop (OC-04): a public URL that 302s to an
-                // internal address is stopped, not followed.
-                super::ssrf::redirect_policy(10)
-            } else {
-                reqwest::redirect::Policy::none()
+        // The redirect policy is a client-level setting, so each policy gets
+        // its own slot and the root store is parsed once per policy instead of
+        // once per call. Everything else rides on the request: the caller's
+        // timeout, and a default User-Agent because GitHub's API (and a long
+        // tail of services that follow the same convention) returns 403 when
+        // the header is missing, while reqwest ships with no UA by default.
+        // The caller's `headers` map can still override it: a per-request
+        // header wins over the client-level default.
+        let client = if input.follow_redirects {
+            // Re-validate every hop (OC-04): a public URL that 302s to an
+            // internal address is stopped, not followed.
+            static FOLLOWING: OnceLock<reqwest::Client> = OnceLock::new();
+            crate::utils::http::cached_client(&FOLLOWING, |b| {
+                b.redirect(super::ssrf::redirect_policy(10))
             })
-            .build()
-            .map_err(|e| ToolError::Execution(format!("Failed to build HTTP client: {}", e)))?;
+        } else {
+            static FROZEN: OnceLock<reqwest::Client> = OnceLock::new();
+            crate::utils::http::cached_client(&FROZEN, |b| {
+                b.redirect(reqwest::redirect::Policy::none())
+            })
+        };
 
         // Build request
-        let mut request = client.request(method.clone(), &input.url);
+        let mut request = client
+            .request(method.clone(), &input.url)
+            .timeout(StdDuration::from_secs(input.timeout_secs))
+            .header(
+                reqwest::header::USER_AGENT,
+                concat!("opencrabs/", env!("CARGO_PKG_VERSION")),
+            );
 
         // Add headers
         if !input.headers.is_empty() {
