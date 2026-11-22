@@ -604,6 +604,34 @@ fn a_remote_send_follows_the_task_to_its_answer() {
     );
 }
 
+/// A reply that lands below the fold was never seen.
+///
+/// The follow loop appends rows while the far side works, and a pane that
+/// opened at the top or stayed where it was showed an answer nobody could see,
+/// which is the other half of "a experiencia de interacao na outra janela nao e
+/// nada igual a estar a falar com a maquina". Both surfaces use the same
+/// `Follow` state, so a reader who scrolled back is never yanked away (#2685).
+#[test]
+fn the_remote_pane_travels_with_the_answer() {
+    let source = include_str!("../dashboard_instances.rs");
+    let tail = fn_body(source, "pub(crate) fn reload_remote_tail")
+        .expect("the in-place re-read is what the loop calls");
+    assert!(
+        tail.contains("transcript.follow.update("),
+        "a follow tick has to judge the reader's place before the rows land"
+    );
+    assert!(
+        tail.contains("scroll_to_bottom()"),
+        "and snap when the reader wants the newest row"
+    );
+    let open = fn_body(source, "pub(crate) fn open_remote_session")
+        .expect("opening a remote session is where the first read lands");
+    assert!(
+        open.contains("scroll_to_bottom()"),
+        "opening a conversation must land on the newest row, not the top"
+    );
+}
+
 #[test]
 fn the_remote_composer_takes_the_local_ones_measurements() {
     // The owner's report was not "make it prettier", it was that the remote

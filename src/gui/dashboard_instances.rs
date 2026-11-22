@@ -29,6 +29,7 @@ use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_store::{InstanceStore, KnownInstance, now};
 use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
 use opencrabs::remote::tunnel;
+use opencrabs::ui_core::scroll::{Follow, scrolled_from_top};
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays, and it is the only clock the strip has: the
@@ -401,6 +402,7 @@ impl Dashboard {
             sending: false,
             following: None,
             scroll: ScrollHandle::new(),
+            follow: Follow::new(),
         });
         cx.notify();
 
@@ -460,6 +462,10 @@ impl Dashboard {
                             transcript.state = state;
                             transcript.has_rows = has_rows;
                             transcript.notice = None;
+                            // Opening a conversation lands on the newest row,
+                            // like the local transcript does: a session that
+                            // opened at the top read as a stale copy (#2698).
+                            transcript.scroll.scroll_to_bottom();
                         }
                     }
                     Err(e) => {
@@ -518,8 +524,19 @@ impl Dashboard {
                 }
                 match result {
                     Ok((title, context_id, state, has_rows)) => {
+                        // Judged from where the reader is, before the new rows
+                        // land: content that grows moves the max offset and
+                        // leaves the offset alone, so the follow survives
+                        // growth and dies only when the reader scrolled up by
+                        // hand (#2685).
+                        let offset = scrolled_from_top(f32::from(transcript.scroll.offset().y));
+                        let max = f32::from(transcript.scroll.max_offset().height);
+                        let snap = transcript.follow.update(offset, max);
                         transcript.state = state;
                         transcript.has_rows = has_rows;
+                        if snap {
+                            transcript.scroll.scroll_to_bottom();
+                        }
                         if !title.is_empty() {
                             transcript.title = SharedString::from(title);
                         }
@@ -2512,6 +2529,11 @@ pub(crate) struct RemoteTranscript {
     pub(crate) following: Option<String>,
     /// The body's own scroll, tracked by the transcript painter it is handed to.
     pub(crate) scroll: ScrollHandle,
+    /// Whether the reader wants the newest row. A follow tick appends rows while
+    /// the far side works, and a one-shot snap cannot hold that: this is the same
+    /// state the local transcript uses, so a reader who scrolled back to read
+    /// something is not yanked away by an answer landing (#2685).
+    pub(crate) follow: Follow,
 }
 
 /// The pairing form's state, which is also "the form is open".
