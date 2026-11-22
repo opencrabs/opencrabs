@@ -23,7 +23,7 @@ fn every_picker_pick_routes_through_the_scope_route() {
         "Enter must route through pick_model"
     );
     assert!(
-        MODELS.contains("this.pick_model(pair, cx)"),
+        MODAL.contains("this.pick_model(pair, cx)"),
         "a provider click must route through pick_model too"
     );
     assert!(
