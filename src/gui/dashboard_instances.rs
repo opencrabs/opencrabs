@@ -1356,7 +1356,7 @@ impl Dashboard {
                 // The rows, every other tick: often enough to watch the
                 // answer being written, rare enough not to re-parse a long
                 // session three times a second.
-                if tick % 2 == 0 {
+                if tick.is_multiple_of(2) {
                     let _ = this.update(cx, |this, cx| {
                         this.reload_remote_tail(follow_session.clone(), cx);
                     });
