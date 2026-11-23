@@ -3890,7 +3890,11 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
         .id("hint-line")
         .flex()
         .flex_row()
-        .items_center()
+        // The sentence breaks onto a second or third row in a narrow pane
+        // (#3162), so the row's children sit at the top of it: centred, the
+        // label and the dismiss control would drift down the middle of a
+        // three-row sentence.
+        .items_start()
         .justify_between()
         .gap_2()
         .w_full()
@@ -3912,8 +3916,16 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_row()
-                .items_center()
+                // The sentence may take more than one row now (#3162), so the
+                // label stays on the first row of it instead of floating in
+                // the middle of the block.
+                .items_start()
                 .gap_2()
+                // The row takes the width the line has left, so the sentence
+                // has a width to break against. Without a bounded width the
+                // text would take its natural size and the pane would scroll
+                // instead of wrapping.
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .child(
@@ -3929,8 +3941,15 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 )
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
-                        .truncate()
+                        // The sentence is never cut (#3162): it breaks onto a
+                        // second or third row in a narrow pane, and the whole
+                        // line stays readable. The old truncate put an
+                        // ellipsis where the tail of the hint used to be, and
+                        // the tail is where the second command and the joke
+                        // live.
+                        .whitespace_normal()
                         .text_xs()
                         // The theme's accent at full strength shouted for a
                         // line that is advice, not a warning (#3124). It is

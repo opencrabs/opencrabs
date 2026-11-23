@@ -3979,3 +3979,38 @@ fn the_composer_is_a_card_on_a_square_ground() {
         "the ground is the shot, so it carries no corner either: {surface}"
     );
 }
+
+/// The hint line breaks instead of cutting its sentence (#3162).
+///
+/// The line used to carry `truncate()`, so a narrow pane put an ellipsis where
+/// the tail of the hint used to be. The tail is where the second command and
+/// the joke live, so the whole sentence has to survive: the text wraps onto a
+/// second or third row, the label stays on the first row of it, and the row
+/// takes the width it has left to break against.
+#[test]
+fn the_hint_line_wraps_instead_of_truncating() {
+    let render = include_str!("../dashboard_render.rs");
+    let line = fn_body(render, "hint_line");
+    assert!(
+        !line.contains(".truncate()"),
+        "the hint sentence is never cut: {line}"
+    );
+    assert!(
+        line.contains(".whitespace_normal()"),
+        "the sentence wraps instead of being cut: {line}"
+    );
+    assert!(
+        line.contains(".flex_1()"),
+        "the sentence has a width to break against: {line}"
+    );
+    assert!(
+        line.contains(".items_start()"),
+        "the label stays on the first row of a wrapped sentence: {line}"
+    );
+    // The dismiss control is still there: a line that cannot be hidden is a
+    // line nobody can get rid of.
+    assert!(
+        line.contains("hint-dismiss"),
+        "the line can still be dismissed: {line}"
+    );
+}
