@@ -1,0 +1,264 @@
+name: Fork remote-backend lane
+
+# Fork-only. The remote-backend branches have no CI of their own: ci.yml runs
+# on pull requests, pushes to main and dispatch, and nobody compiles this
+# crate on the laptop that writes it. This lane is that compiler. It never
+# reaches upstream main.
+#
+# Five jobs, no `needs` between them, so a type error is read off `check`
+# minutes before the test and build jobs finish. Each job keeps its own cache
+# key: the profiles differ (dev for check and clippy, citest for tests, ci for
+# the build), and a shared key would have each job evict the others' units.
+
+on:
+  push:
+    branches: ['feat/**', 'rb/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-remote-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  seam:
+    name: seam (ratchets + fmt)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+
+      # The seam ratchet lands with a later package. Until then the step says
+      # so instead of failing on a missing file.
+      - name: Backend seam ratchet
+        run: |
+          if [ -f scripts/check-backend-seam.py ]; then
+            python3 scripts/check-backend-seam.py
+          else
+            echo "sem ratchets ainda"
+          fi
+
+      - name: Format
+        run: cargo fmt --check
+
+  check:
+    name: check (lib, bins, tests; gui)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fork-rb-check
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      # Types and borrows of the library, both binaries and every test target,
+      # with no codegen and no link. This is the job to read first.
+      - name: Check
+        run: cargo check --locked --tests --features gui
+
+  lint:
+    name: lint (clippy + byte-slice ratchet)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+          # clippy is not part of the default profile; without it the ratchet
+          # dies with "no such command: clippy" instead of linting.
+          components: clippy
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fork-rb-lint
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      # The touch is not cosmetic: on a restored cargo cache every unit is
+      # fresh, clippy emits nothing, and the ratchet would pass without
+      # checking. Touching our own crate keeps dependencies cached and the
+      # check real (see scripts/check-byte-slice-ratchet.py).
+      - name: Clippy, with the byte-slice ratchet
+        run: |
+          touch src/lib.rs
+          python3 scripts/check-byte-slice-ratchet.py
+
+  test:
+    name: test (citest; backend, a2a, remote, window)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      # Same arrangement as the test-linux leg of ci.yml: clang drives mold.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # The citest comment in Cargo.toml: two concurrent units of this crate
+      # evict the 16 GB runner. One unit at a time, each fanning its codegen
+      # across every core.
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fork-rb-test
+          cache-on-failure: true
+
+      - name: Install mold + ALSA + X11 dev
+        run: sudo apt-get update && sudo apt-get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      # One library compile, one filter per module, so a red test names the
+      # module it belongs to.
+      #
+      # A filter that matches nothing is a GREEN cargo run with zero tests
+      # behind it, so every module is judged on its own and a zero-match is a
+      # FAILURE. The one exception is `backend::`: the module does not exist
+      # until it is carved out, so while `src/backend` is absent its
+      # zero-match is a warning. Once the directory exists, a zero-match there
+      # fails like any other.
+      #
+      # `src/gui/` is a separate binary, so there is no `gui::` filter here:
+      # `--lib gui::` matches nothing and exits 0. The window has its own step.
+      - name: Test the library modules
+        run: |
+          status=0
+          for m in backend:: a2a:: remote::; do
+            set +e
+            out=$(cargo test --locked --profile citest --lib -- "$m" 2>&1)
+            rc=$?
+            set -e
+            n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+            if [ $rc -ne 0 ]; then
+              echo "::error::library slice FAILS (rc=$rc): $m"
+              printf '%s\n' "$out" | tail -40
+              status=1
+            elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
+              if [ "$m" = "backend::" ] && ! test -d src/backend; then
+                echo "::warning::library slice ZERO-MATCH: $m (src/backend does not exist yet)"
+              else
+                echo "::error::library slice ZERO-MATCH: $m names no tests (renamed?)"
+                status=1
+              fi
+            else
+              echo "library slice PASS: $m ($n tests)"
+            fi
+          done
+          exit $status
+
+      # `mod tests;` sits at the root of the bin crate (`src/gui/main.rs`), so
+      # the test paths are `tests::<module>::...`. The module list is READ
+      # from `src/gui/tests/mod.rs`, so a new module is covered by the act of
+      # declaring it, and a module that lists no tests is a hard failure
+      # instead of a silent pass.
+      - name: Test every window test module
+        run: |
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui --no-run
+
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui -- --list > /tmp/window-tests.txt 2>&1 || {
+              echo "::error::the window test binary will not list its tests"
+              tail -25 /tmp/window-tests.txt
+              exit 1
+            }
+
+          status=0
+          n_mods=0
+          for m in $(sed -n 's/^mod \([a-z0-9_]*\);/\1/p' src/gui/tests/mod.rs); do
+            n_mods=$((n_mods + 1))
+            if ! grep -q "^tests::${m}::" /tmp/window-tests.txt; then
+              echo "::error::window module ZERO-MATCH: tests::${m} declares no tests (renamed? gated out?)"
+              status=1
+            fi
+          done
+          if [ "$n_mods" -eq 0 ]; then
+            echo "::error::no test modules were found in src/gui/tests/mod.rs; the sed no longer matches the file"
+            exit 1
+          fi
+          echo "window modules found: $n_mods"
+
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui -- tests::
+          exit $status
+
+  build:
+    name: build (opencrabs + opencrabs-gui)
+    if: github.repository != 'opencrabs/opencrabs'
+    # Pinned for the glibc floor (2.39), same reason as prerelease.yml (#2206).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fork-rb-build
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      # Two builds, not one. The `gui` feature is not inert for the daemon:
+      # `compiled_features()` in src/brain/prompt_builder.rs lists it in the
+      # "Built-in features" line of the system prompt, and src/ui_core plus
+      # src/channels/voice compile extra modules under it. A daemon built with
+      # `--features gui` is a different program from the one users run.
+      - name: Build daemon
+        run: cargo build --locked --profile ci --bin opencrabs
+
+      - name: Build GUI
+        run: cargo build --locked --profile ci --features gui --bin opencrabs-gui
+
+      - name: Record what was built
+        run: |
+          git rev-parse HEAD > target/ci/SOURCE-COMMIT.txt
+          sha256sum target/ci/opencrabs target/ci/opencrabs-gui | tee target/ci/opencrabs-gui.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opencrabs-linux-amd64
+          path: |
+            target/ci/opencrabs
+            target/ci/opencrabs-gui
+            target/ci/opencrabs-gui.sha256
+            target/ci/SOURCE-COMMIT.txt
+          retention-days: 7
