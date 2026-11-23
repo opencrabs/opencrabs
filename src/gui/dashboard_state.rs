@@ -475,6 +475,17 @@ pub(crate) struct Dashboard {
     /// scroll position. A generation rejects a response for an older file.
     pub(crate) preview_document: Option<preview_document::DocumentState>,
     pub(crate) preview_document_generation: u64,
+    /// The built-in editors the bang operator opened, one per conversation
+    /// (#3163). Keyed by the session that asked, so a split keeps every
+    /// pane's buffer, cwd and focus apart: pane A's `!vi` must never hand
+    /// pane B's text to the dialog, and each session resolves its file
+    /// against its own working directory.
+    pub(crate) editor_dialogs: HashMap<Uuid, editor_dialog::EditorDialog>,
+    /// Which conversation's editor is on top and holds the keyboard (#3163).
+    pub(crate) editor_focus: Option<Uuid>,
+    /// Bumps on every open and close, so a file read that lands late lands
+    /// on the dialog that actually asked for it (#2395).
+    pub(crate) editor_generation: u64,
     /// The chat's `...` menu, as the session it acts on (#2480).
     ///
     /// It carries the id, never a bare flag: a right press on a topic tab

@@ -1211,6 +1211,13 @@ impl Dashboard {
                     }
                     cx.notify();
                 }
+                // An editor the user asked for with `!vi`, with the
+                // conversation that asked (#3163). The id decides which pane
+                // answers and which working directory a relative path is read
+                // from, so a split never shows one pane's buffer in another.
+                agent_bridge::TurnEvent::EditorRequest { session, command } => {
+                    self.open_editor(session, command, cx);
+                }
                 agent_bridge::TurnEvent::EvolveDone(text) => {
                     self.turn.live.notices.push(text);
                     cx.notify();

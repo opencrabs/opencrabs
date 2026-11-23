@@ -131,6 +131,9 @@ pub enum OverlayId {
     Warning,
     /// A file preview, which covers the window.
     Preview,
+    /// The built-in editor a bang command opened (#3163), which covers the
+    /// window and owns the keyboard while it is up.
+    Editor,
     /// A row's context menu.
     RailMenu,
     /// Waiting for a second session while a split is set up.

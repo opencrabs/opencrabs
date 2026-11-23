@@ -20,6 +20,8 @@ pub mod commands;
 pub mod composer;
 pub mod copy_select;
 pub mod docs;
+// The text behind the built-in editor the bang operator opens (#3163).
+pub mod editor_buffer;
 pub mod help_keys;
 // The line under the composer that says what to do next, shared so the
 // terminal and the desktop app cannot recommend different things (#2279).

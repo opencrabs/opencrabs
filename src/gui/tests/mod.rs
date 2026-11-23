@@ -6,6 +6,8 @@
 //! library, which cannot see the window at all.
 
 mod composer_orb_test;
+// The bang operator's built-in editor (#3163), read as source text.
+mod editor_dialog_test;
 mod layout_guard_test;
 mod main_test;
 mod plan_strip_test;

@@ -652,6 +652,13 @@ impl Dashboard {
         if self.themes_open {
             return vec![OverlayId::Themes];
         }
+        // The editor dialog owns the keyboard on every screen, the same law
+        // as the theme and settings modals: it is the topmost surface while
+        // it is up, so the composer and the panes underneath cannot answer a
+        // key meant for the buffer (#3163).
+        if self.editor_focus.is_some() {
+            return vec![OverlayId::Editor];
+        }
         // A full screen is its own surface: the rail and the chat overlays are
         // not drawn over it, so nothing below can own a key there.
         if self.screen != Screen::Chat {

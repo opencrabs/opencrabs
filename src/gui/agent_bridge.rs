@@ -48,6 +48,21 @@ pub enum TurnEvent {
         /// prints it.
         text: String,
     },
+    /// An editor the user asked for with `!vi`, `!nano`, and the
+    /// conversation that asked for it (#3163).
+    ///
+    /// The window opens a built-in buffer instead of handing the editor to
+    /// Terminal.app. The request travels with the id of the conversation that
+    /// ran it, so the dialog opens on the pane that asked for it: a split
+    /// shows a pane per conversation and each one owns its own working
+    /// directory, so the id is what decides which pane answers and which
+    /// directory a relative path is read from.
+    EditorRequest {
+        /// The conversation the editor was asked for in.
+        session: Option<Uuid>,
+        /// The editor invocation: program, file, line, read-only.
+        command: opencrabs::ui_core::bang::EditorCommand,
+    },
     /// ctrl+k cleared this session's messages; the transcript empties (#2430).
     MessagesCleared(Uuid),
     /// ctrl+k could not clear the session: the reason, for the notices.

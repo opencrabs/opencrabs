@@ -58,6 +58,8 @@ mod dashboard_state;
 mod dashboard_topics;
 mod dashboard_turns;
 mod editor;
+// The built-in editor the bang operator opens (#3163).
+mod editor_dialog;
 mod fonts;
 mod help_view;
 mod hint;

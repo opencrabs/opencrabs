@@ -40,6 +40,9 @@ pub const DASHBOARD: &str = concat!(
     include_str!("dashboard_state.rs"),
     include_str!("dashboard_topics.rs"),
     include_str!("dashboard_turns.rs"),
+    // The bang operator's built-in editor (#3163): the rules that pin the
+    // window's modal and key behaviour read this text, so its code is in.
+    include_str!("editor_dialog.rs"),
     include_str!("main.rs"),
 );
 

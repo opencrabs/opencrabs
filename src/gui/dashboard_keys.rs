@@ -62,6 +62,13 @@ impl Dashboard {
             self.preview_key(ev, window, cx);
             return;
         }
+        // The editor dialog owns every key while it is up (#3163): a typed
+        // character belongs to the buffer, never to the composer underneath,
+        // the same law the preview and the settings modal answer to.
+        if self.editor_focus.is_some() {
+            self.editor_key(ev, window, cx);
+            return;
+        }
         // The settings modal owns every key while it is open, on every screen
         // (#2878): an armed credential edit must not leak a typed character
         // into the composer, and the rows' arrows belong to the modal alone.

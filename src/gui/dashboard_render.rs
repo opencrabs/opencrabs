@@ -3676,6 +3676,20 @@ impl Render for Dashboard {
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
         // scrim is what the pointer meets (#2619).
+        // The built-in editor, over the panes and the other overlays but
+        // under the settings and theme modals: it is where the user went to
+        // write, so a keystroke or a click meant for the buffer must not
+        // reach the panes behind it (#3163). Only the focused conversation's
+        // dialog draws; the other conversations' editors wait their turn,
+        // exactly like every other session state in this window.
+        if let Some(id) = self.editor_focus
+            && let Some(dialog) = self.editor_dialogs.get(&id)
+        {
+            let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.close_editor(cx);
+            });
+            root = root.child(editor_dialog::overlay(dialog, dismiss));
+        }
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
