@@ -47,7 +47,25 @@ impl Dashboard {
         });
         self.reset_model_picker(current, None);
         if let Some(arg) = arg {
-            self.switch_model(arg, cx);
+            // The typed command answers in the conversation and no screen
+            // opens. But a trailing ` all` is a scope-all write (#3168), and
+            // a bulk write never runs unannounced: the typed argument is
+            // parsed the way the engine parses it (#468) and a scope-all
+            // takes the same count-then-confirm the picker takes, only with
+            // the ask landing in the conversation instead of a footer.
+            let (pair_arg, scope_all) = match arg.trim().strip_suffix(" all") {
+                Some(rest) if !rest.trim().is_empty() => (rest.trim(), true),
+                _ => (arg.trim(), false),
+            };
+            let pair = match models::find(&self.models_rows, pair_arg) {
+                Some(row) => row.pair(),
+                None => pair_arg.to_string(),
+            };
+            if scope_all {
+                self.begin_scope_all(pair, cx);
+            } else {
+                self.switch_model(pair, cx);
+            }
             return;
         }
         self.models_query.clear();

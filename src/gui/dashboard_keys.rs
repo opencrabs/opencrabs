@@ -93,6 +93,15 @@ impl Dashboard {
             self.theme_modal_key(ks, cx);
             return;
         }
+        // A pending scope-all ask owns the keyboard on the conversation
+        // (#3168): the typed command landed the question in the chat, and
+        // the picker's second-tap law holds here too. While it waits, every
+        // key is the ask's, so a line aimed at the answer cannot leak into
+        // the composer underneath.
+        if self.screen == Screen::Chat && self.models_apply_confirm.is_some() {
+            self.shared_models_key(ev, false, cx);
+            return;
+        }
         // The Seeker card owns every key while it is up, and the chord that
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer

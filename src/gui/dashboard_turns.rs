@@ -1366,7 +1366,29 @@ impl Dashboard {
                         self.switch_model(pair, cx);
                         continue;
                     }
+                    // The ask line is built before `pair` moves into the
+                    // pending confirm: the same borrow escape #3155 closed.
+                    let ask_line = {
+                        let (provider, model) =
+                            pair.split_once('/').unwrap_or((pair.as_str(), ""));
+                        opencrabs::channels::commands::apply_all_prompt_text(
+                            provider, model, count,
+                        )
+                    };
                     self.models_apply_confirm = Some((pair, count));
+                    // A typed `/models <pair> all` never opened the picker
+                    // (#3168), so the ask cannot live in a footer nobody can
+                    // see: it lands in the conversation, built from the same
+                    // text the channels use, with the two keys that answer
+                    // it. The picker keeps its footer and adds nothing.
+                    if self.screen != Screen::Models {
+                        self.push_session_notice(session, ask_line, cx);
+                        self.push_session_notice(
+                            session,
+                            "enter apply to all  esc cancel".to_string(),
+                            cx,
+                        );
+                    }
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::BrainReady(line) => {
