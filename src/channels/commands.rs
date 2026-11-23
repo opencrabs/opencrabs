@@ -2798,17 +2798,20 @@ pub(crate) fn format_skills() -> String {
 /// rebuild. They answer with an explanation instead of "unknown command".
 pub(crate) fn is_tui_only_command(cmd: &str) -> bool {
     // Terminal-only surfaces: colour presets, clipboard capture, and the
-    // multi-screen setup dialogs (/projects, /tasks, /workspace, /daemon,
-    // /brain, /settings) that upstream moved into `SLASH_COMMANDS` when the
-    // GUI landed. /rebuild was retired upstream but is kept listed so an
-    // old habit still gets an explanation instead of "unknown command".
-    const TUI_ONLY: [&str; 9] = [
+    // setup screens upstream moved into `SLASH_COMMANDS` when the GUI landed
+    // (/projects, /tasks, /workspace, /channels, /voice, /image, /daemon,
+    // /brain, /settings). /rebuild was retired upstream but is kept listed so
+    // an old habit still gets an explanation instead of "unknown command".
+    const TUI_ONLY: [&str; 12] = [
         "/theme",
         "/whisper",
         "/rebuild",
         "/projects",
         "/tasks",
         "/workspace",
+        "/channels",
+        "/voice",
+        "/image",
         "/daemon",
         "/brain",
         "/settings",

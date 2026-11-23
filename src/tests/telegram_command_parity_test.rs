@@ -224,6 +224,15 @@ fn tui_only_detection_covers_the_real_commands_only() {
         "/rebuild",
         "/onboard",
         "/onboard:voice",
+        "/projects",
+        "/tasks",
+        "/workspace",
+        "/channels",
+        "/voice",
+        "/image",
+        "/daemon",
+        "/brain",
+        "/settings",
     ] {
         assert!(
             is_tui_only_command(cmd),
