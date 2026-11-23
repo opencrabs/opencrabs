@@ -565,7 +565,11 @@ fn buffer_view(dialog: &EditorDialog) -> AnyElement {
                 } else {
                     shown.text_normal
                 }))
-                .child(if text.is_empty() { " " } else { text.to_string() }),
+                .child(if text.is_empty() {
+                    " ".to_string()
+                } else {
+                    text.to_string()
+                }),
         );
         rows = rows.child(row);
     }

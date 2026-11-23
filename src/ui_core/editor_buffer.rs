@@ -233,7 +233,7 @@ impl EditorBuffer {
 
     /// One character to the left. A selection collapses to its near edge.
     pub fn move_left(&mut self, select: bool) {
-        if let Some((start, end)) = self.selection() {
+        if let Some((start, _)) = self.selection() {
             let target = if select {
                 start.saturating_sub(1)
             } else {
@@ -249,7 +249,7 @@ impl EditorBuffer {
     /// One character to the right. A selection collapses to its far edge.
     pub fn move_right(&mut self, select: bool) {
         let len = self.text.chars().count();
-        if let Some((start, end)) = self.selection() {
+        if let Some((_, end)) = self.selection() {
             let target = if select {
                 (end + 1).min(len)
             } else {
