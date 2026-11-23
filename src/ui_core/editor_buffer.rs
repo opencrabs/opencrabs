@@ -130,6 +130,31 @@ impl EditorBuffer {
         }
     }
 
+    /// The line's own character-offset span, counted from one: where the
+    /// line starts in the buffer and how far it reaches, newline excluded.
+    /// The raw view's per-row selection paints work in these offsets, so a
+    /// global selection range can be clipped against a row without a second
+    /// scan (#3163).
+    pub fn line_span(&self, line: usize) -> Option<std::ops::Range<usize>> {
+        let (start, len) = self.line_bounds(line)?;
+        Some(start..start + len)
+    }
+
+    /// Put the caret on a line and column, both counted from one, keeping
+    /// the selection when the caller asks and dropping it otherwise. The
+    /// column clamps to the line's own length, so a click past the end of a
+    /// short line lands on its last character instead of drifting into the
+    /// next one (#3163).
+    pub fn goto_line_col(&mut self, line: usize, column: usize, select: bool) {
+        let last = self.line_count();
+        let target = line.clamp(1, last);
+        let Some((start, len)) = self.line_bounds(target) else {
+            return;
+        };
+        let offset = start + column.saturating_sub(1).min(len);
+        self.move_to(offset, select);
+    }
+
     /// The selected character offsets, ascending. No selection is `None`.
     pub fn selection(&self) -> Option<(usize, usize)> {
         let anchor = self.anchor?;
@@ -418,5 +443,39 @@ mod tests {
         buffer.move_right(false);
         buffer.insert("x");
         assert_eq!(buffer.text(), "hxéllo");
+    }
+
+    #[test]
+    fn line_span_gives_each_lines_own_offsets() {
+        let buffer = EditorBuffer::from_text("one\ntwo\nthree");
+        // Counted from one, newline excluded: line two starts at char
+        // offset three and reaches four characters (#3163).
+        assert_eq!(buffer.line_span(2), Some(3..7));
+        assert_eq!(buffer.line_span(1), Some(0..3));
+        assert_eq!(buffer.line_span(9), None);
+    }
+
+    #[test]
+    fn goto_line_col_lands_on_the_asked_character() {
+        let mut buffer = EditorBuffer::from_text("one\ntwo");
+        buffer.goto_line_col(2, 3, false);
+        assert_eq!(buffer.line_col(), (2, 3));
+    }
+
+    #[test]
+    fn goto_line_col_clamps_the_column_to_the_line() {
+        let mut buffer = EditorBuffer::from_text("one\ntwo");
+        // A click past a short line's end lands on its last character, not
+        // on the next line's first (#3163).
+        buffer.goto_line_col(1, 99, false);
+        assert_eq!(buffer.line_col(), (1, 3));
+    }
+
+    #[test]
+    fn goto_line_col_with_select_extends_a_selection() {
+        let mut buffer = EditorBuffer::from_text("one\ntwo");
+        buffer.goto_line_col(1, 2, false);
+        buffer.goto_line_col(2, 2, true);
+        assert_eq!(buffer.selected_text(), Some("ne\nt"));
     }
 }

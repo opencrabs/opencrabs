@@ -14,22 +14,63 @@
 //! which one draws and which one answers a keystroke.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use gpui::{AnyElement, ClipboardItem, Context, KeyDownEvent, Window, div, prelude::*, px, rgb};
+use gpui::{
+    AnyElement, App, BorderStyle, Bounds, ClickEvent, ClipboardItem, Context, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta,
+    ScrollHandle, ScrollWheelEvent, Window, canvas, div, fill, font, point, prelude::*, px, rgb,
+    rgba, size,
+};
 use opencrabs::ui_core::bang::EditorCommand;
+use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::editor_buffer::EditorBuffer;
+use opencrabs::ui_core::local_document::DocumentKind;
+use opencrabs::ui_core::scroll::vertical_scroll_thumb;
 use uuid::Uuid;
 
 use crate::agent_bridge;
 use crate::logging;
+use crate::markdown::{self, MdBlock};
 use crate::modal_shell;
 use crate::palette;
+use crate::transcript;
 
 /// How many buffer lines the dialog draws around the caret. The buffer can
 /// hold far more than a screen, and a full repaint of every line on every
 /// keystroke is the cost the panes just escaped (#2805), so the dialog draws a
 /// window that follows the caret instead of the whole file.
 const VISIBLE_LINES: usize = 30;
+
+/// Which face of the dialog is up. A file the user opens to look at shows as
+/// a document, the way the preview reads it; the raw text only comes up once
+/// the user asks to edit, and goes back to the document the moment a save
+/// lands (#3163).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorMode {
+    /// The file rendered as rich markdown, read-only. The default.
+    RichPreview,
+    /// The raw text: caret, selection, typing, scrolling.
+    RawEdit,
+}
+
+/// What a click needs to land on the right character: the text column's
+/// bounds in window coordinates, and how wide one character of the mono font
+/// renders at the editor's fixed size. The render pass fills it through a
+/// canvas that draws nothing, and the mouse handlers read it, so the two
+/// never have to agree on a layout neither can see (#3163).
+#[derive(Clone)]
+pub(crate) struct EditorHitGrid {
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) char_width: f32,
+}
+
+/// The raw view's fixed text geometry. Rendering and hit testing share these
+/// constants, so a click's pixel offset always divides out to the character
+/// the user aimed at, whatever the theme or rem size does (#3163).
+const RAW_TEXT_SIZE: f32 = 13.0;
+const RAW_LINE_HEIGHT: f32 = 20.0;
+const RAW_GUTTER_WIDTH: f32 = 48.0;
 
 /// One conversation's editor: its text, its path, and what the user is
 /// mid-way through doing to it.
@@ -66,6 +107,33 @@ pub(crate) struct EditorDialog {
     /// Which file load this dialog is waiting on. A generation rejects a
     /// response for a file the user has already closed or replaced.
     pub(crate) generation: u64,
+    /// Which face is up. See [`EditorMode`].
+    pub(crate) mode: EditorMode,
+    /// First visible line of the raw view, counted from one. The wheel moves
+    /// it, caret motion drags it along, and the render draws the lines that
+    /// start here instead of re-deriving the window from the caret every
+    /// frame (#3163).
+    pub(crate) raw_scroll: usize,
+    /// The click-to-caret grid, filled by the render pass and read by the
+    /// mouse handlers. It is shared rather than owned so a handler built in
+    /// the render pass can hold a clone of it without borrowing the dialog
+    /// the handler is about to mutate (#3163). `None` until the first paint
+    /// of the raw view.
+    pub(crate) hit_grid: Arc<Mutex<Option<EditorHitGrid>>>,
+    /// The rich preview's own scroller, so the rendered document wheels like
+    /// the preview modal does instead of standing still (#3163).
+    pub(crate) rich_scroll: ScrollHandle,
+    /// How many raw rows the body can show at the current card size. The
+    /// render pass measures it from the viewport, and the caret-sync uses it
+    /// without a window at hand (#3163).
+    pub(crate) rows_visible: usize,
+    /// A left press is down inside the raw view and the mouse is dragging a
+    /// selection: moves extend the selection until the release (#3163).
+    pub(crate) dragging: bool,
+    /// The rich preview's parsed blocks, keyed by the text they were parsed
+    /// from. Parsing runs once per text change, which only happens in raw
+    /// edit mode, so wheeling or reading the document is a cache hit (#3163).
+    pub(crate) preview_cache: Option<(String, Vec<MdBlock>)>,
 }
 
 impl EditorDialog {
@@ -89,7 +157,29 @@ impl EditorDialog {
             confirm_discard: false,
             status: None,
             generation: 0,
+            mode: EditorMode::RichPreview,
+            raw_scroll: 1,
+            hit_grid: Arc::new(Mutex::new(None)),
+            rich_scroll: ScrollHandle::new(),
+            rows_visible: VISIBLE_LINES,
+            dragging: false,
+            preview_cache: None,
         }
+    }
+
+    /// Pull the raw view's line window along so the caret stays inside it.
+    /// Every caret motion goes through here, so a key at the window's edge or
+    /// a drag past it always shows the line the user is on (#3163).
+    fn scroll_to_caret(&mut self) {
+        let (line, _) = self.buffer.line_col();
+        let rows = self.rows_visible.max(1);
+        if line < self.raw_scroll {
+            self.raw_scroll = line;
+        } else if line >= self.raw_scroll + rows {
+            self.raw_scroll = line + 1 - rows;
+        }
+        let last_first = self.buffer.line_count().saturating_sub(rows - 1).max(1);
+        self.raw_scroll = self.raw_scroll.clamp(1, last_first);
     }
 }
 
@@ -207,17 +297,163 @@ impl super::Dashboard {
                     dialog.buffer.goto_line(line as usize);
                 }
                 if binary {
+                    // A binary file has nothing to preview as text, so it
+                    // goes straight to the raw face rather than rendering a
+                    // document out of bytes it cannot parse (#3163).
+                    dialog.mode = EditorMode::RawEdit;
                     dialog.status =
                         Some("not valid text, opened read-only".to_string());
                 } else {
                     dialog.status = None;
                 }
+                dialog.preview_cache = None;
+                dialog.scroll_to_caret();
             }
             Err(error) => {
                 dialog.loading = false;
                 dialog.load_error = Some(error);
             }
         }
+        cx.notify();
+    }
+
+    /// Flip the focused dialog between the rich document and the raw text.
+    /// A prompt, a load in flight, or a failed or read-only file all keep
+    /// their face: the toggle is only for real text the user can act on
+    /// (#3163).
+    pub(crate) fn toggle_editor_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
+            return;
+        };
+        if dialog.loading
+            || dialog.load_error.is_some()
+            || dialog.save_prompt.is_some()
+            || dialog.read_only
+        {
+            return;
+        }
+        dialog.mode = match dialog.mode {
+            EditorMode::RichPreview => EditorMode::RawEdit,
+            EditorMode::RawEdit => EditorMode::RichPreview,
+        };
+        if dialog.mode == EditorMode::RawEdit {
+            dialog.scroll_to_caret();
+        }
+        logging::info(&format!("editor: face {:?} for {id}", dialog.mode));
+        cx.notify();
+    }
+
+    /// Land the caret on the character under a window point, using the hit
+    /// grid the render pass recorded. The guards mirror the keyboard's: a
+    /// click never edits while the load is in flight, failed, behind a
+    /// prompt, or in a read-only buffer (#3163).
+    fn editor_caret_to(&mut self, position: &Point<Pixels>, select: bool) {
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        let (grid, raw_scroll) = {
+            let Some(dialog) = self.editor_dialogs.get(&id) else {
+                return;
+            };
+            if dialog.mode != EditorMode::RawEdit
+                || dialog.loading
+                || dialog.load_error.is_some()
+                || dialog.save_prompt.is_some()
+                || dialog.read_only
+            {
+                return;
+            }
+            (dialog.hit_grid.clone(), dialog.raw_scroll)
+        };
+        let Some(grid) = grid.lock().ok().and_then(|guard| guard.clone()) else {
+            return;
+        };
+        if !grid.bounds.contains(position) {
+            return;
+        }
+        let rel_x = (position.x - grid.bounds.left()).0;
+        let rel_y = (position.y - grid.bounds.top()).0;
+        let row = (rel_y / RAW_LINE_HEIGHT).floor().max(0.0) as usize;
+        let column =
+            ((rel_x - RAW_GUTTER_WIDTH) / grid.char_width.max(1.0)).round().max(0.0) as usize + 1;
+        let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
+            return;
+        };
+        dialog.buffer.goto_line_col(raw_scroll + row, column, select);
+        dialog.scroll_to_caret();
+    }
+
+    /// A left press in the raw view: land the caret on the clicked
+    /// character and arm the drag-select (#3163).
+    pub(crate) fn editor_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        if ev.button != MouseButton::Left {
+            return;
+        }
+        self.editor_caret_to(&ev.position, false);
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        if let Some(dialog) = self.editor_dialogs.get_mut(&id) {
+            dialog.dragging = true;
+        }
+        cx.notify();
+    }
+
+    /// A press moving over the raw view extends the selection while a drag
+    /// is live, following the mouse line by line (#3163).
+    pub(crate) fn editor_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        let dragging = self
+            .editor_dialogs
+            .get(&id)
+            .is_some_and(|d| d.dragging && d.mode == EditorMode::RawEdit);
+        if !dragging {
+            return;
+        }
+        self.editor_caret_to(&ev.position, true);
+        cx.notify();
+    }
+
+    /// The drag ends: further moves leave the selection alone (#3163).
+    pub(crate) fn editor_mouse_up(&mut self, _ev: &MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        if let Some(dialog) = self.editor_dialogs.get_mut(&id) {
+            dialog.dragging = false;
+        }
+        cx.notify();
+    }
+
+    /// The wheel inside the raw view moves the line window a few rows per
+    /// notch, in whichever direction the platform delta leans, and a tiny
+    /// trackpad delta still pays one row (#3163).
+    pub(crate) fn editor_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let Some(id) = self.editor_focus else {
+            return;
+        };
+        let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
+            return;
+        };
+        if dialog.mode != EditorMode::RawEdit {
+            return;
+        }
+        let delta_y = match ev.delta {
+            ScrollDelta::Pixels(delta) => delta.y.0,
+            ScrollDelta::Lines(delta) => delta.y,
+        };
+        let mut shift = (delta_y / RAW_LINE_HEIGHT).trunc() as i32;
+        if shift == 0 && delta_y != 0.0 {
+            shift = delta_y.signum() as i32;
+        }
+        let rows = dialog.rows_visible.max(1) as i32;
+        let last_first = (dialog.buffer.line_count() as i32 - rows + 1).max(1);
+        dialog.raw_scroll = (dialog.raw_scroll as i32 - shift).clamp(1, last_first) as usize;
         cx.notify();
     }
 
@@ -254,6 +490,13 @@ impl super::Dashboard {
         match write_file(&path, &text) {
             Ok(()) => {
                 dialog.dirty = false;
+                // Back to the document face: the raw edit is done the moment
+                // the file lands, which is the flow the report asked for
+                // (#3163).
+                dialog.mode = EditorMode::RichPreview;
+                // Drop the cache: the text just changed, so the next paint
+                // re-parses the document out of the saved buffer (#3163).
+                dialog.preview_cache = None;
                 dialog.status = Some(format!("saved {}", path.display()));
                 logging::info(&format!("editor: saved {}", path.display()));
             }
@@ -453,16 +696,43 @@ impl super::Dashboard {
                 }
             }
         }
+        // The raw view's line window follows the caret on every motion, and
+        // the movement arms above never repaint by themselves, so one sync
+        // and one notify here cover the whole match (#3163).
+        dialog.scroll_to_caret();
+        cx.notify();
     }
 }
 
 /// The dialog itself, drawn with the window's shared modal chrome so the
 /// editor reads as one of the window's surfaces instead of a page pasted in.
+/// The card is measured from the live viewport instead of guessing a fixed
+/// size, which is what let the old one run off the bottom-right corner and
+/// clip (#3163). The closures are the Dashboard's listeners, passed in so
+/// this free function stays free of a `self` borrow (#3163).
 pub(crate) fn overlay(
-    dialog: &EditorDialog,
-    dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    dialog: &mut EditorDialog,
+    window: &Window,
+    dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    toggle_mode: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    mouse_move: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
+    mouse_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let shown = palette::current();
+    let viewport = window.viewport_size();
+    // The scrim pads 24 on each side and the card 20 more, so the usable
+    // area is the viewport minus that chrome. The clamps keep an extreme
+    // window size from squeezing the card into unusability, and the measured
+    // body height is what decides how many raw rows the dialog can show
+    // (#3163).
+    let width = (viewport.width.0 - 120.0).clamp(420.0, 1040.0);
+    let height = (viewport.height.0 - 120.0).clamp(320.0, 760.0);
+    let body_height = (height - 170.0).max(160.0);
+    let rows_visible =
+        (((body_height - 24.0) / RAW_LINE_HEIGHT).floor() as usize).clamp(6, VISIBLE_LINES);
+    dialog.rows_visible = rows_visible;
     let named = dialog
         .path
         .as_ref()
@@ -473,9 +743,12 @@ pub(crate) fn overlay(
         "loading...".to_string()
     } else if let Some(error) = &dialog.load_error {
         format!("could not read: {error}")
-    } else {
+    } else if dialog.mode == EditorMode::RawEdit {
         let (line, col) = dialog.buffer.line_col();
         format!("{}:{}, {}", line, col, dialog.buffer.text().chars().count())
+    } else {
+        let chars = dialog.buffer.text().chars().count();
+        format!("{} characters", chars)
     };
     if dialog.read_only {
         subtitle.push_str(" · read-only");
@@ -523,73 +796,324 @@ pub(crate) fn overlay(
             .child(error.clone())
             .into_any_element()
     } else {
-        buffer_view(dialog)
+        match dialog.mode {
+            EditorMode::RichPreview => preview_view(dialog, body_height),
+            EditorMode::RawEdit => {
+                buffer_view(dialog, mouse_down, mouse_move, mouse_up, wheel)
+            }
+        }
+    };
+    // The face toggle sits in the header next to the close door: the report
+    // asked for document until an explicit edit click, and raw until a save
+    // or the same click returns (#3163).
+    let (face, toggle_label) = match dialog.mode {
+        EditorMode::RichPreview => ("document", "edit"),
+        EditorMode::RawEdit => ("raw", "view"),
+    };
+    let actions = div()
+        .id("editor-face-toggle")
+        .flex_none()
+        .px_2()
+        .py_1()
+        .rounded(px(6.0))
+        .text_sm()
+        .text_color(rgb(shown.text_muted))
+        .cursor_pointer()
+        .hover(|d| d.bg(rgb(shown.panel_hi)).text_color(rgb(shown.text)))
+        .on_click(move |ev, window, app| toggle_mode(ev, window, app))
+        .child(toggle_label)
+        .into_any_element();
+    let footer_text = match dialog.mode {
+        EditorMode::RichPreview => {
+            format!("{} · edit to change the text · cmd-s save · esc close", face)
+        }
+        EditorMode::RawEdit => format!(
+            "{} · click to place the caret · drag to select · wheel to scroll · cmd-s save · esc close",
+            face
+        ),
     };
     let view = modal_shell::ModalView {
         id: "editor",
         title: format!("{} {}{}", dialog.program, named, dirty_mark),
         subtitle,
-        actions: None,
+        actions: Some(actions),
         header_close: true,
         body,
-        footer: Some(modal_shell::footer(
-            "cmd-s save · esc close · arrows move · shift+arrows select".to_string(),
-        )
-        .into_any_element()),
-        width: 860.0,
-        max_height: 640.0,
+        footer: Some(modal_shell::footer(footer_text).into_any_element()),
+        width,
+        max_height: height,
     };
     modal_shell::render(view, dismiss).into_any_element()
 }
 
-/// The buffer: the lines around the caret, the caret line ringed in the
-/// accent, each row carrying its line number. A window that follows the caret
-/// keeps a keystroke from repainting a whole file (#3163).
-fn buffer_view(dialog: &EditorDialog) -> AnyElement {
+/// The rich face: the file parsed the way the transcript renders a document,
+/// inside its own scroller, so a long document wheels like the preview does.
+/// The cache holds the text the blocks were parsed from; a fresh parse only
+/// happens when the text changed, which only the raw face can cause (#3163).
+fn preview_view(dialog: &mut EditorDialog, body_height: f32) -> AnyElement {
     let shown = palette::current();
+    let text = dialog.buffer.text().to_string();
+    let stale = dialog
+        .preview_cache
+        .as_ref()
+        .is_none_or(|(cached, _)| *cached != text);
+    if stale {
+        let flow = match DocumentKind::of_path(dialog.path.as_deref()) {
+            Some(DocumentKind::Markdown) => markdown::MdFlow::Prose,
+            _ => markdown::MdFlow::Verbatim,
+        };
+        let blocks = markdown::blocks_flow(&text, flow);
+        dialog.preview_cache = Some((text, blocks));
+    }
+    let blocks = dialog
+        .preview_cache
+        .as_ref()
+        .map(|(_, blocks)| blocks.clone())
+        .unwrap_or_default();
+    let reader = div()
+        .id("editor-preview-doc")
+        .overflow_y_scroll()
+        .scrollbar_width(px(8.0))
+        .track_scroll(&dialog.rich_scroll)
+        .h(px(body_height))
+        .rounded(px(concentric_radius(8.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
+        .p_5()
+        .child(transcript::document_blocks(&blocks));
+    div()
+        .relative()
+        .w_full()
+        .h(px(body_height))
+        .child(reader)
+        .child(preview_thumb(dialog.rich_scroll.clone()))
+        .into_any_element()
+}
+
+/// Paint after the reader so the thumb uses this frame's measured content.
+/// The same quiet track and thumb the document preview draws, so the two
+/// scrollables read as one surface (#3163).
+fn preview_thumb(scroll: ScrollHandle) -> impl IntoElement {
+    let shown = palette::current();
+    div()
+        .id("editor-preview-thumb")
+        .absolute()
+        .top_3()
+        .bottom_3()
+        .right_2()
+        .w(px(4.0))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.paint_quad(fill(bounds, rgba((shown.track << 8) | 0x66)));
+                    let Some(thumb) = vertical_scroll_thumb(
+                        f32::from(bounds.size.height),
+                        f32::from(scroll.max_offset().height),
+                        f32::from(scroll.offset().y),
+                    ) else {
+                        return;
+                    };
+                    let thumb_bounds = Bounds::new(
+                        point(bounds.origin.x, bounds.origin.y + px(thumb.top)),
+                        size(bounds.size.width, px(thumb.height)),
+                    );
+                    window.paint_quad(gpui::quad(
+                        thumb_bounds,
+                        px(2.0),
+                        rgb(shown.text_muted),
+                        px(0.0),
+                        rgba(0x00000000),
+                        BorderStyle::default(),
+                    ));
+                },
+            )
+            .size_full(),
+        )
+}
+
+/// The raw face: the caret's line window, one row per line, each character
+/// carrying its own selection or caret paint so a click can land on any of
+/// them through the hit grid the paint pass records. Long lines do not wrap,
+/// so rows keep the fixed geometry the hit test divides by, and the card
+/// clips them instead of shoving the layout around (#3163).
+fn buffer_view(
+    dialog: &mut EditorDialog,
+    mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    mouse_move: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
+    mouse_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let shown = palette::current();
+    let rows = dialog.rows_visible;
     let caret_line = dialog.buffer.line_col().0;
     let total = dialog.buffer.line_count();
-    let start = caret_line.saturating_sub(VISIBLE_LINES / 2).max(1);
-    let end = (start + VISIBLE_LINES - 1).min(total);
+    let start = dialog.raw_scroll.max(1).min(total);
+    let end = (start + rows - 1).min(total);
     let widest = end.to_string().len();
-    let mut rows = div().flex().flex_col();
+    let selection = dialog.buffer.selection();
+    // The caret's character index within its own line, zero-based, may sit
+    // one past the last character (a caret at the line's end or on an empty
+    // line). Only the caret's line gets a caret paint: a global offset would
+    // otherwise read as "past this line's end" on every line above (#3163).
+    let (_, caret_col) = dialog.buffer.line_col();
+    let caret_in_line = if caret_line >= start && caret_line <= end {
+        Some(caret_col - 1)
+    } else {
+        None
+    };
+    let grid = dialog.hit_grid.clone();
+    let mut rows_div = div().flex().flex_col();
     for number in start..=end {
-        let text = dialog.buffer.line_text(number).unwrap_or("");
-        let is_caret = number == caret_line;
+        let line = dialog.buffer.line_text(number).unwrap_or("");
+        let line_start = dialog
+            .buffer
+            .line_span(number)
+            .map(|span| span.start)
+            .unwrap_or(0);
+        let is_caret_line = number == caret_line;
         let mut row = div()
             .flex()
             .flex_row()
-            .gap_2()
-            .px_1()
+            .flex_none()
             .font_family(crate::fonts::current_mono())
-            .text_sm();
-        if is_caret {
-            row = row.border_l_2().border_color(rgb(shown.accent));
-        } else {
-            row = row.border_l_2().border_color(rgb(shown.panel));
-        }
+            .text_size(px(RAW_TEXT_SIZE))
+            .line_height(px(RAW_LINE_HEIGHT))
+            .whitespace_nowrap();
         let gutter = format!("{:>width$}", number, width = widest);
         row = row.child(
             div()
-                .min_w_10()
+                .w(px(RAW_GUTTER_WIDTH))
+                .flex_none()
                 .text_color(rgb(shown.text_faint))
                 .child(gutter),
         );
-        row = row.child(
-            div()
-                .flex_1()
-                .text_color(rgb(if is_caret {
-                    shown.text
+        let on_line_caret = if is_caret_line { caret_in_line } else { None };
+        if line.is_empty() {
+            if on_line_caret.is_some() {
+                // An empty caret line still owes the user a visible caret: a
+                // single space paints the block (#3163).
+                row = row.child(
+                    div()
+                        .bg(rgb(shown.text))
+                        .text_color(rgb(shown.bg))
+                        .child(" "),
+                );
+            }
+        } else {
+            for (text, selected, on_caret) in
+                row_segments(line, line_start, selection, on_line_caret)
+            {
+                let mut cell = div().flex_none();
+                if on_caret {
+                    // The caret is a block of the paper colour over the ink
+                    // colour, the way a terminal draws one (#3163).
+                    cell = cell.bg(rgb(shown.text)).text_color(rgb(shown.bg));
+                } else if selected {
+                    cell = cell.bg(rgb(shown.selection)).text_color(rgb(shown.text));
+                } else if is_caret_line {
+                    cell = cell.text_color(rgb(shown.text));
                 } else {
-                    shown.text_normal
-                }))
-                .child(if text.is_empty() {
-                    " ".to_string()
-                } else {
-                    text.to_string()
-                }),
-        );
-        rows = rows.child(row);
+                    cell = cell.text_color(rgb(shown.text_normal));
+                }
+                row = row.child(cell.child(text));
+            }
+        }
+        rows_div = rows_div.child(row);
     }
-    rows.into_any_element()
+    let raw = div()
+        .id("editor-raw-view")
+        .relative()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .h(px(rows as f32 * RAW_LINE_HEIGHT))
+        .rounded(px(concentric_radius(8.0)))
+        .border_1()
+        .border_color(rgb(shown.track))
+        .bg(rgb(shown.bg))
+        .py_1()
+        .child(rows_div)
+        // The hit grid is filled in paint, the only pass that knows where the
+        // text column really landed. The canvas draws nothing; it exists so
+        // the bounds reach the mouse handlers without either side guessing
+        // (#3163).
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let mono = font(crate::fonts::current_mono());
+                    let char_width = window
+                        .text_system()
+                        .resolve_font(&mono)
+                        .ok()
+                        .and_then(|font_id| {
+                            window
+                                .text_system()
+                                .advance(font_id, px(RAW_TEXT_SIZE), 'M')
+                                .ok()
+                        })
+                        .map(|size| size.width.0)
+                        .unwrap_or(7.2);
+                    if let Ok(mut slot) = grid.lock() {
+                        *slot = Some(EditorHitGrid {
+                            bounds,
+                            char_width,
+                        });
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_mouse_down(MouseButton::Left, move |ev, window, app| {
+            mouse_down(ev, window, app);
+            app.stop_propagation();
+        })
+        .on_mouse_move(move |ev, window, app| mouse_move(ev, window, app))
+        .on_mouse_up(MouseButton::Left, move |ev, window, app| {
+            mouse_up(ev, window, app);
+        })
+        .on_scroll_wheel(move |ev, window, app| {
+            wheel(ev, window, app);
+            app.stop_propagation();
+        });
+    raw.into_any_element()
+}
+
+/// Split one displayed line into runs of text, marking which are inside the
+/// selection and which carry the caret, all in the buffer's character
+/// offsets. The caret index is within the line, zero-based, and may equal
+/// the line's length: a caret past the last character gets a one-space
+/// block, which is the only way it can be visible at all (#3163).
+fn row_segments(
+    line: &str,
+    line_start: usize,
+    selection: Option<(usize, usize)>,
+    caret: Option<usize>,
+) -> Vec<(String, bool, bool)> {
+    let line_len = line.chars().count();
+    let line_end = line_start + line_len;
+    let selected_span = selection
+        .filter(|(s, e)| *s < line_end && *e > line_start)
+        .map(|(s, e)| (s.max(line_start), e.min(line_end)));
+    let mut segments: Vec<(String, bool, bool)> = Vec::new();
+    for (index, ch) in line.chars().enumerate() {
+        let at = line_start + index;
+        let selected = selected_span.is_some_and(|(s, e)| at >= s && at < e);
+        let on_caret = caret == Some(index);
+        match segments.last_mut() {
+            Some((text, run_selected, run_caret))
+                if *run_selected == selected && *run_caret == on_caret =>
+            {
+                text.push(ch);
+            }
+            _ => segments.push((ch.to_string(), selected, on_caret)),
+        }
+    }
+    if caret == Some(line_len) {
+        segments.push((" ".to_string(), false, true));
+    }
+    segments
 }

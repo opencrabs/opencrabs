@@ -92,6 +92,7 @@ pub enum MdFlow {
 /// One renderable line: the text plus byte-range highlight runs into it,
 /// whether it belongs to a code fence (mono, grouped by the renderer), the
 /// list/quote nesting depth, and whether it is a heading line.
+#[derive(Clone)]
 pub struct MdLine {
     pub text: String,
     pub highlights: Vec<(Range<usize>, MdStyle)>,
@@ -136,7 +137,7 @@ pub struct MdCell {
 
 /// A whole table, header row first. Column count is `header.len()` (or the
 /// widest row, if a malformed table disagrees).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MdTable {
     pub header: Vec<MdCell>,
     pub rows: Vec<Vec<MdCell>>,
@@ -156,6 +157,7 @@ impl MdTable {
 
 /// A renderable block: either a run of lines (paragraphs, headings, code
 /// fences) or a table, which must not be flattened into lines.
+#[derive(Clone)]
 pub enum MdBlock {
     Line(MdLine),
     Table(MdTable),
