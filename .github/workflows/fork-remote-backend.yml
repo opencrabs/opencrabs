@@ -115,7 +115,10 @@ jobs:
     name: test (citest; backend, a2a, remote, window)
     if: github.repository != 'opencrabs/opencrabs'
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # Two cold citest compiles in series at one unit at a time: the library
+    # slices took 49 min and the window binary 57 min in run 45142864215,
+    # which the old 120 min cap cut off before the window tests ran.
+    timeout-minutes: 240
     env:
       # Same arrangement as the test-linux leg of ci.yml: clang drives mold.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
@@ -134,7 +137,10 @@ jobs:
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: fork-rb-test
+          # v2: the v1 entry was saved before the window step ever finished,
+          # and a full key match never saves again, so the gui dependencies
+          # were rebuilt cold on every run.
+          key: fork-rb-test-v2
           cache-on-failure: true
 
       - name: Install mold + ALSA + X11 dev
