@@ -278,6 +278,16 @@ pub enum ChannelCommand {
     /// `/discard` — cancel the in-flight turn when needed, then engine
     /// cleanup back to NoPlan (handled by the channel handler).
     DiscardPlan,
+    /// `/approve [approve-only|auto-session|auto-always]` — show or set the
+    /// tool-approval policy. Same config key and same accepted values as the
+    /// TUI's slash-command tool, so both surfaces stay in step.
+    Approve(String),
+    /// `/skills` — enumerate every loaded skill with the `/name` that runs it.
+    Skills(String),
+    /// A command that exists only in the TUI (terminal presets, clipboard,
+    /// wizard screens, local rebuild). The reply explains what it does and
+    /// what to use in chat instead of a bare "unknown command".
+    TuiOnly(String),
     /// Not a recognised command — pass through to agent
     NotACommand,
 }
@@ -851,6 +861,35 @@ pub async fn handle_command(
                 }
             }
         }
+        // `/approve` was TUI-only until now. The policy already lives in
+        // config, so a channel can read and set it with exactly the values the
+        // TUI's slash-command tool accepts.
+        cmd if cmd == "/approve" || cmd.starts_with("/approve ") => {
+            if !is_owner {
+                ChannelCommand::UnknownCommand(
+                    "🔒 `/approve` is restricted to the bot owner.".to_string(),
+                )
+            } else {
+                let arg = cmd.strip_prefix("/approve").unwrap_or("").trim();
+                ChannelCommand::Approve(handle_approve_policy(arg))
+            }
+        }
+        // `/skills` enumerates what the Telegram menu already lists one entry
+        // at a time: every loaded SKILL.md with the slash that runs it, so a
+        // chat user can see the whole toolbox in one reply.
+        "/skills" => {
+            if !is_owner {
+                ChannelCommand::UnknownCommand(
+                    "🔒 `/skills` is restricted to the bot owner.".to_string(),
+                )
+            } else {
+                ChannelCommand::Skills(format_skills())
+            }
+        }
+        // Commands that only exist in the TUI answer with what they do and
+        // what to use here instead. The generic "unknown command" sent people
+        // hunting for a bug that was really a terminal-only surface.
+        cmd if is_tui_only_command(cmd) => ChannelCommand::TuiOnly(tui_only_notice(cmd)),
         _ if trimmed.starts_with('/') && !crate::utils::string::looks_like_file_path(trimmed) => {
             match_user_command(trimmed, is_owner)
         }
@@ -888,7 +927,9 @@ pub async fn handle_command(
         ChannelCommand::Help(body)
         | ChannelCommand::Usage(body)
         | ChannelCommand::MissionControl(body)
-        | ChannelCommand::Rename(body) => Some(body.clone()),
+        | ChannelCommand::Rename(body)
+        | ChannelCommand::Approve(body)
+        | ChannelCommand::Skills(body) => Some(body.clone()),
         ChannelCommand::Models(resp) => Some(resp.text.clone()),
         ChannelCommand::Sessions(resp) => Some(resp.text.clone()),
         ChannelCommand::NewSession => Some("New session started.".to_string()),
@@ -916,6 +957,7 @@ pub async fn handle_command(
         | ChannelCommand::UserPrompt(_)
         | ChannelCommand::PlanModeWithQuery(_)
         | ChannelCommand::NotACommand
+        | ChannelCommand::TuiOnly(_)
         | ChannelCommand::UnknownCommand(_) => None,
         ChannelCommand::RespondTo(body) => Some(body.clone()),
         ChannelCommand::Redact(body) => Some(body.clone()),
@@ -1086,6 +1128,10 @@ pub(crate) fn format_help() -> String {
             "Abort current operation (`/stop <id>` targets another session)",
         ),
         (
+            "/approve",
+            "Show/set the tool approval policy (`/approve <approve-only|auto-session|auto-always>`)",
+        ),
+        (
             "/architecture",
             "Directory tree of a path (mechanical, no API cost)",
         ),
@@ -1137,6 +1183,7 @@ pub(crate) fn format_help() -> String {
         ("/restart", "Restart OpenCrabs"),
         ("/rtk", "Show RTK token savings statistics"),
         ("/show-plan", "Show the current plan state"),
+        ("/skills", "List loaded skills and the slash that runs each"),
         (
             "/usage",
             "Token & cost stats (`provider [name]` / `model <name>` / `7d`)",
@@ -2693,6 +2740,117 @@ fn schedule_exit() -> String {
     "👋 Exiting OpenCrabs. Starting it again needs access to the machine it runs on.".to_string()
 }
 
+/// `/approve [approve-only|auto-session|auto-always]` — read or set the
+/// tool-approval policy. Deliberately identical to the TUI slash-command
+/// tool's `handle_approve`: same config key (`agent.approval_policy`), same
+/// accepted values, same two messages. Two surfaces, one policy.
+pub(crate) fn handle_approve_policy(arg: &str) -> String {
+    let policy = arg.trim();
+    if policy.is_empty() {
+        return match Config::load() {
+            Ok(cfg) => format!(
+                "🔐 Current approval policy: `{}`\n\n\
+                 Set it with `/approve <policy>`:\n\
+                 • `approve-only` — ask before every tool call\n\
+                 • `auto-session` — auto-approve on approval callbacks\n\
+                 • `auto-always` — never ask (YOLO, the shipped default)",
+                cfg.agent.approval_policy
+            ),
+            Err(e) => format!("❌ Failed to read config: {e}"),
+        };
+    }
+    match policy {
+        "approve-only" | "auto-session" | "auto-always" => {
+            match Config::write_key("agent", "approval_policy", policy) {
+                Ok(_written) => format!("✅ Approval policy set to: `{policy}`"),
+                Err(e) => format!("❌ Failed to write config: {e}"),
+            }
+        }
+        _ => format!(
+            "❌ Invalid policy: `{}`. Valid: `approve-only`, `auto-session`, `auto-always`",
+            policy
+        ),
+    }
+}
+
+/// `/skills` — enumerate every loaded skill (built-in + user + project) with
+/// the slash that runs it. The Telegram menu lists them one entry at a time,
+/// which is impossible to survey on a phone; this is the whole toolbox in one
+/// reply. Sorted by name so the list is stable between calls.
+pub(crate) fn format_skills() -> String {
+    let mut skills = crate::brain::skills::load_all_skills();
+    if skills.is_empty() {
+        return "🧰 No skills loaded.\n\nAdd `SKILL.md` files under \
+                `~/.opencrabs/skills/<name>/`."
+            .to_string();
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = format!("# 🧰 Skills ({})\n\n", skills.len());
+    for s in &skills {
+        out.push_str(&format!("• `{}` — {}\n", s.slash_name, s.description));
+    }
+    out.push_str("\nSend a skill's slash command to run it.");
+    out
+}
+
+/// Commands that only exist in the TUI because they need a terminal surface:
+/// colour presets, clipboard access, a multi-screen wizard, or a local source
+/// rebuild. They answer with an explanation instead of "unknown command".
+pub(crate) fn is_tui_only_command(cmd: &str) -> bool {
+    // Terminal-only surfaces: colour presets, clipboard capture, and the
+    // multi-screen setup dialogs (/projects, /tasks, /workspace, /daemon,
+    // /brain, /settings) that upstream moved into `SLASH_COMMANDS` when the
+    // GUI landed. /rebuild was retired upstream but is kept listed so an
+    // old habit still gets an explanation instead of "unknown command".
+    const TUI_ONLY: [&str; 9] = [
+        "/theme",
+        "/whisper",
+        "/rebuild",
+        "/projects",
+        "/tasks",
+        "/workspace",
+        "/daemon",
+        "/brain",
+        "/settings",
+    ];
+    TUI_ONLY
+        .iter()
+        .any(|c| cmd == *c || cmd.starts_with(&format!("{c} ")))
+        || cmd == "/onboard"
+        || cmd.starts_with("/onboard:")
+        || cmd.starts_with("/onboard ")
+}
+
+/// Every configured audience receives the same explanation for the TUI-only
+/// commands, with the chat-side equivalent named where one exists.
+pub(crate) fn tui_only_notice(cmd: &str) -> String {
+    let base = cmd.split([' ', ':']).next().unwrap_or(cmd).to_string();
+    let detail = match base.as_str() {
+        "/theme" => {
+            "Themes are terminal colour presets for the TUI — there is nothing a chat \
+             channel could render, so the setting has no meaning here."
+        }
+        "/whisper" => {
+            "Whisper captures microphone audio and pastes the transcript into the local \
+             clipboard, which a chat channel cannot reach. Send me a voice note instead: \
+             speech-to-text runs on inbound audio."
+        }
+        "/rebuild" => {
+            "Rebuild compiles the local source tree and restarts this process — it needs a \
+             Rust toolchain on the host and is deliberately TUI-only. Use `/evolve` for \
+             the normal release upgrade."
+        }
+        "/onboard" => {
+            "The setup wizard is a multi-screen TUI flow (provider, workspace, channels, \
+             voice, image, persona). In chat use `/models` to switch model, `/doctor` to \
+             health-check, and just ask me to change any setting — I write it with \
+             `config_manager`."
+        }
+        _ => "That command only exists in the TUI.",
+    };
+    format!("🖥️ `{base}` is TUI-only.\n\n{detail}")
+}
+
 /// Run doctor health check directly (no LLM needed). Returns a user-facing status message.
 pub fn run_doctor() -> String {
     use crate::brain::tools::slash_command::SlashCommandTool;
@@ -2911,6 +3069,9 @@ pub async fn try_execute_text_command(cmd: &ChannelCommand) -> Option<String> {
         | ChannelCommand::MissionControl(body)
         | ChannelCommand::UserSystem(body)
         | ChannelCommand::Rtk(body) => Some(body.clone()),
+        ChannelCommand::Approve(body)
+        | ChannelCommand::Skills(body)
+        | ChannelCommand::TuiOnly(body) => Some(body.clone()),
         ChannelCommand::Doctor => Some(run_doctor()),
         ChannelCommand::Architecture(path) => Some(run_architecture(path.as_deref())),
         ChannelCommand::Attach(body) => Some(body.clone()),

@@ -2642,6 +2642,15 @@ pub(crate) fn collect_command_catalog() -> Vec<teloxide::types::BotCommand> {
             "Approve the design plan / retry the checklist seed",
         ),
         BotCommand::new("discard", "Discard the live plan (back to no plan)"),
+        // Commands the channel dispatcher already handled but which never had
+        // a menu chip, so chat users had to know they existed. `/approve` and
+        // `/skills` gained handlers in the same change; `/rename`, `/restart`
+        // and `/exit` had worked for ages with no way to discover them.
+        BotCommand::new("approve", "Show/set the tool approval policy"),
+        BotCommand::new("skills", "List loaded skills and the slash that runs each"),
+        BotCommand::new("rename", "Rename the current session"),
+        BotCommand::new("restart", "Restart OpenCrabs (resumes this session)"),
+        BotCommand::new("exit", "Shut OpenCrabs down"),
     ];
 
     // Load user-defined commands from commands.toml
@@ -2790,7 +2799,7 @@ async fn register_scoped_menus(bot: &Bot, commands: Vec<teloxide::types::BotComm
         tracing::warn!("Telegram: failed to set default command menu: {e}");
     }
 
-    let owner_id: Option<u64> = tg.allowed_users.first().and_then(|s| s.parse().ok());
+    let owner_id: Option<u64> = super::menu_scope::owner_user_id(&tg.allowed_users, &tg.bot_owner);
     let Some(owner_id) = owner_id else {
         tracing::info!("Telegram: no owner configured, only the default menu is set");
         return;

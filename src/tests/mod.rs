@@ -1270,6 +1270,7 @@ pub mod telegram_bg_ack_fold_test;
 pub mod telegram_bg_resume_gate_test;
 pub mod telegram_caption_test;
 pub mod telegram_code_fence_balance_test;
+pub mod telegram_command_parity_test;
 pub mod telegram_command_sanitize_test;
 pub mod telegram_detached_row_test;
 pub mod telegram_double_answer_test;

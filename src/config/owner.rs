@@ -61,3 +61,36 @@ pub fn seed_bot_owner(allowed: &[String], bot_owner: &[String]) -> Option<Vec<St
     }
     allowed.first().map(|o| vec![o.clone()])
 }
+
+/// Resolve the numeric owner id used for per-user bot state (command menus,
+/// member-event notices).
+///
+/// Same precedence as [`is_owner`]: an explicit `bot_owner` list decides
+/// ownership, and the allow list is only consulted when `bot_owner` is empty.
+/// Within a list the first entry that parses as a numeric id wins.
+///
+/// Non-numeric entries are skipped rather than aborting the lookup, because
+/// the shipped convention allows the wildcard `"*"` anywhere in the allow
+/// list and real configs do put it first:
+///
+/// ```toml
+/// allowed_users = ["*", "1608111860"]
+/// ```
+///
+/// Callers used to take `.first()` and parse it, which yielded `None` on every
+/// such config. Every owner-menu path treats `None` as "no owner configured",
+/// so the Telegram command menu was never published (only `/start` appeared in
+/// the `/` picker), and member-event notices to the owner were dropped.
+pub fn resolve_owner_id(allowed: &[String], bot_owner: &[String]) -> Option<u64> {
+    fn first_numeric(list: &[String]) -> Option<u64> {
+        list.iter()
+            .map(|entry| entry.trim().trim_start_matches('+'))
+            .find_map(|entry| entry.parse::<u64>().ok())
+    }
+
+    if !bot_owner.is_empty() {
+        first_numeric(bot_owner)
+    } else {
+        first_numeric(allowed)
+    }
+}
