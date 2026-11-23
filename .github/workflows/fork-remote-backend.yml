@@ -268,6 +268,97 @@ jobs:
             --bin opencrabs-gui -- tests::
           exit $status
 
+  # The `test` job runs three slices, because a red test should name its
+  # module. Three slices are not the library: src/tests/mod.rs declares 1340
+  # modules and the other 1337 never ran here.
+  #
+  # That is not hypothetical, it is how #3152 was almost lost. The fix shipped
+  # with a regression test in src/tests/format_user_error_test.rs, whose path
+  # is tests::format_user_error_test::..., which no slice filter matches: the
+  # lane went green without ever executing it. Upstream CI does run it, because
+  # ci.yml runs the whole suite with --all-features, so the test was covered by
+  # the layer above rather than by this lane. A lane that cannot say "no test
+  # ran" is not a gate.
+  #
+  # So this job runs the entire default-feature library suite in one
+  # invocation. One invocation and not one per module, for two reasons:
+  # ci.yml records that timing-sensitive tests (rate_limiter pacing) rely on
+  # cargo test's own threadpool, and 1340 processes would each pay startup.
+  #
+  # A separate job and not a step in `test`, measured: the slices spend 94 min
+  # (almost all of it the cold compile of the lib test binary) and the window
+  # step 76 min, so a third step of ~55 min would land on ~232 of the 240 min
+  # cap. That is luck, not headroom, and a cancelled job saves no cache, so the
+  # next lane pays the cold compile again. In parallel it costs one extra cold
+  # compile of runner minutes, which are unlimited on a public fork, and no
+  # wall clock at all.
+  #
+  # The slices are kept: they are the attribution, and this job is the
+  # coverage. Neither replaces the other.
+  lib-suite:
+    name: lib-suite (every module in src/tests)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      # Same arrangement as the `test` job: clang drives mold.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # Two concurrent units of this crate evict the 16 GB runner.
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Its own key: sharing the `test` key would have the two jobs evict
+          # each other's units, and they start together anyway.
+          key: fork-rb-libsuite-v1
+          cache-on-failure: true
+
+      - name: Install mold + ALSA + X11 dev
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # Wrapped in the stall watchdog: before it, a blocked test thread showed
+      # up as the runner killing the job at the cap with no stacks (#1936). The
+      # watchdog leaves the compile alone (its stall clock starts at the first
+      # result line) and exits 97 on a stall, so a hang names itself in
+      # minutes instead of at the wall.
+      - name: Every library test
+        shell: bash
+        run: |
+          set -uo pipefail
+          bash scripts/test-stall-watchdog.sh \
+            cargo test --locked --profile citest --lib 2>&1 | tee /tmp/lib-suite.log
+          rc=${PIPESTATUS[0]}
+          n=$(sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' /tmp/lib-suite.log | head -n1)
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::the library suite fails (rc=$rc)"
+            tail -40 /tmp/lib-suite.log
+            exit 1
+          fi
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::the library suite reported no tests at all: the profile or the target is wrong, not the code"
+            tail -40 /tmp/lib-suite.log
+            exit 1
+          fi
+          echo "library suite PASS: $n tests passed (every module in src/tests, not only the rail slices)"
+
   build:
     name: build (opencrabs + opencrabs-gui)
     if: github.repository != 'opencrabs/opencrabs'
