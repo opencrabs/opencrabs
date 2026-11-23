@@ -34,11 +34,6 @@ const VISIBLE_LINES: usize = 30;
 /// One conversation's editor: its text, its path, and what the user is
 /// mid-way through doing to it.
 pub(crate) struct EditorDialog {
-    /// The conversation that asked for the editor. Relative paths resolve
-    /// against this session's working directory, never the process launch
-    /// directory: each session owns its own `/cd` path, so pane A's
-    /// `!vi notes.md` must not read pane B's directory (#3163).
-    pub(crate) session: Uuid,
     /// The editor program as the user typed it, for the title.
     pub(crate) program: String,
     /// The file behind the buffer, resolved absolute. `None` for a bare
@@ -74,9 +69,8 @@ pub(crate) struct EditorDialog {
 }
 
 impl EditorDialog {
-    fn empty(session: Uuid, command: &EditorCommand, path: Option<PathBuf>) -> Self {
+    fn empty(command: &EditorCommand, path: Option<PathBuf>) -> Self {
         Self {
-            session,
             program: command.program.clone(),
             path,
             buffer: EditorBuffer::new(),
@@ -152,7 +146,7 @@ impl super::Dashboard {
         });
         let generation = self.editor_generation.wrapping_add(1);
         self.editor_generation = generation;
-        let mut dialog = EditorDialog::empty(id, &command, path.clone());
+        let mut dialog = EditorDialog::empty(&command, path.clone());
         dialog.generation = generation;
         let exists = path.as_ref().is_some_and(|p| p.is_file());
         dialog.loading = exists;
@@ -319,58 +313,82 @@ impl super::Dashboard {
             self.save_editor(&id, cx);
             return;
         }
+        if !self.editor_dialogs.contains_key(&id) {
+            self.editor_focus = None;
+            return;
+        }
+        if key == "escape" {
+            // The prompt closes first, then the discard guard, then the
+            // dialog itself: one Esc never throws away typed text on its own.
+            // The close decision is taken while the dialog is borrowed and
+            // run after the borrow ends, so `self` is free for it and no
+            // reference has to be "dropped" to fake a release.
+            let close = {
+                let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
+                    return;
+                };
+                if dialog.save_prompt.take().is_some() {
+                    cx.notify();
+                    false
+                } else if dialog.dirty && !dialog.confirm_discard {
+                    dialog.confirm_discard = true;
+                    dialog.status = Some("unsaved changes, esc again to discard".to_string());
+                    cx.notify();
+                    false
+                } else {
+                    true
+                }
+            };
+            if close {
+                self.close_editor(cx);
+            }
+            return;
+        }
+        // While the name prompt is up, the typing belongs to it: the buffer
+        // underneath must not take a character meant for the filename. The
+        // typed name is read inside the borrow and the save runs after the
+        // borrow ends, which is what needs `self` back.
+        let prompt_up = self
+            .editor_dialogs
+            .get(&id)
+            .is_some_and(|d| d.save_prompt.is_some());
+        if prompt_up {
+            let save_as = {
+                let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
+                    return;
+                };
+                match key {
+                    "enter" => Some(dialog.save_prompt.clone().unwrap_or_default()),
+                    "backspace" => {
+                        if let Some(name) = dialog.save_prompt.as_mut() {
+                            name.pop();
+                        }
+                        cx.notify();
+                        None
+                    }
+                    _ => {
+                        if !primary
+                            && !ks.modifiers.alt
+                            && let Some(ch) = ks.key_char.as_ref().and_then(|s| s.chars().next())
+                            && !ch.is_control()
+                            && let Some(name) = dialog.save_prompt.as_mut()
+                        {
+                            name.push(ch);
+                            cx.notify();
+                        }
+                        None
+                    }
+                }
+            };
+            if let Some(typed) = save_as {
+                self.save_editor_as(&id, &typed, cx);
+            }
+            return;
+        }
         let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
             self.editor_focus = None;
             return;
         };
-        if key == "escape" {
-            // The prompt closes first, then the discard guard, then the
-            // dialog itself: one Esc never throws away typed text on its own.
-            if dialog.save_prompt.take().is_some() {
-                cx.notify();
-                return;
-            }
-            if dialog.dirty && !dialog.confirm_discard {
-                dialog.confirm_discard = true;
-                dialog.status = Some("unsaved changes, esc again to discard".to_string());
-                cx.notify();
-                return;
-            }
-            drop(dialog);
-            self.close_editor(cx);
-            return;
-        }
-        // While the name prompt is up, the typing belongs to it: the buffer
-        // underneath must not take a character meant for the filename. Each
-        // branch re-reaches into the option rather than holding a borrow
-        // across the save call, which needs `self` back.
-        if dialog.save_prompt.is_some() {
-            match key {
-                "enter" => {
-                    let typed = dialog.save_prompt.clone().unwrap_or_default();
-                    drop(dialog);
-                    self.save_editor_as(&id, &typed, cx);
-                }
-                "backspace" => {
-                    if let Some(name) = dialog.save_prompt.as_mut() {
-                        name.pop();
-                    }
-                    cx.notify();
-                }
-                _ => {
-                    if !primary
-                        && !ks.modifiers.alt
-                        && let Some(ch) = ks.key_char.as_ref().and_then(|s| s.chars().next())
-                        && !ch.is_control()
-                        && let Some(name) = dialog.save_prompt.as_mut()
-                    {
-                        name.push(ch);
-                        cx.notify();
-                    }
-                }
-            }
-            return;
-        }
         // Movement answers even in read-only and even while a load is in
         // flight, because looking around a file never writes anything.
         let select = ks.modifiers.shift;
