@@ -1997,6 +1997,12 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
     let mut in_fence = false;
     let mut dropping = false;
     let mut skipping_manifest = false;
+    // #3167: the prompt asks for a `## 0. IMMEDIATE TASK` heading, but the
+    // summariser sometimes writes the directive as an unheaded preamble above
+    // the first durable heading. A heading-anchored strip cannot see it, so
+    // nothing before the first durable heading is trusted: it is all execution
+    // spill from one session.
+    let mut seen_durable = false;
 
     for line in summary.lines() {
         let trimmed = line.trim_start();
@@ -2018,7 +2024,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
                 }
             }
             in_fence = !in_fence;
-            if !dropping {
+            if seen_durable && !dropping {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2026,7 +2032,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
         }
 
         if in_fence {
-            if !dropping {
+            if seen_durable && !dropping {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2038,8 +2044,15 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
             if dropping {
                 continue;
             }
+            seen_durable = true;
         }
-        if dropping {
+        // The obligation line belongs to section 0, but a summariser that
+        // lost its heading writes it inside durable prose too (#3167).
+        if trimmed.starts_with("**Obligation status:") || trimmed.starts_with("Obligation status:")
+        {
+            continue;
+        }
+        if dropping || !seen_durable {
             continue;
         }
         out.push_str(line);

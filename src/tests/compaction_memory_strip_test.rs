@@ -134,6 +134,77 @@ required_tools:
     assert!(out.contains("## 2. Files Modified"));
 }
 
+// #3167: the summariser sometimes writes the directive without its
+// `## 0. IMMEDIATE TASK` heading. A heading-anchored strip sails straight past
+// the preamble, so the obligation and the CONTINUE order reached the shared
+// daily file and live replay for every session in the profile.
+
+#[test]
+fn an_unheaded_directive_preamble_does_not_survive_the_strip() {
+    let summary = "\
+**Obligation status: OPEN**
+
+CONTINUE THIS TASK: finish the audit. Do NOT deviate to any other topic.
+
+## 1. Chronological Analysis
+- the user asked for an audit
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(
+        !out.contains("Obligation status"),
+        "the unheaded preamble's obligation survived"
+    );
+    assert!(
+        !out.contains("CONTINUE THIS TASK"),
+        "the unheaded preamble's directive survived"
+    );
+    assert!(
+        out.contains("## 1. Chronological Analysis"),
+        "durable half lost"
+    );
+}
+
+#[test]
+fn an_obligation_line_inside_a_durable_section_goes_too() {
+    // A summariser that loses the heading mid-document drops the obligation
+    // line into durable prose. It is section-0 text wherever it lands.
+    let summary = "\
+## 1. Chronological Analysis
+**Obligation status: OPEN**
+- the work
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(!out.contains("Obligation status"));
+    assert!(out.contains("- the work"), "durable rows lost");
+}
+
+#[test]
+fn a_fenced_heading_in_the_preamble_does_not_end_the_skip() {
+    // The preamble often quotes the document shape, so a durable heading can
+    // appear inside a fence before the real one. Only a heading outside a
+    // fence ends the skip.
+    let summary = "\
+CONTINUE THIS TASK: keep going.
+
+```
+## 1. Chronological Analysis
+```
+
+## 2. Files Modified
+- src/foo.rs
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(!out.contains("CONTINUE THIS TASK"), "preamble survived");
+    assert!(
+        !out.contains("## 1. Chronological Analysis"),
+        "a quoted heading inside a preamble fence must not flip the strip to keeping"
+    );
+    assert!(out.contains("## 2. Files Modified"), "durable half lost");
+}
+
 #[test]
 fn one_entry_is_capped_and_says_it_was_cut() {
     let huge = "a".repeat(20_000);
