@@ -68,8 +68,8 @@ use crate::config::owner::resolve_owner_id;
 
 #[test]
 fn resolve_owner_id_explicit_bot_owner_decides() {
-    let allowed = v(&["*".to_string(), "1".to_string()]);
-    let bot_owner = v(&["2".to_string()]);
+    let allowed = v(&["*", "1"]);
+    let bot_owner = v(&["2"]);
     assert_eq!(resolve_owner_id(&allowed, &bot_owner), Some(2));
 }
 
@@ -78,15 +78,15 @@ fn resolve_owner_id_positional_fallback_skips_the_wildcard() {
     // The regression the Telegram menu path shipped with: `.first().parse()`
     // returned None on `["*", "<id>"]`, which silently disabled every owner
     // menu — the `/` picker was left with nothing but `/start`.
-    let allowed = v(&["*".to_string(), "1608111860".to_string()]);
+    let allowed = v(&["*", "1608111860"]);
     let bot_owner: Vec<String> = Vec::new();
     assert_eq!(resolve_owner_id(&allowed, &bot_owner), Some(1_608_111_860));
 }
 
 #[test]
 fn resolve_owner_id_none_without_any_numeric_entry() {
-    let allowed = v(&["*".to_string()]);
-    let bot_owner = v(&["@nobody".to_string()]);
+    let allowed = v(&["*"]);
+    let bot_owner = v(&["@nobody"]);
     assert_eq!(resolve_owner_id(&allowed, &bot_owner), None);
     assert_eq!(resolve_owner_id(&[], &[]), None);
 }
@@ -94,7 +94,7 @@ fn resolve_owner_id_none_without_any_numeric_entry() {
 #[test]
 fn resolve_owner_id_tolerates_a_leading_plus() {
     // Same normalization `is_owner` applies for international numbers (#277).
-    let allowed = v(&["+1608111860".to_string()]);
+    let allowed = v(&["+1608111860"]);
     let bot_owner: Vec<String> = Vec::new();
     assert_eq!(resolve_owner_id(&allowed, &bot_owner), Some(1_608_111_860));
 }
