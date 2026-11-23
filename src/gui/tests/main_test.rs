@@ -3967,3 +3967,42 @@ fn the_composer_is_a_card_on_a_square_ground() {
         "the ground is the shot, so it carries no corner either: {surface}"
     );
 }
+
+/// A provider retry has to reach the card (#3152).
+///
+/// With no network the ladder spends its whole budget and walks the fallback
+/// chain before a single `Failed` arrives, so a card that dropped
+/// `RetryAttempt` showed a clock and a ctx reading and nothing else: the
+/// window looked frozen while the turn was alive and retrying. Folding is the
+/// one place every surface already runs (a split leaf, a parked turn, a rail
+/// card), so this pins the notice once for all of them instead of once per
+/// owner.
+#[test]
+fn a_provider_retry_says_so_on_the_card() {
+    use crate::transcript;
+    use opencrabs::brain::agent::ProgressEvent;
+
+    let mut live = transcript::LiveTurn::default();
+    crate::fold_live(
+        &mut live,
+        ProgressEvent::RetryAttempt {
+            attempt: 1,
+            max: 4,
+            reason: "HTTP request failed: dns error: failed to lookup address".to_string(),
+        },
+        std::time::Instant::now(),
+    );
+
+    let line = live
+        .notices
+        .last()
+        .expect("a retry is the only thing a silent turn has to say");
+    assert!(
+        line.contains("Retry attempt 2 of 5"),
+        "the label is the one the terminal and every channel print: {line}"
+    );
+    assert!(
+        line.contains("dns error"),
+        "the reason the user can act on has to survive: {line}"
+    );
+}

@@ -140,6 +140,30 @@ pub(crate) fn fold_live(
         // has to drop it too, or the working-out that just got retried stays on
         // screen as the answer until the turn settles (#3021).
         ProgressEvent::StripStreamedContent { bytes, .. } => live.strip_streamed(bytes),
+        // A retry is the only trace a turn leaves while it is riding out a
+        // dead link. `utils::retry` does not fast-fail a connection or a DNS
+        // error (see its comment on the patient backoff), so a laptop with no
+        // wifi spends the whole five-send budget and then walks the fallback
+        // chain before a single `Failed` reaches the card. Until then the
+        // window painted a clock and a ctx reading and said nothing, which
+        // reads as a frozen turn instead of a machine with no network (#3152).
+        //
+        // Folded here rather than in the window's event match on purpose: this
+        // is the one function every surface already runs (a split leaf, a
+        // parked turn, a rail card), so the notice appears wherever the turn
+        // is being drawn without a second copy of the rule. The label is the
+        // same `send_label` the terminal and every channel print.
+        ProgressEvent::RetryAttempt {
+            attempt,
+            max,
+            reason,
+        } => {
+            live.notices.push(format!(
+                "{}: {}",
+                opencrabs::utils::retry::send_label(attempt, max),
+                reason
+            ));
+        }
         _ => {}
     }
 }

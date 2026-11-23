@@ -191,6 +191,29 @@ pub fn format_user_error(err: &AgentError) -> String {
             }
         }
     }
+    // A dead link is not a provider fault, and "try again" is the wrong
+    // advice: nothing about the request changes until the network is back.
+    // The raw text here is reqwest's ("error sending request for url ...:
+    // error trying to connect: dns error: failed to lookup address
+    // information"), which reads as a crash to anyone who is not a network
+    // engineer. The retry ladder has already spent its budget and walked the
+    // fallback chain by the time this runs, so the honest line is the one
+    // thing the user can act on (#3152).
+    let unreachable = [
+        "dns error",
+        "failed to lookup address",
+        "Network is unreachable",
+        "No route to host",
+        "Temporary failure in name resolution",
+        "dns resolution failed",
+    ]
+    .iter()
+    .any(|needle| raw.contains(needle));
+    if unreachable {
+        return "No network: this machine cannot reach the provider. Check \
+                the wifi or the VPN, then send the message again."
+            .to_string();
+    }
     raw
 }
 

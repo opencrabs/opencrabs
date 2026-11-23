@@ -259,3 +259,33 @@ fn format_user_error_surfaces_sqlite_cause() {
         "the outer context must stay visible too: {msg}"
     );
 }
+
+/// A dead link gets a sentence the user can act on (#3152).
+///
+/// The provider chain renders reqwest's own words: `error sending request for
+/// url (...): error trying to connect: dns error: failed to lookup address
+/// information: Temporary failure in name resolution`. Every case above this
+/// one in the helper is about what the PROVIDER said, so none of them matched
+/// and the raw text fell through to the card. A laptop with the wifi off then
+/// showed that line and read as a crash. The real variant is
+/// `ProviderError::HttpError`, whose `Display` is the reqwest chain; a
+/// `reqwest::Error` cannot be built in a unit test, so this pins the same
+/// rendered text, which is all the helper reads.
+#[test]
+fn format_user_error_names_a_dead_link() {
+    let raw = AgentError::Internal(
+        "error sending request for url (https://api.example.com/v1/messages): \
+         error trying to connect: dns error: failed to lookup address \
+         information: Temporary failure in name resolution"
+            .to_string(),
+    );
+    let msg = format_user_error(&raw);
+    assert!(
+        msg.starts_with("No network"),
+        "the card must name the missing link instead of echoing reqwest: {msg}"
+    );
+    assert!(
+        !msg.contains("dns error"),
+        "the DNS wording is not a sentence a user can act on: {msg}"
+    );
+}
