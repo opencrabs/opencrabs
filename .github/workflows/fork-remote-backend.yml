@@ -56,7 +56,12 @@ jobs:
     name: check (lib, bins, tests; gui)
     if: github.repository != 'opencrabs/opencrabs'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # 60 was measured too tight: run 45161017128 reached the cap at exactly
+    # 60 min (10:59:21Z -> 11:59:35Z) with the check step still going, and a
+    # cancelled job never runs its post step, so its cache was never saved and
+    # the next lane paid the same cold compile. Only the first cold run is
+    # expensive; 180 leaves real headroom instead of guessing again.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -71,7 +76,20 @@ jobs:
           cache-on-failure: true
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        run: |
+          set -euo pipefail
+          # A locked dpkg (unattended-upgrades on the runner) held this step for
+          # 135 min on run 45165005854 until the job cap killed it. Wait for the
+          # lock, bound the network, and retry: the runner is not ours to fix.
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
 
       # Types and borrows of the library, both binaries and every test target,
       # with no codegen and no link. This is the job to read first.
@@ -82,7 +100,10 @@ jobs:
     name: lint (clippy + byte-slice ratchet)
     if: github.repository != 'opencrabs/opencrabs'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # 90 was measured too tight: run 45165005854 reached the cap at exactly
+    # 90 min (11:25:04Z -> 12:55:20Z) with clippy still going on a cold target
+    # dir, and a cancelled job saves no cache.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -100,7 +121,18 @@ jobs:
           cache-on-failure: true
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        run: |
+          set -euo pipefail
+          # Same hardening as the check job: a locked dpkg must not burn the cap.
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
 
       # The touch is not cosmetic: on a restored cargo cache every unit is
       # fresh, clippy emits nothing, and the ratchet would pass without
@@ -144,7 +176,17 @@ jobs:
           cache-on-failure: true
 
       - name: Install mold + ALSA + X11 dev
-        run: sudo apt-get update && sudo apt-get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
 
       # One library compile, one filter per module, so a red test names the
       # module it belongs to.
@@ -231,7 +273,7 @@ jobs:
     if: github.repository != 'opencrabs/opencrabs'
     # Pinned for the glibc floor (2.39), same reason as prerelease.yml (#2206).
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -246,7 +288,17 @@ jobs:
           cache-on-failure: true
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
 
       # Two builds, not one. The `gui` feature is not inert for the daemon:
       # `compiled_features()` in src/brain/prompt_builder.rs lists it in the
