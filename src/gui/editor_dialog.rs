@@ -219,9 +219,10 @@ impl super::Dashboard {
         cx: &mut Context<Self>,
     ) {
         let Some(id) = session.or(self.chat_state.session()) else {
-            self.turn.live.notices.push(
-                "editor: no conversation to open it in, start or pick one first".to_string(),
-            );
+            self.turn
+                .live
+                .notices
+                .push("editor: no conversation to open it in, start or pick one first".to_string());
             cx.notify();
             return;
         };
@@ -306,8 +307,7 @@ impl super::Dashboard {
                     // goes straight to the raw face rather than rendering a
                     // document out of bytes it cannot parse (#3163).
                     dialog.mode = EditorMode::RawEdit;
-                    dialog.status =
-                        Some("not valid text, opened read-only".to_string());
+                    dialog.status = Some("not valid text, opened read-only".to_string());
                 } else {
                     dialog.status = None;
                 }
@@ -386,12 +386,16 @@ impl super::Dashboard {
         // (#3163).
         let rel_y = (f32::from(position.y - grid.bounds.top()) - RAW_PADDING).max(0.0);
         let row = (rel_y / RAW_LINE_HEIGHT).floor() as usize;
-        let column =
-            ((rel_x - RAW_GUTTER_WIDTH) / grid.char_width.max(1.0)).round().max(0.0) as usize + 1;
+        let column = ((rel_x - RAW_GUTTER_WIDTH) / grid.char_width.max(1.0))
+            .round()
+            .max(0.0) as usize
+            + 1;
         let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
             return;
         };
-        dialog.buffer.goto_line_col(raw_scroll + row, column, select);
+        dialog
+            .buffer
+            .goto_line_col(raw_scroll + row, column, select);
         dialog.scroll_to_caret();
     }
 
@@ -763,7 +767,10 @@ pub(crate) fn overlay(
         subtitle.push_str(" · read-only");
     }
     if !dialog.unsupported_flags.is_empty() {
-        subtitle.push_str(&format!(" · ignored: {}", dialog.unsupported_flags.join(" ")));
+        subtitle.push_str(&format!(
+            " · ignored: {}",
+            dialog.unsupported_flags.join(" ")
+        ));
     }
     if let Some(status) = &dialog.status {
         subtitle.push_str(&format!(" · {status}"));
@@ -807,9 +814,7 @@ pub(crate) fn overlay(
     } else {
         match dialog.mode {
             EditorMode::RichPreview => preview_view(dialog, body_height),
-            EditorMode::RawEdit => {
-                buffer_view(dialog, mouse_down, mouse_move, mouse_up, wheel)
-            }
+            EditorMode::RawEdit => buffer_view(dialog, mouse_down, mouse_move, mouse_up, wheel),
         }
     };
     // The face toggle sits in the header next to the close door: the report
@@ -834,7 +839,10 @@ pub(crate) fn overlay(
         .into_any_element();
     let footer_text = match dialog.mode {
         EditorMode::RichPreview => {
-            format!("{} · edit to change the text · cmd-s save · esc close", face)
+            format!(
+                "{} · edit to change the text · cmd-s save · esc close",
+                face
+            )
         }
         EditorMode::RawEdit => format!(
             "{} · click to place the caret · drag to select · wheel to scroll · cmd-s save · esc close",
@@ -1041,9 +1049,9 @@ fn buffer_view(
         // this view adds, and the one-pixel border each side. Sizing the
         // content box exactly to the rows keeps the last line whole; the
         // shorter box before this clipped half of it (#3163).
-        .h(px(
-            rows as f32 * RAW_LINE_HEIGHT + 2.0 * RAW_PADDING + 2.0 * RAW_BORDER,
-        ))
+        .h(px(rows as f32 * RAW_LINE_HEIGHT
+            + 2.0 * RAW_PADDING
+            + 2.0 * RAW_BORDER))
         .rounded(px(concentric_radius(8.0)))
         .border_1()
         .border_color(rgb(shown.track))
@@ -1066,10 +1074,7 @@ fn buffer_view(
                         .map(|size| f32::from(size.width))
                         .unwrap_or(7.2);
                     if let Ok(mut slot) = grid.lock() {
-                        *slot = Some(EditorHitGrid {
-                            bounds,
-                            char_width,
-                        });
+                        *slot = Some(EditorHitGrid { bounds, char_width });
                     }
                 },
             )

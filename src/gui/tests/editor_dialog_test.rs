@@ -30,7 +30,10 @@ fn the_bang_runner_never_spawns_a_terminal_editor() {
     let shell = BANG
         .find("run_shell(&cmd)")
         .expect("the runner lost its ordinary shell path, `!ls` and friends");
-    assert!(editor < shell, "the shell thread must not run before the editor branch answers");
+    assert!(
+        editor < shell,
+        "the shell thread must not run before the editor branch answers"
+    );
     let request = BANG
         .find("TurnEvent::EditorRequest")
         .expect("the editor branch must end in the event the window answers");

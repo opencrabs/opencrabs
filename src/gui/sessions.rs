@@ -306,6 +306,35 @@ impl SessionsState {
         self.ordered().position(|s| s.id == id)
     }
 
+    /// The sessions that paint as chips on their parent's card instead of as
+    /// their own rows (#2303): a visible child of a visible parent. A live
+    /// search paints every match flat, so no hit ever hides inside a chip.
+    /// One source of truth for the paint and the numbered jump, so the two
+    /// can never count different rows (#3166).
+    pub fn chip_children(&self) -> HashSet<uuid::Uuid> {
+        if !self.filter.trim().is_empty() {
+            return HashSet::new();
+        }
+        let visible: HashSet<uuid::Uuid> = self.visible().map(|s| s.id).collect();
+        self.parents
+            .iter()
+            .filter(|(_, parent)| visible.contains(*parent))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The rows the rail paints, in painted order (#3166): `ordered()`
+    /// without the children that hang off their parent as chips. The
+    /// numbered jump counts painted rows only, so digit n never opens a
+    /// session the rail does not show.
+    pub fn painted_row_ids(&self) -> Vec<uuid::Uuid> {
+        let chips = self.chip_children();
+        self.ordered()
+            .map(|s| s.id)
+            .filter(|id| !chips.contains(id))
+            .collect()
+    }
+
     /// Whether the cursor points at a row the rail still shows. A deleted,
     /// filtered-out or refetched-away row must never stay armed.
     pub fn cursor_visible(&self) -> bool {

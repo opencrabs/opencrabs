@@ -32,8 +32,11 @@ pub mod links;
 pub mod local_document;
 pub mod message_reader;
 pub mod message_select;
+// The cmd/ctrl+1..9 jump: pure id arithmetic so the terminal and the desktop
+// window pick the same nth topic or session (#3166).
 pub mod model_layout;
 pub mod model_selector;
+pub mod numbered_jump;
 pub mod palette;
 pub mod pane_tree;
 pub mod plan_history;

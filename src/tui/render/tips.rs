@@ -310,4 +310,3 @@ mod tests {
         assert_eq!(rows_for(&hint, 8), MAX_HINT_ROWS);
     }
 }
-

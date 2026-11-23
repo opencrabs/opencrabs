@@ -600,19 +600,6 @@ impl Dashboard {
         // One clock for the whole pass, so every flashing card blinks on the
         // same frame instead of one behind its neighbour.
         let flash_now = std::time::Instant::now();
-        // Telegram-style topics: a parent's children paint as compact chips on
-        // its card, not as their own rows. Resolve the chip set once before the
-        // loop so the paint can skip those rows and hang the strip on the
-        // parent. A live search falls back to flat rows so a match is never
-        // hidden inside a chip; a favorite stays a chip on its parent, never a
-        // row. Chips always paint: a terminal-written `topics_collapsed` flag
-        // never blanks the strip, the GUI has no row-era fold (#2701).
-        let searching = !self.sessions.filter.trim().is_empty();
-        let visible_ids: std::collections::HashSet<Uuid> = if rail_drawn {
-            self.sessions.visible().map(|s| s.id).collect()
-        } else {
-            std::collections::HashSet::new()
-        };
         // The grouped stamp, spend and indent of every card, one pass each. The
         // row loop asked per row and every ask scanned the whole rail, so a
         // 200-row rail paid ~80k item visits a frame for numbers that only
@@ -630,15 +617,15 @@ impl Dashboard {
                 std::collections::HashSet::new(),
             )
         };
-        let chip_children: std::collections::HashSet<Uuid> = if searching || !rail_drawn {
-            std::collections::HashSet::new()
+        // The chip set resolves once before the loop so the paint can skip
+        // those rows and hang the strip on the parent. Chips always paint: a
+        // terminal-written `topics_collapsed` flag never blanks the strip,
+        // the GUI has no row-era fold (#2701). The search-flat rule lives in
+        // `sessions::chip_children`, shared with the numbered jump (#3166).
+        let chip_children: std::collections::HashSet<Uuid> = if rail_drawn {
+            self.sessions.chip_children()
         } else {
-            self.sessions
-                .visible()
-                .filter_map(|s| self.sessions.parents.get(&s.id).map(|p| (s.id, *p)))
-                .filter(|(_, p)| visible_ids.contains(p))
-                .map(|(cid, _)| cid)
-                .collect()
+            std::collections::HashSet::new()
         };
         let mut children_by_parent: HashMap<Uuid, Vec<sessions::RailChip>> = HashMap::new();
         // One clock for the chip order (#2853): a topic with work in flight

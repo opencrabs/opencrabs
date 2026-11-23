@@ -1921,6 +1921,45 @@ impl App {
             return Ok(());
         }
 
+        // cmd/ctrl+1..9 jumps (#3166): the nth entry of what the user is
+        // looking at, `0` being position ten. The open conversation's topics
+        // win when it has any, so the session under the reader never changes;
+        // a conversation with no topics hands the chord to the session list.
+        // It sits above the composer so a chord is never text, and it claims
+        // the key even when the position lands past the list's end. Kitty
+        // terminals report ctrl+digit as CSI u, which crossterm hands over as
+        // a plain digit with CONTROL; on terminals without the protocol only
+        // ctrl+4..7 reach here (the 0x1c..0x1f bytes parse as digits), and
+        // the rest of the number row is simply not a chord.
+        use crate::ui_core::numbered_jump as jump;
+        if let KeyCode::Char(digit) = event.code
+            && let Some(position) = jump::chord_position(
+                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::SUPER),
+                digit,
+            )
+        {
+            // The bar's drawing order is the jump order: `All` first, then
+            // the topics in list order, the same ids its own chips open
+            // (#2701). The list order comes from the same rows Up/Down
+            // walks on the sessions screen.
+            let scope = jump::scope_for(false, self.chat_topic_bar.is_some());
+            let topics: Vec<Uuid> = self
+                .chat_topic_bar
+                .as_ref()
+                .map(|bar| bar.entries.iter().map(|e| e.session(bar.root)).collect())
+                .unwrap_or_default();
+            let sessions: Vec<Uuid> = self
+                .visible_session_indices()
+                .iter()
+                .filter_map(|i| self.sessions.get(*i).map(|s| s.id))
+                .collect();
+            if let Some(target) = jump::resolve_target(scope, position, &topics, &sessions) {
+                self.load_session(target).await?;
+            }
+            return Ok(());
+        }
+
         // When slash suggestions are active, intercept navigation keys
         if self.slash_suggestions_active {
             if keys::is_up(&event) {
@@ -2659,6 +2698,65 @@ impl App {
         Ok(())
     }
 
+    /// Open the session row the list cursor points at (#3166). Enter lands
+    /// here and so does a numbered jump, so the two surfaces can never
+    /// disagree about what opening a row means: in assign mode the row is
+    /// assigned and the list stays up, and a session already pinned to
+    /// another pane pulls the focus to that pane instead of yanking the
+    /// session out of it.
+    pub(crate) async fn open_selected_session(&mut self) -> Result<()> {
+        let Some(session) = self
+            .selected_session_actual_index()
+            .and_then(|i| self.sessions.get(i))
+        else {
+            return Ok(());
+        };
+        let session_id = session.id;
+
+        if let Some(project_id) = self.assigning_to_project {
+            // Assign mode: assign this session to the project, stay in list
+            let title = session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Untitled".to_string());
+            match self
+                .project_service
+                .assign_session(session_id, project_id)
+                .await
+            {
+                Ok(()) => {
+                    self.notification = Some(format!("Assigned: {title}"));
+                    // Reflect the assignment in the in-memory list right
+                    // away so the project badge appears in real time,
+                    // without leaving and re-entering the sessions list.
+                    if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                        s.project_id = Some(project_id);
+                    }
+                }
+                Err(e) => {
+                    self.notification = Some(format!("Failed to assign: {e}"));
+                }
+            }
+            self.notification_shown_at = Some(std::time::Instant::now());
+            // Stay in sessions list for more picks
+        } else {
+            // Normal mode: load session and go to chat
+            // If this session is already in another pane, switch focus there
+            let existing_pane =
+                self.pane_manager.panes.iter().find(|p| {
+                    p.session_id == Some(session_id) && p.id != self.pane_manager.focused
+                });
+            if let Some(pane) = existing_pane {
+                let target_id = pane.id;
+                self.pane_manager.focused = target_id;
+            }
+
+            self.load_session(session_id).await?;
+            self.switch_mode(AppMode::Chat).await?;
+        }
+        Ok(())
+    }
+
     /// Handle keys in sessions mode
     pub(crate) async fn handle_sessions_key(
         &mut self,
@@ -2793,6 +2891,42 @@ impl App {
             return Ok(());
         }
 
+        // cmd/ctrl+1..9 jumps (#3166): the list is what is on screen, so the
+        // chord always targets its visible rows, `0` being position ten. It
+        // sits above the search field because a jump chord is never text,
+        // and it claims the key even when the position lands past the list's
+        // end. Kitty terminals report ctrl+digit as CSI u, which crossterm
+        // hands over as a plain digit with CONTROL; on terminals without the
+        // protocol only ctrl+4..7 reach here (the 0x1c..0x1f bytes parse as
+        // digits), and the rest of the number row is simply not a chord.
+        use crate::ui_core::numbered_jump as jump;
+        if let KeyCode::Char(digit) = event.code
+            && let Some(position) = jump::chord_position(
+                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::SUPER),
+                digit,
+            )
+        {
+            // The visible rows, in the order the list paints them: the same
+            // order Up/Down walks, so digit n opens what row n shows.
+            let rows: Vec<Uuid> = self
+                .visible_session_indices()
+                .iter()
+                .filter_map(|i| self.sessions.get(*i).map(|s| s.id))
+                .collect();
+            if let Some(target) =
+                jump::resolve_target(jump::JumpScope::Sessions, position, &[], &rows)
+                && let Some(row) = rows.iter().position(|id| *id == target)
+            {
+                // The cursor follows the jump, so the next Up/Down moves
+                // from where it landed, and the row opens exactly the way
+                // Enter opens it.
+                self.selected_session_index = row;
+                self.open_selected_session().await?;
+            }
+            return Ok(());
+        }
+
         // Search mode: typing to filter sessions
         if self.session_search_active {
             match event.code {
@@ -2887,53 +3021,7 @@ impl App {
             self.selected_session_index =
                 (self.selected_session_index + 1).min(count.saturating_sub(1));
         } else if keys::is_enter(&event) {
-            if let Some(session) = self
-                .selected_session_actual_index()
-                .and_then(|i| self.sessions.get(i))
-            {
-                let session_id = session.id;
-
-                if let Some(project_id) = self.assigning_to_project {
-                    // Assign mode: assign this session to the project, stay in list
-                    let title = session
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Untitled".to_string());
-                    match self
-                        .project_service
-                        .assign_session(session_id, project_id)
-                        .await
-                    {
-                        Ok(()) => {
-                            self.notification = Some(format!("Assigned: {title}"));
-                            // Reflect the assignment in the in-memory list right
-                            // away so the project badge appears in real time,
-                            // without leaving and re-entering the sessions list.
-                            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                                s.project_id = Some(project_id);
-                            }
-                        }
-                        Err(e) => {
-                            self.notification = Some(format!("Failed to assign: {e}"));
-                        }
-                    }
-                    self.notification_shown_at = Some(std::time::Instant::now());
-                    // Stay in sessions list for more picks
-                } else {
-                    // Normal mode: load session and go to chat
-                    // If this session is already in another pane, switch focus there
-                    let existing_pane = self.pane_manager.panes.iter().find(|p| {
-                        p.session_id == Some(session_id) && p.id != self.pane_manager.focused
-                    });
-                    if let Some(pane) = existing_pane {
-                        let target_id = pane.id;
-                        self.pane_manager.focused = target_id;
-                    }
-
-                    self.load_session(session_id).await?;
-                    self.switch_mode(AppMode::Chat).await?;
-                }
-            }
+            self.open_selected_session().await?;
         } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
             // Topics on the selected session (#2306, two-state since #2701):
             // the first press turns topics on, the next one asks for the name

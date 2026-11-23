@@ -430,6 +430,17 @@ pub const ROWS: &[HelpRow] = &[
         Some("enter"),
         "Open the highlighted session",
     ),
+    // The numbered jump (#3166): digit n opens the nth row, `0` the tenth,
+    // in the list the screen is showing; with a conversation's topics on
+    // screen it is the topic bar instead, `1` being `All`. Both surfaces
+    // answer it from anywhere the list or bar is the focus, so both print it.
+    row(
+        HelpSection::Sessions,
+        "ctrl+1..9,0",
+        "Ctrl+1..9, 0",
+        Some("ctrl-1..9,0"),
+        "Jump to the nth session or topic",
+    ),
     row(
         HelpSection::Sessions,
         "ctrl+f",
@@ -625,6 +636,9 @@ mod tests {
         "Ctrl+U",
         "↑ / ↓",
         "Enter",
+        // Added by #3166: numbered jump, printed right after Enter
+        // because it is the sibling of opening the highlighted row.
+        "Ctrl+1..9, 0",
         "/",
         "Ctrl+Shift+P",
         "D",
@@ -669,8 +683,9 @@ mod tests {
                 r.neutral.chars().all(|c| c.is_ascii_lowercase()
                     || c.is_ascii_digit()
                     // `|` and `_` are the split chords' key glyphs: shift
-                    // and the glyph is the whole chord (#2438).
-                    || matches!(c, '+' | '/' | '@' | '|' | '_' | ',')),
+                    // and the glyph is the whole chord (#2438). `..` marks
+                    // a key range, so the numbered jump reads 1..9 (#3166).
+                    || matches!(c, '+' | '/' | '@' | '|' | '_' | ',' | '.')),
                 "{} is not a machine spelling",
                 r.neutral
             );
@@ -693,9 +708,11 @@ mod tests {
         for r in gui_rows() {
             let chord = r.gui.expect("gui_rows only yields rows with a chord");
             assert!(
-                chord
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || matches!(c, '-' | '/' | '|' | '_')),
+                chord.chars().all(|c| c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        // Digits and `..` ranges match the neutral
+                        // allow-list, for the numbered jump (#3166).
+                        || matches!(c, '-' | '/' | '|' | '_' | ',' | '.')),
                 "{chord} is not a window spelling"
             );
         }

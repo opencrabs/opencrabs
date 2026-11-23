@@ -275,11 +275,7 @@ impl EditorBuffer {
     pub fn move_right(&mut self, select: bool) {
         let len = self.text.chars().count();
         if let Some((_, end)) = self.selection() {
-            let target = if select {
-                (end + 1).min(len)
-            } else {
-                end
-            };
+            let target = if select { (end + 1).min(len) } else { end };
             self.move_to(target, select);
             return;
         }
@@ -321,7 +317,10 @@ impl EditorBuffer {
     /// The last character of the caret's line.
     pub fn line_end(&mut self, select: bool) {
         let (line, _) = self.line_col();
-        let end = self.line_bounds(line).map(|(start, len)| start + len).unwrap_or(0);
+        let end = self
+            .line_bounds(line)
+            .map(|(start, len)| start + len)
+            .unwrap_or(0);
         self.move_to(end, select);
     }
 

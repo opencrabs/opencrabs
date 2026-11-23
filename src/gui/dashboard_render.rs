@@ -3706,8 +3706,14 @@ impl Render for Dashboard {
             // The window is only read here: the card is measured from the
             // viewport size it carries (#3163).
             root = root.child(editor_dialog::overlay(
-                dialog, window, dismiss, toggle_mode, mouse_down, mouse_move,
-                mouse_up, wheel,
+                dialog,
+                window,
+                dismiss,
+                toggle_mode,
+                mouse_down,
+                mouse_move,
+                mouse_up,
+                wheel,
             ));
         }
         if self.themes_open {
