@@ -4956,8 +4956,12 @@ fn live_view(
         ));
     }
     for notice in &live.notices {
+        // The notice words land on the messages' column (#3169): the
+        // transcript spends half a rem of gutter on each side, and this pads
+        // the other 16, the same rule the hint rows follow (#3124).
         col = col.child(
             div()
+                .px(card_inset())
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
                 .child(SharedString::from(notice.clone())),
@@ -6542,8 +6546,11 @@ pub fn view(
     // the last reload did not land, which the reader needs, and it costs the
     // conversation nothing: the rows below it are the ones already on screen.
     if let Some(err) = &state.error {
+        // Same column as the messages (#3169): the transcript's half rem plus
+        // this 16 puts the words where every row above them sits.
         col = col.child(
             div()
+                .px(card_inset())
                 .text_xs()
                 .text_color(rgb(palette::current().amber))
                 .child(err.clone()),
