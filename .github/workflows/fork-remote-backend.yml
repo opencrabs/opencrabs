@@ -150,30 +150,36 @@ jobs:
       # zero-match is a warning. Once the directory exists, a zero-match there
       # fails like any other.
       #
+      # Most library tests do not live inside their module: they sit in
+      # `src/tests/<module>_*_test.rs`, so their paths are
+      # `tests::remote_routes_test::...`, which `remote::` never matches. Each
+      # module therefore runs with two filters (libtest ORs them): `<m>::` for
+      # the in-module tests and `tests::<m>_` for the central ones.
+      #
       # `src/gui/` is a separate binary, so there is no `gui::` filter here:
       # `--lib gui::` matches nothing and exits 0. The window has its own step.
       - name: Test the library modules
         run: |
           status=0
-          for m in backend:: a2a:: remote::; do
+          for m in backend a2a remote; do
             set +e
-            out=$(cargo test --locked --profile citest --lib -- "$m" 2>&1)
+            out=$(cargo test --locked --profile citest --lib -- "${m}::" "tests::${m}_" 2>&1)
             rc=$?
             set -e
             n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
             if [ $rc -ne 0 ]; then
-              echo "::error::library slice FAILS (rc=$rc): $m"
+              echo "::error::library slice FAILS (rc=$rc): ${m}:: + tests::${m}_"
               printf '%s\n' "$out" | tail -40
               status=1
             elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
-              if [ "$m" = "backend::" ] && ! test -d src/backend; then
-                echo "::warning::library slice ZERO-MATCH: $m (src/backend does not exist yet)"
+              if [ "$m" = "backend" ] && ! test -d src/backend; then
+                echo "::warning::library slice ZERO-MATCH: ${m}:: + tests::${m}_ (src/backend does not exist yet)"
               else
-                echo "::error::library slice ZERO-MATCH: $m names no tests (renamed?)"
+                echo "::error::library slice ZERO-MATCH: ${m}:: + tests::${m}_ names no tests (renamed?)"
                 status=1
               fi
             else
-              echo "library slice PASS: $m ($n tests)"
+              echo "library slice PASS: ${m}:: + tests::${m}_ ($n tests)"
             fi
           done
           exit $status
