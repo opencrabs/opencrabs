@@ -124,6 +124,7 @@ pub enum MdAlign {
 
 /// One table cell: its text plus the inline highlight runs into it, byte
 /// ranges relative to `text` so the renderer can style the cell on its own.
+#[derive(Clone)]
 pub struct MdCell {
     pub text: String,
     pub highlights: Vec<(Range<usize>, MdStyle)>,

@@ -46,7 +46,7 @@ const VISIBLE_LINES: usize = 30;
 /// a document, the way the preview reads it; the raw text only comes up once
 /// the user asks to edit, and goes back to the document the moment a save
 /// lands (#3163).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditorMode {
     /// The file rendered as rich markdown, read-only. The default.
     RichPreview,
@@ -67,10 +67,15 @@ pub(crate) struct EditorHitGrid {
 
 /// The raw view's fixed text geometry. Rendering and hit testing share these
 /// constants, so a click's pixel offset always divides out to the character
-/// the user aimed at, whatever the theme or rem size does (#3163).
+/// the user aimed at, whatever the theme or rem size does (#3163). The
+/// padding and border are explicit pixels rather than `py_1()`/`border_1()`
+/// shorthands precisely so the height sum below and the hit test cannot
+/// drift apart when zoom changes the rem size (#3163).
 const RAW_TEXT_SIZE: f32 = 13.0;
 const RAW_LINE_HEIGHT: f32 = 20.0;
 const RAW_GUTTER_WIDTH: f32 = 48.0;
+const RAW_PADDING: f32 = 4.0;
+const RAW_BORDER: f32 = 1.0;
 
 /// One conversation's editor: its text, its path, and what the user is
 /// mid-way through doing to it.
@@ -374,9 +379,13 @@ impl super::Dashboard {
         if !grid.bounds.contains(position) {
             return;
         }
-        let rel_x = (position.x - grid.bounds.left()).0;
-        let rel_y = (position.y - grid.bounds.top()).0;
-        let row = (rel_y / RAW_LINE_HEIGHT).floor().max(0.0) as usize;
+        let rel_x = f32::from(position.x - grid.bounds.left());
+        // The canvas bounds are the raw view's padding box, so the text rows
+        // start exactly RAW_PADDING below the bounds' top. Without this the
+        // last four pixels of every line would read as the next line down
+        // (#3163).
+        let rel_y = (f32::from(position.y - grid.bounds.top()) - RAW_PADDING).max(0.0);
+        let row = (rel_y / RAW_LINE_HEIGHT).floor() as usize;
         let column =
             ((rel_x - RAW_GUTTER_WIDTH) / grid.char_width.max(1.0)).round().max(0.0) as usize + 1;
         let Some(dialog) = self.editor_dialogs.get_mut(&id) else {
@@ -444,7 +453,7 @@ impl super::Dashboard {
             return;
         }
         let delta_y = match ev.delta {
-            ScrollDelta::Pixels(delta) => delta.y.0,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y),
             ScrollDelta::Lines(delta) => delta.y,
         };
         let mut shift = (delta_y / RAW_LINE_HEIGHT).trunc() as i32;
@@ -727,8 +736,8 @@ pub(crate) fn overlay(
     // window size from squeezing the card into unusability, and the measured
     // body height is what decides how many raw rows the dialog can show
     // (#3163).
-    let width = (viewport.width.0 - 120.0).clamp(420.0, 1040.0);
-    let height = (viewport.height.0 - 120.0).clamp(320.0, 760.0);
+    let width = (f32::from(viewport.width) - 120.0).clamp(420.0, 1040.0);
+    let height = (f32::from(viewport.height) - 120.0).clamp(320.0, 760.0);
     let body_height = (height - 170.0).max(160.0);
     let rows_visible =
         (((body_height - 24.0) / RAW_LINE_HEIGHT).floor() as usize).clamp(6, VISIBLE_LINES);
@@ -858,7 +867,7 @@ fn preview_view(dialog: &mut EditorDialog, body_height: f32) -> AnyElement {
         .as_ref()
         .is_none_or(|(cached, _)| *cached != text);
     if stale {
-        let flow = match DocumentKind::of_path(dialog.path.as_deref()) {
+        let flow = match dialog.path.as_deref().and_then(DocumentKind::of_path) {
             Some(DocumentKind::Markdown) => markdown::MdFlow::Prose,
             _ => markdown::MdFlow::Verbatim,
         };
@@ -1028,12 +1037,18 @@ fn buffer_view(
         .flex()
         .flex_col()
         .overflow_hidden()
-        .h(px(rows as f32 * RAW_LINE_HEIGHT))
+        // The height is the border box: the rows themselves, the padding
+        // this view adds, and the one-pixel border each side. Sizing the
+        // content box exactly to the rows keeps the last line whole; the
+        // shorter box before this clipped half of it (#3163).
+        .h(px(
+            rows as f32 * RAW_LINE_HEIGHT + 2.0 * RAW_PADDING + 2.0 * RAW_BORDER,
+        ))
         .rounded(px(concentric_radius(8.0)))
         .border_1()
         .border_color(rgb(shown.track))
         .bg(rgb(shown.bg))
-        .py_1()
+        .py(px(RAW_PADDING))
         .child(rows_div)
         // The hit grid is filled in paint, the only pass that knows where the
         // text column really landed. The canvas draws nothing; it exists so
@@ -1044,17 +1059,11 @@ fn buffer_view(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
                     let mono = font(crate::fonts::current_mono());
+                    let font_id = window.text_system().resolve_font(&mono);
                     let char_width = window
                         .text_system()
-                        .resolve_font(&mono)
-                        .ok()
-                        .and_then(|font_id| {
-                            window
-                                .text_system()
-                                .advance(font_id, px(RAW_TEXT_SIZE), 'M')
-                                .ok()
-                        })
-                        .map(|size| size.width.0)
+                        .advance(font_id, px(RAW_TEXT_SIZE), 'M')
+                        .map(|size| f32::from(size.width))
                         .unwrap_or(7.2);
                     if let Ok(mut slot) = grid.lock() {
                         *slot = Some(EditorHitGrid {
