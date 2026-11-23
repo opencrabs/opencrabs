@@ -30,8 +30,24 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
-    /// Output of a `!cmd` the user ran in the window (#2437).
-    BangOutput(String),
+    /// Output of a `!cmd` the user ran, with the conversation that ran it
+    /// (#3160).
+    ///
+    /// The id is what keeps the output in the conversation that asked for it.
+    /// The event used to carry the text alone, and the window painted it on
+    /// whichever conversation happened to be on screen when the command came
+    /// back: in a split, pane A's output landed in pane B's chat, and
+    /// switching conversations while a command ran put the output in the
+    /// conversation the reader had already moved to. The id travels with the
+    /// output, and the arrival is routed to its owner, the same door a
+    /// command reply takes (#3036).
+    BangOutput {
+        /// The conversation the command was run in.
+        session: Option<Uuid>,
+        /// The command's output, already formatted the way the terminal
+        /// prints it.
+        text: String,
+    },
     /// ctrl+k cleared this session's messages; the transcript empties (#2430).
     MessagesCleared(Uuid),
     /// ctrl+k could not clear the session: the reason, for the notices.

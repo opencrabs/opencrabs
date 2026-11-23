@@ -2,11 +2,18 @@
 //! window thread and reports the output. Parsing is in `ui_core::bang`.
 
 use opencrabs::ui_core::bang::{is_editor, output_text};
+use uuid::Uuid;
 
 /// Run a bang command off the window thread and report its output as a
 /// `BangOutput` event. The command runs in the launch directory, as the terminal's
 /// does, through the platform shell.
-pub fn spawn(cmd: String, sink: crate::agent_bridge::EventSink) {
+///
+/// The session is handed along with the output (#3160). The command runs on
+/// its own thread and takes as long as it takes, so the window may well be
+/// painting another conversation by the time it answers. Without the id the
+/// output had nowhere to go but the chat on screen, which is how a pane's
+/// `!cmd` ended up in a neighbour's chat.
+pub fn spawn(cmd: String, session: Option<Uuid>, sink: crate::agent_bridge::EventSink) {
     let spawned = std::thread::Builder::new()
         .stack_size(4 * 1024 * 1024)
         .name("gui-bang".into())
@@ -16,7 +23,8 @@ pub fn spawn(cmd: String, sink: crate::agent_bridge::EventSink) {
             } else {
                 run_shell(&cmd)
             };
-            if let Err(e) = sink.send(crate::agent_bridge::TurnEvent::BangOutput(text)) {
+            if let Err(e) = sink.send(crate::agent_bridge::TurnEvent::BangOutput { session, text })
+            {
                 crate::logging::error(&format!("bang output not delivered: {e}"));
             }
         });

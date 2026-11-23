@@ -104,13 +104,12 @@ impl Dashboard {
             return;
         }
         if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
-            if let Some(pane) = self.pane_states.get(&session) {
-                pane.update(cx, |pane, cx| {
-                    pane.live.notices.push(format!("! {cmd}"));
-                    cx.notify();
-                });
-            }
-            bang::spawn(cmd.to_string(), self.sink.clone());
+            // The echo and the output belong to the conversation that ran the
+            // command (#3160). The echo goes through the same door as the
+            // output, so the two lines stay together: a pane's `!cmd` reads
+            // its own line and its own output, and never a neighbour's.
+            self.push_session_notice(session, format!("! {cmd}"), cx);
+            bang::spawn(cmd.to_string(), Some(session), self.sink.clone());
             cx.notify();
             return;
         }
@@ -579,8 +578,18 @@ impl Dashboard {
         }
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
         if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
-            bang::spawn(cmd.to_string(), self.sink.clone());
-            self.turn.live.notices.push(format!("! {cmd}"));
+            // The conversation the command belongs to is taken now, because
+            // the command answers later and the reader may well have switched
+            // by then (#3160). The id travels with the output, so the line
+            // lands in the conversation that asked for it.
+            let session = self.chat_state.session();
+            match session {
+                Some(id) => self.push_session_notice(id, format!("! {cmd}"), cx),
+                // With no conversation on screen there is nothing to own the
+                // line, so it stays on the window's own strip.
+                None => self.turn.live.notices.push(format!("! {cmd}")),
+            }
+            bang::spawn(cmd.to_string(), session, self.sink.clone());
             cx.notify();
             return;
         }
@@ -1179,8 +1188,27 @@ impl Dashboard {
                     self.turn.live.notices.push(text);
                     cx.notify();
                 }
-                agent_bridge::TurnEvent::BangOutput(text) => {
-                    self.turn.live.notices.push(text);
+                // The output of a `!cmd`, with the conversation that ran it
+                // (#3160). The event used to carry the text alone, so the
+                // window painted it on whatever happened to be on screen
+                // when the command came back: another pane's chat in a
+                // split, and a conversation the reader had already switched
+                // away from otherwise. The id it carries is the one that
+                // asked, and the line goes to that owner, the same door a
+                // command reply takes (#3036).
+                agent_bridge::TurnEvent::BangOutput { session, text } => {
+                    match session {
+                        Some(id) => {
+                            // The receipt is logged before it is routed, so a
+                            // reader who saw nothing can be told the output
+                            // arrived and which conversation took it.
+                            logging::debug(&format!("bang output for {id}: {text}"));
+                            self.push_session_notice(id, text, cx)
+                        }
+                        // With no conversation to own it, the line stays on
+                        // the window's own strip.
+                        None => self.turn.live.notices.push(text),
+                    }
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::EvolveDone(text) => {

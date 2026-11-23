@@ -370,6 +370,7 @@ pub mod goal_manage_test;
 pub mod group_history_test;
 pub mod gui_accent_test;
 pub mod gui_accent_wheel_test;
+pub mod gui_bang_output_session_3160_test;
 pub mod gui_cancel_test;
 pub mod gui_chat_align_test;
 pub mod gui_chat_menu_2480_test;
