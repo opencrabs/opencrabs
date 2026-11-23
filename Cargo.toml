@@ -60,7 +60,10 @@ clap = { version = "4.5", features = ["derive", "env", "cargo"] }
 clap_complete = "4.6"
 
 # TUI
-ratatui = { version = "0.30", features = ["all-widgets"] }
+# `unstable-rendered-line-info` gives the terminal the wrapped line count of a
+# paragraph, so the hint row can reserve exactly the rows its sentence needs
+# instead of cutting the sentence at the edge of the terminal (#3161).
+ratatui = { version = "0.30", features = ["all-widgets", "unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Native desktop app. Zed's GPU-accelerated UI framework. Optional on purpose:
