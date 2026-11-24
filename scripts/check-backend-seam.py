@@ -62,27 +62,27 @@ BASELINES = {
     # handover quoted 57 from F4's report; this tree has 36 raw grep hits
     # for `local_db_path(` in src/gui, all of them code, so 57 is not this
     # tree's number and 36 is.
-    "R1": 36,
+    "R1": 10,
     # Ledger opened by the window outside LOCAL_ONLY: the L1/L2/L3/L5
     # functions the inventory routes to an `op`, not migrated yet
     # (sessions.rs 37, agent_bridge.rs 12, transcript.rs 8, the rest 5).
-    "R2": 62,
+    "R2": 17,
     # The agent service reached around the backend: the `facto` and
     # `chamada` sites of L6/L7/L8 plus agent_bridge.rs outside `build`.
-    "R3": 59,
+    "R3": 46,
     # ops! names missing an impl, a fixture, or a parity test. The brief
     # expects 0; it is 3 because tests/fixtures/gui_backend/ does not exist
     # yet: LoadSessions, RenameSession and ClearMessages have their impl and
     # their parity! test but no JSON fixture. Fixtures are outside this
     # package (scripts and workflow only), so the gap is recorded, not hidden.
-    "R4": 3,
+    "R4": 0,
     # The window branching on the remote backend outside the seam files.
     "R5": 0,
     # The window touching the disk outside LOCAL_ONLY and without localize:
     # the `blob` functions of C5, plus L5 prompt files and L7 task detail.
     # L8 migrated its two disk sites (channel ownership, cd entries) to the
     # ChannelStatus and ListDir operations, which took the count to 20.
-    "R6": 20,
+    "R6": 15,
     # The retired remote panel and its polling. The brief expects 0; it is 1
     # because src/remote/scopes.rs maps the A2A method "tasks/get" to its
     # scope (a2a:read). That is the A2A protocol table, not the panel; it
