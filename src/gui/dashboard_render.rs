@@ -576,10 +576,8 @@ impl Render for Dashboard {
                 // and the click did nothing.
                 let click_roots = self
                     .chat_session
-                    .and_then(|id| {
-                        agent_bridge::bridge()
-                            .map(|b| b.service.get_working_directory_for_session(id))
-                    })
+                    .and_then(|id| self.backend.facts(Some(id)))
+                    .map(|facts| facts.working_directory)
                     .into_iter()
                     .collect();
                 self.copy_drag.set_roots(click_roots);
@@ -696,17 +694,13 @@ impl Render for Dashboard {
                         // bootstrap provider: a pick pins the model per
                         // session, so the global slot never moves and this row
                         // kept naming the pair it started with (#2634).
-                        let (provider, model) = match agent_bridge::bridge() {
-                            Some(b) => match self.chat_session {
-                                Some(sid) => {
-                                    let (provider, model) =
-                                        b.service.provider_pair_for_session(sid);
-                                    let label =
-                                        model.rsplit('/').next().unwrap_or(&model).to_string();
-                                    (provider, label)
-                                }
-                                None => (b.service.provider_name(), b.service.provider_model()),
-                            },
+                        let (provider, model) = match self.backend.facts(self.chat_session) {
+                            Some(facts) if self.chat_session.is_some() => {
+                                let model = facts.served_model;
+                                let label = model.rsplit('/').next().unwrap_or(&model).to_string();
+                                (facts.provider, label)
+                            }
+                            Some(facts) => (facts.provider, facts.model),
                             None => ("-".to_string(), "-".to_string()),
                         };
                         // The session name leads, as in the TUI footer. The row
@@ -1403,6 +1397,7 @@ impl Render for Dashboard {
                                 row_layout: picker_layout.model_row,
                                 provider_label_width: picker_layout.provider_label_width,
                                 show_provider_labels: true,
+                                backend: &self.backend,
                             },
                         );
                         model_footer = Some(rendered.footer);

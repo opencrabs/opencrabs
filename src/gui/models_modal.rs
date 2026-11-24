@@ -8,17 +8,10 @@ impl Dashboard {
         let shown = palette::current();
         let visible = models::filtered_rows(&self.models_rows, &self.models_query);
         let providers = models::providers(&visible);
-        let live =
-            agent_bridge::bridge().map(|bridge| match self.models_session.or(self.chat_session) {
-                Some(sid) => (
-                    bridge.service.provider_name_for_session(sid),
-                    bridge.service.provider_model_for_session(sid),
-                ),
-                None => (
-                    bridge.service.provider_name(),
-                    bridge.service.provider_model(),
-                ),
-            });
+        let live = self
+            .backend
+            .facts(self.models_session.or(self.chat_session))
+            .map(|facts| (facts.provider, facts.model));
         let pair = live
             .as_ref()
             .map(|(provider, model)| format!("{provider} / {model}"))
@@ -106,6 +99,7 @@ impl Dashboard {
                 row_layout: opencrabs::ui_core::model_layout::ModelRowLayout::Stacked,
                 provider_label_width: 0.0,
                 show_provider_labels: false,
+                backend: &self.backend,
             },
         );
         let body = div()

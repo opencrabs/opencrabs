@@ -1,7 +1,7 @@
 //! The single GPUI model-picker renderer used by `/models` and Brain Fuel.
 
 use super::theme::{Size, text};
-use super::{Dashboard, agent_bridge, models, palette};
+use super::{Dashboard, models, palette};
 use gpui::{Context, Div, SharedString, div, prelude::*, px, rgb};
 use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::model_layout::ModelRowLayout;
@@ -20,6 +20,8 @@ pub struct ModelPickerView<'a> {
     pub row_layout: ModelRowLayout,
     pub provider_label_width: f32,
     pub show_provider_labels: bool,
+    /// The crab the picker names the live provider from.
+    pub backend: &'a crate::backend_glue::Backend,
 }
 
 pub struct RenderedModelPicker {
@@ -224,8 +226,9 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         let active = if onboarding {
             view.active_provider.to_string()
         } else {
-            agent_bridge::bridge()
-                .map(|bridge| bridge.service.provider_name())
+            view.backend
+                .facts(None)
+                .map(|facts| facts.provider)
                 .unwrap_or_default()
         };
         if let Some(pair) = models::manual_pair(view.query, &active) {
