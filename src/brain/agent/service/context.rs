@@ -1321,6 +1321,22 @@ impl AgentService {
         // response's own verdict is read here, at the source.
         Self::warn_if_summary_truncated(response.stop_reason.clone(), &response.usage);
 
+        // #3172: a cut is a failed attempt, not a summary. With text the
+        // document is mutilated (typically missing the context-manifest
+        // fence), and the budget guard cannot see it because a capped
+        // document sits exactly at the budget. Without text there is no
+        // document at all. Either way the attempt must fail so the
+        // caller's retry loop retries, and a terminal cut flows to the
+        // honest CompactionOutcome::Truncated marker instead of shipping
+        // the cut as the continuation document.
+        if Self::summary_stop_is_cut(response.stop_reason) {
+            return Err(AgentError::Internal(format!(
+                "summariser stopped at MaxTokens ({} output / {} reasoning tokens): \
+                 the continuation document is cut, counting as a failed attempt",
+                response.usage.output_tokens, response.usage.reasoning_tokens
+            )));
+        }
+
         let summary = Self::extract_text_from_response(&response);
 
         if let Err(e) = Self::save_compaction_summary_to_memory(session_id, &summary).await {
@@ -1586,6 +1602,22 @@ impl AgentService {
                 usage.reasoning_tokens,
             );
         }
+    }
+
+    /// The enforcement predicate for the visibility check above (#3172):
+    /// does this stop verdict mean the summariser failed to deliver a
+    /// complete continuation document? A `MaxTokens` stop is a cut whatever
+    /// the text looks like: with text the document is mutilated (typically
+    /// missing the context-manifest fence), without text there is no
+    /// document at all. Pure, so the policy is testable without a provider
+    /// harness.
+    pub(crate) fn summary_stop_is_cut(
+        stop_reason: Option<crate::brain::provider::StopReason>,
+    ) -> bool {
+        matches!(
+            stop_reason,
+            Some(crate::brain::provider::StopReason::MaxTokens)
+        )
     }
 
     /// Append a harness-written correction for artifacts the summary reports as

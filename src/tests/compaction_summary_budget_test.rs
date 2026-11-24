@@ -773,3 +773,48 @@ fn a_cut_document_surfaces_the_truncation_warn_and_keeps_its_fence() {
         "the head-protected fence must survive both the cut and the trim:\n{out}"
     );
 }
+
+/// #3172: the stop verdict that counts as a failed attempt.
+///
+/// Only a `MaxTokens` stop means the document is cut. `EndTurn`, a stop
+/// sequence and a missing verdict are all complete documents.
+#[test]
+fn a_maxtokens_stop_is_a_cut_and_nothing_else_is() {
+    use crate::brain::provider::StopReason;
+
+    assert!(AgentService::summary_stop_is_cut(Some(StopReason::MaxTokens)));
+    assert!(!AgentService::summary_stop_is_cut(Some(StopReason::EndTurn)));
+    assert!(!AgentService::summary_stop_is_cut(Some(StopReason::StopSequence)));
+    assert!(!AgentService::summary_stop_is_cut(None));
+}
+
+/// #3172: the cut must fail the attempt BEFORE the text is extracted.
+///
+/// The old order warned and carried on, so an `Ok` carrying a mutilated
+/// document consumed zero retries and shipped as the marker. The new order
+/// returns `Err` first, which feeds the caller's 3-attempt retry loop and,
+/// on a terminal cut, the honest `CompactionOutcome::Truncated` marker.
+#[test]
+fn the_cut_check_fails_the_attempt_before_extraction() {
+    let src = include_str!("../brain/agent/service/context.rs");
+    let fn_start = src
+        .find("pub(super) async fn compute_compaction_summary(")
+        .expect("compute_compaction_summary must exist");
+    let cut_check = src[fn_start..]
+        .find("if Self::summary_stop_is_cut(response.stop_reason)")
+        .expect("compute_compaction_summary must gate on the cut predicate (#3172)");
+    let extraction = src[fn_start..]
+        .find("let summary = Self::extract_text_from_response(&response);")
+        .expect("the text extraction must still exist");
+
+    assert!(
+        cut_check < extraction,
+        "the cut check must run BEFORE extract_text_from_response, so a cut \
+         document never reaches the marker path (#3172)"
+    );
+    let err_return = &src[fn_start + cut_check..fn_start + extraction];
+    assert!(
+        err_return.contains("return Err("),
+        "the cut check must fail the attempt with Err, not warn (#3172)"
+    );
+}
