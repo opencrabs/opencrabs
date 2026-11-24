@@ -96,6 +96,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install ALSA dev (for local-stt feature)
@@ -242,6 +244,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (macOS)
@@ -401,6 +405,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
 
       # Pinned to a released tag and an explicit tool version: the action
       # defaults cmakeVersion to "latest" and resolves it at run time.
@@ -824,6 +830,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           # A fork PR saves too, so `cache-on-failure` can keep the partial
           # compile from a cancelled attempt and the retry restores it
           # (#3132). The save lands on the PR's own ref, never on main, so
@@ -1070,6 +1078,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install build toolchain, display and software renderer (Linux)
@@ -1286,6 +1296,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Refuse to administer the host's rustup
