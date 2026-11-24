@@ -782,9 +782,15 @@ fn a_cut_document_surfaces_the_truncation_warn_and_keeps_its_fence() {
 fn a_maxtokens_stop_is_a_cut_and_nothing_else_is() {
     use crate::brain::provider::StopReason;
 
-    assert!(AgentService::summary_stop_is_cut(Some(StopReason::MaxTokens)));
-    assert!(!AgentService::summary_stop_is_cut(Some(StopReason::EndTurn)));
-    assert!(!AgentService::summary_stop_is_cut(Some(StopReason::StopSequence)));
+    assert!(AgentService::summary_stop_is_cut(Some(
+        StopReason::MaxTokens
+    )));
+    assert!(!AgentService::summary_stop_is_cut(Some(
+        StopReason::EndTurn
+    )));
+    assert!(!AgentService::summary_stop_is_cut(Some(
+        StopReason::StopSequence
+    )));
     assert!(!AgentService::summary_stop_is_cut(None));
 }
 

@@ -471,9 +471,7 @@ impl AgentService {
                 // this alert is the only user-visible record that messages
                 // were dropped without a summary. Every surface already
                 // renders SelfHealingAlert.
-                if truncated
-                    && let Some(cb) = progress_callback
-                {
+                if truncated && let Some(cb) = progress_callback {
                     cb(
                         session_id,
                         ProgressEvent::SelfHealingAlert {
