@@ -58,17 +58,24 @@ impl Ctx {
 
     /// The ledger. The shared pool when there is one, otherwise a fresh
     /// connection by path: pragmas only, never migrations, the same door the
-    /// window's reads use.
+    /// window's reads use. A failed connect reads `{e:#}`, the text the
+    /// window's loads have always shown.
     pub async fn db(&self) -> Result<Database, BackendError> {
+        self.database()
+            .await
+            .map_err(|e| BackendError::Failed(format!("{e:#}")))
+    }
+
+    /// The same door as [`Ctx::db`], with the connect error untouched, for an
+    /// operation whose moved body words its own failure (`clear: {e}`).
+    pub async fn database(&self) -> anyhow::Result<Database> {
         if let Some(pool) = &self.pool {
             return Ok(Database {
                 pool: pool.clone(),
                 db_path: Some(self.db_path.to_string_lossy().into_owned()),
             });
         }
-        Database::connect(&self.db_path)
-            .await
-            .map_err(|e| BackendError::Failed(format!("{e:#}")))
+        Database::connect(&self.db_path).await
     }
 
     /// Hand the booted agent service to this crab. The first one wins: a
@@ -94,6 +101,21 @@ pub fn set_primary(ctx: Arc<Ctx>) {
 /// This process's own crab, once boot recorded it.
 pub fn primary() -> Option<Arc<Ctx>> {
     PRIMARY.get().cloned()
+}
+
+/// A crab on a fresh, migrated ledger in its own temp directory. Keep the
+/// `TempDir`: dropping it deletes the ledger.
+#[cfg(test)]
+pub(crate) async fn temp_ctx() -> (tempfile::TempDir, Ctx) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ctx = Ctx::new(dir.path().join("backend.db"));
+    ctx.db()
+        .await
+        .expect("connect the temp ledger")
+        .run_migrations()
+        .await
+        .expect("migrate the temp ledger");
+    (dir, ctx)
 }
 
 #[cfg(test)]

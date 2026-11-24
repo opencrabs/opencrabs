@@ -575,46 +575,17 @@ pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
         )
 }
 
-/// The hard cap so a long history cannot make the rail unbounded.
-const RAIL_LIMIT: usize = 200;
-
-/// Fetch the real session list on a thread with a real stack, same shape as
-/// `load_view` in `main.rs`: tokio current-thread runtime on a 4 MB thread,
-/// result over a oneshot. `Database::connect` runs pragmas only, never
-/// migrations, so a read cannot race the daemon that owns the schema.
+/// The rail's session list, through the backend (`LoadSessions`).
+///
+/// Locally the op runs on its own `spawn_worker` lane: a 4 MB thread with a
+/// current-thread runtime, the shape this load always had. `Ctx::db` runs
+/// pragmas only, never migrations, so a read cannot race the daemon that owns
+/// the schema. A failure is the same `{e:#}` text the window showed before.
 pub async fn load_sessions(backend: crate::backend_glue::Backend) -> Result<Vec<Session>, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<Session>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("sessions-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.list(SessionListOptions {
-                            limit: Some(RAIL_LIMIT),
-                            ..Default::default()
-                        })
-                        .await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("sessions fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("sessions fetch thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::LoadSessions {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// The rail's ledger signature, read through the same no-migration door as

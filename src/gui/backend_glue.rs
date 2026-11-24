@@ -43,20 +43,32 @@ impl Backend {
     /// op: a 4 MB stack and a `current_thread` runtime built before the job
     /// is sent, so every ledger connect the op makes has a reactor (#2973,
     /// #3033). The window only awaits a oneshot, which needs no reactor.
-    #[allow(dead_code)] // the first caller is the LoadSessions example
     pub async fn call<O: Op>(&self, op: O) -> Result<O::Reply, BackendError> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.spawn(op, move |reply| {
+            let _ = tx.send(reply);
+        })
+        .map_err(BackendError::Failed)?;
+        rx.await
+            .map_err(|_| BackendError::Failed(format!("{} worker dropped its result", O::NAME)))?
+    }
+
+    /// Run `op` off the window's thread and hand its reply to `done`, on the
+    /// same lane `call` uses. For the `spawn_*` doors that report through the
+    /// event sink instead of awaiting. `Err` means the job never reached a
+    /// worker, so `done` will not run: the caller reports that itself, as it
+    /// did for a failed thread spawn.
+    pub fn spawn<O: Op>(
+        &self,
+        op: O,
+        done: impl FnOnce(Result<O::Reply, BackendError>) + Send + 'static,
+    ) -> Result<(), String> {
         match self {
             Backend::Local(ctx) => {
                 let ctx = ctx.clone();
-                let (tx, rx) = futures::channel::oneshot::channel();
                 crate::agent_bridge::spawn_worker(O::NAME, move |runtime| {
-                    let reply = runtime.block_on(op.run(&ctx));
-                    let _ = tx.send(reply);
+                    done(runtime.block_on(op.run(&ctx)));
                 })
-                .map_err(BackendError::Failed)?;
-                rx.await.map_err(|_| {
-                    BackendError::Failed(format!("{} worker dropped its result", O::NAME))
-                })?
             }
         }
     }
