@@ -189,10 +189,12 @@ mod tests {
         let root = Uuid::from_u128(7);
         let flipped: Vec<Uuid> = topics(root).into_iter().rev().collect();
         // The same ids handed over reversed open a different topic: order is
-        // the caller's live order, never a sorted copy.
+        // the caller's live order, never a sorted copy. Reversed, the bar is
+        // `[103, 102, 101, 100, 7]`, so position 3 is `101`, not the `102`
+        // that position 2 would open in the original order.
         assert_eq!(
             resolve_target(JumpScope::Topics, 3, &flipped, &[]),
-            Some(Uuid::from_u128(102))
+            Some(Uuid::from_u128(101))
         );
     }
 

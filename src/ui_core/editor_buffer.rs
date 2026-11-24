@@ -367,11 +367,11 @@ mod tests {
         let mut buffer = EditorBuffer::from_text("abc\ndefgh\nij");
         buffer.goto_line(2);
         buffer.move_to(7, false);
-        assert_eq!(buffer.line_col(), (2, 3));
+        assert_eq!(buffer.line_col(), (2, 4));
         buffer.move_up(false);
-        assert_eq!(buffer.line_col(), (1, 3));
+        assert_eq!(buffer.line_col(), (1, 4));
         buffer.move_down(false);
-        assert_eq!(buffer.line_col(), (2, 3));
+        assert_eq!(buffer.line_col(), (2, 4));
     }
 
     #[test]

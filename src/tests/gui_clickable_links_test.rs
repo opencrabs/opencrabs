@@ -368,9 +368,14 @@ fn open_target_survives_a_split_and_routes_through_the_dashboard() {
         open.contains("transcript link: open {}"),
         "a hit writes a line naming what opened"
     );
+    let miss = body_of(TRANSCRIPT, "fn note_miss(");
     assert!(
-        open.contains("transcript link: nothing to open at"),
+        miss.contains("transcript link: nothing to open at"),
         "a miss writes a line too, so a click that found nothing can be told from one that never arrived"
+    );
+    assert!(
+        open.contains("self.note_miss(&pending)"),
+        "the click handler routes a miss to the function that writes the line"
     );
 }
 
