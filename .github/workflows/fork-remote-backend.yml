@@ -244,6 +244,35 @@ jobs:
           done
           exit $status
 
+      # The parity harness is the proof that one operation gives one answer
+      # through two doors: the local one and the remote one. It runs inside
+      # the `backend::` slice above, but that step captures the cargo output
+      # into a variable and prints only the count, so the harness itself
+      # never appears by name in this job's log. A harness that stopped
+      # matching would be a green run with zero parity tests behind it, so
+      # this step names every test it finds and a zero-match is a failure.
+      #
+      # The compile is already done by the slice above (same profile, same
+      # target dir), so this is a re-run of the binary, not a second build.
+      - name: The parity harness, by name
+        run: |
+          set +e
+          out=$(cargo test --locked --profile citest --lib -- backend::parity::tests 2>&1)
+          rc=$?
+          set -e
+          n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+          printf '%s\n' "$out" | grep -E '^test backend::parity::tests::' || true
+          if [ $rc -ne 0 ]; then
+            echo "::error::parity harness FAILS (rc=$rc)"
+            printf '%s\n' "$out" | tail -40
+            exit 1
+          fi
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::parity harness ZERO-MATCH: backend::parity::tests names no test (renamed?)"
+            exit 1
+          fi
+          echo "parity harness PASS: backend::parity::tests ($n tests)"
+
       # `mod tests;` sits at the root of the bin crate (`src/gui/main.rs`), so
       # the test paths are `tests::<module>::...`. The module list is READ
       # from `src/gui/tests/mod.rs`, so a new module is covered by the act of
