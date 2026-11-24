@@ -65,10 +65,6 @@ impl markdown::MdPalette for palette::Palette {
     }
 }
 
-/// The family order lives with the read that uses it, in the backend.
-#[cfg(test)]
-use opencrabs::backend::transcript::family_row_order;
-
 /// Lines of one working-out body a folded turn draws before it hands the rest
 /// to the reader (#2805). The pane builds one element per line, so a window
 /// that holds a 1.6 MB row built tens of thousands of them on every keystroke:
@@ -1102,8 +1098,11 @@ async fn reactions_for(
         .await
     {
         Ok(reactions) => reactions,
+        // The op formats the repository's chain with `{e:#}` into
+        // `Failed`, and `BackendError`'s Display is that text, so the line
+        // carries the whole chain.
         Err(e) => {
-            crate::logging::error(&format!("reactions load: {}", e.into_message()));
+            crate::logging::error(&format!("reactions load: {e:#}"));
             HashMap::new()
         }
     }
@@ -6658,6 +6657,8 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The family order lives with the read that uses it, in the backend.
+    use opencrabs::backend::transcript::family_row_order;
 
     /// A turn's answer must never sort above its own question (#3018).
     ///
