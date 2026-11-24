@@ -24,6 +24,11 @@ pub struct Facts {
     pub provider: String,
     /// The model serving the session, including a sticky fallback.
     pub model: String,
+    /// The model the session's provider actually sends, read with the
+    /// provider as one coherent pair (#2264). A sticky fallback that does not
+    /// carry the session's pick reports the model it remapped to here, while
+    /// `model` still names the pick. With no session, the crab-wide model.
+    pub served_model: String,
     /// The footer floor before the first reply.
     pub base_context_tokens: u32,
 }
@@ -40,6 +45,7 @@ pub fn facts_for(ctx: &Ctx, session: Option<Uuid>) -> Result<Facts, BackendError
             context_limit: service.context_limit_for_session(id),
             provider: service.provider_name_for_session(id),
             model: service.provider_model_for_session(id),
+            served_model: service.provider_pair_for_session(id).1,
             base_context_tokens: service.base_context_tokens(),
         },
         None => Facts {
@@ -47,6 +53,7 @@ pub fn facts_for(ctx: &Ctx, session: Option<Uuid>) -> Result<Facts, BackendError
             context_limit: service.context_limit(),
             provider: service.provider_name(),
             model: service.provider_model(),
+            served_model: service.provider_model(),
             base_context_tokens: service.base_context_tokens(),
         },
     };
@@ -102,6 +109,10 @@ mod tests {
         assert_eq!(facts.context_limit, service.context_limit_for_session(session));
         assert_eq!(facts.provider, service.provider_name_for_session(session));
         assert_eq!(facts.model, service.provider_model_for_session(session));
+        assert_eq!(
+            (facts.provider.clone(), facts.served_model.clone()),
+            service.provider_pair_for_session(session)
+        );
         assert_eq!(facts.base_context_tokens, service.base_context_tokens());
     }
 
@@ -120,6 +131,7 @@ mod tests {
             context_limit: 200_000,
             provider: "anthropic".into(),
             model: "claude-x".into(),
+            served_model: "claude-x".into(),
             base_context_tokens: 0,
         };
         let json = serde_json::to_string(&facts).expect("encode");
