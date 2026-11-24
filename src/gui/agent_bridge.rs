@@ -2106,10 +2106,9 @@ pub fn spawn_text_command(
     arg: String,
     sink: EventSink,
 ) {
-    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-text-command", move |runtime| {
-        let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));
+        let events = runtime.block_on(run_text_command(&backend, session_id, &name, &arg));
         for event in events {
             if let Err(e) = thread_sink.send(event) {
                 crate::logging::error(&format!("command result not delivered: {e}"));
@@ -2128,12 +2127,13 @@ pub fn spawn_text_command(
 
 /// The engine calls behind one text command, in order.
 async fn run_text_command(
-    db_path: &std::path::Path,
+    backend: &crate::backend_glue::Backend,
     session_id: Uuid,
     name: &str,
     arg: &str,
 ) -> Vec<TurnEvent> {
     use super::text_commands as tc;
+    use opencrabs::backend::session_ops::CrabCommand;
 
     let Some(command) = tc::classify(name) else {
         return vec![TurnEvent::CommandReply {
@@ -2188,116 +2188,36 @@ async fn run_text_command(
                 }]
             }
         },
-        tc::TextCommand::Discard => {
-            let pool = match Database::connect(db_path).await {
-                Ok(db) => db.pool().clone(),
-                Err(e) => {
-                    return vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("/discard could not open the database: {e}"),
-                    }];
-                }
-            };
-            let svc = ServiceContext::new(pool);
-            vec![TurnEvent::CommandReply {
-                session: Some(session_id),
-                text: opencrabs::utils::plan_mode::discard(session_id, &svc).await,
-            }]
-        }
-        tc::TextCommand::Clear => match bridge() {
-            Some(bridge) => match bridge.service.clear_context(session_id).await {
-                Ok(receipt) => vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: opencrabs::tui::clear_notice::cleared(&receipt),
-                }],
-                Err(e) => vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: opencrabs::tui::clear_notice::failed(&e),
-                }],
-            },
-            None => vec![TurnEvent::CommandReply {
-                session: Some(session_id),
-                text: "/clear needs the agent running; it is offline right now.".to_string(),
-            }],
-        },
-        tc::TextCommand::Rtk => {
-            #[cfg(feature = "rtk")]
-            {
-                if !opencrabs::rtk::is_rtk_available().await {
-                    return vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: opencrabs::rtk::RTK_NOT_INSTALLED_HELP.to_string(),
-                    }];
-                }
-                match tokio::process::Command::new("rtk")
-                    .arg("gain")
-                    .output()
-                    .await
-                {
-                    Ok(output) => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: tc::rtk_reply(
-                            output.status.success(),
-                            &String::from_utf8_lossy(&output.stdout),
-                            &String::from_utf8_lossy(&output.stderr),
-                        ),
-                    }],
-                    Err(e) => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("rtk gain: {e}"),
-                    }],
-                }
-            }
-            #[cfg(not(feature = "rtk"))]
-            {
-                vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: "RTK is not compiled into this build.".to_string(),
-                }]
-            }
-        }
+        tc::TextCommand::Discard => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Discard).await,
+        }],
+        tc::TextCommand::Clear => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Clear).await,
+        }],
+        tc::TextCommand::Rtk => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Rtk).await,
+        }],
         tc::TextCommand::Approve => {
-            if arg.is_empty() {
-                let policy = opencrabs::config::Config::load()
-                    .map(|cfg| cfg.agent.approval_policy)
-                    .unwrap_or_else(|_| "ask".to_string());
-                vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: tc::approval_reply(&policy),
-                }]
+            let text = if arg.is_empty() {
+                crab_command(backend, session_id, CrabCommand::ApprovalPolicy).await
             } else {
                 match tc::approval_target(arg) {
-                    Some(policy) => match opencrabs::config::Config::write_key(
-                        "agent",
-                        "approval_policy",
-                        policy,
-                    ) {
-                        Ok(_) => {
-                            // Both halves: the file and the live service. A
-                            // written key alone would leave the running window
-                            // gating tools by the policy it started with, which
-                            // is the staleness the terminal had to rebuild for.
-                            if let Some(b) = bridge() {
-                                b.service.set_auto_approve_tools(
-                                    opencrabs::utils::approval::policy_auto_approves(policy),
-                                );
-                            }
-                            vec![TurnEvent::CommandReply {
-                                session: Some(session_id),
-                                text: tc::approval_set(policy),
-                            }]
-                        }
-                        Err(e) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: format!("/approve could not write the policy: {e}"),
-                        }],
-                    },
-                    None => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: tc::approval_unknown(arg),
-                    }],
+                    Some(policy) => {
+                        let command = CrabCommand::SetApprovalPolicy {
+                            policy: policy.to_string(),
+                        };
+                        crab_command(backend, session_id, command).await
+                    }
+                    None => tc::approval_unknown(arg),
                 }
-            }
+            };
+            vec![TurnEvent::CommandReply {
+                session: Some(session_id),
+                text,
+            }]
         }
         // `Cd` has no arm here any more (#2527): the window intercepts it in
         // `run_text_command` (the picker screen for a bare `/cd`, the local
@@ -2367,6 +2287,39 @@ async fn run_text_command(
                 text: format!("{name} is dispatched by the window, not the bridge."),
             }]
         }
+    }
+}
+
+/// Run the crab's half of a text command and word its answer the way the
+/// window always has. The crab runs it; the lines are the window's.
+async fn crab_command(
+    backend: &crate::backend_glue::Backend,
+    session_id: Uuid,
+    command: opencrabs::backend::session_ops::CrabCommand,
+) -> String {
+    use super::text_commands as tc;
+    use opencrabs::backend::session_ops::{CommandAnswer, CrabCommand};
+
+    let policy = match &command {
+        CrabCommand::SetApprovalPolicy { policy } => Some(policy.clone()),
+        _ => None,
+    };
+    let answer = backend
+        .call(opencrabs::backend::session_ops::TextCommand {
+            session_id,
+            command,
+        })
+        .await;
+    match answer {
+        Ok(CommandAnswer::Line(text)) => text,
+        Ok(CommandAnswer::RtkGain {
+            success,
+            stdout,
+            stderr,
+        }) => tc::rtk_reply(success, &stdout, &stderr),
+        Ok(CommandAnswer::ApprovalPolicy(current)) => tc::approval_reply(&current),
+        Ok(CommandAnswer::ApprovalSet) => tc::approval_set(policy.as_deref().unwrap_or_default()),
+        Err(e) => format!("command: {}", e.into_message()),
     }
 }
 
