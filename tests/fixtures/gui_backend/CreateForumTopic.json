@@ -1,0 +1,11 @@
+{
+  "op": "telegram_topics.create_forum_topic",
+  "scope": "a2a:manage",
+  "request": {
+    "parent": "0b7e7c1e-6a43-4d55-9d2a-2f1f7a3c9e01",
+    "name": "plans"
+  },
+  "reply": { "Ok": "5d1c2b3a-8e4f-4a6b-9c7d-0e1f2a3b4c5d" },
+  "reply_not_a_forum": { "Ok": null },
+  "reply_failed": { "Err": { "kind": "failed", "detail": "a topic needs a name" } }
+}
