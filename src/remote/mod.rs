@@ -7,6 +7,7 @@
 //! without a broker in the middle. Design reference:
 //! `research/remote-phase1-plan.md` in the OpenCrabs home.
 
+pub mod instance_client;
 pub mod pairing;
 pub mod route_client;
 pub mod route_store;
