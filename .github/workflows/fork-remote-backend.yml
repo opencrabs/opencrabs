@@ -43,15 +43,12 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt
 
-      # The seam ratchet lands with a later package. Until then the step says
-      # so instead of failing on a missing file.
+      # R1 to R7 on the GUI/backend seam. The self-test plants a violation
+      # per rule first, so a rule that stopped matching cannot pass green.
       - name: Backend seam ratchet
         run: |
-          if [ -f scripts/check-backend-seam.py ]; then
-            python3 scripts/check-backend-seam.py
-          else
-            echo "sem ratchets ainda"
-          fi
+          python3 scripts/check-backend-seam.py --self-test
+          python3 scripts/check-backend-seam.py
 
       - name: Format
         run: cargo fmt --check
