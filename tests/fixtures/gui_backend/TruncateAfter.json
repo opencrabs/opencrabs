@@ -1,0 +1,11 @@
+{
+  "op": "transcript.truncate_after",
+  "scope": "manage",
+  "request": {
+    "session_id": "00000000-0000-0000-0000-00005e551000",
+    "sequence": 1
+  },
+  "response": {
+    "Ok": 2
+  }
+}

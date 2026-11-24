@@ -1,0 +1,11 @@
+{
+  "op": "transcript.toggle_reaction",
+  "scope": "manage",
+  "request": {
+    "message_id": "00000000-0000-0000-0000-00000000a002",
+    "emoji": "🦀"
+  },
+  "response": {
+    "Ok": true
+  }
+}
