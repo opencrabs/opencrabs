@@ -717,22 +717,37 @@ impl super::Dashboard {
     }
 }
 
+/// The window's answers to the editor's gestures, carried as one value.
+/// Each listener used to be its own `impl Fn` parameter, which had the draw
+/// call eight arguments deep; clippy's `too_many_arguments` (seven) is the
+/// lint that says a function has stopped being readable, and the honest fix
+/// is one argument per concern, not a silencing allow. Boxing each handler
+/// keeps the struct one concrete type instead of six generic ones: the
+/// dashboard's `cx.listener` closures are already `'static` and `Fn`, and
+/// the same boxed shape is what `command_palette`'s `PickHandler` carries
+/// for its row presses (#3163).
+pub(crate) struct EditorHandlers {
+    pub(crate) dismiss: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) toggle_mode: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) mouse_down: Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) mouse_move: Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) mouse_up: Box<dyn Fn(&MouseUpEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) wheel: Box<dyn Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static>,
+}
+
 /// The dialog itself, drawn with the window's shared modal chrome so the
 /// editor reads as one of the window's surfaces instead of a page pasted in.
 /// The card is measured from the live viewport instead of guessing a fixed
 /// size, which is what let the old one run off the bottom-right corner and
-/// clip (#3163). The closures are the Dashboard's listeners, passed in so
-/// this free function stays free of a `self` borrow (#3163).
+/// clip (#3163). The handlers are the Dashboard's listeners, bundled into
+/// one struct and passed in so this free function stays free of a `self`
+/// borrow (#3163).
 pub(crate) fn overlay(
     dialog: &mut EditorDialog,
     window: &Window,
-    dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    toggle_mode: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    mouse_move: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static,
-    mouse_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
-    wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
+    handlers: EditorHandlers,
 ) -> AnyElement {
+    let EditorHandlers { dismiss, toggle_mode, mouse_down, mouse_move, mouse_up, wheel } = handlers;
     let shown = palette::current();
     let viewport = window.viewport_size();
     // The scrim pads 24 on each side and the card 20 more, so the usable

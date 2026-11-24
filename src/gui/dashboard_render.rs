@@ -3685,36 +3685,32 @@ impl Render for Dashboard {
         if let Some(id) = self.editor_focus
             && let Some(dialog) = self.editor_dialogs.get_mut(&id)
         {
-            let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.close_editor(cx);
-            });
-            let toggle_mode = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.toggle_editor_mode(cx);
-            });
-            let mouse_down = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-                this.editor_mouse_down(ev, cx);
-            });
-            let mouse_move = cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
-                this.editor_mouse_move(ev, cx);
-            });
-            let mouse_up = cx.listener(|this, ev: &MouseUpEvent, _window, cx| {
-                this.editor_mouse_up(ev, cx);
-            });
-            let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
-                this.editor_wheel(ev, cx);
-            });
+            // The window's answers to the editor's gestures travel as one
+            // value, so the draw call stays three arguments deep instead of
+            // eight (#3163).
+            let handlers = editor_dialog::EditorHandlers {
+                dismiss: Box::new(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.close_editor(cx);
+                })),
+                toggle_mode: Box::new(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.toggle_editor_mode(cx);
+                })),
+                mouse_down: Box::new(cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                    this.editor_mouse_down(ev, cx);
+                })),
+                mouse_move: Box::new(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+                    this.editor_mouse_move(ev, cx);
+                })),
+                mouse_up: Box::new(cx.listener(|this, ev: &MouseUpEvent, _window, cx| {
+                    this.editor_mouse_up(ev, cx);
+                })),
+                wheel: Box::new(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                    this.editor_wheel(ev, cx);
+                })),
+            };
             // The window is only read here: the card is measured from the
             // viewport size it carries (#3163).
-            root = root.child(editor_dialog::overlay(
-                dialog,
-                window,
-                dismiss,
-                toggle_mode,
-                mouse_down,
-                mouse_move,
-                mouse_up,
-                wheel,
-            ));
+            root = root.child(editor_dialog::overlay(dialog, window, handlers));
         }
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
