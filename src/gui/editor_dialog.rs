@@ -754,7 +754,14 @@ pub(crate) fn overlay(
     window: &Window,
     handlers: EditorHandlers,
 ) -> AnyElement {
-    let EditorHandlers { dismiss, toggle_mode, mouse_down, mouse_move, mouse_up, wheel } = handlers;
+    let EditorHandlers {
+        dismiss,
+        toggle_mode,
+        mouse_down,
+        mouse_move,
+        mouse_up,
+        wheel,
+    } = handlers;
     let shown = palette::current();
     let viewport = window.viewport_size();
     // The scrim pads 24 on each side and the card 20 more, so the usable
