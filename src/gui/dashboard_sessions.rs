@@ -423,17 +423,8 @@ impl Dashboard {
         // reading it here started each new conversation on a provider the
         // user had already switched away from (#2643).
         let active = self.focused_pane();
-        let (provider, model) = match agent_bridge::bridge() {
-            Some(b) => match active {
-                Some(sid) => (
-                    Some(b.service.provider_name_for_session(sid)),
-                    Some(b.service.provider_model_for_session(sid)),
-                ),
-                None => (
-                    Some(b.service.provider_name()),
-                    Some(b.service.provider_model()),
-                ),
-            },
+        let (provider, model) = match self.backend.facts(active) {
+            Some(facts) => (Some(facts.provider), Some(facts.model)),
             None => (None, None),
         };
         agent_bridge::spawn_create_session(

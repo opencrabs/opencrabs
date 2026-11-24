@@ -156,8 +156,8 @@ impl Dashboard {
             if let Some(from) = self.chat_state.session() {
                 self.metrics.pending.remove(&from);
             }
-            if let Some(b) = agent_bridge::bridge() {
-                self.ctx_max = b.service.context_limit_for_session(id);
+            if let Some(facts) = self.backend.facts(Some(id)) {
+                self.ctx_max = facts.context_limit;
             }
             // A recall belongs to the conversation it started in too, so its
             // messages go back to wait instead of vanishing with the old draft

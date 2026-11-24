@@ -889,8 +889,10 @@ impl Dashboard {
             cx.notify();
             return;
         };
-        let here = agent_bridge::bridge()
-            .map(|b| b.service.get_working_directory_for_session(session))
+        let here = self
+            .backend
+            .facts(Some(session))
+            .map(|facts| facts.working_directory)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         self.cd_dir = here;
         self.cd_show_hidden = false;
