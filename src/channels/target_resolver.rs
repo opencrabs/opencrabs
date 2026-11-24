@@ -28,7 +28,10 @@
 use anyhow::{Result, anyhow, bail};
 use uuid::Uuid;
 
+#[cfg(feature = "telegram")]
 use super::telegram::session_resolve::GENERAL_TOPIC_ID;
+#[cfg(not(feature = "telegram"))]
+const GENERAL_TOPIC_ID: i32 = 1;
 use crate::brain::tools::OriginTarget;
 
 /// Where a resolved target's delivery should go.
