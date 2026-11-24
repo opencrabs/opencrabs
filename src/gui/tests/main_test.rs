@@ -3880,8 +3880,13 @@ fn the_footer_names_the_open_conversations_directory() {
         .nth(1)
         .and_then(|rest| rest.split("\n    pub(crate) fn ").next())
         .expect("the footer's place is resolved from the session");
+    // The window reads the open session's facts, and the backend fills
+    // their directory from the conversation's own working directory.
+    let facts = include_str!("../../backend/facts.rs");
     assert!(
-        place.contains("get_working_directory_for_session"),
+        place.contains(".facts(session)")
+            && place.contains("facts.working_directory")
+            && facts.contains("working_directory: service.get_working_directory_for_session(id)"),
         "the directory comes from the conversation, not the process"
     );
     assert!(
