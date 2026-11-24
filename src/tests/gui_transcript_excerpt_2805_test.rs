@@ -9,6 +9,9 @@
 
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const MESSAGE_REPO: &str = include_str!("../db/repository/message.rs");
+/// The transcript read moved behind the backend's `LoadRecent`; the window
+/// only asks for it.
+const BACKEND_TRANSCRIPT: &str = include_str!("../backend/transcript.rs");
 
 /// The renderer between two of its neighbours, so an assertion cannot be
 /// satisfied by an unrelated function elsewhere in the file.
@@ -113,12 +116,13 @@ fn a_folded_turn_bounds_working_out_without_cutting_the_answer() {
 /// family, and reading each member's own window put 3,627 rows on screen.
 #[test]
 fn the_merged_family_reads_one_window_not_one_per_member() {
-    let loader = region(
-        "pub async fn load_recent(",
-        "/// What a stored session title",
+    let loader = region_in(
+        BACKEND_TRANSCRIPT,
+        "async fn load_recent(ctx: &Ctx,",
+        "/// The order a topic family's rows are drawn in",
     );
     assert!(
-        loader.contains("repo.find_recent_by_sessions(&ids, WINDOW)"),
+        loader.contains("repo.find_recent_by_sessions(&ids, RECENT_WINDOW)"),
         "the family is read as one window"
     );
     assert!(

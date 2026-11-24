@@ -16,6 +16,7 @@
 
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const BACKEND_GLUE: &str = include_str!("../gui/backend_glue.rs");
 
 /// One function's byte range, from its signature to the closing brace in column
 /// zero. Every function in these files ends there, and no nested block starts at
@@ -67,8 +68,25 @@ fn the_transcript_has_no_thread_of_its_own() {
         !TRANSCRIPT.contains("std::thread::Builder::new()"),
         "a transcript path still builds its own thread"
     );
+    // The reads and writes go through the backend now, and the backend's one
+    // door onto the window's threads is the lane: `Backend::spawn`, which
+    // `Backend::call` sends through, is a `spawn_worker` and nothing else.
+    let door = BACKEND_GLUE
+        .split("pub fn spawn<O: Op>(")
+        .nth(1)
+        .expect("the backend has one door onto the lane")
+        .split("\n    }\n")
+        .next()
+        .unwrap_or_default();
     assert!(
-        TRANSCRIPT.matches("agent_bridge::spawn_worker(").count() >= 3,
+        door.contains("agent_bridge::spawn_worker(") && !door.contains("std::thread"),
+        "the transcript should reach the lane for its reads and writes"
+    );
+    assert!(
+        TRANSCRIPT
+            .matches(".call(opencrabs::backend::transcript::")
+            .count()
+            >= 3,
         "the transcript should reach the lane for its reads and writes"
     );
 }
