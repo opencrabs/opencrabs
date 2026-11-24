@@ -1,0 +1,20 @@
+{
+  "op": "prompt_files.persist",
+  "scope": "a2a:manage",
+  "request": {
+    "docs": [
+      {
+        "session": "0b7e7c1e-6a43-4d55-9d2a-2f1f7a3c9e01",
+        "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+        "name": "deploy-log.md",
+        "content": "the whole body"
+      }
+    ]
+  },
+  "reply": {
+    "Ok": {
+      "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d": "/home/crab/.opencrabs/projects/unfiled/files/prompts/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-deploy-log.md"
+    }
+  },
+  "reply_failed": { "Err": { "kind": "failed", "detail": "prompt docs db: unable to open database file" } }
+}
