@@ -717,6 +717,13 @@ impl super::Dashboard {
     }
 }
 
+/// One gesture listener from the window, boxed so the editor's draw code can
+/// carry the window's answers without naming six closure types. The shape is
+/// the one `command_palette`'s `PickHandler` carries for its row presses,
+/// written as an alias because a `Box<dyn Fn(...)>` spelled out in a struct
+/// field is what clippy counts as a very complex type (#3163).
+pub(crate) type EditorHandler<E> = Box<dyn Fn(&E, &mut Window, &mut App) + 'static>;
+
 /// The window's answers to the editor's gestures, carried as one value.
 /// Each listener used to be its own `impl Fn` parameter, which had the draw
 /// call eight arguments deep; clippy's `too_many_arguments` (seven) is the
@@ -727,12 +734,12 @@ impl super::Dashboard {
 /// the same boxed shape is what `command_palette`'s `PickHandler` carries
 /// for its row presses (#3163).
 pub(crate) struct EditorHandlers {
-    pub(crate) dismiss: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
-    pub(crate) toggle_mode: Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
-    pub(crate) mouse_down: Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>,
-    pub(crate) mouse_move: Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static>,
-    pub(crate) mouse_up: Box<dyn Fn(&MouseUpEvent, &mut Window, &mut App) + 'static>,
-    pub(crate) wheel: Box<dyn Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static>,
+    pub(crate) dismiss: EditorHandler<ClickEvent>,
+    pub(crate) toggle_mode: EditorHandler<ClickEvent>,
+    pub(crate) mouse_down: EditorHandler<MouseDownEvent>,
+    pub(crate) mouse_move: EditorHandler<MouseMoveEvent>,
+    pub(crate) mouse_up: EditorHandler<MouseUpEvent>,
+    pub(crate) wheel: EditorHandler<ScrollWheelEvent>,
 }
 
 /// The dialog itself, drawn with the window's shared modal chrome so the
