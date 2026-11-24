@@ -19,10 +19,6 @@ use opencrabs::brain::mission_control::{
     ACTIVITY_LIMIT, McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem,
     activity_service, analytics_service, inbox_service, schedule_service,
 };
-use opencrabs::brain::prompt_builder::BrainLoader;
-use opencrabs::brain::tools::ToolRegistry;
-use opencrabs::brain::tools::dynamic::DynamicToolLoader;
-use opencrabs::brain::tools::rsi_proposals::RsiProposalsTool;
 use opencrabs::db::{Database, Pool};
 use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
 use std::path::PathBuf;
@@ -349,14 +345,13 @@ fn single_char(key: &str) -> Option<char> {
     }
 }
 
-/// What a key on the inbox asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    /// Install the proposal: the loaders write it live.
-    Apply,
-    /// Archive it without installing.
-    Reject,
-}
+/// What a key on the inbox asks for. The backend owns it because the choice
+/// crosses to the crab that applies it (`MissionDecide`).
+pub use opencrabs::backend::mission::Decision;
+/// The apply/reject body, now in the backend, named here for the tests that
+/// drive it against a scratch home.
+#[cfg(test)]
+use opencrabs::backend::mission::decide_with;
 
 /// What the screen says after a decision: the tool's own message, and
 /// whether it worked, so the strip can be green or red.
@@ -366,65 +361,26 @@ pub struct Notice {
     pub ok: bool,
 }
 
-/// Apply or reject one proposal with the paths already resolved.
+/// Decide one proposal through the backend (`MissionDecide`).
 ///
-/// Sync and path-explicit so a test can point every write at a scratch home
-/// without the override having to reach a spawned thread (the profile
-/// override is a task-local and does not cross `std::thread::spawn`).
-pub fn decide_with(
-    registry: Arc<ToolRegistry>,
-    id: &str,
-    kind: &McInboxKind,
-    decision: Decision,
-    tools_path: PathBuf,
-    brain_path: PathBuf,
-) -> Result<String, String> {
-    let tool = RsiProposalsTool::new(registry, tools_path, brain_path);
-    match decision {
-        Decision::Apply => tool.apply(id, kind),
-        Decision::Reject => tool.reject(id, None),
-    }
-}
-
-/// Decide one proposal on a thread of its own.
-///
-/// Resolving the two paths happens here because they are cheap home lookups;
-/// the writes themselves (tools.toml, commands.toml, SKILL.md, the archive)
-/// run off the gpui worker, which has a small stack and no reactor.
+/// The two paths are resolved on the crab, the same ones the terminal
+/// resolves, so an applied proposal lands in this instance's own files and
+/// nowhere else. The writes (tools.toml, commands.toml, SKILL.md, the archive)
+/// run on the backend's worker lane, off the gpui worker, which has a small
+/// stack and no reactor. The crab it runs on carries the `service` the caller
+/// holds, so the registry is the one it passed.
 pub async fn decide(
     service: Arc<AgentService>,
     id: String,
     kind: McInboxKind,
     decision: Decision,
 ) -> Result<String, String> {
-    // The same two paths the terminal resolves, so an applied proposal lands
-    // in this instance's own files and nowhere else.
-    let Some(tools_path) = DynamicToolLoader::default_path() else {
-        return Err("no tools.toml path for this instance".to_string());
-    };
-    let brain_path = BrainLoader::resolve_path();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-mission-decide".into())
-        .spawn(move || {
-            let result = decide_with(
-                service.tool_registry().clone(),
-                &id,
-                &kind,
-                decision,
-                tools_path,
-                brain_path,
-            );
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("proposal thread dropped its result".to_string()),
-        },
-        Err(e) => Err(format!("proposal thread failed to spawn: {e}")),
-    }
+    let ctx = opencrabs::backend::Ctx::new(PathBuf::new());
+    ctx.set_service(service);
+    crate::backend_glue::Backend::Local(Arc::new(ctx))
+        .call(opencrabs::backend::mission::MissionDecide { id, kind, decision })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Read the snapshot for `window` on a thread that owns its reactor.
@@ -484,6 +440,7 @@ pub async fn read_from_pool(pool: Pool, window: TimeWindow) -> Snapshot {
 mod tests {
     use super::*;
     use opencrabs::brain::rsi_proposals::ProposalsStore;
+    use opencrabs::brain::tools::ToolRegistry;
     use opencrabs::config::profile::with_home_override;
 
     fn runtime() -> tokio::runtime::Runtime {
