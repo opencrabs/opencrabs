@@ -79,9 +79,10 @@ BASELINES = {
     # The window branching on the remote backend outside the seam files.
     "R5": 0,
     # The window touching the disk outside LOCAL_ONLY and without localize:
-    # the `blob` functions of C5, plus L5 prompt files, L7 task detail, L8
-    # channel ownership and cd entries, and logging.rs's `use std::fs::`.
-    "R6": 22,
+    # the `blob` functions of C5, plus L5 prompt files and L7 task detail.
+    # L8 migrated its two disk sites (channel ownership, cd entries) to the
+    # ChannelStatus and ListDir operations, which took the count to 20.
+    "R6": 20,
     # The retired remote panel and its polling. The brief expects 0; it is 1
     # because src/remote/scopes.rs maps the A2A method "tasks/get" to its
     # scope (a2a:read). That is the A2A protocol table, not the panel; it
