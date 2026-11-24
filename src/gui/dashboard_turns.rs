@@ -2446,12 +2446,11 @@ impl Dashboard {
             return;
         }
         detail.read_at = Some(std::time::Instant::now());
-        // The crab looks up the output file while the task runs and re-reads
-        // it only when its stamp moved (see `TaskDetail`).
+        // The crab finds the output file while the task runs, keeps it after,
+        // and re-reads it only when its stamp moved (see `TaskDetail`).
         let Some(read) = opencrabs::backend::tasks::TaskDetail {
             session: detail.session,
             task: detail.task,
-            path: detail.path.clone(),
             stamp: detail.stamp,
         }
         .answer(ctx)

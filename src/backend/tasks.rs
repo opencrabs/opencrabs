@@ -7,8 +7,9 @@
 //! it inside a frame, and `Op::run` is that same `answer` for the remote
 //! door. Nothing here waits on anything.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,40 @@ use super::{BackendError, Ctx, Op, Scope};
 /// runs without one, which every reader takes as "nothing is running".
 fn manager(ctx: &Ctx) -> Result<Option<Arc<BackgroundTaskManager>>, BackendError> {
     Ok(ctx.service()?.background_manager())
+}
+
+/// The output file this crab found for each task it was asked about.
+///
+/// A caller never chooses the file: the crab resolves it from the task's own
+/// row, so a reader holding `a2a:read` cannot name an arbitrary file. The
+/// path is remembered once found, because a finished task leaves the roster
+/// and its view still reads the log it wrote, and a claude-cli task's file
+/// only appears a moment after the task does. One entry per task looked at.
+fn known_paths() -> &'static Mutex<HashMap<(Uuid, Uuid), PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashMap<(Uuid, Uuid), PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The output file of `task` in `session`: the one already found, else the
+/// one the roster reports now when `look_up` allows it, remembered.
+fn output_path(
+    mgr: &BackgroundTaskManager,
+    session: Uuid,
+    task: Uuid,
+    look_up: bool,
+) -> Option<PathBuf> {
+    let known = known_paths()
+        .lock()
+        .ok()
+        .and_then(|paths| paths.get(&(session, task)).cloned());
+    if known.is_some() || !look_up {
+        return known;
+    }
+    let found = mgr.output_path_for(session, task)?;
+    if let Ok(mut paths) = known_paths().lock() {
+        paths.insert((session, task), found.clone());
+    }
+    Some(found)
 }
 
 /// Where a running task came from, which decides the tag a surface prints.
@@ -141,8 +176,9 @@ pub struct TaskTail {
     pub session: Uuid,
     /// The task.
     pub task: Uuid,
-    /// The output file a previous read already found. `None` looks it up,
-    /// because a claude-cli task's file appears a moment after the task.
+    /// The file the caller last got back for this task, if any. Only a
+    /// check: the crab answers from its own record and never opens a path
+    /// it did not resolve for this task, so a hint that differs is dropped.
     pub path: Option<PathBuf>,
     /// How many lines to keep.
     pub lines: usize,
@@ -163,10 +199,13 @@ impl TaskTail {
         let Some(mgr) = manager(ctx)? else {
             return Ok(None);
         };
-        let path = self
-            .path
-            .clone()
-            .or_else(|| mgr.output_path_for(self.session, self.task));
+        let path = output_path(&mgr, self.session, self.task, true);
+        if self.path.is_some() && self.path != path {
+            tracing::debug!(
+                "tasks.tail: dropped a path hint for {} that this crab did not resolve",
+                self.task
+            );
+        }
         let text = path.as_deref().map(|p| mgr.output_tail(p, self.lines));
         Ok(Some(TailRead { path, text }))
     }
@@ -190,9 +229,6 @@ pub struct TaskDetail {
     pub session: Uuid,
     /// The task.
     pub task: Uuid,
-    /// The output file the view already knows. `None` looks it up while the
-    /// task runs.
-    pub path: Option<PathBuf>,
     /// The file's `(len, mtime)` when the view last read it.
     pub stamp: Option<(u64, SystemTime)>,
 }
@@ -202,7 +238,7 @@ pub struct TaskDetail {
 pub struct DetailRead {
     /// Whether the task is still in the roster.
     pub running: bool,
-    /// The output file, the one asked with or the one found.
+    /// The output file, once the crab has found it.
     pub path: Option<PathBuf>,
     /// The file's `(len, mtime)` now, `None` when it cannot be read.
     pub stamp: Option<(u64, SystemTime)>,
@@ -221,10 +257,9 @@ impl TaskDetail {
             .running_tasks(self.session)
             .iter()
             .any(|t| t.task_id == self.task);
-        let mut path = self.path.clone();
-        if path.is_none() && running {
-            path = mgr.output_path_for(self.session, self.task);
-        }
+        // Looked up only while the task runs; a finished one keeps the file
+        // found before it ended.
+        let path = output_path(&mgr, self.session, self.task, running);
         let Some(file) = path.clone() else {
             return Ok(Some(DetailRead {
                 running,
@@ -365,7 +400,6 @@ mod tests {
             TaskDetail {
                 session,
                 task,
-                path: None,
                 stamp: None
             }
             .answer(&ctx),
@@ -406,7 +440,6 @@ mod tests {
             TaskDetail {
                 session,
                 task,
-                path: None,
                 stamp: None
             }
             .answer(&ctx),
@@ -454,7 +487,6 @@ mod tests {
         let detail = TaskDetail {
             session: busy,
             task,
-            path: None,
             stamp: None,
         }
         .answer(&ctx)
@@ -480,6 +512,44 @@ mod tests {
             .answer(&ctx),
             Ok(Some(StopOutcome::NotFound))
         );
+    }
+
+    /// A caller cannot make the crab read a file by naming it: a path hint
+    /// the crab did not resolve for that task is dropped, and a task with no
+    /// output file answers no text.
+    #[tokio::test]
+    async fn a_tail_never_opens_a_path_the_caller_named() {
+        let db = crate::db::Database::connect_in_memory()
+            .await
+            .expect("in-memory ledger");
+        db.run_migrations().await.expect("migrate");
+        let context = crate::services::ServiceContext::new(db.pool().clone());
+        let provider: Arc<dyn crate::brain::provider::Provider> =
+            Arc::new(crate::tests::agent_service_mocks::MockProvider);
+        let mgr = Arc::new(BackgroundTaskManager::new());
+        let service = crate::brain::agent::AgentService::new_for_test(provider, context)
+            .await
+            .with_existing_background_manager(Some(mgr.clone()), None);
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        ctx.set_service(Arc::new(service));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "do not read me\n").expect("write");
+        let session = Uuid::new_v4();
+        mgr.mirror_started(session, "probe");
+        let task = mgr.running_tasks(session)[0].task_id;
+
+        let read = TaskTail {
+            session,
+            task,
+            path: Some(secret),
+            lines: 5,
+        }
+        .answer(&ctx)
+        .expect("tail")
+        .expect("a manager");
+        assert_eq!(read, TailRead { path: None, text: None });
     }
 
     #[test]
@@ -570,7 +640,6 @@ mod tests {
         let op = TaskDetail {
             session: Uuid::new_v4(),
             task: Uuid::new_v4(),
-            path: None,
             stamp: None,
         };
         parity!(gateway, TaskDetail { ..op.clone() });
