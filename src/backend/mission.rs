@@ -24,8 +24,9 @@ pub enum Decision {
     Reject,
 }
 
-/// The wire shape of [`McInboxKind`], which carries no serde of its own.
-#[allow(dead_code)]
+/// The wire shape of [`McInboxKind`], which carries no serde of its own. The
+/// variant names are the remote type's, which is what `serde(remote)` needs.
+#[allow(dead_code, clippy::enum_variant_names)]
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "McInboxKind")]
 enum McInboxKindWire {
