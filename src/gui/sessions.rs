@@ -812,40 +812,17 @@ pub async fn load_topic_info(
     }
 }
 
-/// Rename a session or topic. The caller re-reads the rail afterwards.
+/// Rename a session or topic through the backend (`RenameSession`). The
+/// caller re-reads the rail afterwards.
 pub async fn rename_session(
     backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     title: String,
 ) -> Result<(), String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("rename-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.rename(id, &title).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("rename thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("rename thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::RenameSession { id, title })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Every closed session. A closed topic is dimmed and refuses new turns (#2305).

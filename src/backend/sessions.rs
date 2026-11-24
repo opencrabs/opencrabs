@@ -3,6 +3,7 @@
 //! Operations land here as their GUI doors move behind the contract.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::db::models::Session;
 use crate::db::repository::session::{SessionListOptions, SessionRepository};
@@ -38,7 +39,33 @@ impl Op for LoadSessions {
     }
 }
 
-ops! { LoadSessions }
+/// Rename a session or topic. The caller re-reads the rail afterwards.
+///
+/// The write example: same door as the read, a `Manage` scope because it
+/// changes the other crab's ledger, and `()` as the reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameSession {
+    /// The session or topic to rename.
+    pub id: Uuid,
+    /// Its new title, stored as given.
+    pub title: String,
+}
+
+impl Op for RenameSession {
+    const NAME: &'static str = "sessions.rename";
+    const SCOPE: Scope = Scope::Manage;
+    type Reply = ();
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let db = ctx.db().await?;
+        let repo = SessionRepository::new(db.pool().clone());
+        repo.rename(self.id, &self.title)
+            .await
+            .map_err(|e| BackendError::Failed(format!("{e:#}")))
+    }
+}
+
+ops! { LoadSessions, RenameSession }
 
 #[cfg(test)]
 mod tests {
@@ -61,6 +88,30 @@ mod tests {
         let mut want = vec![first.id, second.id];
         want.sort();
         assert_eq!(ids, want);
+    }
+
+    #[tokio::test]
+    async fn rename_session_writes_the_new_title() {
+        let (_dir, ctx) = temp_ctx().await;
+        let db = ctx.db().await.expect("db");
+        let repo = SessionRepository::new(db.pool().clone());
+        let session = Session::new(Some("before".into()), None, None);
+        repo.create(&session).await.expect("create");
+
+        RenameSession {
+            id: session.id,
+            title: "after".into(),
+        }
+        .run(&ctx)
+        .await
+        .expect("rename");
+
+        let stored = repo
+            .find_by_id(session.id)
+            .await
+            .expect("read back")
+            .expect("the row is still there");
+        assert_eq!(stored.title.as_deref(), Some("after"));
     }
 
     #[tokio::test]
