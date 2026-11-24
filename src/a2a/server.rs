@@ -4,6 +4,8 @@
 //! - `GET  /.well-known/agent.json` — Agent Card discovery
 //! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped; `gui/call`
 //!   gates per backend operation)
+//! - `GET  /gui/events?session=<id>` — SSE of one session's backend events
+//!   (scoped, `a2a:read`; fan-out to every surface watching the session)
 //! - `POST /a2a/pair`               — One-time code → scoped session token
 //! - `GET  /a2a/health`             — Health check
 
@@ -25,6 +27,11 @@ use futures::stream;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+
+// The SSE door for backend events. Its file sits with the other handlers;
+// it is declared here because this file is the one that routes it.
+#[path = "handler/gui_stream.rs"]
+pub mod gui_stream;
 
 /// Shared state for the A2A gateway.
 #[derive(Clone)]
@@ -205,6 +212,7 @@ pub fn build_router(state: A2aState, allowed_origins: &[String]) -> Router {
     let protected = Router::new()
         .route("/a2a/v1", post(handle_jsonrpc))
         .route("/a2a/routes", get(routes_http::handle_routes))
+        .route("/gui/events", get(gui_stream::handle_events))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
