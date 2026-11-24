@@ -303,7 +303,9 @@ fn a_wide_pane_shows_the_running_task_and_the_next_two() {
     // asked for: what is running, and the one or two tasks after it.
     let lines = pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Tasks, false);
     assert_eq!(lines.len(), 4, "summary, running, two next: {lines:?}");
-    assert_eq!(lines[0].1, "3/8 · ███░░░░░░░ 37%");
+    // The bar is a drawn track (#3131), so the data line is the count and
+    // the view paints track and percentage beside it.
+    assert_eq!(lines[0], (LineKind::Bar, "3/8".to_string()));
     assert_eq!(lines[1], (LineKind::Running, "▸ task 4".to_string()));
     assert_eq!(lines[2].0, LineKind::Next);
     assert!(lines[2].1.starts_with("· task 5"), "{:?}", lines[2]);
@@ -324,11 +326,52 @@ fn a_split_grid_separates_the_disclosure_arrow_from_its_summary() {
     // Four to seven keeps the same progress and running task.
     let summary = pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Summary, false);
     assert_eq!(summary.len(), 2, "{summary:?}");
-    assert_eq!(summary[0].1, "3/8 · ███░░░░░░░ 37%");
+    assert_eq!(summary[0], (LineKind::Bar, "3/8".to_string()));
     assert_eq!(summary[1], (LineKind::Running, "▸ task 4".to_string()));
     assert!(
         !summary.iter().any(|(kind, _)| *kind == LineKind::Title),
         "a summary pane spends its rows on the progress and the task"
+    );
+}
+
+#[test]
+fn a_pane_draws_the_track_instead_of_typing_the_bar() {
+    // #3131: the glyph string followed the platform font, so the bar read
+    // as noise on Linux and as a track on macOS from the same data. The
+    // renderer paints the drawn track and the percentage; no glyph ever
+    // reaches the pane again.
+    let src = include_str!("../plan_strip.rs");
+    let panes = src
+        .split("pub fn pane_view(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    pub fn ").next())
+        .expect("pane view body");
+    assert!(
+        panes.contains("progress_bar_view(percent, color)"),
+        "the pane bar row paints the drawn track"
+    );
+    assert!(
+        !pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Tasks, false)
+            .iter()
+            .any(|(_, line)| line.contains('█') || line.contains('░')),
+        "the pane data never carries glyphs again"
+    );
+    assert!(
+        !pane_lines(&plan_with(8, 3, Some(4)), PaneDensity::Tasks, true)
+            .iter()
+            .any(|(_, line)| line.contains('█') || line.contains('░')),
+        "the expanded pane data never carries glyphs either"
+    );
+    let track = src
+        .split("pub(crate) fn progress_bar_view(")
+        .nth(1)
+        .expect("track helper")
+        .split("}")
+        .next()
+        .expect("track helper body");
+    assert!(
+        !track.contains("█") && !track.contains("░"),
+        "the drawn track carries no glyph text"
     );
 }
 

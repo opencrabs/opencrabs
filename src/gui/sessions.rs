@@ -2299,11 +2299,13 @@ fn badge_cell(glyph: &str) -> Div {
         .child(SharedString::from(glyph.to_string()))
 }
 
-/// The plan's checklist as one slim line on the card: the same ten-cell bar
-/// the composer strip draws, plus the done/total count. The bar math lives in
+/// The plan's checklist as one slim line on the card: the same drawn bar the
+/// composer strip draws, plus the done/total count. The bar shape lives in
 /// `plan_strip`, so a row and the strip can never disagree about one plan.
 fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
-    let (_, bar) = crate::plan_strip::progress_bar(done, total);
+    // The glyph bar is gone (#3131); progress_bar still carries the exact
+    // percentage the strip and this card share.
+    let (percent, _) = crate::plan_strip::progress_bar(done, total);
     // The theme's own accent is the orange: it stays legible on both the dark
     // and the paper palette, where a hardcoded orange would wash out.
     let bar_colour = if flash {
@@ -2317,12 +2319,7 @@ fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
         .items_center()
         .gap_1()
         .text_xs()
-        .child(
-            div()
-                .flex_none()
-                .text_color(rgb(bar_colour))
-                .child(SharedString::from(bar)),
-        )
+        .child(crate::plan_strip::progress_bar_view(percent, bar_colour))
         .child(
             div()
                 .flex_none()
@@ -4175,6 +4172,10 @@ mod tests {
         assert!(
             cell_source.contains("crate::plan_strip::progress_bar(done, total)"),
             "the bar reuses the composer strip's math, not a second copy"
+        );
+        assert!(
+            cell_source.contains("crate::plan_strip::progress_bar_view(percent, bar_colour)"),
+            "the drawn track paints the bar (#3131), never a glyph string"
         );
         assert!(
             cell_source.contains("{done}/{total}"),
