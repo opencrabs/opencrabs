@@ -17,13 +17,30 @@ fn read_src(relative: &str) -> String {
         .unwrap_or_else(|e| panic!("read {relative}: {e}"))
 }
 
-/// The accessor is a real `OnceLock`: same client on every call, so the root
-/// store loads once and one connection pool serves the whole process.
+/// The test build hands back a fresh client per call: each `#[tokio::test]`
+/// runs its own runtime, and a pool born in one runtime driven by another
+/// fails every request outright. The production contract (one `OnceLock`
+/// client per process) cannot hold under `cfg(test)`, so it is verified by
+/// source scan instead, and the runtime check pins the test-side contract.
 #[test]
-fn shared_client_is_built_once() {
+fn shared_client_matches_its_build_contract() {
+    // Test-side contract: distinct clients per call, so no pool ever crosses
+    // a runtime boundary between two tests.
     let first = crate::utils::http::shared() as *const reqwest::Client;
     let second = crate::utils::http::shared() as *const reqwest::Client;
-    assert_eq!(first, second, "shared() handed back two different clients");
+    assert_ne!(first, second, "shared() under test must hand back distinct clients");
+
+    // Production-side contract: the process-wide OnceLock still exists and
+    // wraps build_shared, so the root store loads exactly once per daemon.
+    let source = read_src("src/utils/http.rs");
+    assert!(
+        source.contains("#[cfg(not(test))]\n    static CLIENT: OnceLock<reqwest::Client>"),
+        "production shared() no longer uses a process-wide OnceLock; the CA bundle would load per call"
+    );
+    assert!(
+        source.contains("CLIENT.get_or_init(build_shared)"),
+        "production shared() no longer initializes the OnceLock with build_shared"
+    );
 }
 
 /// The DuckDuckGo loop builds one request per attempt. It used to build a
