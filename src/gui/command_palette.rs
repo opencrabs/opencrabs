@@ -226,13 +226,21 @@ const FIELD_MIC_GLYPH: f32 = 1.65;
 
 /// The smoked glass the card floats on: near-black, faintly transparent, so
 /// white ink lands hard against it and the code behind reads as a shadow
-/// rather than as texture (#3066).
-const GLASS_TOP: u32 = 0x0b0b0ee8;
-const GLASS_BOTTOM: u32 = 0x0a0a0cd8;
+/// rather than as texture (#3066). The card's ceiling (#3130) starts at the
+/// pill's floor tone and lightens slightly downward, so the seam between the
+/// two reads as one continuous ramp instead of a 9-unit step up.
+const GLASS_TOP: u32 = 0x0c0c10e8;
+const GLASS_BOTTOM: u32 = 0x0e0e12d8;
 
-/// The field's fill: darker than the card, because the pill sits on top of the
-/// scrim and the card sits under it, and the stack has to read top-down.
+/// The field's fill: darker at the crown than at the floor, so the pill
+/// hands its bottom edge to the card's top at the same tone and the two
+/// read as one sheet of glass (#3130). The old flat fill made the card's
+/// top edge a 9-unit step UP from the pill's floor, which the eye read as
+/// two stacked panels.
 const PILL_FILL: u32 = 0x0c0c10f2;
+/// The pill's crown tone: a step darker than the pill's floor, so the ramp
+/// runs downward through the pill and hands off at its floor (#3130).
+const PILL_CROWN: u32 = 0x08080c98;
 
 /// The invitation's glass rim. Spotlight's edge is not a drawn border: it is a
 /// lit edge, brightest along the top where the light falls, thinning as it
@@ -752,7 +760,15 @@ pub(super) fn overlay(
         .pr(px(FIELD_PAD_RIGHT))
         .py(px(FIELD_PAD_Y))
         .rounded(px(PILL_RADIUS))
-        .bg(rgba(PILL_FILL))
+        // One ramp through the pill (#3130): the crown a step darker than the
+        // floor, so the pill hands its bottom edge off at exactly the tone the
+        // card's ceiling starts at and the seam reads as continuity, not as a
+        // step up.
+        .bg(linear_gradient(
+            180.0,
+            linear_color_stop(rgba(PILL_CROWN), 0.0),
+            linear_color_stop(rgba(PILL_FILL), 1.0),
+        ))
         .child(query_line(state, view, paint, caret_on));
     // The microphone closes the field's row in the one state this card paints
     // it: idle. A running take leaves the card entirely for its own bubble
@@ -894,7 +910,10 @@ pub(super) fn overlay(
                     .flex_col()
                     .child(
                         div()
-                            .text_sm()
+                            // One step larger (#3130): measured 21 device px
+                            // cap-to-descender at 2x was too small to read at
+                            // a glance for the row's primary line.
+                            .text_base()
                             .text_color(rgb(if rowv.missing { INK_MUTED } else { INK }))
                             .truncate()
                             .child(SharedString::from(rowv.title.clone())),
@@ -902,7 +921,7 @@ pub(super) fn overlay(
                     .when(armed && !rowv.subtitle.is_empty(), |d| {
                         d.child(
                             div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(rgb(INK_MUTED))
                                 .truncate()
                                 .child(SharedString::from(rowv.subtitle.clone())),
