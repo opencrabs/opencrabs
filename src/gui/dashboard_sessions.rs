@@ -60,7 +60,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session_id, attached);
         }
         cx.notify();
     }
@@ -135,7 +135,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session_id, attached);
         }
         // The rail says the session is working from the first frame, the same
         // signal a visible turn gives (#2666, #2636).
@@ -192,9 +192,9 @@ impl Dashboard {
         if !self.hint_dismissed.iter().any(|id| id == hint_id) {
             self.hint_dismissed.push(hint_id.to_string());
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let hint_id = hint_id.to_string();
-        crate::hint_dismiss::dismiss(db_path, hint_id);
+        crate::hint_dismiss::dismiss(backend, hint_id);
         cx.notify();
     }
 
@@ -403,7 +403,7 @@ impl Dashboard {
                 cancel,
             );
             if !attached.is_empty() {
-                agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
+                agent_bridge::spawn_track_files(self.backend.clone(), sid, attached);
             }
         }
         cx.notify();
@@ -437,7 +437,7 @@ impl Dashboard {
             None => (None, None),
         };
         agent_bridge::spawn_create_session(
-            self.db_path.clone(),
+            self.backend.clone(),
             self.sink.clone(),
             provider,
             model,
@@ -454,9 +454,9 @@ impl Dashboard {
     /// write, and the refetch replaces the guess with what was stored.
     pub(crate) fn toggle_favorite(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let pinned = self.sessions.is_favorite(id);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_favorite(db_path, id, !pinned).await {
+            if let Err(e) = sessions::set_favorite(backend, id, !pinned).await {
                 logging::error(&format!("favorite {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("favorite: {e}"));
@@ -489,9 +489,9 @@ impl Dashboard {
         after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_topics(db_path.clone(), id, true).await {
+            if let Err(e) = sessions::set_topics(backend.clone(), id, true).await {
                 logging::error(&format!("enable topics {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("enable topics: {e}"));
@@ -500,7 +500,7 @@ impl Dashboard {
                 .ok();
                 return;
             }
-            let result = sessions::load_topics(db_path).await;
+            let result = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(ids) => {
@@ -539,9 +539,9 @@ impl Dashboard {
         let open_was_topic = self
             .chat_session
             .is_some_and(|open| self.sessions.parents.get(&open) == Some(&id));
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(
-            async move |this, cx| match sessions::merge_topics(db_path, id).await {
+            async move |this, cx| match sessions::merge_topics(backend, id).await {
                 Ok(folded) => {
                     this.update(cx, |this, cx| {
                         logging::info(&format!("topics disabled on {id}: folded {folded}"));
@@ -571,9 +571,9 @@ impl Dashboard {
     /// Re-read the pinned ids. A separate fetch from the rows because the
     /// sidecar can change on its own (the TUI pins too).
     pub(crate) fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_favorites(db_path).await;
+            let result = sessions::load_favorites(backend).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(ids) => this.sessions.favorites = ids.into_iter().collect(),
@@ -802,7 +802,7 @@ impl Dashboard {
     /// ledger. The row disappears because the row is gone, not because a
     /// local list was filtered.
     pub(crate) fn delete_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        agent_bridge::spawn_delete_session(self.db_path.clone(), id, self.sink.clone());
+        agent_bridge::spawn_delete_session(self.backend.clone(), id, self.sink.clone());
         // A deleted conversation must not keep a draft waiting for a composer
         // it can never reach. Its pane's editor leaves with the conversation.
         self.composer.drafts.remove(id);
@@ -844,9 +844,9 @@ impl Dashboard {
     /// Load the info panel for a session. The panel is read-only: it shows
     /// the id, the parent, the created time, and the message count.
     pub(crate) fn open_topic_info(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(
-            async move |this, cx| match sessions::load_topic_info(db_path, id).await {
+            async move |this, cx| match sessions::load_topic_info(backend, id).await {
                 Ok(Some(info)) => {
                     this.update(cx, |this, cx| {
                         this.topic_info = Some(info);
@@ -874,9 +874,9 @@ impl Dashboard {
     /// what was actually written.
     pub(crate) fn toggle_closed_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let closed = self.sessions.is_closed(id);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_closed(db_path, id, !closed).await {
+            if let Err(e) = sessions::set_closed(backend, id, !closed).await {
                 logging::error(&format!("close topic {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("close topic: {e}"));

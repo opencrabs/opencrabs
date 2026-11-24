@@ -74,6 +74,11 @@ pub(crate) fn run() {
     // later fetch reuses it instead of re-running `Config::load` on a
     // tiny-stack background thread.
     let db_path = ledger_path();
+    // This process's own crab (F4): one `Ctx` on that ledger, recorded as the
+    // primary so the bootstrap can hand it the window's agent service.
+    let ctx = std::sync::Arc::new(opencrabs::backend::Ctx::new(db_path));
+    opencrabs::backend::set_primary(ctx.clone());
+    let backend = backend_glue::Backend::Local(ctx);
     // Agent bootstrap (task 5) starts before the window: provider, tool
     // registry, brain files and a fresh session build on a 4 MB thread and
     // report through the channel the Dashboard drains on its poll tick.
@@ -96,17 +101,17 @@ pub(crate) fn run() {
             let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(e));
         }
     }
-    let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
-    let session_list = futures::executor::block_on(sessions::load_sessions(db_path.clone()));
+    let state = futures::executor::block_on(load_view(backend.clone(), Period::AllTime));
+    let session_list = futures::executor::block_on(sessions::load_sessions(backend.clone()));
     // Which hints the reader has hidden, read before the first frame so a
     // dismissed line never flashes in and out (#3121). A read that fails shows
     // every hint rather than none: a repeated hint is a small annoyance, a
     // silently empty card is a feature that looks broken.
-    let hint_dismissed = hint_dismiss::load(db_path.clone());
+    let hint_dismissed = hint_dismiss::load(backend.clone());
     // The pinned set is a sidecar table, so it is its own read. A failure
     // leaves the rail unpinned rather than hiding the conversations.
     let favorites: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_favorites(db_path.clone()))
+        futures::executor::block_on(sessions::load_favorites(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("favorites load: {e}"));
                 Vec::new()
@@ -115,7 +120,7 @@ pub(crate) fn run() {
             .collect();
     // Topics are opt-in per session, read as their own set (#2302).
     let topics: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_topics(db_path.clone()))
+        futures::executor::block_on(sessions::load_topics(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("topics load: {e}"));
                 Vec::new()
@@ -124,7 +129,7 @@ pub(crate) fn run() {
             .collect();
     // Closed topics are dimmed and refuse turns, so their set is read up front (#2305).
     let closed: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_closed(db_path.clone()))
+        futures::executor::block_on(sessions::load_closed(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("closed load: {e}"));
                 Vec::new()
@@ -133,7 +138,7 @@ pub(crate) fn run() {
             .collect();
     // Which topic sits under which session, so the rail can group them (#2303).
     let parents: std::collections::HashMap<uuid::Uuid, uuid::Uuid> =
-        futures::executor::block_on(sessions::load_topic_parents(db_path.clone()))
+        futures::executor::block_on(sessions::load_topic_parents(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("topic parents load: {e}"));
                 Vec::new()
@@ -146,7 +151,7 @@ pub(crate) fn run() {
     // "topic icons vanished" bug. The rows are already in the database; they
     // just were never read on the way in.
     let topic_icons: std::collections::HashMap<uuid::Uuid, String> =
-        futures::executor::block_on(sessions::load_topic_icons(db_path.clone()))
+        futures::executor::block_on(sessions::load_topic_icons(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("topic icons load: {e}"));
                 Vec::new()
@@ -404,7 +409,7 @@ pub(crate) fn run() {
                     // aggregate per tick, with the full refetch paid only when
                     // that aggregate moved, keeps this clear of the per-frame
                     // ledger reads #2817 removed.
-                    let rail_db = db_path.clone();
+                    let rail_db = backend.clone();
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
@@ -490,7 +495,7 @@ pub(crate) fn run() {
                         window_frame: saved_window,
                         window_frame_seen: saved_window,
                         window_frame_saved: saved_window,
-                        db_path: db_path.clone(),
+                        backend: backend.clone(),
                         hint_dismissed,
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),

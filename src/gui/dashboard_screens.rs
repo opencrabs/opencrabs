@@ -81,12 +81,12 @@ impl Dashboard {
         logging::info(&format!("period -> {period:?}: fetching"));
         self.pending += 1;
         let pending = self.pending;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // The fetch runs on its own big-stack thread (see `load_view`):
             // gpui's background workers are dispatch-queue threads with tiny
             // stacks. The previous view stays visible until the result lands.
-            let state = load_view(db_path, period).await;
+            let state = load_view(backend, period).await;
             this.update(cx, |this, cx| {
                 if pending == this.pending {
                     this.state = state;
@@ -131,10 +131,10 @@ impl Dashboard {
         }
         self.mc_loading = true;
         self.mc_err = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let window = self.mc_window;
         cx.spawn(async move |this, cx| {
-            let result = mission_control::load(db_path, window).await;
+            let result = mission_control::load(backend, window).await;
             this.update(cx, |this, cx| {
                 this.mc_loading = false;
                 if this.mc_window == window {
@@ -1023,9 +1023,9 @@ impl Dashboard {
     /// them only if the user still sits on the files screen of the same
     /// session; a stale fetch paints nothing.
     pub(crate) fn fetch_files(&mut self, sid: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = agent_bridge::load_files(db_path, sid).await;
+            let result = agent_bridge::load_files(backend, sid).await;
             this.update(cx, |this, cx| {
                 if this.files_for == Some(sid) && this.screen == Screen::Files {
                     match result {

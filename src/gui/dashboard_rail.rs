@@ -243,14 +243,14 @@ impl Dashboard {
     /// from a sidecar the TUI also writes, so a list refresh that skipped it
     /// would draw a row in the wrong slot until the next pin click.
     pub(crate) fn refresh_rail(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_sessions(db_path.clone()).await;
+            let result = sessions::load_sessions(backend.clone()).await;
             // One batched lookup per refresh pass, never per row per frame
             // (#2490): the topic store outranks the stored session name and a
             // rename has to reach the rail without a restart.
             let titles = match &result {
-                Ok(items) => sessions::load_telegram_topic_titles(db_path, items).await,
+                Ok(items) => sessions::load_telegram_topic_titles(backend, items).await,
                 Err(_) => Ok(HashMap::new()),
             };
             this.update(cx, |this, cx| {
@@ -308,12 +308,12 @@ impl Dashboard {
             .set(self.previews_in_flight.get().saturating_add(1));
         let in_flight = self.previews_in_flight.clone();
         let dirty = self.previews_dirty.clone();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // Released on drop, so a task whose view went away still frees the
             // slot instead of wedging previews for the rest of the run.
             let _slot = PreviewSlot(in_flight.clone());
-            match sessions::load_previews(db_path, ids).await {
+            match sessions::load_previews(backend, ids).await {
                 Ok(pairs) => {
                     this.update(cx, |this, cx| {
                         this.sessions.previews = pairs;
@@ -374,7 +374,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // A burst of keystrokes costs one query, not one per character.
             cx.background_executor()
@@ -388,7 +388,7 @@ impl Dashboard {
             if stale {
                 return;
             }
-            match sessions::load_content_matches(db_path, query).await {
+            match sessions::load_content_matches(backend, query).await {
                 Ok(rows) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.rail_find_gen == generation {
@@ -464,7 +464,7 @@ impl Dashboard {
         }
         self.seeker_find_gen = self.seeker_find_gen.wrapping_add(1);
         let generation = self.seeker_find_gen;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // A burst of keystrokes costs one query, not one per character.
             cx.background_executor()
@@ -476,7 +476,7 @@ impl Dashboard {
             if stale {
                 return;
             }
-            match sessions::load_content_matches(db_path, query.clone()).await {
+            match sessions::load_content_matches(backend, query.clone()).await {
                 Ok(rows) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.seeker_find_gen == generation {

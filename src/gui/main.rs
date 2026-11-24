@@ -29,6 +29,7 @@ mod accent;
 mod agent_bridge;
 mod app;
 mod attachment_view;
+mod backend_glue;
 mod bang;
 mod boot;
 mod breakdown;

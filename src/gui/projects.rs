@@ -333,7 +333,11 @@ async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<Proj
 }
 
 /// Run one read or write and return a complete snapshot for the screen.
-pub async fn run(db_path: PathBuf, action: ProjectAction) -> Result<ProjectsData, String> {
+pub async fn run(
+    backend: crate::backend_glue::Backend,
+    action: ProjectAction,
+) -> Result<ProjectsData, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .stack_size(4 * 1024 * 1024)

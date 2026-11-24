@@ -582,7 +582,8 @@ const RAIL_LIMIT: usize = 200;
 /// `load_view` in `main.rs`: tokio current-thread runtime on a 4 MB thread,
 /// result over a oneshot. `Database::connect` runs pragmas only, never
 /// migrations, so a read cannot race the daemon that owns the schema.
-pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, String> {
+pub async fn load_sessions(backend: crate::backend_glue::Backend) -> Result<Vec<Session>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<Session>, String>>();
     let spawned = std::thread::Builder::new()
         .name("sessions-fetch".into())
@@ -619,7 +620,8 @@ pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, 
 /// The rail's ledger signature, read through the same no-migration door as
 /// [`load_sessions`] (#2881). `None` when the read failed, which the caller
 /// must treat as "no news" rather than "the ledger is empty".
-pub async fn rail_ledger_signature(db_path: std::path::PathBuf) -> Option<(i64, i64)> {
+pub async fn rail_ledger_signature(backend: crate::backend_glue::Backend) -> Option<(i64, i64)> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Option<(i64, i64)>>();
     let spawned = std::thread::Builder::new()
         .name("rail-ledger-sig".into())
@@ -647,7 +649,10 @@ pub async fn rail_ledger_signature(db_path: std::path::PathBuf) -> Option<(i64, 
 /// The pinned set, read through the same 4 MB no-migration door as
 /// [`load_sessions`]. Returns ids: the rail already holds the rows, this only
 /// says which of them go on top.
-pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+pub async fn load_favorites(
+    backend: crate::backend_glue::Backend,
+) -> Result<Vec<uuid::Uuid>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
     let spawned = std::thread::Builder::new()
         .name("favorites-fetch".into())
@@ -695,9 +700,10 @@ pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uui
 /// no-migration door as [`load_sessions`]. One batched query per pass, so a
 /// rail of 200 cards costs one round trip rather than 200.
 pub async fn load_previews(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     ids: Vec<uuid::Uuid>,
 ) -> Result<HashMap<uuid::Uuid, SharedString>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, SharedString>, String>>();
     let spawned = std::thread::Builder::new()
@@ -740,9 +746,10 @@ pub async fn load_previews(
 /// off the paint path, so a rail repaint never waits on the database. The row
 /// count is bounded so a common word cannot flood the rail.
 pub async fn load_content_matches(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     query: String,
 ) -> Result<Vec<ContentSearchRow>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<ContentSearchRow>, String>>();
     let spawned = std::thread::Builder::new()
         .name("session-content-find".into())
@@ -788,9 +795,10 @@ pub struct TopicInfo {
 /// Read one session's info for the panel. A session that is not a topic
 /// reports no parent.
 pub async fn load_topic_info(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
 ) -> Result<Option<TopicInfo>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<TopicInfo>, String>>();
     let spawned = std::thread::Builder::new()
         .name("topic-info-fetch".into())
@@ -835,10 +843,11 @@ pub async fn load_topic_info(
 
 /// Rename a session or topic. The caller re-reads the rail afterwards.
 pub async fn rename_session(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     title: String,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("rename-write".into())
@@ -869,7 +878,8 @@ pub async fn rename_session(
 }
 
 /// Every closed session. A closed topic is dimmed and refuses new turns (#2305).
-pub async fn load_closed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+pub async fn load_closed(backend: crate::backend_glue::Backend) -> Result<Vec<uuid::Uuid>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
     let spawned = std::thread::Builder::new()
         .name("closed-fetch".into())
@@ -901,10 +911,11 @@ pub async fn load_closed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>,
 
 /// Close or reopen one topic. The caller re-reads the closed set afterwards.
 pub async fn set_closed(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     closed: bool,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("closed-write".into())
@@ -937,8 +948,9 @@ pub async fn set_closed(
 /// Every (topic, parent) pair. Read separately from the rows, like favorites,
 /// so the grouping does not change the row model (#2303).
 pub async fn load_topic_parents(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
 ) -> Result<Vec<(uuid::Uuid, uuid::Uuid)>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, uuid::Uuid)>, String>>();
     let spawned = std::thread::Builder::new()
@@ -972,10 +984,11 @@ pub async fn load_topic_parents(
 /// Create a topic under a session and return its id. The database refuses a
 /// parent that is already a topic; that refusal comes back as the error.
 pub async fn create_topic(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     parent: uuid::Uuid,
     title: String,
 ) -> Result<uuid::Uuid, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<uuid::Uuid, String>>();
     let spawned = std::thread::Builder::new()
         .name("topic-create".into())
@@ -1010,9 +1023,10 @@ pub async fn create_topic(
 /// by the caller from the rail's own parent map, so this stays a plain list
 /// read on the same dedicated-stack thread the other rail loaders use.
 pub async fn load_group_candidates(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     target: uuid::Uuid,
 ) -> Result<Vec<(uuid::Uuid, String, String)>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String, String)>, String>>();
     let spawned = std::thread::Builder::new()
@@ -1057,10 +1071,11 @@ pub async fn load_group_candidates(
 /// back as its plain sentence (the typed error's Display), so the picker can
 /// show why instead of a raw constraint error.
 pub async fn attach_topic(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     child: uuid::Uuid,
     parent: uuid::Uuid,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("topic-attach".into())
@@ -1092,7 +1107,8 @@ pub async fn attach_topic(
 
 /// Every session with topics turned on. Read separately from the rows, the
 /// same way favorites are, so the row model does not carry the flag.
-pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+pub async fn load_topics(backend: crate::backend_glue::Backend) -> Result<Vec<uuid::Uuid>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
     let spawned = std::thread::Builder::new()
         .name("topics-fetch".into())
@@ -1124,8 +1140,9 @@ pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>,
 
 /// Every topic's own icon. Read with the topic state, the same way the flag is.
 pub async fn load_topic_icons(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
 ) -> Result<Vec<(uuid::Uuid, String)>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String)>, String>>();
     let spawned = std::thread::Builder::new()
@@ -1167,9 +1184,10 @@ pub async fn load_topic_icons(
 /// pass with no restart, and batching the pairs into one query means a list of
 /// two hundred rows still costs one lookup per pass, not two hundred.
 pub async fn load_telegram_topic_titles(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     items: &[Session],
 ) -> Result<HashMap<uuid::Uuid, String>, String> {
+    let db_path = backend.local_db_path();
     use opencrabs::db::repository::channel_message::ChannelMessageRepository;
     use opencrabs::ui_core::rail;
 
@@ -1243,10 +1261,11 @@ pub fn icon_write_needed(stored: Option<&str>, draft: Option<&str>) -> bool {
 
 /// Give one topic an icon, or clear it with None. The caller re-reads afterwards.
 pub async fn set_topic_icon(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     icon: Option<String>,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("topic-icon-write".into())
@@ -1280,10 +1299,11 @@ pub async fn set_topic_icon(
 
 /// Turn topics on or off for one session. The caller re-reads afterwards.
 pub async fn set_topics(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     enabled: bool,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("topics-write".into())
@@ -1320,7 +1340,11 @@ pub async fn set_topics(
 /// rail and the topic store afterwards rather than patching its own copy: a
 /// topic that moved is a session row that changed, and guessing at that in
 /// memory is how two surfaces end up disagreeing.
-pub async fn merge_topics(db_path: std::path::PathBuf, id: uuid::Uuid) -> Result<usize, String> {
+pub async fn merge_topics(
+    backend: crate::backend_glue::Backend,
+    id: uuid::Uuid,
+) -> Result<usize, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
     let spawned = std::thread::Builder::new()
         .name("topics-fold".into())
@@ -1354,10 +1378,11 @@ pub async fn merge_topics(db_path: std::path::PathBuf, id: uuid::Uuid) -> Result
 /// afterwards instead of patching its own list, so the rail can never show a
 /// pin the ledger does not have.
 pub async fn set_favorite(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     pinned: bool,
 ) -> Result<(), String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
     let spawned = std::thread::Builder::new()
         .name("favorite-write".into())
@@ -2834,7 +2859,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("runtime");
-                rt.block_on(load_sessions(db_path))
+                rt.block_on(load_sessions(crate::backend_glue::Backend::local(db_path)))
             })
             .expect("spawn tiny caller");
         let result = handle.join().expect("tiny caller must survive");

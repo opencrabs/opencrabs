@@ -853,7 +853,7 @@ impl Dashboard {
             }
             if key == "k" && ev.keystroke.modifiers.control {
                 if let Some(id) = self.chat_session {
-                    agent_bridge::spawn_clear_messages(self.db_path.clone(), id, self.sink.clone());
+                    agent_bridge::spawn_clear_messages(self.backend.clone(), id, self.sink.clone());
                 }
                 return;
             }

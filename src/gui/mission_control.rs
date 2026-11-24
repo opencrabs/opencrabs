@@ -431,7 +431,11 @@ pub async fn decide(
 ///
 /// The thread is 4 MB and named, exactly like [`super::agent_bridge::load_files`],
 /// because the caller waits on it from a gpui task.
-pub async fn load(db_path: PathBuf, window: TimeWindow) -> Result<Snapshot, String> {
+pub async fn load(
+    backend: crate::backend_glue::Backend,
+    window: TimeWindow,
+) -> Result<Snapshot, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .stack_size(4 * 1024 * 1024)

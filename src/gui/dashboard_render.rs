@@ -167,7 +167,7 @@ impl Render for Dashboard {
                     // needs a Tokio reactor; the gpui executor is not one, so
                     // this never runs inline (smoke-panic receipt in the gate
                     // log, 2026-10-31). Same pattern as every bridge call.
-                    agent_bridge::spawn_plan_path(self.db_path.clone(), sid, self.sink.clone());
+                    agent_bridge::spawn_plan_path(self.backend.clone(), sid, self.sink.clone());
                 }
                 None => self.plan.set_path(None),
             }

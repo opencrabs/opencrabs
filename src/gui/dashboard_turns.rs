@@ -172,7 +172,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session, attached);
         }
         cx.notify();
     }
@@ -407,7 +407,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session, attached);
         }
         cx.notify();
     }
@@ -415,9 +415,9 @@ impl Dashboard {
     /// Re-read one pane's rows from the ledger, the same read `add_pane` makes
     /// when it first draws the leaf (#2614).
     pub(crate) fn reload_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, session).await;
+            let result = transcript::load_recent(backend, session).await;
             this.update(cx, |this, cx| match result {
                 Ok(loaded) => {
                     let (hidden, turns) = transcript::turns_with_origins(
@@ -692,7 +692,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), sid, attached);
         }
         cx.notify();
     }
@@ -713,7 +713,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.stop_turn_for_edit(target.session, cx);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
@@ -730,9 +730,9 @@ impl Dashboard {
                 .ok();
                 return;
             };
-            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let truncated = transcript::truncate_after(backend.clone(), session, sequence).await;
             let loaded = match &truncated {
-                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Ok(_) => Some(transcript::load_recent(backend, session).await),
                 Err(_) => None,
             };
             this.update(cx, |this, cx| match truncated {
@@ -771,7 +771,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.stop_turn_for_edit(target.session, cx);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
@@ -788,9 +788,9 @@ impl Dashboard {
                 .ok();
                 return;
             };
-            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let truncated = transcript::truncate_after(backend.clone(), session, sequence).await;
             let loaded = match &truncated {
-                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Ok(_) => Some(transcript::load_recent(backend, session).await),
                 Err(_) => None,
             };
             this.update(cx, |this, cx| match truncated {
@@ -921,9 +921,9 @@ impl Dashboard {
         if documents.is_empty() {
             return;
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let paths = prompt_files::persist_off_thread(db_path, documents).await;
+            let paths = prompt_files::persist_off_thread(backend, documents).await;
             if paths.is_empty() {
                 return;
             }
@@ -1618,7 +1618,7 @@ impl Dashboard {
                                 content.clone()
                             };
                             agent_bridge::spawn_speak_reply(
-                                self.db_path.clone(),
+                                self.backend.clone(),
                                 self.sink.clone(),
                                 session,
                                 spoken,
@@ -1712,7 +1712,7 @@ impl Dashboard {
                             content.clone()
                         };
                         agent_bridge::spawn_speak_reply(
-                            self.db_path.clone(),
+                            self.backend.clone(),
                             self.sink.clone(),
                             session,
                             spoken,

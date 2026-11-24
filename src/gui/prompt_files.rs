@@ -130,9 +130,10 @@ pub async fn persist(pool: &Pool, docs: &[PromptDocument]) -> HashMap<Uuid, Path
 /// pool built on a gpui worker is what killed the process before (#3053's
 /// crash reports), so the connect happens here and the window only waits.
 pub async fn persist_off_thread(
-    db_path: PathBuf,
+    backend: crate::backend_glue::Backend,
     docs: Vec<PromptDocument>,
 ) -> HashMap<Uuid, PathBuf> {
+    let db_path = backend.local_db_path();
     if docs.is_empty() {
         return HashMap::new();
     }

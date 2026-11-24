@@ -330,7 +330,12 @@ pub fn spawn_update_checks(sink: EventSink) {
 
 /// Delete one session's messages from the ledger, as the TUI's ctrl+k does. The
 /// session row stays, so the conversation is kept and only its history clears (#2430).
-pub fn spawn_clear_messages(db_path: PathBuf, session_id: Uuid, sink: EventSink) {
+pub fn spawn_clear_messages(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
+    let db_path = backend.local_db_path();
     // Both arms report: the job may fail to reach a worker, and the worker may
     // fail to run it, and the window must not keep the old rows either way.
     let thread_sink = sink.clone();
@@ -728,6 +733,11 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     let bridge = AgentBridge {
         service: Arc::new(service),
     };
+    // The window's own crab answers operations with this same service, so a
+    // local op and the window never hold two opinions about one session.
+    if let Some(ctx) = opencrabs::backend::primary() {
+        ctx.set_service(bridge.service.clone());
+    }
 
     // Pick up the turns the last process died inside (#2627). Every turn the
     // window runs writes `pending_requests`, but nothing read the table back,
@@ -750,11 +760,12 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
 /// workers have tiny stacks), and only connects: migrations belong to the
 /// daemon and to the agent bootstrap, never to a UI action.
 pub fn spawn_create_session(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     sink: EventSink,
     provider: Option<String>,
     model: Option<String>,
 ) {
+    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-session-create", move |runtime| {
         let sink = thread_sink;
@@ -811,7 +822,12 @@ pub fn spawn_create_session(
 /// Fire and forget by design: a failure here must never hold up or fail the
 /// turn, which is why it logs and returns. Runs on its own 4 MB thread for
 /// the same reason every other DB path does.
-pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>) {
+pub fn spawn_track_files(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    paths: Vec<PathBuf>,
+) {
+    let db_path = backend.local_db_path();
     if paths.is_empty() {
         return;
     }
@@ -877,7 +893,13 @@ impl Drop for VoiceReplyGuard {
 /// Silence is the normal failure: no TTS provider configured, or synthesis
 /// failed. The turn already answered in text, so nothing here is allowed to
 /// turn a spoken reply into an error the user has to read.
-pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, text: String) {
+pub fn spawn_speak_reply(
+    backend: crate::backend_glue::Backend,
+    sink: EventSink,
+    session_id: Uuid,
+    text: String,
+) {
+    let db_path = backend.local_db_path();
     if text.trim().is_empty() {
         return;
     }
@@ -996,7 +1018,11 @@ pub struct SessionFile {
 /// as the window's `load_view`: an own 4 MB thread with an own current-thread
 /// runtime, because gpui's workers are dispatch-queue threads with tiny
 /// stacks and sqlx needs a Tokio reactor.
-pub async fn load_files(db_path: PathBuf, session_id: Uuid) -> Result<Vec<SessionFile>, String> {
+pub async fn load_files(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+) -> Result<Vec<SessionFile>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let spawned = spawn_worker("gui-file-list", move |runtime| {
         let result = runtime.block_on(async move {
@@ -1028,7 +1054,12 @@ pub async fn load_files(db_path: PathBuf, session_id: Uuid) -> Result<Vec<Sessio
     }
 }
 
-pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
+pub fn spawn_delete_session(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
+    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-session-delete", move |runtime| {
         let sink = thread_sink;
@@ -1065,7 +1096,8 @@ pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink:
 /// the window six seconds after launch (gate smoke, 2026-10-31). Same shape
 /// as every other bridge call: 4 MB thread, own current-thread runtime,
 /// result back over the event channel.
-pub fn spawn_plan_path(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
+pub fn spawn_plan_path(backend: crate::backend_glue::Backend, session_id: Uuid, sink: EventSink) {
+    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-plan-path", move |runtime| {
         let sink = thread_sink;
@@ -2183,12 +2215,13 @@ pub fn spawn_apply_operator_cd(
 /// Nothing here re-implements a command; it only decides which engine call
 /// answers the line and what the window should paint.
 pub fn spawn_text_command(
-    db_path: PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     name: String,
     arg: String,
     sink: EventSink,
 ) {
+    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-text-command", move |runtime| {
         let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));

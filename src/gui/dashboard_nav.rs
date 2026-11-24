@@ -544,9 +544,9 @@ impl Dashboard {
         self.begin_conversation(id, cx);
         self.mark_rail_seen(id);
         self.screen = Screen::Chat;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, id).await;
+            let result = transcript::load_recent(backend, id).await;
             this.update(cx, |this, cx| {
                 // Apply only if the user still sits on this session; a slow
                 // fetch for an abandoned click paints nothing.

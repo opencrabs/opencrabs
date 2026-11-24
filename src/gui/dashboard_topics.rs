@@ -408,7 +408,7 @@ impl Dashboard {
         }
         // A rename prompt renames the topic in place and changes nothing else.
         if let Some(target) = self.topic_rename {
-            let db_path = self.db_path.clone();
+            let db_path = self.backend.clone();
             // The icon rides along with the rename (#2791): the draft was
             // seeded from the stored value, so only a real change writes.
             let stored_icon = self.sessions.topic_icons.get(&target).cloned();
@@ -464,7 +464,7 @@ impl Dashboard {
         let Some(parent) = self.topic_draft_parent() else {
             return;
         };
-        let db_path = self.db_path.clone();
+        let db_path = self.backend.clone();
         let icon = self
             .topic_draft_icon
             .clone()
@@ -531,7 +531,7 @@ impl Dashboard {
         self.group_warned = false;
         self.group_filter.clear();
         self.refocus_screen();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         // Taken rows: topics themselves, every child (a key) and every parent
         // (a value) already in the rail's tree. A session that carries the
         // topics flag is NOT taken: grouping it folds its topics into it
@@ -542,7 +542,7 @@ impl Dashboard {
             self.sessions.parents.keys().copied().collect();
         taken.extend(self.sessions.parents.values().copied());
         cx.spawn(async move |this, cx| {
-            match sessions::load_group_candidates(db_path, id).await {
+            match sessions::load_group_candidates(backend, id).await {
                 Ok(rows) => {
                     this.update(cx, |this, cx| {
                         // A stale open (target changed while loading) is dropped.
@@ -614,7 +614,7 @@ impl Dashboard {
         }
         self.group_busy = true;
         self.group_error = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             for child in children {
                 // Fold first when the candidate carries topics of its own:
@@ -622,7 +622,7 @@ impl Dashboard {
                 // children, and after the fold it has none (#2864). The fold
                 // is its own transaction, so a refusal below leaves a
                 // session with no topics rather than half a family.
-                if let Err(e) = sessions::merge_topics(db_path.clone(), child).await {
+                if let Err(e) = sessions::merge_topics(backend.clone(), child).await {
                     this.update(cx, |this, cx| {
                         this.group_busy = false;
                         this.group_error = Some(e);
@@ -631,7 +631,7 @@ impl Dashboard {
                     .ok();
                     return;
                 }
-                if let Err(e) = sessions::attach_topic(db_path.clone(), child, parent).await {
+                if let Err(e) = sessions::attach_topic(backend.clone(), child, parent).await {
                     this.update(cx, |this, cx| {
                         this.group_busy = false;
                         this.group_error = Some(e);
@@ -667,12 +667,12 @@ impl Dashboard {
 
     /// Re-read which sessions are topics and what each topic's parent is.
     pub(crate) fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let parents = sessions::load_topic_parents(db_path.clone()).await;
-            let closed = sessions::load_closed(db_path.clone()).await;
-            let icons = sessions::load_topic_icons(db_path.clone()).await;
-            let topics = sessions::load_topics(db_path).await;
+            let parents = sessions::load_topic_parents(backend.clone()).await;
+            let closed = sessions::load_closed(backend.clone()).await;
+            let icons = sessions::load_topic_icons(backend.clone()).await;
+            let topics = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
                 match closed {
                     Ok(ids) => this.sessions.closed = ids.into_iter().collect(),

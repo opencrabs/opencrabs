@@ -177,10 +177,11 @@ pub(crate) struct Dashboard {
     pub(crate) window_frame_seen: Option<layout_store::WindowState>,
     /// The frame already on disk, so a settled window costs no write at all.
     pub(crate) window_frame_saved: Option<layout_store::WindowState>,
-    /// Ledger path resolved once at startup, before the window opens.
-    /// Period fetches reuse it; they never re-read the config, because
-    /// tiny-stack background threads must not run `Config::load`.
-    pub(crate) db_path: std::path::PathBuf,
+    /// The crab this window talks to, built once at startup from the ledger
+    /// path resolved before the window opens. Period fetches reuse it; they
+    /// never re-read the config, because tiny-stack background threads must
+    /// not run `Config::load`.
+    pub(crate) backend: crate::backend_glue::Backend,
     /// The hint ids the reader has hidden, read once at startup and appended
     /// to on each dismissal (#3121).
     ///

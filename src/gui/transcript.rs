@@ -1120,10 +1120,11 @@ async fn reactions_for(
 /// is whether the reaction is there afterwards so the caller can say which way
 /// the click went without a second read.
 pub async fn toggle_reaction(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     message_id: uuid::Uuid,
     emoji: String,
 ) -> Result<bool, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<bool, String>>();
     let spawned = super::agent_bridge::spawn_worker("message-reaction", move |runtime| {
         let result = runtime
@@ -1152,10 +1153,11 @@ pub async fn toggle_reaction(
 /// The row at `sequence` survives, because the edit replaces it and the resend
 /// speaks for everything that followed. Returns how many rows went.
 pub async fn truncate_after(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: uuid::Uuid,
     sequence: i32,
 ) -> Result<usize, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
     let spawned = super::agent_bridge::spawn_worker("transcript-truncate", move |runtime| {
         let result = runtime
@@ -1199,9 +1201,10 @@ fn family_row_order(m: &Message) -> (chrono::DateTime<chrono::Utc>, i32, uuid::U
 /// [`Loaded::origins`] (#2762). That is what `All` shows. A topic opened on its
 /// own has no children, so it reads alone and carries no labels at all.
 pub async fn load_recent(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: uuid::Uuid,
 ) -> Result<Loaded, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Loaded, String>>();
     let spawned = super::agent_bridge::spawn_worker("transcript-fetch", move |runtime| {
         let result = runtime

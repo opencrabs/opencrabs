@@ -31,7 +31,8 @@ pub(crate) fn period_word(p: Period) -> &'static str {
 /// exceeded", frames `ledger_path -> Config::load -> resolve_profile_home
 /// -> _tlv_get_addr`. The tokio runtime and the sqlx work therefore run on
 /// this dedicated 4 MB thread; the future only awaits the result channel.
-pub(crate) async fn load_view(db_path: std::path::PathBuf, period: Period) -> LoadState {
+pub(crate) async fn load_view(backend: crate::backend_glue::Backend, period: Period) -> LoadState {
+    let db_path = backend.local_db_path();
     let (tx, rx) = oneshot::channel::<LoadState>();
     let spawned = std::thread::Builder::new()
         .name("usage-fetch".into())

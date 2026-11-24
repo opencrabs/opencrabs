@@ -625,7 +625,7 @@ impl Dashboard {
         }
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
-        agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
+        agent_bridge::spawn_plan_path(self.backend.clone(), id, self.sink.clone());
         // The leaf's state is its own type now (#2805). It opens at the
         // width the window last painted the wall at, and the walk corrects it
         // the first frame the pane has a box of its own.
@@ -661,9 +661,9 @@ impl Dashboard {
         // transcript load to come back: an empty pane that appears at once
         // reads as a split, where a silent wait reads as nothing (#2438).
         cx.notify();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, id).await;
+            let result = transcript::load_recent(backend, id).await;
             this.update(cx, |this, cx| {
                 // The rows are measured against the window's metrics, read
                 // before the leaf is borrowed: a pane's own context cannot

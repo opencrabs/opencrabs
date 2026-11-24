@@ -440,9 +440,9 @@ impl Dashboard {
         // picked there would paint on a row that is not on screen.
         let leaf = self.msg_menu_leaf.take();
         self.msg_menu_row = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::toggle_reaction(db_path, id, name.clone()).await;
+            let result = transcript::toggle_reaction(backend, id, name.clone()).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(reacted) => {
@@ -1195,7 +1195,7 @@ impl Dashboard {
     /// turn is the only thing keeping a silent or slow turn visible, so it
     /// stays until the fetch returns a transcript that includes it.
     pub(crate) fn reload_transcript(&mut self, sid: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         // The turn that just finished should add at least one row to the
         // session. A reload that comes back short is a write that has not
         // landed yet. The count is the session's own row total, so a
@@ -1211,7 +1211,7 @@ impl Dashboard {
             .deadline
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, sid).await;
+            let result = transcript::load_recent(backend, sid).await;
             this.update(cx, |this, cx| {
                 if this.chat_state.session() != Some(sid) {
                     return;

@@ -216,7 +216,7 @@ impl Dashboard {
                     return;
                 };
                 agent_bridge::spawn_text_command(
-                    self.db_path.clone(),
+                    self.backend.clone(),
                     session,
                     text_commands::name(other).to_string(),
                     arg,

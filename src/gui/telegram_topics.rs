@@ -9,7 +9,6 @@
 //! Every failure has to reach the user: a create that quietly leaves a local
 //! row behind, or that does nothing at all, is the bug being fixed.
 
-use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Create a forum topic when `parent` is a Telegram forum.
@@ -24,10 +23,11 @@ use uuid::Uuid;
 /// window must not wait on it inside a draw.
 #[cfg(feature = "telegram")]
 pub async fn create_forum_topic_if_forum(
-    db_path: PathBuf,
+    backend: crate::backend_glue::Backend,
     parent: Uuid,
     name: String,
 ) -> Result<Option<Uuid>, String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<Uuid>, String>>();
     let spawned = std::thread::Builder::new()
         .name("forum-topic-create".into())
@@ -68,7 +68,7 @@ pub async fn create_forum_topic_if_forum(
 /// shape rather than a `cfg` at every call site.
 #[cfg(not(feature = "telegram"))]
 pub async fn create_forum_topic_if_forum(
-    _db_path: PathBuf,
+    _backend: crate::backend_glue::Backend,
     _parent: Uuid,
     _name: String,
 ) -> Result<Option<Uuid>, String> {

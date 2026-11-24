@@ -11,8 +11,6 @@
 //! never worth failing the window over: a read that errors leaves the hints
 //! showing rather than blanking them.
 
-use std::path::PathBuf;
-
 use opencrabs::db::Database;
 use opencrabs::db::repository::HintDismissalRepository;
 use opencrabs::ui_core::hints::DISMISS_DAYS;
@@ -21,7 +19,8 @@ use opencrabs::ui_core::hints::DISMISS_DAYS;
 ///
 /// Blocking on purpose: the window has no frame to draw yet, and a hint that
 /// flashes in for one frame and disappears is worse than one that never shows.
-pub(crate) fn load(db_path: PathBuf) -> Vec<String> {
+pub(crate) fn load(backend: crate::backend_glue::Backend) -> Vec<String> {
+    let db_path = backend.local_db_path();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<String>>();
     let spawned = std::thread::Builder::new()
         .name("hint-dismissals".into())
@@ -54,7 +53,8 @@ pub(crate) fn load(db_path: PathBuf) -> Vec<String> {
 /// the write is fire and forget: a failed write costs the reader the line
 /// coming back on the next launch, which is the safe direction. Doing it
 /// inline would block the click on a database open.
-pub(crate) fn dismiss(db_path: PathBuf, hint_id: String) {
+pub(crate) fn dismiss(backend: crate::backend_glue::Backend, hint_id: String) {
+    let db_path = backend.local_db_path();
     let spawned = std::thread::Builder::new()
         .name("hint-dismiss".into())
         .stack_size(4 * 1024 * 1024)
