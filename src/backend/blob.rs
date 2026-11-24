@@ -59,7 +59,7 @@ pub const MAX_BLOB_BYTES: u64 = 50 * 1024 * 1024;
 /// | `projects` | each project's files and its sessions' plan files |
 /// | `agents/session` | plan files written before plans became project aware |
 /// | `plans` | the plan tool's reference files |
-/// | `tmp` | channel attachments (Telegram, WhatsApp, clipboard) and uploads |
+/// | `tmp` | channel attachments (Telegram, WhatsApp, clipboard) and uploads, minus [`DENIED_IN_TMP`] |
 /// | `gui-icons` | custom topic icons (`topic_icons::image_store_dir`) |
 pub const ROOTS: &[&str] = &[
     "session",
@@ -69,6 +69,13 @@ pub const ROOTS: &[&str] = &[
     "tmp",
     "gui-icons",
 ];
+
+/// Entries under `tmp` that are not attachments and never leave the crab,
+/// whatever the scope: the WhatsApp pairing QR (`whatsapp_connect`) links an
+/// account to whoever scans it, the cowork invite QR (`telegram::cowork`)
+/// admits a member, and `detached` holds background task output
+/// (`work_status`), which can carry anything a command printed.
+pub const DENIED_IN_TMP: &[&str] = &["whatsapp_qr.png", "cowork_invite_qr.png", "detached"];
 
 /// Where uploaded attachments land, under the crab's home. Inside `tmp`, the
 /// convention for incoming files, so an upload is served back like any other
@@ -186,10 +193,22 @@ pub fn resolve(roots: &[PathBuf], requested: &str) -> Result<PathBuf, BlobError>
         Err(e) if e.kind() == ErrorKind::NotFound => return Err(BlobError::NotFound),
         Err(_) => return Err(BlobError::Denied),
     };
-    if !inside(&real, &canonical_roots) {
+    if !inside(&real, &canonical_roots) || denied(&lexical, &real, roots) {
         return Err(BlobError::Denied);
     }
     Ok(real)
+}
+
+/// Whether `lexical` or `real` is one of [`DENIED_IN_TMP`], or inside one,
+/// under the `tmp` root as written or as resolved.
+fn denied(lexical: &Path, real: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .filter(|root| root.file_name().is_some_and(|name| name == "tmp"))
+        .flat_map(|root| [Some(root.clone()), root.canonicalize().ok()])
+        .flatten()
+        .flat_map(|tmp| DENIED_IN_TMP.iter().map(move |entry| tmp.join(entry)))
+        .any(|entry| lexical.starts_with(&entry) || real.starts_with(&entry))
 }
 
 /// The bytes of the file `requested` names, through [`resolve`].
@@ -515,6 +534,34 @@ mod tests {
         assert_eq!(status(&roots, &canonical), 200);
         let escape = home.join("tmp/../keys.toml").to_string_lossy().into_owned();
         assert_eq!(status(&roots, &escape), 403);
+    }
+
+    #[test]
+    fn pairing_codes_and_task_output_in_tmp_are_403() {
+        let disk = Disk::new();
+        let roots = disk.roots();
+        std::fs::write(disk.home.join("tmp/whatsapp_qr.png"), b"qr").expect("qr");
+        std::fs::write(disk.home.join("tmp/cowork_invite_qr.png"), b"qr").expect("invite");
+        std::fs::create_dir_all(disk.home.join("tmp/detached")).expect("detached");
+        std::fs::write(disk.home.join("tmp/detached/job.log"), b"out").expect("log");
+        for requested in [
+            disk.path("tmp/whatsapp_qr.png"),
+            disk.path("tmp/cowork_invite_qr.png"),
+            disk.path("tmp/detached/job.log"),
+            disk.path("tmp/sub/../detached/job.log"),
+        ] {
+            assert_eq!(status(&roots, &requested), 403, "{requested}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                disk.home.join("tmp/whatsapp_qr.png"),
+                disk.home.join("plans/qr.png"),
+            )
+            .expect("link to the qr");
+            assert_eq!(status(&roots, &disk.path("plans/qr.png")), 403);
+        }
+        assert_eq!(status(&roots, &disk.path("tmp/photo.jpg")), 200);
     }
 
     #[test]
