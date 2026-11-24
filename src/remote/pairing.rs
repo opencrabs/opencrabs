@@ -485,3 +485,56 @@ fn sweep(store: &mut StoreFile, now: u64) {
         dead_since == 0 || now.saturating_sub(dead_since) < SESSION_RETENTION_SECS
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::scopes::{SCOPE_ADMIN, SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND, allows};
+
+    fn store() -> (tempfile::TempDir, PairingStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("remote").join("pairing.json");
+        (dir, PairingStore::new(path))
+    }
+
+    fn scopes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_code_without_manage_never_redeems_into_manage() {
+        let (_d, st) = store();
+        let code = st
+            .mint_code(&scopes(&[SCOPE_READ, SCOPE_SEND]))
+            .expect("mint");
+        let (token, session) = st.verify_code(&code, "phone").expect("verify");
+        assert!(!allows(&session.scopes, SCOPE_MANAGE));
+        assert!(!allows(&session.scopes, SCOPE_ADMIN));
+        let live = st.verify_token(&token).expect("token verifies");
+        assert!(!allows(&live.scopes, SCOPE_MANAGE));
+        assert!(!allows(&live.scopes, SCOPE_ADMIN));
+    }
+
+    #[test]
+    fn manage_and_admin_redeem_only_when_minted_by_name() {
+        let (_d, st) = store();
+        let code = st
+            .mint_code(&scopes(&[SCOPE_READ, SCOPE_MANAGE]))
+            .expect("mint manage");
+        let (_t, session) = st.verify_code(&code, "ops").expect("verify");
+        assert!(allows(&session.scopes, SCOPE_MANAGE));
+        assert!(!allows(&session.scopes, SCOPE_ADMIN));
+
+        let code = st.mint_code(&scopes(&[SCOPE_ADMIN])).expect("mint admin");
+        let (_t, session) = st.verify_code(&code, "owner").expect("verify");
+        assert_eq!(session.scopes, scopes(&[SCOPE_ADMIN]));
+    }
+
+    #[test]
+    fn unknown_scopes_are_still_refused() {
+        let (_d, st) = store();
+        assert!(st.mint_code(&scopes(&["a2a:root"])).is_err());
+        assert!(st.mint_code(&scopes(&["A2A:ADMIN"])).is_err());
+        assert!(st.mint_code(&scopes(&["a2a:*"])).is_err());
+    }
+}
