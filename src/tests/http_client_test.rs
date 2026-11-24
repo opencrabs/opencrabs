@@ -28,7 +28,10 @@ fn shared_client_matches_its_build_contract() {
     // a runtime boundary between two tests.
     let first = crate::utils::http::shared() as *const reqwest::Client;
     let second = crate::utils::http::shared() as *const reqwest::Client;
-    assert_ne!(first, second, "shared() under test must hand back distinct clients");
+    assert_ne!(
+        first, second,
+        "shared() under test must hand back distinct clients"
+    );
 
     // Production-side contract: the process-wide OnceLock still exists and
     // wraps build_shared, so the root store loads exactly once per daemon.
