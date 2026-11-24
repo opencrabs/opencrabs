@@ -468,19 +468,42 @@ def stale_local_only(root: Path, local_only: set[tuple[str, str]]) -> list[str]:
     return stale
 
 
-def check(root: Path, baselines: dict[str, int], local_only: set[tuple[str, str]], out=print) -> int:
+def check(
+    root: Path,
+    baselines: dict[str, int],
+    local_only: set[tuple[str, str]],
+    out=print,
+    allow_below: bool = False,
+    only_files: tuple[str, ...] = (),
+) -> int:
     worst = 0
     for r in rules(root, local_only):
-        count, base = len(r.sites), baselines[r.rid]
+        sites = r.sites
+        if only_files:
+            # Measuring scope: count only sites whose file starts with one of
+            # the given prefixes. No baseline comparison here, the global
+            # baseline says nothing about a file subset; the numbers are for
+            # the package's own brief gate.
+            sites = [s for s in sites if s.split(":")[0].startswith(only_files)]
+            out(f"{r.rid} {r.label}: {len(sites)} [files: {', '.join(only_files)}]")
+            continue
+        count, base = len(sites), baselines[r.rid]
         out(f"{r.rid} {r.label}: {count} (baseline {base})")
         if count > base:
             worst = 1
             out(f"::error::{r.rid} {r.label}: {count} sites, baseline {base}. New door(s) among:")
-            for s in r.sites:
+            for s in sites:
                 out(f"  {s}")
         elif count < base:
-            worst = 1
-            out(f"::error::{r.rid} {r.label}: baixa o baseline para {count} (scripts/check-backend-seam.py)")
+            if allow_below:
+                out(
+                    f"::warning::{r.rid} {r.label}: {count} sites, baseline {base}."
+                    " Below baseline, allowed on a package branch:"
+                    " lower the baseline in scripts/check-backend-seam.py at the merge."
+                )
+            else:
+                worst = 1
+                out(f"::error::{r.rid} {r.label}: baixa o baseline para {count} (scripts/check-backend-seam.py)")
     return worst
 
 
@@ -503,9 +526,9 @@ def self_test() -> int:
             p.write_text(body, encoding="utf-8")
         return d
 
-    def run(files, baselines=zero):
+    def run(files, baselines=zero, **kw):
         lines: list[str] = []
-        code = check(plant(files), baselines, lo, lines.append)
+        code = check(plant(files), baselines, lo, lines.append, **kw)
         return code, "\n".join(lines)
 
     def expect_fail(case, files, where):
@@ -540,6 +563,23 @@ def self_test() -> int:
     code, text = run({"src/gui/a.rs": ""}, {**zero, "R1": 2})
     if code != 1 or "baixa o baseline para 0" not in text:
         failures.append(f"below baseline: wanted exit 1 and 'baixa o baseline para 0', got {code}:\n{text}")
+
+    # --allow-below: the same drop warns and passes (package-branch mode).
+    code, text = run({"src/gui/a.rs": ""}, {**zero, "R1": 2}, allow_below=True)
+    if code != 0 or "Below baseline" not in text:
+        failures.append(f"allow-below: wanted exit 0 with a warning, got {code}:\n{text}")
+
+    # --files: counts restricted to the given prefixes, no baseline math.
+    two_files = {
+        "src/gui/a.rs": "fn f(b: B) {\n    let p = b.local_db_path();\n}\n",
+        "src/gui/b.rs": "fn g(c: C) {\n    let p = c.local_db_path();\n}\n",
+    }
+    code, text = run(two_files, zero, only_files=("src/gui/a.rs",))
+    if code != 0 or "R1 local_db_path: 1 [files: src/gui/a.rs]" not in text or "b.rs" in text:
+        failures.append(f"--files scope: wanted exit 0 counting only a.rs, got {code}:\n{text}")
+    code, text = run(two_files, zero, only_files=("src/gui/",))
+    if code != 0 or "R1 local_db_path: 2 [files: src/gui/]" not in text:
+        failures.append(f"--files prefix: wanted exit 0 counting both, got {code}:\n{text}")
 
     # What does not count.
     expect_pass(
@@ -599,7 +639,7 @@ def self_test() -> int:
         for f in failures:
             print(f"self-test FAIL: {f}")
         return 1
-    print("self-test OK: 7 rules planted (16 cases), below-baseline, 7 exemption cases, stale LOCAL_ONLY")
+    print("self-test OK: 7 rules planted (19 cases), below-baseline, 7 exemption cases, stale LOCAL_ONLY")
     return 0
 
 
@@ -607,6 +647,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--self-test", action="store_true", help="plant a violation per rule and check the exit")
     ap.add_argument("--root", type=Path, default=REPO, help="tree to check (default: this repo)")
+    ap.add_argument(
+        "--allow-below",
+        action="store_true",
+        help="a count below the baseline is a warning, not an error (package branches;"
+        " the baseline is lowered at the merge into the integration branch)",
+    )
+    ap.add_argument(
+        "--files",
+        nargs="+",
+        metavar="PREFIX",
+        help="count only sites in files starting with these prefixes and skip the"
+        " baseline comparison (measuring tool for a package's own brief gate)",
+    )
     args = ap.parse_args()
     if args.self_test:
         return self_test()
@@ -616,7 +669,7 @@ def main() -> int:
         for s in stale:
             print(f"::error::LOCAL_ONLY names a function that is gone, drop it: {s}")
         return 2
-    return check(args.root, BASELINES, local_only)
+    return check(args.root, BASELINES, local_only, allow_below=args.allow_below, only_files=tuple(args.files or ()))
 
 
 if __name__ == "__main__":

@@ -45,10 +45,16 @@ jobs:
 
       # R1 to R7 on the GUI/backend seam. The self-test plants a violation
       # per rule first, so a rule that stopped matching cannot pass green.
+      # Package branches (rb/*) may drop counts below the global baseline:
+      # they close doors only in their own files, the baseline comes down at
+      # the merge into the integration branch, which stays strict.
       - name: Backend seam ratchet
         run: |
           python3 scripts/check-backend-seam.py --self-test
-          python3 scripts/check-backend-seam.py
+          case "$GITHUB_REF_NAME" in
+            rb/*) python3 scripts/check-backend-seam.py --allow-below ;;
+            *) python3 scripts/check-backend-seam.py ;;
+          esac
 
       - name: Format
         run: cargo fmt --check
