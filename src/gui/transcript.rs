@@ -2,8 +2,8 @@
 //! way the TUI renders it. Three hard rules carry over from the TUI's own
 //! message pipeline:
 //!
-//! 1. Only the newest `WINDOW` rows are read, `LIMIT` pushed into SQL via
-//!    `find_recent_by_session`, and the hidden count comes from
+//! 1. Only the newest `RECENT_WINDOW` rows are read (`backend::transcript`),
+//!    `LIMIT` pushed into SQL via `find_recent_by_session`, and the hidden count comes from
 //!    `count_by_session`. Reading a 10k-message session no longer pulls the
 //!    whole history to show the tail of it (`DISPLAY_MESSAGE_WINDOW` in
 //!    `tui/app/messaging.rs` is the same contract).
@@ -25,7 +25,6 @@ use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::links::{self, ClickTarget};
 use opencrabs::ui_core::message_reader;
 use opencrabs::ui_core::plan_history::CompletedPlanView;
-use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -40,11 +39,7 @@ use gpui::{
 };
 
 use opencrabs::channels::voice::spoken;
-use opencrabs::db::Database;
 use opencrabs::db::models::Message;
-use opencrabs::db::repository::message::MessageRepository;
-use opencrabs::db::repository::message_reaction::MessageReactionRepository;
-use opencrabs::db::repository::session::SessionRepository;
 use opencrabs::tui::app::ledger_scan::next_ledger;
 use opencrabs::tui::app::reasoning_split::{self, Segment, is_intermediate, split_segments};
 // The fold header's wording is the TUI's own (#759), re-exported from the lib
@@ -70,9 +65,9 @@ impl markdown::MdPalette for palette::Palette {
     }
 }
 
-/// Newest rows shown per load, matching the TUI display window. Older
-/// history stays behind the `Marker` block.
-const WINDOW: usize = 200;
+/// The family order lives with the read that uses it, in the backend.
+#[cfg(test)]
+use opencrabs::backend::transcript::family_row_order;
 
 /// Lines of one working-out body a folded turn draws before it hands the rest
 /// to the reader (#2805). The pane builds one element per line, so a window
@@ -1082,7 +1077,8 @@ pub struct Loaded {
     pub reactions: HashMap<uuid::Uuid, Vec<(String, usize)>>,
 }
 
-/// Every reaction on the rows one read loaded, in a single query (#2825).
+/// Every reaction on the rows one read loaded, in a single query (#2825),
+/// through the backend (`ReactionsFor`).
 ///
 /// A transcript read is the only place the map is built: a toggle edits the
 /// entry it touched, so drawing a chip never goes back to the ledger.
@@ -1097,26 +1093,27 @@ pub struct Loaded {
 /// sidecar reads in `main.rs` (`favorites`, `topics`, `closed`, `parents`,
 /// `topic_icons`) take the same posture for the same reason.
 async fn reactions_for(
-    db: &Database,
+    backend: &crate::backend_glue::Backend,
     rows: &[Message],
 ) -> HashMap<uuid::Uuid, Vec<(String, usize)>> {
-    let ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
-    match MessageReactionRepository::new(db.pool().clone())
-        .for_messages(&ids)
+    let message_ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
+    match backend
+        .call(opencrabs::backend::transcript::ReactionsFor { message_ids })
         .await
     {
         Ok(reactions) => reactions,
         Err(e) => {
-            crate::logging::error(&format!("reactions load: {e:#}"));
+            crate::logging::error(&format!("reactions load: {}", e.into_message()));
             HashMap::new()
         }
     }
 }
 
-/// Toggle one reaction on one stored row (#2825).
+/// Toggle one reaction on one stored row (#2825), through the backend
+/// (`ToggleReaction`).
 ///
-/// Its own worker thread with a real stack and its own runtime, the same shape
-/// as [`load_recent`]: the window never blocks a frame on a write, and the reply
+/// Locally the op runs on its own `spawn_worker` lane, the same shape as
+/// [`load_recent`]: the window never blocks a frame on a write, and the reply
 /// is whether the reaction is there afterwards so the caller can say which way
 /// the click went without a second read.
 pub async fn toggle_reaction(
@@ -1124,31 +1121,14 @@ pub async fn toggle_reaction(
     message_id: uuid::Uuid,
     emoji: String,
 ) -> Result<bool, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<bool, String>>();
-    let spawned = super::agent_bridge::spawn_worker("message-reaction", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                MessageReactionRepository::new(db.pool().clone())
-                    .toggle(message_id, &emoji)
-                    .await
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("reaction write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("reaction write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::transcript::ToggleReaction { message_id, emoji })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
-/// Drop every row after a point in one session (#2826), off the UI thread the
-/// same way [`load_recent`] reads: a worker thread carrying its own runtime, so
-/// the window's executor never blocks on the pool.
+/// Drop every row after a point in one session (#2826), through the backend
+/// (`TruncateAfter`), off the UI thread the same way [`load_recent`] reads.
 ///
 /// The row at `sequence` survives, because the edit replaces it and the resend
 /// speaks for everything that followed. Returns how many rows went.
@@ -1157,44 +1137,20 @@ pub async fn truncate_after(
     session_id: uuid::Uuid,
     sequence: i32,
 ) -> Result<usize, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
-    let spawned = super::agent_bridge::spawn_worker("transcript-truncate", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                let repo = MessageRepository::new(db.pool().clone());
-                repo.delete_after(session_id, sequence).await
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("truncate thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("truncate thread failed to spawn: {e}")),
-    }
-}
-
-/// The order a topic family's rows are drawn in (#3018).
-///
-/// `created_at` places rows from different sessions in one stream. Within a
-/// session it cannot order a turn: the assistant row is created at turn start
-/// and updated in place, so it carries the same second as the question it
-/// answers. Breaking that tie on `id` is a coin flip, and the losing side puts
-/// the answer above its question, which leaves the question at the bottom of
-/// the transcript in a turn of its own. `sequence` is the per-session order
-/// the single-session read already uses, so it decides the tie; `id` stays as
-/// the last resort for two different sessions stamped the same second.
-fn family_row_order(m: &Message) -> (chrono::DateTime<chrono::Utc>, i32, uuid::Uuid) {
-    (m.created_at, m.sequence, m.id)
+    backend
+        .call(opencrabs::backend::transcript::TruncateAfter {
+            session_id,
+            sequence,
+        })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Fetch the newest window of the conversation plus the session's total row
-/// count, on a worker thread with a real stack (crash receipt in `main.rs`).
-/// `Database::connect` runs pragmas only, never migrations.
+/// count, through the backend (`LoadRecent`), then the reactions those rows
+/// carry (`ReactionsFor`). Locally each op runs on its own `spawn_worker` lane
+/// with a real stack (crash receipt in `main.rs`); `Ctx::db` runs pragmas
+/// only, never migrations.
 ///
 /// A session that has topics comes back as its whole family: the parent plus
 /// every topic under it, merged by time, with each row's topic recorded in
@@ -1204,76 +1160,17 @@ pub async fn load_recent(
     backend: crate::backend_glue::Backend,
     session_id: uuid::Uuid,
 ) -> Result<Loaded, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Loaded, String>>();
-    let spawned = super::agent_bridge::spawn_worker("transcript-fetch", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                let repo = MessageRepository::new(db.pool().clone());
-                let sessions = SessionRepository::new(db.pool().clone());
-                let family = sessions.family_of(session_id).await?;
-                // One row in the family is the ordinary read this
-                // function has always made.
-                if family.len() <= 1 {
-                    let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
-                    let total = repo.count_by_session(session_id).await?;
-                    let reactions = reactions_for(&db, &rows).await;
-                    return Ok::<_, anyhow::Error>(Loaded {
-                        rows,
-                        total,
-                        origins: HashMap::new(),
-                        reactions,
-                    });
-                }
-                let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
-                let mut total: i64 = 0;
-                for id in &ids {
-                    total += repo.count_by_session(*id).await?;
-                }
-                // One conversation, one window (#2805). A window per
-                // member drew 3,627 rows for a 44-member family into a
-                // pane built to show 200, and every one of them was
-                // rebuilt on every keystroke.
-                let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
-                let labels: HashMap<uuid::Uuid, String> = family
-                    .iter()
-                    .filter_map(|(id, title)| topic_family_label(title).map(|label| (*id, label)))
-                    .collect();
-                let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
-                for row in &rows {
-                    if let Some(label) = labels.get(&row.session_id) {
-                        origins.insert(row.id, label.clone());
-                    }
-                }
-                // Same order the TUI's reader gets from SQL (#3018).
-                // `created_at` places rows from different topics in
-                // one stream, but it cannot order a turn: the answer
-                // row is created at turn start, so it is stamped the
-                // same second as the question it answers. `sequence`
-                // is the per-session order the single-session read
-                // already trusts, and `id` only keeps two different
-                // sessions stamped the same second stable.
-                rows.sort_by_key(family_row_order);
-                let reactions = reactions_for(&db, &rows).await;
-                Ok::<_, anyhow::Error>(Loaded {
-                    rows,
-                    total,
-                    origins,
-                    reactions,
-                })
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    let result = match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("transcript fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("transcript fetch thread failed to spawn: {e}")),
-    };
-    result.map_err(|e| read_failed(session_id, e))
+    let recent = backend
+        .call(opencrabs::backend::transcript::LoadRecent { session_id })
+        .await
+        .map_err(|e| read_failed(session_id, e.into_message()))?;
+    let reactions = reactions_for(&backend, &recent.rows).await;
+    Ok(Loaded {
+        rows: recent.rows,
+        total: recent.total,
+        origins: recent.origins,
+        reactions,
+    })
 }
 
 /// One line whenever a read comes back with nothing (#2981).
@@ -1286,23 +1183,6 @@ pub async fn load_recent(
 fn read_failed(session: uuid::Uuid, error: String) -> String {
     crate::logging::warn(&format!("transcript read failed for {session}: {error}"));
     error
-}
-
-/// What a stored session title reads as once the bookkeeping is off it. `All`
-/// labels every row with this, and the label names the conversation the row
-/// came from, never the transport (#2766): a topic reads `Memes`, and a row
-/// from the base chat reads `OpenCrabs Dev`. Before this the platform word and
-/// its key came through whole, so every divider printed `Telegram: OpenCrabs
-/// Dev / Memes [chat:-100:topic:42]` above the rows it was labelling.
-fn topic_family_label(title: &str) -> Option<String> {
-    let trimmed = title.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(topic) = rail::topic_name(Some(trimmed)) {
-        return Some(topic);
-    }
-    Some(rail::chat_name(Some(trimmed)))
 }
 
 /// A model-switch receipt used to be persisted with the user role. Draw the

@@ -15,9 +15,9 @@ use crate::ui_core::rail;
 
 use super::{BackendError, Ctx, Op, Scope};
 
-/// How many of the newest rows one transcript read brings back. The window's
-/// own `WINDOW` in `src/gui/transcript.rs` is the same 200: a pane built to
-/// show this many rows, rebuilt on every keystroke.
+/// How many of the newest rows one transcript read brings back, matching the
+/// TUI display window: a pane built to show this many rows, rebuilt on every
+/// keystroke. Older history stays behind the window's `Marker` block.
 pub const RECENT_WINDOW: usize = 200;
 
 /// Reactions keyed by message id, each a list of `(emoji, count)` in the order
