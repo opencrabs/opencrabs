@@ -36,7 +36,14 @@ pub type ApprovalCallback = Arc<
 >;
 
 /// Progress event emitted during tool execution
-#[derive(Debug, Clone)]
+///
+/// Serializable because a remote surface reads it off the wire
+/// (`backend::Event::Turn`). Adjacently tagged so the tuple variants
+/// (`BuildLine`, `TokenCount`, `SuggestedOptions`) encode too. `Duration`
+/// travels as serde's `{secs, nanos}`, losslessly. A `PathBuf` that is not
+/// UTF-8 fails to encode rather than arriving altered.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ProgressEvent {
     Thinking,
     ToolStarted {
