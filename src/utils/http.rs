@@ -38,6 +38,7 @@ use std::time::Duration;
 /// How long a TCP and TLS handshake may take. A host that cannot complete one
 /// in this window is unreachable, and failing here leaves the retry loop free
 /// to try the next candidate instead of holding a half-open socket.
+#[cfg_attr(test, expect(dead_code))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The process-wide client, built on first use.
