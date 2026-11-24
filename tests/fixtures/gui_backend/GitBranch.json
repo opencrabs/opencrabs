@@ -1,0 +1,6 @@
+{
+  "op": "status.git_branch",
+  "scope": "a2a:read",
+  "request": { "dir": "/home/crab/project" },
+  "reply": { "Ok": "main" }
+}

@@ -39,17 +39,29 @@ pub(crate) fn tilde_path(p: &std::path::Path) -> String {
 /// was read from and ask again only when that directory changes: it is a
 /// footer label, never a per-frame read.
 pub(crate) fn git_branch(dir: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    ask_crab(opencrabs::backend::status::GitBranch {
+        dir: dir.to_path_buf(),
+    })
+    .ok()
+    .flatten()
+}
+
+/// Run `op` on the window's crab and wait for the answer, for a door whose
+/// callers are still synchronous. The op runs on its `spawn_worker` lane
+/// through [`Backend::call`](crate::backend_glue::Backend::call); this thread
+/// only parks on the oneshot, which needs no reactor.
+///
+/// Before the crab has booted there is no primary `Ctx`, and the footer, the
+/// finder and the /cd picker can already ask. They get a ledgerless local
+/// crab: the ops that go through here read the disk or run `git` and never
+/// open the ledger, so they answer exactly what they answered before.
+pub(crate) fn ask_crab<O: opencrabs::backend::Op>(
+    op: O,
+) -> Result<O::Reply, opencrabs::backend::BackendError> {
+    let ctx = opencrabs::backend::primary().unwrap_or_else(|| {
+        std::sync::Arc::new(opencrabs::backend::Ctx::new(std::path::PathBuf::new()))
+    });
+    futures::executor::block_on(crate::backend_glue::Backend::Local(ctx).call(op))
 }
 
 /// The key reference, painted over everything else (#2320).
