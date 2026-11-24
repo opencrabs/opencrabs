@@ -2116,28 +2116,57 @@ impl Dashboard {
     /// The same roster for ANY session, not just the open conversation, so every
     /// pane prints its own detached commands above its composer (#2593).
     pub(crate) fn running_tasks_label_for(&self, session: Uuid) -> Option<String> {
-        let bridge = agent_bridge::bridge()?;
-        let mgr = bridge.service.background_manager()?;
-        let tasks: Vec<(String, u64)> = mgr
-            .running_tasks(session)
+        let tasks: Vec<(String, u64)> = self
+            .session_tasks(session)
             .into_iter()
-            .map(|t| (t.label, t.started.elapsed().as_secs()))
+            .map(|t| (t.label, t.secs))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, task_list::STRIP_LABEL_CHARS)
     }
 
+    /// What is running in each of `sessions`, now: the task roster is read
+    /// while the window paints, so it is asked synchronously, the way
+    /// `Backend::facts` is. A crab still booting, or one with no task
+    /// manager, runs nothing.
+    pub(crate) fn tasks_snapshot(
+        &self,
+        sessions: Vec<Uuid>,
+    ) -> Vec<opencrabs::backend::tasks::SessionTasks> {
+        opencrabs::backend::tasks::TasksSnapshot { sessions }
+            .answer(tasks_ctx(&self.backend))
+            .unwrap_or_default()
+    }
+
+    /// One session's running tasks, oldest first.
+    fn session_tasks(&self, session: Uuid) -> Vec<opencrabs::backend::tasks::TaskRow> {
+        self.tasks_snapshot(vec![session])
+            .into_iter()
+            .next()
+            .map(|entry| entry.tasks)
+            .unwrap_or_default()
+    }
+
+    /// Ask one task to stop. `None` when the crab has no task manager.
+    fn stop_task(
+        backend: &crate::backend_glue::Backend,
+        session: Uuid,
+        task: Uuid,
+    ) -> Option<opencrabs::backend::tasks::StopOutcome> {
+        opencrabs::backend::tasks::TaskStop { session, task }
+            .answer(tasks_ctx(backend))
+            .ok()
+            .flatten()
+    }
+
     /// One session's running tasks as the card prints them, oldest first.
     pub(crate) fn task_rows(&self, session: Uuid) -> Vec<task_list::TaskRow> {
-        let Some(mgr) = agent_bridge::bridge().and_then(|b| b.service.background_manager()) else {
-            return Vec::new();
-        };
-        mgr.running_tasks(session)
+        self.session_tasks(session)
             .into_iter()
             .map(|t| task_list::TaskRow {
                 id: t.task_id,
-                tag: t.source.tag(),
-                secs: t.started.elapsed().as_secs(),
-                ours: t.cancel.is_some(),
+                tag: t.kind.tag(),
+                secs: t.secs,
+                ours: t.ours,
                 label: t.label,
             })
             .collect()
@@ -2252,21 +2281,24 @@ impl Dashboard {
             .get(&task)
             .is_some_and(|tail| tail.read_at.elapsed() < task_list::TAIL_TICK);
         if !fresh {
-            let mgr = agent_bridge::bridge().and_then(|b| b.service.background_manager())?;
-            let path = self
-                .task_tails
-                .get(&task)
-                .and_then(|tail| tail.path.clone())
-                .or_else(|| mgr.output_path_for(session, task));
-            let text = path
-                .as_deref()
-                .map(|p| SharedString::from(mgr.output_tail(p, task_list::TAIL_LINES)));
+            let read = opencrabs::backend::tasks::TaskTail {
+                session,
+                task,
+                path: self
+                    .task_tails
+                    .get(&task)
+                    .and_then(|tail| tail.path.clone()),
+                lines: task_list::TAIL_LINES,
+            }
+            .answer(tasks_ctx(&self.backend))
+            .ok()
+            .flatten()?;
             self.task_tails.insert(
                 task,
                 TaskTail {
                     read_at: std::time::Instant::now(),
-                    path,
-                    text,
+                    path: read.path,
+                    text: read.text.map(SharedString::from),
                 },
             );
         }
@@ -2327,9 +2359,7 @@ impl Dashboard {
                 self.task_area_resized(session, cx);
             }
             task_list::KeyStep::Cancel(ix) => {
-                let outcome = agent_bridge::bridge()
-                    .and_then(|b| b.service.background_manager())
-                    .map(|mgr| mgr.cancel(session, rows[ix].id));
+                let outcome = Self::stop_task(&self.backend, session, rows[ix].id);
                 logging::debug(&format!(
                     "task list: esc on {:?} -> {outcome:?}",
                     rows[ix].label
@@ -2405,6 +2435,7 @@ impl Dashboard {
     /// Look at the open task again, at most once a [`task_detail::READ_TICK`]:
     /// whether it still runs, where its output is, and what it wrote since.
     fn refresh_task_detail(&mut self) {
+        let ctx = tasks_ctx(&self.backend);
         let Some(detail) = self.task_detail.as_mut() else {
             return;
         };
@@ -2415,34 +2446,28 @@ impl Dashboard {
             return;
         }
         detail.read_at = Some(std::time::Instant::now());
-        let Some(mgr) = agent_bridge::bridge().and_then(|b| b.service.background_manager()) else {
+        // The crab looks up the output file while the task runs and re-reads
+        // it only when its stamp moved (see `TaskDetail`).
+        let Some(read) = opencrabs::backend::tasks::TaskDetail {
+            session: detail.session,
+            task: detail.task,
+            path: detail.path.clone(),
+            stamp: detail.stamp,
+        }
+        .answer(ctx)
+        .ok()
+        .flatten() else {
             return;
         };
-        let running = mgr
-            .running_tasks(detail.session)
-            .iter()
-            .any(|t| t.task_id == detail.task);
-        if !running && detail.ended.is_none() {
+        if !read.running && detail.ended.is_none() {
             detail.ended = Some(detail.started.elapsed().as_secs());
             detail.confirm_stop = false;
         }
-        if detail.path.is_none() && running {
-            detail.path = mgr.output_path_for(detail.session, detail.task);
+        detail.path = read.path;
+        if let Some(history) = read.history {
+            detail.stamp = read.stamp;
+            detail.absorb(history);
         }
-        let Some(path) = detail.path.clone() else {
-            return;
-        };
-        // A file that has not changed is not read again: the read scrubs up
-        // to half a megabyte, which is not worth doing once a second for a
-        // task that is thinking.
-        let stamp = std::fs::metadata(&path)
-            .ok()
-            .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
-        if stamp.is_some() && stamp == detail.stamp {
-            return;
-        }
-        detail.stamp = stamp;
-        detail.absorb(mgr.output_history(&path));
     }
 
     /// One key while the full view holds the keyboard (see
@@ -2503,6 +2528,7 @@ impl Dashboard {
     /// The stop door: the first press asks, the second stops. The task then
     /// ends through its own exit path, and the view says so when it does.
     fn stop_task_detail(&mut self, cx: &mut Context<Self>) {
+        let backend = &self.backend;
         let Some(detail) = self.task_detail.as_mut() else {
             return;
         };
@@ -2515,9 +2541,7 @@ impl Dashboard {
             return;
         }
         detail.confirm_stop = false;
-        let outcome = agent_bridge::bridge()
-            .and_then(|b| b.service.background_manager())
-            .map(|mgr| mgr.cancel(detail.session, detail.task));
+        let outcome = Self::stop_task(backend, detail.session, detail.task);
         logging::info(&format!(
             "task detail: stop on {} -> {outcome:?}",
             detail.task
@@ -2670,5 +2694,15 @@ impl Dashboard {
             .any(|row| row.badge == Some(crate::rail_activity::Badge::Live) || row.ring);
         self.rail_anim_live = live;
         live
+    }
+}
+
+/// The crab the task doors read from inside a frame.
+///
+/// A free function over the field, not a method, so a caller can hold it
+/// while it changes another field of the window.
+fn tasks_ctx(backend: &crate::backend_glue::Backend) -> &opencrabs::backend::Ctx {
+    match backend {
+        crate::backend_glue::Backend::Local(ctx) => ctx,
     }
 }

@@ -143,10 +143,14 @@ impl Dashboard {
         // The sweep throttle reads a moving clock; the animations read the
         // window's fixed origin. Two different questions, two clocks.
         let now = std::time::Instant::now();
-        // One bridge lookup for the whole pass, not one per row: a detached
+        // One roster read for the whole pass, not one per row: a detached
         // command outlives its turn, so it is the only trace that session still
         // has work in flight (#762).
-        let manager = agent_bridge::bridge().and_then(|b| b.service.background_manager());
+        let running: std::collections::HashSet<Uuid> = self
+            .tasks_snapshot(rows.clone())
+            .into_iter()
+            .map(|entry| entry.session)
+            .collect();
         let mut map = HashMap::with_capacity(rows.len());
         for id in rows {
             let live = self.rail.is_live(
@@ -163,7 +167,7 @@ impl Dashboard {
                 self.pane_states
                     .get(&id)
                     .is_some_and(|pane| pane.read(cx).busy),
-                manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
+                running.contains(&id),
             );
             let plan = self.rail_index.evidence(id, live, now);
             let seen = plan.is_some_and(|evidence| self.rail_seen.is_seen(id, evidence.stamp));
@@ -215,25 +219,22 @@ impl Dashboard {
     ///
     /// Shaped by [`opencrabs::tui::render::format_background_tasks`], the same
     /// formatter the composer strip and the terminal's footer use, so one
-    /// running task cannot read three different ways. One manager lookup for
+    /// running task cannot read three different ways. One roster read for
     /// the whole pass, never one per row.
     pub(crate) fn rail_running_map(&self) -> HashMap<Uuid, SharedString> {
-        let Some(manager) = agent_bridge::bridge().and_then(|b| b.service.background_manager())
-        else {
-            return HashMap::new();
-        };
+        let ids: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
         let mut map = HashMap::new();
-        for id in self.sessions.ordered().map(|s| s.id) {
-            let tasks: Vec<(String, u64)> = manager
-                .running_tasks(id)
-                .into_iter()
-                .map(|t| (t.label, t.started.elapsed().as_secs()))
-                .collect();
+        for entry in self.tasks_snapshot(ids) {
+            let tasks: Vec<(String, u64)> =
+                entry.tasks.into_iter().map(|t| (t.label, t.secs)).collect();
             if let Some(line) = opencrabs::tui::render::format_background_tasks(
                 &tasks,
                 opencrabs::tui::render::LABEL_CHARS,
             ) {
-                map.insert(id, SharedString::from(format!("\u{23f3} {line}")));
+                map.insert(
+                    entry.session,
+                    SharedString::from(format!("\u{23f3} {line}")),
+                );
             }
         }
         map
