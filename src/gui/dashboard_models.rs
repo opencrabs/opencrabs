@@ -38,13 +38,10 @@ impl Dashboard {
         // The catalogue is read once, here, so a frame never walks it. A pane
         // carries its own pair, so the picker marks that pair rather than the
         // window's when the command came from a split.
-        let current = agent_bridge::bridge().map(|b| match target {
-            Some(sid) => (
-                b.service.provider_name_for_session(sid),
-                b.service.provider_model_for_session(sid),
-            ),
-            None => (b.service.provider_name(), b.service.provider_model()),
-        });
+        let current = self
+            .backend
+            .facts(target)
+            .map(|facts| (facts.provider, facts.model));
         self.reset_model_picker(current, None);
         if let Some(arg) = arg {
             self.switch_model(arg, cx);
@@ -186,12 +183,9 @@ impl Dashboard {
                     };
                     Some((provider, ob.model()))
                 } else {
-                    agent_bridge::bridge().map(|bridge| {
-                        (
-                            bridge.service.provider_name(),
-                            bridge.service.provider_model(),
-                        )
-                    })
+                    self.backend
+                        .facts(None)
+                        .map(|facts| (facts.provider, facts.model))
                 };
                 models::replace_provider(
                     &mut self.models_rows,
@@ -304,10 +298,7 @@ impl Dashboard {
                         } else {
                             self.models_provider.clone().or_else(|| {
                                 let target = self.models_session.or(self.chat_session);
-                                agent_bridge::bridge().map(|bridge| match target {
-                                    Some(sid) => bridge.service.provider_name_for_session(sid),
-                                    None => bridge.service.provider_name(),
-                                })
+                                self.backend.facts(target).map(|facts| facts.provider)
                             })
                         };
                         models::manual_pair(
@@ -723,12 +714,9 @@ impl Dashboard {
         // pair the session is using instead of the first row of the catalogue
         // (#2060). A first run keeps the built-in preselection from `open_at`.
         if step != onboard::OnboardingStep::HealthCheck
-            && let Some(bridge) = agent_bridge::bridge()
+            && let Some(facts) = self.backend.facts(None)
         {
-            wizard.seed_session_pair(
-                &bridge.service.provider_name(),
-                &bridge.service.provider_model(),
-            );
+            wizard.seed_session_pair(&facts.provider, &facts.model);
         }
         self.onboard = Some(wizard);
         if self
