@@ -51,7 +51,7 @@ pub fn shared() -> &'static reqwest::Client {
     // under test a fresh client per call sidesteps the runtime mismatch wholly.
     #[cfg(test)]
     {
-        return Box::leak(Box::new(build_shared()));
+        Box::leak(Box::new(build_shared()))
     }
     #[cfg(not(test))]
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
