@@ -1329,7 +1329,7 @@ impl AgentService {
         // caller's retry loop retries, and a terminal cut flows to the
         // honest CompactionOutcome::Truncated marker instead of shipping
         // the cut as the continuation document.
-        if Self::summary_stop_is_cut(response.stop_reason) {
+        if Self::summary_stop_is_cut(response.stop_reason.clone()) {
             return Err(AgentError::Internal(format!(
                 "summariser stopped at MaxTokens ({} output / {} reasoning tokens): \
                  the continuation document is cut, counting as a failed attempt",
