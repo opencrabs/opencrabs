@@ -26,10 +26,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use axum::Extension;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response, Sse, sse};
 use futures::stream;
 use serde::Deserialize;
@@ -173,28 +174,61 @@ pub struct EventsQuery {
     pub session: Uuid,
 }
 
+/// How often an open stream asks again whether its credential still holds.
+const RECHECK: Duration = Duration::from_secs(30);
+
 /// `GET /gui/events?session=<id>`: the session's events as SSE, one
 /// [`Event`] as JSON per `data:` line.
+///
+/// The stream can stay open for hours, longer than the pairing behind it.
+/// Every [`RECHECK`] it presents the same bearer again, the way
+/// `require_bearer` did at connect, and ends once that no longer carries
+/// `a2a:read`: a revoked or expired token stops seeing events.
 pub async fn handle_events(
     State(state): State<A2aState>,
     Extension(granted): Extension<GrantedScopes>,
+    headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> Response {
     crate::remote::tunnel::note_traffic(&state.remote_state_dir);
     if !allows(&granted.0, SCOPE_READ) {
         return forbidden();
     }
-    stream_events(hub().subscribe(query.session))
+    let token = super::bearer_from_headers(&headers).map(str::to_string);
+    let still_allowed = move || {
+        super::credential_scopes(&state, token.as_deref())
+            .is_some_and(|scopes| allows(&scopes, SCOPE_READ))
+    };
+    stream_events(hub().subscribe(query.session), RECHECK, still_allowed)
 }
 
 /// The SSE body for one subscription. The subscription lives in the stream,
-/// so it drops, and cleans up, when the client goes away.
-fn stream_events(subscription: Subscription) -> Response {
-    let events = stream::unfold(subscription, |mut subscription| async move {
-        let event = subscription.next().await?;
-        let frame = sse::Event::default().json_data(&event);
-        Some((frame, subscription))
-    });
+/// so it drops, and cleans up, when the client goes away or when
+/// `still_allowed`, asked every `recheck`, says no.
+fn stream_events(
+    subscription: Subscription,
+    recheck: Duration,
+    still_allowed: impl Fn() -> bool + Send + 'static,
+) -> Response {
+    let timer = tokio::time::interval_at(tokio::time::Instant::now() + recheck, recheck);
+    let events = stream::unfold(
+        (subscription, timer, still_allowed),
+        |(mut subscription, mut timer, still_allowed)| async move {
+            loop {
+                tokio::select! {
+                    event = subscription.next() => {
+                        let frame = sse::Event::default().json_data(&event?);
+                        return Some((frame, (subscription, timer, still_allowed)));
+                    }
+                    _ = timer.tick() => {
+                        if !still_allowed() {
+                            return None;
+                        }
+                    }
+                }
+            }
+        },
+    );
     Sse::new(events)
         .keep_alive(sse::KeepAlive::default())
         .into_response()
@@ -424,6 +458,7 @@ mod tests {
             Extension(GrantedScopes(vec![
                 crate::remote::scopes::SCOPE_SEND.to_string(),
             ])),
+            HeaderMap::new(),
             Query(EventsQuery { session }),
         )
         .await;
@@ -437,6 +472,42 @@ mod tests {
         assert_eq!(error.code, error_codes::INSUFFICIENT_SCOPE);
         let data: BackendError = serde_json::from_value(error.data.expect("data")).expect("typed");
         assert_eq!(data, BackendError::Forbidden { scope: Scope::Read });
+    }
+
+    /// A stream whose credential stops holding ends, and its subscription
+    /// goes with it.
+    #[tokio::test]
+    async fn the_stream_ends_once_its_credential_no_longer_holds() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let session = Uuid::new_v4();
+        let allowed = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&allowed);
+        let resp = stream_events(
+            hub().subscribe(session),
+            std::time::Duration::from_millis(10),
+            move || flag.load(Ordering::SeqCst),
+        );
+        let mut frames = resp.into_body().into_data_stream();
+        let event = turn(session, "while allowed");
+        assert_eq!(publish(&event), 1);
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next())
+            .await
+            .expect("the event within 5s")
+            .expect("the stream is open")
+            .expect("a body chunk");
+        assert!(
+            std::str::from_utf8(&chunk)
+                .expect("UTF-8")
+                .contains("while allowed")
+        );
+        allowed.store(false, Ordering::SeqCst);
+        let end = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next())
+            .await
+            .expect("the stream ends within 5s");
+        assert!(end.is_none(), "the stream outlived its credential");
+        drop(frames);
+        assert!(!hub().is_watched(session));
     }
 
     #[tokio::test]
