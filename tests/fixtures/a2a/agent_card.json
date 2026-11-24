@@ -1,0 +1,99 @@
+{
+  "name": "<name>",
+  "description": "High-performance AI orchestration agent with A2A protocol support. Part of the Bee Colony multi-agent system.",
+  "version": "<version>",
+  "documentationUrl": "https://github.com/opencrabs/opencrabs",
+  "supportedInterfaces": [
+    {
+      "url": "http://127.0.0.1:18790/a2a/v1",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
+    {
+      "url": "http://127.0.0.1:18790/a2a/v1",
+      "protocolBinding": "gui-backend/1",
+      "protocolVersion": "1"
+    }
+  ],
+  "provider": {
+    "organization": "OpenCrabs Contributors",
+    "url": "https://github.com/opencrabs/opencrabs"
+  },
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "stateTransitionHistory": true
+  },
+  "skills": [
+    {
+      "id": "code-analysis",
+      "name": "Code Analysis & Refactoring",
+      "description": "Analyze source code, identify issues, and suggest improvements.",
+      "tags": [
+        "code",
+        "analysis",
+        "refactoring"
+      ],
+      "examples": [
+        "Analyze this Rust module for performance issues."
+      ],
+      "inputModes": [
+        "text/plain",
+        "application/json"
+      ],
+      "outputModes": [
+        "text/plain",
+        "application/json"
+      ]
+    },
+    {
+      "id": "research",
+      "name": "Deep Research",
+      "description": "Perform multi-source research using web search, memory search, and document analysis. Runs in read-only mode.",
+      "tags": [
+        "research",
+        "analysis",
+        "synthesis"
+      ],
+      "examples": [
+        "Research the latest developments in AI agent security."
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain",
+        "application/json"
+      ]
+    },
+    {
+      "id": "debate",
+      "name": "Multi-Agent Debate",
+      "description": "Participate in structured multi-round debates with other A2A agents using knowledge-enriched context.",
+      "tags": [
+        "debate",
+        "council",
+        "multi-agent"
+      ],
+      "examples": [
+        "Debate the pros and cons of microservices vs monoliths."
+      ],
+      "inputModes": [
+        "text/plain",
+        "application/json"
+      ],
+      "outputModes": [
+        "text/plain",
+        "application/json"
+      ]
+    }
+  ],
+  "defaultInputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ]
+}
