@@ -1524,6 +1524,7 @@ async fn cmd_chat_inner(
 
                         // TUI: wire cancel token and send response via TuiEvent
                         // Non-TUI: send response back to the originating channel
+                        #[cfg(feature = "telegram")]
                         let tg = telegram_state.clone();
                         let transports = crate::cli::resume_delivery::ResumeTransports {
                             #[cfg(feature = "discord")]
@@ -1549,6 +1550,7 @@ async fn cmd_chat_inner(
                         // Telegram: use full streaming pipeline (typing, tool msgs, edit loop).
                         // The bot may not be authenticated yet at startup, so we spawn a
                         // task that waits for it before calling resume_session.
+                        #[cfg(feature = "telegram")]
                         if channel == "telegram"
                             && let Some(ref cid) = channel_chat_id
                             && let Ok(chat_id) = cid.parse::<i64>()

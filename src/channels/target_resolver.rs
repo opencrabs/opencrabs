@@ -28,7 +28,7 @@
 use anyhow::{Result, anyhow, bail};
 use uuid::Uuid;
 
-use super::telegram::session_resolve::GENERAL_TOPIC_ID;
+use super::GENERAL_TOPIC_ID;
 use crate::brain::tools::OriginTarget;
 
 /// Where a resolved target's delivery should go.

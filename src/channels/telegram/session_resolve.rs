@@ -78,7 +78,7 @@ pub fn topic_session_id(is_topic_message: bool, thread_id: Option<i32>) -> Optio
 /// General messages carry NO explicit `message_thread_id` and are not flagged
 /// `is_topic_message`, which historically made them indistinguishable from
 /// DMs / non-forum groups (#1220).
-pub const GENERAL_TOPIC_ID: i32 = 1;
+pub use crate::channels::GENERAL_TOPIC_ID;
 
 /// The `message_thread_id` to put on the wire for a session scoped to `topic`.
 ///

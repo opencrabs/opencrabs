@@ -855,7 +855,7 @@ impl App {
         // Platform backends below (macOS/Linux/Windows) all spawn; the
         // import would be unused (and warned) on any other target. Stdio is
         // not here any more: the deadline helper owns every pipe (#2702).
-        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[cfg(any(unix, windows))]
         use std::process::Command;
 
         // macOS: pbpaste is text-only, so dump the clipboard PNG to a scratch
@@ -1076,7 +1076,7 @@ impl App {
     // platform being compiled it reads as the tail, hence the allow.
     #[allow(clippy::needless_return)]
     fn read_clipboard_text() -> Option<String> {
-        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[cfg(any(unix, windows))]
         use std::process::Command;
 
         // One table for every unix backend (#2702): `pbpaste` on macOS, then

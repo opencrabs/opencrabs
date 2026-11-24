@@ -2014,7 +2014,7 @@ async fn test_telegram_connection(
     _token: &str,
     _user_id_str: &str,
     _agent: std::sync::Arc<crate::brain::agent::AgentService>,
-) -> Result<(), String> {
+) -> Result<TelegramTestResult, String> {
     Err("Telegram feature not enabled".to_string())
 }
 

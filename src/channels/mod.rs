@@ -39,6 +39,9 @@ pub use factory::{ChannelFactory, configure_cron_factory};
 pub use greeting::generate_connection_greeting;
 pub use manager::ChannelManager;
 
+/// Telegram's General topic in a forum supergroup is topic ID 1 (#3095).
+pub const GENERAL_TOPIC_ID: i32 = 1;
+
 /// Root of the durable channel-attachment store, profile-resolved via
 /// `opencrabs_home()` so a named-profile instance stores under its OWN home
 /// (`~/.opencrabs/profiles/<name>/channel_attachments/`) rather than the shared

@@ -33,7 +33,7 @@ impl OriginTarget {
     /// wire address.
     pub fn deliver_to(&self) -> String {
         match self.thread {
-            Some(t) if t != crate::channels::telegram::session_resolve::GENERAL_TOPIC_ID => {
+            Some(t) if t != crate::channels::GENERAL_TOPIC_ID => {
                 format!("{}:{}:{}", self.channel, self.chat_id, t)
             }
             _ => format!("{}:{}", self.channel, self.chat_id),
