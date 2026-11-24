@@ -1,6 +1,6 @@
 //! Capability scopes for remote A2A access.
 //!
-//! Four scopes, plain wire strings, stored verbatim on pairing codes and
+//! Three scopes, plain wire strings, stored verbatim on pairing codes and
 //! session tokens:
 //!
 //! | Scope        | Grants                                                  |
@@ -8,10 +8,13 @@
 //! | `a2a:read`   | `tasks/get`, `session/notify-status`                     |
 //! | `a2a:send`   | `message/send`, `message/stream`, `tasks/cancel`, `session/notify` |
 //! | `a2a:manage` | writes to the other crab's ledger (rename, close, topics, undo) |
-//! | `a2a:admin`  | model, working directory, settings, shell, deletes       |
 //!
-//! `a2a:manage` and `a2a:admin` gate no JSON-RPC method of their own; the
-//! backend operations that need them declare it on `backend::op::Scope`.
+//! `a2a:manage` gates no JSON-RPC method of its own; the backend operations
+//! that need it declare it on `backend::op::Scope`.
+//!
+//! `a2a:admin` (model, working directory, settings, shell, deletes) exists
+//! only on `backend::op::Scope`. It is deliberately not a wire scope: no
+//! pairing code can carry it, so no remote session ever holds it.
 //!
 //! Rules:
 //! - Scopes only ever narrow: a pairing exchange picks a subset of
@@ -31,17 +34,14 @@ pub const SCOPE_READ: &str = "a2a:read";
 pub const SCOPE_SEND: &str = "a2a:send";
 /// Ledger-write scope: rename, close, favourite, topics, new session, undo.
 pub const SCOPE_MANAGE: &str = "a2a:manage";
-/// Owner scope: model and provider, working directory, settings, shell,
-/// session delete.
-pub const SCOPE_ADMIN: &str = "a2a:admin";
 
 /// Every scope the system knows. Mint-time validation rejects anything
 /// else so stored state never contains typos that silently grant nothing.
-pub const ALL_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_SEND, SCOPE_MANAGE, SCOPE_ADMIN];
+pub const ALL_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_SEND, SCOPE_MANAGE];
 
 /// Scopes a pairing code carries only when the operator named them. Every
 /// default the pairing surface offers stays inside the complement.
-pub const ELEVATED_SCOPES: &[&str] = &[SCOPE_MANAGE, SCOPE_ADMIN];
+pub const ELEVATED_SCOPES: &[&str] = &[SCOPE_MANAGE];
 
 /// The scope required by one JSON-RPC method, or `None` when the method
 /// needs no scope gate (unknown methods: the dispatcher rejects them).
@@ -78,12 +78,14 @@ mod tests {
     use crate::backend::op::Scope;
 
     #[test]
-    fn every_operation_scope_is_a_known_wire_scope() {
+    fn every_operation_scope_but_admin_is_a_known_wire_scope() {
         for scope in Scope::ALL {
-            assert!(
-                is_known_scope(scope.as_str()),
-                "{scope} missing from ALL_SCOPES"
-            );
+            let known = is_known_scope(scope.as_str());
+            if *scope == Scope::Admin {
+                assert!(!known, "{scope} must stay outside the wire scopes");
+            } else {
+                assert!(known, "{scope} missing from ALL_SCOPES");
+            }
         }
     }
 
@@ -92,20 +94,27 @@ mod tests {
         for s in ALL_SCOPES {
             assert!(Scope::parse(s).is_some(), "{s} has no backend::op::Scope");
         }
-        assert_eq!(ALL_SCOPES.len(), Scope::ALL.len());
+        assert_eq!(ALL_SCOPES.len() + 1, Scope::ALL.len());
     }
 
     #[test]
-    fn manage_and_admin_are_known_and_elevated() {
+    fn manage_is_known_and_elevated_admin_is_unknown() {
         assert_eq!(SCOPE_MANAGE, Scope::Manage.as_str());
-        assert_eq!(SCOPE_ADMIN, Scope::Admin.as_str());
-        for s in [SCOPE_MANAGE, SCOPE_ADMIN] {
-            assert!(is_known_scope(s));
-            assert!(is_elevated(s));
-        }
+        assert!(is_known_scope(SCOPE_MANAGE));
+        assert!(is_elevated(SCOPE_MANAGE));
+        let admin = Scope::Admin.as_str();
+        assert!(!is_known_scope(admin));
+        assert!(!is_elevated(admin));
         assert!(!is_elevated(SCOPE_READ));
         assert!(!is_elevated(SCOPE_SEND));
         assert!(!is_known_scope("a2a:root"));
+    }
+
+    #[test]
+    fn every_elevated_scope_is_known() {
+        for s in ELEVATED_SCOPES {
+            assert!(is_known_scope(s), "{s} elevated but not mintable");
+        }
     }
 
     #[test]
@@ -124,10 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn holding_admin_does_not_imply_manage() {
-        let admin_only = vec![SCOPE_ADMIN.to_string()];
-        assert!(allows(&admin_only, SCOPE_ADMIN));
-        assert!(!allows(&admin_only, SCOPE_MANAGE));
-        assert!(!allows(&admin_only, SCOPE_READ));
+    fn holding_manage_does_not_imply_read_or_send() {
+        let manage_only = vec![SCOPE_MANAGE.to_string()];
+        assert!(allows(&manage_only, SCOPE_MANAGE));
+        assert!(!allows(&manage_only, SCOPE_READ));
+        assert!(!allows(&manage_only, SCOPE_SEND));
     }
 }

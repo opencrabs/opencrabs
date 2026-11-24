@@ -489,7 +489,8 @@ fn sweep(store: &mut StoreFile, now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::scopes::{SCOPE_ADMIN, SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND, allows};
+    use crate::backend::op::Scope;
+    use crate::remote::scopes::{SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND, allows};
 
     fn store() -> (tempfile::TempDir, PairingStore) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -509,25 +510,30 @@ mod tests {
             .expect("mint");
         let (token, session) = st.verify_code(&code, "phone").expect("verify");
         assert!(!allows(&session.scopes, SCOPE_MANAGE));
-        assert!(!allows(&session.scopes, SCOPE_ADMIN));
+        assert!(!allows(&session.scopes, Scope::Admin.as_str()));
         let live = st.verify_token(&token).expect("token verifies");
         assert!(!allows(&live.scopes, SCOPE_MANAGE));
-        assert!(!allows(&live.scopes, SCOPE_ADMIN));
+        assert!(!allows(&live.scopes, Scope::Admin.as_str()));
     }
 
     #[test]
-    fn manage_and_admin_redeem_only_when_minted_by_name() {
+    fn manage_redeems_only_when_minted_by_name() {
         let (_d, st) = store();
         let code = st
             .mint_code(&scopes(&[SCOPE_READ, SCOPE_MANAGE]))
             .expect("mint manage");
         let (_t, session) = st.verify_code(&code, "ops").expect("verify");
         assert!(allows(&session.scopes, SCOPE_MANAGE));
-        assert!(!allows(&session.scopes, SCOPE_ADMIN));
+        assert!(!allows(&session.scopes, Scope::Admin.as_str()));
+    }
 
-        let code = st.mint_code(&scopes(&[SCOPE_ADMIN])).expect("mint admin");
-        let (_t, session) = st.verify_code(&code, "owner").expect("verify");
-        assert_eq!(session.scopes, scopes(&[SCOPE_ADMIN]));
+    #[test]
+    fn admin_is_never_mintable() {
+        let (_d, st) = store();
+        let admin = Scope::Admin.as_str();
+        assert!(st.mint_code(&scopes(&[admin])).is_err());
+        assert!(st.mint_code(&scopes(&[SCOPE_READ, admin])).is_err());
+        assert!(st.mint_code(&scopes(&[SCOPE_MANAGE, admin])).is_err());
     }
 
     #[test]
