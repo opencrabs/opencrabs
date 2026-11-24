@@ -98,7 +98,7 @@ impl Dashboard {
         self.projects.notice = None;
         self.projects.next_generation();
         let generation = self.projects.generation;
-        let backend = self.backend.clone();
+        let db_path = self.backend.clone();
         let membership_update = match &action {
             ProjectAction::AssignMany {
                 project_id,
@@ -124,7 +124,7 @@ impl Dashboard {
             _ => None,
         };
         cx.spawn(async move |this, cx| {
-            let result = crate::projects::run(backend, action).await;
+            let result = crate::projects::run(db_path, action).await;
             let updated = this.update(cx, |this, cx| {
                 if generation != this.projects.generation {
                     return;
