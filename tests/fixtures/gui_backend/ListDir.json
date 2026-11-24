@@ -1,0 +1,12 @@
+{
+  "op": "fs_list.list_dir",
+  "scope": "a2a:admin",
+  "request": { "dir": "/home/crab/project", "show_hidden": false },
+  "reply": {
+    "Ok": [
+      "/home/crab/project/..",
+      "/home/crab/project/docs",
+      "/home/crab/project/src"
+    ]
+  }
+}

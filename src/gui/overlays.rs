@@ -767,27 +767,9 @@ pub(crate) fn confirm_disable_topics_overlay(
 /// listing without a live window, the same shape the terminal's dialog
 /// builds in `open_directory_picker`.
 pub(crate) fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    if dir.parent().is_some() {
-        files.push(dir.join(".."));
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let hidden = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with('.'))
-                .unwrap_or(false);
-            if hidden && !show_hidden {
-                continue;
-            }
-            files.push(path);
-        }
-    }
-    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    files
+    crate::status::ask_crab(opencrabs::backend::fs_list::ListDir {
+        dir: dir.to_path_buf(),
+        show_hidden,
+    })
+    .unwrap_or_default()
 }
