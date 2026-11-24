@@ -73,7 +73,15 @@ pub fn file_name(doc: &PromptDocument) -> String {
 /// byte compare would re-read every prompt on every reopen to learn nothing.
 /// A truncated write leaves a different size behind and is rewritten next time,
 /// which is the one failure this cheap check cannot hide.
+///
+/// The name crosses the wire, so it is checked before it touches a path: a
+/// name that is not one plain file name (a separator, `..`, a leading dot) is
+/// refused and nothing is written. Every name `message_reader::document_name`
+/// produces passes, so the window's own documents are never refused.
 pub fn write(dir: &Path, doc: &PromptDocument) -> Option<PathBuf> {
+    if !plain_name(&doc.name) {
+        return None;
+    }
     let path = dir.join(file_name(doc));
     let same = std::fs::metadata(&path).is_ok_and(|meta| meta.len() == doc.content.len() as u64);
     if same {
@@ -81,6 +89,16 @@ pub fn write(dir: &Path, doc: &PromptDocument) -> Option<PathBuf> {
     }
     std::fs::write(&path, doc.content.as_bytes()).ok()?;
     Some(path)
+}
+
+/// Whether `name` is one plain file name that stays inside the directory it
+/// is joined to.
+fn plain_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_)))
+        && parts.next().is_none()
+        && !name.contains(['/', '\\'])
+        && !name.starts_with('.')
 }
 
 /// Write every document, returning where each one landed, keyed by row id.
@@ -163,6 +181,32 @@ mod tests {
         let session = Session::new(Some("chat".into()), None, None);
         repo.create(&session).await.expect("create");
         session.id
+    }
+
+    #[test]
+    fn a_name_that_leaves_the_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inner = dir.path().join("prompts");
+        std::fs::create_dir_all(&inner).expect("prompts dir");
+        for name in ["../escape.md", "a/b.md", "a\\b.md", "/abs.md", "..", ".hidden.md", ""] {
+            let doc = PromptDocument {
+                session: Uuid::new_v4(),
+                id: Uuid::new_v4(),
+                name: name.into(),
+                content: "body".into(),
+            };
+            assert_eq!(write(&inner, &doc), None, "{name:?} was written");
+        }
+        let entries = std::fs::read_dir(&inner).expect("list").count()
+            + std::fs::read_dir(dir.path()).expect("list").count();
+        assert_eq!(entries, 1, "only the prompts dir itself exists");
+        let ok = PromptDocument {
+            session: Uuid::new_v4(),
+            id: Uuid::new_v4(),
+            name: crate::ui_core::message_reader::document_name("Deploy log: v2"),
+            content: "body".into(),
+        };
+        assert!(write(&inner, &ok).is_some(), "a window name is written");
     }
 
     #[tokio::test]
