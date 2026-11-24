@@ -1849,21 +1849,44 @@ pub fn spawn_switch_model(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-model-switch", move |runtime| {
-        let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
-            &service, session_id, &pair,
-        ));
-        let _ = sink.send(TurnEvent::ModelSwitched {
-            session: session_id,
-            line,
-        });
-    });
+    let spawned = service_backend(service).spawn(
+        opencrabs::backend::session_ops::SwitchModel { session_id, pair },
+        move |result| {
+            let event = match result {
+                Ok(line) => TurnEvent::ModelSwitched {
+                    session: session_id,
+                    line,
+                },
+                Err(e) => TurnEvent::ModelSwitchFailed {
+                    session: session_id,
+                    error: e.into_message(),
+                },
+            };
+            let _ = sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
             error: format!("switch thread: {e}"),
         });
     }
+}
+
+/// A backend on the crab the window already holds: `service` and the pool it
+/// was built on.
+///
+/// The `spawn_*` doors that take the service keep that signature for their
+/// call sites, and still run their work as an operation. The ledger is the
+/// service's own pool, never a second connection, so the operation reads and
+/// writes exactly what the service did when it ran the work inline.
+fn service_backend(service: Arc<AgentService>) -> crate::backend_glue::Backend {
+    let db_path = opencrabs::backend::primary()
+        .map(|ctx| ctx.db_path().to_path_buf())
+        .unwrap_or_default();
+    let ctx = opencrabs::backend::Ctx::new(db_path).with_pool(service.context().pool());
+    ctx.set_service(service);
+    crate::backend_glue::Backend::Local(Arc::new(ctx))
 }
 
 /// Count what a scope-all pick would change, so the window can ask before it
@@ -1880,23 +1903,23 @@ pub fn spawn_scope_count(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-model-scope", move |runtime| {
-        let count = runtime.block_on(async {
-            let Some((provider, model)) = pair.split_once('/') else {
-                return 0;
+    let spawned = service_backend(service).spawn(
+        opencrabs::backend::session_ops::ScopeCount { pair: pair.clone() },
+        move |result| {
+            let event = match result {
+                Ok(count) => TurnEvent::ModelScopeCounted {
+                    session: session_id,
+                    pair,
+                    count,
+                },
+                Err(e) => TurnEvent::ModelSwitchFailed {
+                    session: session_id,
+                    error: format!("scope count: {}", e.into_message()),
+                },
             };
-            let sessions = opencrabs::services::SessionService::new(service.context().clone());
-            sessions
-                .count_provider_model_all_sessions(provider, model)
-                .await
-                .unwrap_or(0)
-        });
-        let _ = sink.send(TurnEvent::ModelScopeCounted {
-            session: session_id,
-            pair,
-            count,
-        });
-    });
+            let _ = sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
@@ -1915,46 +1938,22 @@ pub fn spawn_scope_count(
 /// turn, or anything a tool wrote, stops the walk.
 pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: EventSink) {
     let done_sink = sink.clone();
-    let spawned = spawn_worker("gui-turn-undo", move |runtime| {
-        runtime.block_on(async move {
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            let rows = match messages.list_messages_for_session(session_id).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    crate::logging::error(&format!("turn undo read: {e}"));
-                    return;
+    let spawned = service_backend(service).spawn(
+        opencrabs::backend::session_ops::UndoLastTurn { session_id },
+        move |result| match result {
+            Ok(reply) => {
+                for line in &reply.errors {
+                    crate::logging::error(line);
                 }
-            };
-            // Newest first: the placeholder, then the question it echoed.
-            let Some(placeholder) = rows.last() else {
-                return;
-            };
-            if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
-                // The turn had already answered, or wrote nothing yet. An
-                // answer that landed between the stop and this thread is
-                // the user's: only the empty placeholder is ever cut.
-                return;
+                if reply.reverted {
+                    let _ = done_sink.send(TurnEvent::TurnReverted {
+                        session: session_id,
+                    });
+                }
             }
-            if let Err(e) = messages.delete_message(placeholder.id).await {
-                crate::logging::error(&format!("turn undo assistant row: {e}"));
-                return;
-            }
-            let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-                let _ = done_sink.send(TurnEvent::TurnReverted {
-                    session: session_id,
-                });
-                return;
-            };
-            if question.role == "user"
-                && let Err(e) = messages.delete_message(question.id).await
-            {
-                crate::logging::error(&format!("turn undo user row: {e}"));
-            }
-            let _ = done_sink.send(TurnEvent::TurnReverted {
-                session: session_id,
-            });
-        });
-    });
+            Err(e) => crate::logging::error(&format!("turn undo: {}", e.into_message())),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn undo thread: {e}"));
         let _ = sink.send(TurnEvent::TurnReverted {
@@ -2025,62 +2024,17 @@ pub fn spawn_brain_generation(
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-brain-gen", move |runtime| {
-        let provider = service.provider().clone();
-        let model = service.provider_model().to_string();
-        let request = opencrabs::brain::provider::LLMRequest::new(
-            model,
-            vec![opencrabs::brain::provider::Message::user(prompt)],
-        )
-        .with_max_tokens(65536);
-        let result = runtime.block_on(async move {
-            match tokio::time::timeout(Duration::from_secs(120), provider.complete(request)).await {
-                Ok(Ok(response)) => {
-                    let text: String = response
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            opencrabs::brain::provider::ContentBlock::Text { text } => {
-                                Some(text.as_str())
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let parsed = opencrabs::tui::onboarding::parse_brain_sections(&text);
-                    // SOUL and USER are the two a setup cannot do without;
-                    // without them the reply was prose, not sections.
-                    if parsed[0].is_none() || parsed[1].is_none() {
-                        return Err("the answer had no brain sections".to_string());
-                    }
-                    let files = [
-                        ("SOUL.md", &parsed[0]),
-                        ("USER.md", &parsed[1]),
-                        ("AGENTS.md", &parsed[2]),
-                        ("TOOLS.md", &parsed[3]),
-                        ("MEMORY.md", &parsed[4]),
-                    ];
-                    let mut written = 0;
-                    for (name, content) in &files {
-                        if let Some(content) = content {
-                            if let Err(e) = std::fs::write(workspace.join(name), content) {
-                                return Err(format!("writing {name}: {e}"));
-                            }
-                            written += 1;
-                        }
-                    }
-                    Ok(written)
-                }
-                Ok(Err(e)) => Err(format!("generation failed: {e}")),
-                Err(_) => Err("generation timed out after 120s".to_string()),
-            }
-        });
-        let _ = match result {
-            Ok(written) => sink.send(TurnEvent::BrainReady(format!(
-                "{written} brain files personalized"
-            ))),
-            Err(e) => sink.send(TurnEvent::BrainFailed(e)),
-        };
-    });
+    let spawned = service_backend(service).spawn(
+        opencrabs::backend::session_ops::BrainGenerate { prompt, workspace },
+        move |result| {
+            let _ = match result {
+                Ok(written) => sink.send(TurnEvent::BrainReady(format!(
+                    "{written} brain files personalized"
+                ))),
+                Err(e) => sink.send(TurnEvent::BrainFailed(e.into_message())),
+            };
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::BrainFailed(format!("thread: {e}")));
     }
@@ -2109,17 +2063,25 @@ pub fn spawn_apply_operator_cd(
     sink: EventSink,
 ) {
     let done_sink = sink.clone();
-    let spawned = spawn_worker("gui-operator-cd", move |runtime| {
-        let applied = runtime.block_on(service.apply_operator_cd(session_id, &dir));
-        crate::logging::info(&format!(
-            "operator cd: session {session_id} -> {}",
-            applied.display()
-        ));
-        let _ = done_sink.send(TurnEvent::CommandReply {
-            session: Some(session_id),
-            text: super::text_commands::cd_reply(&applied.display().to_string()),
-        });
-    });
+    let spawned = service_backend(service).spawn(
+        opencrabs::backend::session_ops::ApplyCd { session_id, dir },
+        move |result| {
+            let text = match result {
+                Ok(applied) => {
+                    crate::logging::info(&format!(
+                        "operator cd: session {session_id} -> {}",
+                        applied.display()
+                    ));
+                    super::text_commands::cd_reply(&applied.display().to_string())
+                }
+                Err(e) => format!("/cd: {}", e.into_message()),
+            };
+            let _ = done_sink.send(TurnEvent::CommandReply {
+                session: Some(session_id),
+                text,
+            });
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("operator cd thread: {e}"));
         let _ = sink.send(TurnEvent::CommandReply {
