@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::{Dashboard, palette};
+use opencrabs::backend::hello::HelloReply;
 use opencrabs::ui_core::card::{SEEKER_RADIUS, seeker_concentric_radius};
 use opencrabs::ui_core::commands::{Support, support_gui};
 use opencrabs::ui_core::palette::{PaletteKind, PaletteState, SEEKER_PAGE, roast};
@@ -41,6 +42,11 @@ pub struct RowView {
     /// The calculator's own answer. It is a result, not a match, so the card
     /// floats it instead of painting it like a row (#3066).
     pub calc: bool,
+    /// A command the crab will not run for this window, and why: a missing
+    /// scope, an older crab, or an action that only works on this machine.
+    /// Printed dimmed with the reason in place of the enter hint, so a
+    /// greyed out row says what is missing instead of failing when picked.
+    pub unavailable: Option<String>,
 }
 
 /// The rows the card prints, in the order the engine ranked them.
@@ -78,8 +84,31 @@ pub fn rows(state: &PaletteState) -> Vec<RowView> {
             subtitle: row.item.subtitle,
             kind: kind_label(row.item.kind),
             armed: ix + start == armed,
+            unavailable: None,
         })
         .collect()
+}
+
+/// [`rows`], with every command row the crab that answered `hello` will not
+/// run marked with its reason. With no handshake yet this is [`rows`].
+#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
+pub fn rows_gated(state: &PaletteState, hello: Option<&HelloReply>) -> Vec<RowView> {
+    let mut printed = rows(state);
+    for row in &mut printed {
+        if row.kind == kind_label(PaletteKind::Command) {
+            row.unavailable = command_unavailable(&row.title, hello);
+        }
+    }
+    printed
+}
+
+/// Why the command row titled `title` is greyed out, or `None` when it runs.
+fn command_unavailable(title: &str, hello: Option<&HelloReply>) -> Option<String> {
+    use super::commands::{Outcome, parse_command, unavailable};
+    match parse_command(title)? {
+        Outcome::Run(action) | Outcome::RunWith(action, _) => unavailable(action, hello),
+        Outcome::Missing(_) | Outcome::Unknown { .. } => None,
+    }
 }
 
 /// The line under the field when nothing matched, or a count of what did.
@@ -875,7 +904,8 @@ pub(super) fn overlay(
                 // lift is a tenth of white, enough to read on the smoked glass
                 // and quiet enough that the armed row still owns the eye.
                 .when(!armed, |d| d.hover(|d| d.bg(rgba(0xffffff0d))));
-            if armed && !rowv.missing {
+            let dimmed = rowv.missing || rowv.unavailable.is_some();
+            if armed && !dimmed {
                 cell = cell.child(
                     div()
                         .w(px(10.0))
@@ -895,7 +925,7 @@ pub(super) fn overlay(
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(if rowv.missing { INK_MUTED } else { INK }))
+                            .text_color(rgb(if dimmed { INK_MUTED } else { INK }))
                             .truncate()
                             .child(SharedString::from(rowv.title.clone())),
                     )
@@ -948,6 +978,17 @@ pub(super) fn overlay(
                         .text_xs()
                         .text_color(rgb(INK_MUTED))
                         .child("terminal only"),
+                );
+            } else if let Some(reason) = &rowv.unavailable {
+                // A command the crab will not run here says why in the slot
+                // the enter hint would take, so picking it is never the way
+                // to find out.
+                cell = cell.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(INK_MUTED))
+                        .child(SharedString::from(reason.clone())),
                 );
             } else if armed {
                 cell = cell.child(
@@ -1758,5 +1799,49 @@ mod tests {
         let printed = rows(&state);
         assert_eq!(printed[0].title, "= 28.1690140845");
         assert_eq!(printed[0].kind, "calc");
+    }
+
+    /// Before the handshake, and on a local crab, the gated rows are the
+    /// plain rows: nothing is greyed out and nothing moves.
+    #[test]
+    fn no_command_row_is_greyed_out_before_the_handshake_or_locally() {
+        use opencrabs::backend::Scope;
+        use opencrabs::ui_core::commands::gui_commands;
+
+        let items: Vec<PaletteItem> = gui_commands()
+            .map(|cmd| item(cmd.name, PaletteKind::Command))
+            .collect();
+        let state = state_with(items);
+        let local = HelloReply::for_caller(Scope::ALL, true);
+        assert_eq!(rows_gated(&state, None), rows(&state));
+        assert_eq!(rows_gated(&state, Some(&local)), rows(&state));
+        assert!(rows(&state).iter().all(|row| row.unavailable.is_none()));
+    }
+
+    /// A read-only token greys out `/new` with the scope it lacks, and leaves
+    /// a session row that happens to share the name alone.
+    #[test]
+    fn a_read_only_token_greys_out_new_with_its_reason() {
+        use opencrabs::backend::Scope;
+
+        let hello = HelloReply::for_caller(&[Scope::Read], false);
+        let mut probe = state_with(vec![item("/new", PaletteKind::Command)]);
+        for ch in "/new".chars() {
+            probe.type_char(ch);
+        }
+        let printed = rows_gated(&probe, Some(&hello));
+        let command = printed
+            .iter()
+            .find(|row| row.title == "/new")
+            .expect("the command row");
+        let why = command.unavailable.as_deref().expect("needs manage");
+        assert!(why.contains("a2a:manage"), "{why}");
+
+        // Only command rows are gated: a session row named like one never is.
+        let sessions = rows_gated(
+            &state_with(vec![item("/new", PaletteKind::Session)]),
+            Some(&hello),
+        );
+        assert_eq!(sessions[0].unavailable, None);
     }
 }
