@@ -45,18 +45,30 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Also carries the connection pool: one client means connections are reused
 /// across requests instead of a fresh pool, and a fresh DNS lookup, per call.
 pub fn shared() -> &'static reqwest::Client {
+    // Each #[tokio::test] runs its own runtime, and a reqwest pool born in one
+    // runtime driven by another fails every request outright. Production has
+    // one daemon runtime, so a single process-wide client is correct there;
+    // under test a fresh client per call sidesteps the runtime mismatch wholly.
+    #[cfg(test)]
+    {
+        return Box::leak(Box::new(build_shared()));
+    }
+    #[cfg(not(test))]
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            // A build failure would take every caller down at once, so keep
-            // going with the default client and leave the reason in the logs.
-            .unwrap_or_else(|e| {
-                tracing::error!("shared HTTP client build failed ({e:#}); using the default");
-                reqwest::Client::new()
-            })
-    })
+    #[cfg(not(test))]
+    CLIENT.get_or_init(build_shared)
+}
+
+fn build_shared() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        // A build failure would take every caller down at once, so keep
+        // going with the default client and leave the reason in the logs.
+        .unwrap_or_else(|e| {
+            tracing::error!("shared HTTP client build failed ({e:#}); using the default");
+            reqwest::Client::new()
+        })
 }
 
 /// Build a client once and hand the same one back on every later call.
