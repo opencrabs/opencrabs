@@ -158,9 +158,7 @@ fn normalize(path: &Path) -> Option<PathBuf> {
             Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
-                if out.parent().is_none() {
-                    return None;
-                }
+                out.parent()?;
                 out.pop();
             }
             Component::Normal(part) => out.push(part),
