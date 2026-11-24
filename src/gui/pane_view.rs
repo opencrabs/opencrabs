@@ -131,6 +131,7 @@ pub(crate) struct PaneView {
 impl PaneView {
     /// Build one leaf's state. `width` starts at the window's content width
     /// and is corrected by the first walk that measures the leaf.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session: Uuid,
         title: String,
