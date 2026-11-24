@@ -59,7 +59,7 @@ pub const MAX_BLOB_BYTES: u64 = 50 * 1024 * 1024;
 /// | `projects` | each project's files and its sessions' plan files |
 /// | `agents/session` | plan files written before plans became project aware |
 /// | `plans` | the plan tool's reference files |
-/// | `tmp` | channel attachments (Telegram, WhatsApp, clipboard) and uploads, minus [`DENIED_IN_TMP`] |
+/// | `tmp` | channel attachments and uploads, narrowed by [`TMP_SUBDIRS`] |
 /// | `gui-icons` | custom topic icons (`topic_icons::image_store_dir`) |
 pub const ROOTS: &[&str] = &[
     "session",
@@ -70,12 +70,19 @@ pub const ROOTS: &[&str] = &[
     "gui-icons",
 ];
 
-/// Entries under `tmp` that are not attachments and never leave the crab,
-/// whatever the scope: the WhatsApp pairing QR (`whatsapp_connect`) links an
-/// account to whoever scans it, the cowork invite QR (`telegram::cowork`)
-/// admits a member, and `detached` holds background task output
-/// (`work_status`), which can carry anything a command printed.
-pub const DENIED_IN_TMP: &[&str] = &["whatsapp_qr.png", "cowork_invite_qr.png", "detached"];
+/// `tmp` is shared with things that are not attachments, so inside it the
+/// rule inverts: only a file directly in `tmp` (where the channels and the
+/// clipboard drop media) or under one of these subdirectories is served.
+/// `files` is `file_extract::save_to_temp`, `gui-uploads` is [`UPLOAD_DIR`].
+/// Every other subdirectory is refused, so private output added later
+/// (today `detached` and `subagents`, background task status) stays home.
+pub const TMP_SUBDIRS: &[&str] = &["files", "gui-uploads"];
+
+/// Files directly in `tmp` that are not attachments and never leave the
+/// crab, whatever the scope: the WhatsApp pairing QR (`whatsapp_connect`)
+/// links an account to whoever scans it, the cowork invite QR
+/// (`telegram::cowork`) admits a member.
+pub const DENIED_IN_TMP: &[&str] = &["whatsapp_qr.png", "cowork_invite_qr.png"];
 
 /// Where uploaded attachments land, under the crab's home. Inside `tmp`, the
 /// convention for incoming files, so an upload is served back like any other
@@ -199,16 +206,32 @@ pub fn resolve(roots: &[PathBuf], requested: &str) -> Result<PathBuf, BlobError>
     Ok(real)
 }
 
-/// Whether `lexical` or `real` is one of [`DENIED_IN_TMP`], or inside one,
-/// under the `tmp` root as written or as resolved.
+/// Whether `rel`, a path relative to `tmp`, is an attachment: a file
+/// directly in `tmp` other than [`DENIED_IN_TMP`], or anything under one of
+/// [`TMP_SUBDIRS`].
+fn tmp_serves(rel: &Path) -> bool {
+    let parts: Vec<Component<'_>> = rel.components().collect();
+    match parts.as_slice() {
+        [Component::Normal(name)] => !DENIED_IN_TMP.iter().any(|entry| name == entry),
+        [Component::Normal(dir), _, ..] => TMP_SUBDIRS.iter().any(|known| dir == known),
+        _ => false,
+    }
+}
+
+/// Whether `lexical` or `real` falls under the `tmp` root, as written or as
+/// resolved, somewhere [`tmp_serves`] refuses.
 fn denied(lexical: &Path, real: &Path, roots: &[PathBuf]) -> bool {
     roots
         .iter()
         .filter(|root| root.file_name().is_some_and(|name| name == "tmp"))
         .flat_map(|root| [Some(root.clone()), root.canonicalize().ok()])
         .flatten()
-        .flat_map(|tmp| DENIED_IN_TMP.iter().map(move |entry| tmp.join(entry)))
-        .any(|entry| lexical.starts_with(&entry) || real.starts_with(&entry))
+        .any(|tmp| {
+            [lexical, real]
+                .into_iter()
+                .filter_map(|path| path.strip_prefix(&tmp).ok())
+                .any(|rel| !tmp_serves(rel))
+        })
 }
 
 /// The bytes of the file `requested` names, through [`resolve`].
@@ -537,17 +560,21 @@ mod tests {
     }
 
     #[test]
-    fn pairing_codes_and_task_output_in_tmp_are_403() {
+    fn tmp_serves_attachments_only() {
         let disk = Disk::new();
         let roots = disk.roots();
         std::fs::write(disk.home.join("tmp/whatsapp_qr.png"), b"qr").expect("qr");
         std::fs::write(disk.home.join("tmp/cowork_invite_qr.png"), b"qr").expect("invite");
-        std::fs::create_dir_all(disk.home.join("tmp/detached")).expect("detached");
-        std::fs::write(disk.home.join("tmp/detached/job.log"), b"out").expect("log");
+        for dir in ["detached", "subagents", "anything-new", "files", "gui-uploads"] {
+            std::fs::create_dir_all(disk.home.join("tmp").join(dir)).expect("tmp dir");
+            std::fs::write(disk.home.join("tmp").join(dir).join("job.log"), b"out").expect("log");
+        }
         for requested in [
             disk.path("tmp/whatsapp_qr.png"),
             disk.path("tmp/cowork_invite_qr.png"),
             disk.path("tmp/detached/job.log"),
+            disk.path("tmp/subagents/job.log"),
+            disk.path("tmp/anything-new/job.log"),
             disk.path("tmp/sub/../detached/job.log"),
         ] {
             assert_eq!(status(&roots, &requested), 403, "{requested}");
@@ -562,6 +589,8 @@ mod tests {
             assert_eq!(status(&roots, &disk.path("plans/qr.png")), 403);
         }
         assert_eq!(status(&roots, &disk.path("tmp/photo.jpg")), 200);
+        assert_eq!(status(&roots, &disk.path("tmp/files/job.log")), 200);
+        assert_eq!(status(&roots, &disk.path("tmp/gui-uploads/job.log")), 200);
     }
 
     #[test]
