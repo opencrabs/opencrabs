@@ -1,0 +1,11 @@
+{
+  "op": "sessions.ledger_signature",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": [
+      2,
+      1764000300
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "op": "sessions.load",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": [
+      {
+        "id": "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e01",
+        "title": "chat",
+        "model": null,
+        "provider_name": null,
+        "created_at": "2026-11-24T10:00:00Z",
+        "updated_at": "2026-11-24T10:05:00Z",
+        "archived_at": null,
+        "token_count": 0,
+        "total_cost": 0.0,
+        "working_directory": null,
+        "auto_title_attempted": false,
+        "project_id": null,
+        "channel_chat_key": null,
+        "title_source": "manual"
+      }
+    ]
+  }
+}
