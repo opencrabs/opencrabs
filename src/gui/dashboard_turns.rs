@@ -1369,8 +1369,8 @@ impl Dashboard {
                     // The ask line is built before `pair` moves into the
                     // pending confirm: the same borrow escape #3155 closed.
                     let ask_line = {
-                    let (provider, model) = pair.split_once('/').unwrap_or((pair.as_str(), ""));
-                    opencrabs::channels::commands::apply_all_prompt_text(provider, model, count)
+                        let (provider, model) = pair.split_once('/').unwrap_or((pair.as_str(), ""));
+                        opencrabs::channels::commands::apply_all_prompt_text(provider, model, count)
                     };
                     self.models_apply_confirm = Some((pair, count));
                     // A typed `/models <pair> all` never opened the picker
