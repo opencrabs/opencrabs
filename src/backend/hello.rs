@@ -168,16 +168,17 @@ mod tests {
     #[test]
     fn the_fixture_is_a_hello_and_its_answer() {
         let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture is JSON");
-        assert_eq!(fixture["name"], Hello::NAME);
-        let _: Hello = serde_json::from_value(fixture["params"].clone()).expect("params decode");
+        assert_eq!(fixture["op"], Hello::NAME);
+        assert_eq!(fixture["scope"], Hello::SCOPE.as_str());
+        let _: Hello = serde_json::from_value(fixture["request"].clone()).expect("request decode");
         let reply: HelloReply =
-            serde_json::from_value(fixture["reply"].clone()).expect("reply decode");
+            serde_json::from_value(fixture["reply"]["Ok"].clone()).expect("reply decode");
         assert_eq!(reply.protocol, PROTOCOL);
         // Nothing in the fixture is dropped or renamed on the way back: every
         // field and value it shows is one this build reads and writes.
         assert_eq!(
             serde_json::to_value(&reply).expect("encode"),
-            fixture["reply"],
+            fixture["reply"]["Ok"],
             "the fixture holds something this build does not keep"
         );
     }
