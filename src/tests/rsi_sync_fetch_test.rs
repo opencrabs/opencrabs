@@ -382,11 +382,19 @@ fn one_fetch_per_tracked_file() {
 }
 
 #[test]
-fn template_client_has_timeouts() {
-    let body = fn_body("template_client");
+fn template_fetch_carries_timeouts() {
+    // The per-call client was retired with the shared HTTP client (#2843).
+    // The connect ceiling now lives on the process-wide client, and the
+    // whole-call ceiling rides on the request.
+    let http = include_str!("../utils/http.rs");
     assert!(
-        body.contains(".connect_timeout(TEMPLATE_CONNECT_TIMEOUT)"),
+        http.contains(".connect_timeout(CONNECT_TIMEOUT)"),
         "a connect timeout is what stops a blackholed SYN from hanging forever"
+    );
+    let body = fn_body("fetch_once");
+    assert!(
+        body.contains("crate::utils::http::shared()"),
+        "the fetch must post through the shared client instead of building one per call"
     );
     assert!(
         body.contains(".timeout(TEMPLATE_REQUEST_TIMEOUT)"),
