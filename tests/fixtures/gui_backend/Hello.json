@@ -1,0 +1,16 @@
+{
+  "name": "hello.handshake",
+  "params": {},
+  "reply": {
+    "protocol": "gui-backend/1",
+    "version": "0.6.0",
+    "scopes": ["read", "send"],
+    "caps": ["open_external"],
+    "ops": [
+      { "name": "sessions.load", "scope": "read" },
+      { "name": "sessions.rename", "scope": "manage" },
+      { "name": "session_ops.clear_messages", "scope": "manage" },
+      { "name": "hello.handshake", "scope": "read" }
+    ]
+  }
+}
