@@ -1,8 +1,11 @@
 //! The crab an operation runs against: its ledger and, once booted, its
 //! agent service.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use uuid::Uuid;
 
 use crate::brain::agent::AgentService;
 use crate::db::{Database, Pool};
@@ -21,6 +24,7 @@ pub struct Ctx {
     pool: Option<Pool>,
     service: OnceLock<Arc<AgentService>>,
     home: Option<PathBuf>,
+    turns: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 impl Ctx {
@@ -31,6 +35,7 @@ impl Ctx {
             pool: None,
             service: OnceLock::new(),
             home: None,
+            turns: Arc::default(),
         }
     }
 
@@ -88,6 +93,68 @@ impl Ctx {
     pub fn service(&self) -> Result<&Arc<AgentService>, BackendError> {
         self.service.get().ok_or(BackendError::NotReady)
     }
+
+    /// Take `session` for one turn, or `Busy` when a turn already holds it.
+    ///
+    /// A turn is in flight when this crab already handed out a claim for the
+    /// session, or when the channel that owns it says so through its turn
+    /// probe (the gate `session/notify` reads). The claim lasts until the
+    /// returned value drops. While it lives, a session no channel probes reads
+    /// as mid-turn to that same gate, so a notify does not land inside it.
+    pub fn claim_turn(&self, session: Uuid) -> Result<TurnClaim, BackendError> {
+        use crate::brain::agent::service::session_routes::{register_turn_probe, turn_probe};
+
+        let probe = turn_probe(session);
+        if probe.as_ref().is_some_and(|mid_turn| mid_turn()) {
+            return Err(BackendError::Busy);
+        }
+        if !lock_turns(&self.turns).insert(session) {
+            return Err(BackendError::Busy);
+        }
+        if probe.is_none() {
+            let turns = Arc::clone(&self.turns);
+            register_turn_probe(
+                session,
+                Arc::new(move || lock_turns(&turns).contains(&session)),
+            );
+        }
+        Ok(TurnClaim {
+            turns: Arc::clone(&self.turns),
+            session,
+        })
+    }
+
+    /// Whether this crab holds a turn on `session` right now.
+    pub fn turn_in_flight(&self, session: Uuid) -> bool {
+        lock_turns(&self.turns).contains(&session)
+    }
+}
+
+/// A turn's hold on its session. Dropping it frees the session.
+#[must_use = "the session is free again as soon as the claim drops"]
+pub struct TurnClaim {
+    turns: Arc<Mutex<HashSet<Uuid>>>,
+    session: Uuid,
+}
+
+impl TurnClaim {
+    /// The session this claim holds.
+    pub fn session(&self) -> Uuid {
+        self.session
+    }
+}
+
+impl Drop for TurnClaim {
+    fn drop(&mut self) {
+        lock_turns(&self.turns).remove(&self.session);
+    }
+}
+
+/// The in-flight set. A turn that panicked while holding the lock left the
+/// set itself intact, so a poisoned lock is read through rather than wedging
+/// every later turn on this crab.
+fn lock_turns(turns: &Mutex<HashSet<Uuid>>) -> std::sync::MutexGuard<'_, HashSet<Uuid>> {
+    turns.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 static PRIMARY: OnceLock<Arc<Ctx>> = OnceLock::new();
@@ -143,5 +210,53 @@ mod tests {
             path.exists(),
             "the first connection created the ledger file"
         );
+    }
+
+    #[test]
+    fn a_second_turn_on_a_busy_session_is_refused() {
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        let session = Uuid::new_v4();
+        let first = ctx
+            .claim_turn(session)
+            .expect("an idle session takes a turn");
+        assert!(ctx.turn_in_flight(session));
+        assert!(matches!(ctx.claim_turn(session), Err(BackendError::Busy)));
+        drop(first);
+        assert!(!ctx.turn_in_flight(session));
+        let again = ctx
+            .claim_turn(session)
+            .expect("a freed session takes a turn");
+        assert_eq!(again.session(), session);
+    }
+
+    #[test]
+    fn a_busy_session_leaves_the_others_free() {
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        let _held = ctx.claim_turn(Uuid::new_v4()).expect("first session");
+        assert!(ctx.claim_turn(Uuid::new_v4()).is_ok());
+    }
+
+    #[test]
+    fn a_channel_mid_turn_makes_the_session_busy() {
+        use crate::brain::agent::service::session_routes::register_turn_probe;
+
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        let session = Uuid::new_v4();
+        register_turn_probe(session, Arc::new(|| true));
+        assert!(matches!(ctx.claim_turn(session), Err(BackendError::Busy)));
+        assert!(!ctx.turn_in_flight(session));
+    }
+
+    #[test]
+    fn a_claimed_session_reads_mid_turn_to_the_notify_gate() {
+        use crate::brain::agent::service::session_routes::turn_probe;
+
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        let session = Uuid::new_v4();
+        let claim = ctx.claim_turn(session).expect("idle session");
+        let probe = turn_probe(session).expect("the claim registered a probe");
+        assert!(probe());
+        drop(claim);
+        assert!(!probe());
     }
 }
