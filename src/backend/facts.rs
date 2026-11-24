@@ -69,6 +69,50 @@ mod tests {
         );
     }
 
+    async fn booted_ctx() -> Ctx {
+        let db = crate::db::Database::connect_in_memory()
+            .await
+            .expect("in-memory ledger");
+        db.run_migrations().await.expect("migrate");
+        let context = crate::services::ServiceContext::new(db.pool().clone());
+        let provider: std::sync::Arc<dyn crate::brain::provider::Provider> =
+            std::sync::Arc::new(crate::tests::agent_service_mocks::MockProvider);
+        let service = crate::brain::agent::AgentService::new_for_test(provider, context).await;
+        let ctx = Ctx::new(PathBuf::from("unused.db"));
+        ctx.set_service(std::sync::Arc::new(service));
+        ctx
+    }
+
+    /// The fact example (`footer_place`): a session's directory is the one
+    /// the service holds for that session, not the process's.
+    #[tokio::test]
+    async fn a_sessions_working_directory_is_its_own() {
+        let ctx = booted_ctx().await;
+        let service = ctx.service().expect("booted");
+        let session = Uuid::new_v4();
+        let own = PathBuf::from("/tmp/facts-session-own");
+        service.set_session_only_working_directory(session, own.clone());
+
+        let facts = facts_for(&ctx, Some(session)).expect("facts");
+        assert_eq!(facts.working_directory, own);
+        assert_eq!(
+            facts.working_directory,
+            service.get_working_directory_for_session(session)
+        );
+        assert_eq!(facts.context_limit, service.context_limit_for_session(session));
+        assert_eq!(facts.provider, service.provider_name_for_session(session));
+        assert_eq!(facts.model, service.provider_model_for_session(session));
+        assert_eq!(facts.base_context_tokens, service.base_context_tokens());
+    }
+
+    /// With no conversation open the footer names the launch directory.
+    #[tokio::test]
+    async fn without_a_session_the_directory_is_the_launch_one() {
+        let ctx = booted_ctx().await;
+        let facts = facts_for(&ctx, None).expect("facts");
+        assert_eq!(facts.working_directory, crate::utils::cwd::launch_cwd());
+    }
+
     #[test]
     fn facts_survive_the_wire() {
         let facts = Facts {
