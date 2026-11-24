@@ -1,0 +1,11 @@
+{
+  "op": "session_ops.create",
+  "scope": "a2a:manage",
+  "request": {
+    "provider": "anthropic",
+    "model": "claude-x"
+  },
+  "response": {
+    "Ok": "0e7d6c1a-2f4b-4c8e-9a51-7b3d2e1f0a99"
+  }
+}

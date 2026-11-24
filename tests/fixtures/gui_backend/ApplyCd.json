@@ -1,0 +1,11 @@
+{
+  "op": "session_ops.apply_cd",
+  "scope": "a2a:admin",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "dir": "/home/crab/project"
+  },
+  "response": {
+    "Ok": "/home/crab/project"
+  }
+}
