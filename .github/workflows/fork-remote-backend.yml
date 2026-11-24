@@ -5,10 +5,14 @@ name: Fork remote-backend lane
 # crate on the laptop that writes it. This lane is that compiler. It never
 # reaches upstream main.
 #
-# Five jobs, no `needs` between them, so a type error is read off `check`
-# minutes before the test and build jobs finish. Each job keeps its own cache
-# key: the profiles differ (dev for check and clippy, citest for tests, ci for
-# the build), and a shared key would have each job evict the others' units.
+# Six jobs, no `needs` between them, so a type error is read off `check`
+# minutes before the test and build jobs finish. Cache keys follow the build
+# profiles (dev for check + clippy, citest for test + lib-suite, ci for the
+# build), one key per profile: clippy and lib-suite ride their sibling job's
+# compiled dependencies restore-only, and only the integration branch saves,
+# because a cache is only restorable from the branch it was saved on or the
+# repository default branch. Feature branches restore from it and never write,
+# or each branch's writes would evict the shared pool at the 10 GB repo cap.
 
 on:
   push:
@@ -72,8 +76,15 @@ jobs:
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: fork-rb-check
+          # `shared-key` reproduces the segment this job's key always had
+          # (key + GITHUB_JOB), so the existing warm entry stays a full match.
+          # The lint job uses the same shared key: clippy runs the deps
+          # through plain rustc, so the check job's compiled dependencies are
+          # exactly what it needs, and lint's own artifacts change with the
+          # workspace anyway. Only check saves; the key is never written twice.
+          shared-key: fork-rb-check-check
           cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Install dependencies
         run: |
@@ -117,8 +128,11 @@ jobs:
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: fork-rb-lint
+          # Same key as check (see that step): restore-only, so clippy rides
+          # the compiled dependency tree instead of paying for its own copy.
+          shared-key: fork-rb-check-check
           cache-on-failure: true
+          save-if: false
 
       - name: Install dependencies
         run: |
@@ -174,6 +188,7 @@ jobs:
           # were rebuilt cold on every run.
           key: fork-rb-test-v2
           cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Install mold + ALSA + X11 dev
         run: |
@@ -396,6 +411,7 @@ jobs:
         with:
           key: fork-rb-build
           cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Install dependencies
         run: |
