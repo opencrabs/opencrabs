@@ -235,6 +235,13 @@ pub(crate) fn apply_progress_event(
         }
         ProgressEvent::SelfHealingAlert { message } => {
             if let Ok(mut s) = st.lock() {
+                // #3173: a failed or truncated compaction never emits
+                // CompactionSummary, so this alert is the only chance to
+                // lift the header pin. Unconditional like the success lift:
+                // set-gated / lift-ungated means a failed compaction can
+                // never strand a "Compacting" header forever.
+                s.compacting = false;
+                s.header_preview = None;
                 s.display_queue.push(DisplayItem::System(format!(
                     "🔧 {}",
                     crate::utils::sanitize::normalize_dashes(&message)

@@ -407,3 +407,66 @@ fn receipt_after_pct_is_the_meter_pct() {
         "the meter log at service/context.rs:1011 reads the same function"
     );
 }
+
+/// #3173: the terminal cut speaks. The wording names the loss plainly: no
+/// summary was produced, the oldest messages were dropped, nothing before
+/// the marker survives.
+#[test]
+fn the_truncated_alert_names_the_loss() {
+    let msg = crate::brain::agent::service::compaction::truncated_alert_message();
+    assert!(msg.contains("no summary"), "{msg}");
+    assert!(msg.contains("dropped"), "{msg}");
+    assert!(msg.contains("Nothing before the marker survives"), "{msg}");
+}
+
+/// #3173: the truncation branch emits the alert, not silence.
+///
+/// The success receipt never fires when every summariser attempt failed, so
+/// the last-resort truncation is the only place that can tell the user
+/// messages were dropped without a summary.
+#[test]
+fn the_truncation_branch_emits_the_alert() {
+    const COMPACTION: &str = include_str!("../brain/agent/service/compaction.rs");
+    let branch = COMPACTION
+        .find("Last resort: every compaction attempt failed")
+        .expect("the last-resort truncation branch must exist");
+    let body = &COMPACTION[branch..branch + 1600];
+    assert!(
+        body.contains("ProgressEvent::SelfHealingAlert"),
+        "the truncation branch must emit the honest alert (#3173)"
+    );
+    assert!(
+        body.contains("truncated_alert_message()"),
+        "the alert must carry the shared wording, not a divergent copy (#3173)"
+    );
+}
+
+/// #3173: both Telegram alert arms lift the Compacting header pin.
+///
+/// A failed compaction never emits CompactionSummary, the only arm that
+/// lifted the pin before, so the header stayed pinned to
+/// "⏳ Compacting context..." forever after a failed walk.
+#[test]
+fn both_telegram_alert_arms_lift_the_pin() {
+    for (path, src) in [
+        (
+            "progress.rs",
+            include_str!("../channels/telegram/progress.rs"),
+        ),
+        ("resume.rs", include_str!("../channels/telegram/resume.rs")),
+    ] {
+        let mut lifts = 0;
+        let mut cursor = 0;
+        while let Some(off) = src[cursor..].find("ProgressEvent::SelfHealingAlert { message }") {
+            let start = cursor + off;
+            let body = &src[start..start + 500];
+            assert!(
+                body.contains("s.compacting = false;"),
+                "{path}: every SelfHealingAlert arm must lift the Compacting pin (#3173)"
+            );
+            lifts += 1;
+            cursor = start + 10;
+        }
+        assert!(lifts >= 1, "{path}: expected at least one alert arm");
+    }
+}
