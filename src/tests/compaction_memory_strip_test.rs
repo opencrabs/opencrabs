@@ -346,3 +346,39 @@ fn a_message_that_is_not_a_summary_is_left_alone() {
 
     assert_eq!(reinjectable_summary(plain, then, now), plain);
 }
+
+// #3170: the `/clear` marker shares the compaction prefix, so a reload sends
+// it through the same rewrite. Its body carries no `## ` heading, and the
+// #3167 rule ("nothing before the first durable heading is trusted") therefore
+// deleted every line of it: the quoted exchanges and the session_search
+// pointer both vanished, leaving a marker that said it had carried nothing but
+// instructions.
+#[test]
+fn a_clear_marker_keeps_the_exchanges_it_quoted() {
+    let cleared = format!(
+        "{}\n\n\
+         The user cleared this session's context at this point. Only the last \
+         exchanges quoted below carry over; everything older is out of your \
+         context. The full history is still stored in this session, titled \
+         'GH Issues'. If you need something from before, use the session_search \
+         tool. Continue from the user's next message.\n\n\
+         The last exchanges before the clear, quoted as context only:\n\n\
+         **user**\nfix the gate\n\n**assistant**\nrun the ratchet first",
+        crate::brain::agent::service::clear::CLEAR_MARKER_PREFIX
+    );
+    let (then, now) = then_and_now();
+    let out = reinjectable_summary(&cleared, then, now);
+
+    assert!(
+        out.contains("fix the gate"),
+        "the quoted exchange was dropped on replay: {out}"
+    );
+    assert!(
+        out.contains("session_search"),
+        "the pointer back to the stored history was dropped: {out}"
+    );
+    assert!(
+        !out.contains("dropped when it was replayed"),
+        "the marker was mistaken for a summary of nothing but instructions: {out}"
+    );
+}

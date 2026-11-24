@@ -1916,6 +1916,12 @@ pub(crate) fn reinjectable_summary(
     if !content.starts_with(COMPACTION_MARKER_PREFIX) {
         return content.to_string();
     }
+    // #3170: a `/clear` marker shares this prefix but is not a continuation
+    // document. It carries no sections, only the exchanges it quoted, so the
+    // section strip below has nothing to cut and would delete all of it.
+    if content.starts_with(crate::brain::agent::service::clear::CLEAR_MARKER_PREFIX) {
+        return content.to_string();
+    }
     // The banner is its own line; the document starts after the blank line
     // that follows it. A marker with no body keeps its banner and gains no
     // stamp, because there is nothing to age.
@@ -2003,6 +2009,15 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
     // nothing before the first durable heading is trusted: it is all execution
     // spill from one session.
     let mut seen_durable = false;
+    // #3170: a stored body that is not a continuation document at all carries
+    // no `## ` heading anywhere, so there are no sections to slice by. The
+    // unheaded-preamble rule above deleted every line of such a body, which
+    // emptied `/clear`'s quoted exchanges on replay and made a capped entry
+    // claim it had nothing durable to say. Only a document with headings can
+    // be taken apart by them.
+    let keep_unstructured = !summary
+        .lines()
+        .any(|line| line.trim_start().starts_with("## "));
 
     for line in summary.lines() {
         let trimmed = line.trim_start();
@@ -2024,7 +2039,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
                 }
             }
             in_fence = !in_fence;
-            if seen_durable && !dropping {
+            if !dropping && (seen_durable || keep_unstructured) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2032,7 +2047,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
         }
 
         if in_fence {
-            if seen_durable && !dropping {
+            if !dropping && (seen_durable || keep_unstructured) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2052,7 +2067,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
         {
             continue;
         }
-        if dropping || !seen_durable {
+        if dropping || (!seen_durable && !keep_unstructured) {
             continue;
         }
         out.push_str(line);
