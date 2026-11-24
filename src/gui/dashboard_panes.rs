@@ -642,9 +642,12 @@ impl Dashboard {
         // The leaf's own context window, read for ITS session (#2854): a pane
         // can run a different provider from the window, so borrowing the
         // window's number would print another conversation's budget.
-        let pane_ctx_max = agent_bridge::bridge()
-            .map(|b| b.service.context_limit_for_session(id))
+        let pane_ctx_max = self
+            .backend
+            .facts(Some(id))
+            .map(|facts| facts.context_limit)
             .unwrap_or(0);
+        let pane_backend = self.backend.clone();
         let pane = cx.new(|_| {
             PaneView::new(
                 id,
@@ -654,6 +657,7 @@ impl Dashboard {
                 pane_width,
                 pane_ctx_max,
                 window,
+                pane_backend,
             )
         });
         self.pane_states.insert(id, pane);
@@ -970,13 +974,12 @@ impl Dashboard {
     /// anywhere yet.
     pub(crate) fn footer_place(&mut self) -> (String, String) {
         let session = self.chat_session;
-        let dir = match agent_bridge::bridge() {
-            Some(bridge) => match session {
-                Some(id) => bridge.service.get_working_directory_for_session(id),
-                None => opencrabs::utils::cwd::launch_cwd(),
-            },
-            None => opencrabs::utils::cwd::launch_cwd(),
-        };
+        // With no session the facts already name the launch directory.
+        let dir = self
+            .backend
+            .facts(session)
+            .map(|facts| facts.working_directory)
+            .unwrap_or_else(opencrabs::utils::cwd::launch_cwd);
         let stale = self
             .footer_dir
             .as_ref()
@@ -1012,14 +1015,13 @@ impl Dashboard {
             // can be mid-turn is the open one.
             parts.push("⠙ working".to_string());
         }
-        if let Some(bridge) = agent_bridge::bridge() {
+        if let Some(facts) = self.backend.facts(Some(session)) {
             // Each pane names the directory its own conversation works in, so
             // a `/cd` in one leaf never reads as a move of its neighbour
             // (#3036). Only the directory: the branch would run `git` per pane
             // per frame, and the window footer above already names it.
-            let dir = bridge.service.get_working_directory_for_session(session);
-            parts.push(tilde_path(&dir));
-            let (provider, model) = bridge.service.provider_pair_for_session(session);
+            parts.push(tilde_path(&facts.working_directory));
+            let (provider, model) = (facts.provider, facts.served_model);
             if !model.is_empty() {
                 let label = model.rsplit('/').next().unwrap_or(&model).to_string();
                 parts.push(format!("{provider} / {label}"));
