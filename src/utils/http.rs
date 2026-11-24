@@ -51,6 +51,14 @@ pub fn shared() -> &'static reqwest::Client {
     // under test a fresh client per call sidesteps the runtime mismatch wholly.
     #[cfg(test)]
     {
+        // The connect deadline goes too (see build_shared): the governor
+        // drainer tests run under tokio's paused clock, which auto-advances
+        // to the next pending timer deadline while the real localhost connect
+        // parks on the reactor, so the 10s deadline fires and every wire
+        // attempt dies before the mock records a hit (#3174: 0 requests
+        // received, 8 attempts abandoned). A client with no timeout leaves
+        // nothing for the virtual clock to race, the same reason
+        // drainer_wire_round's teloxide client has none.
         Box::leak(Box::new(build_shared()))
     }
     #[cfg(not(test))]
@@ -60,8 +68,15 @@ pub fn shared() -> &'static reqwest::Client {
 }
 
 fn build_shared() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
+    // The 10s connect deadline is production-only. Under tokio's paused test
+    // clock the deadline is a pending timer the runtime auto-advances to while
+    // the real connect parks, so every governor drainer wire attempt died
+    // before mockito recorded a hit (#3174).
+    #[cfg(not(test))]
+    let builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    #[cfg(test)]
+    let builder = reqwest::Client::builder();
+    builder
         .build()
         // A build failure would take every caller down at once, so keep
         // going with the default client and leave the reason in the logs.
