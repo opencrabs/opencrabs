@@ -7,6 +7,9 @@
 //! (#2613). The move is mechanical: no behaviour, no ids, no styles changed.
 
 use crate::palette;
+use opencrabs::backend::cap::{self, Need};
+use opencrabs::backend::hello::HelloReply;
+use opencrabs::backend::{Op, session_ops, sessions};
 
 use gpui::{
     AnyElement, App, Div, Edges, InteractiveElement, MouseButton, MouseDownEvent, Pixels, Point,
@@ -31,6 +34,43 @@ pub enum MenuKind {
     GroupTopics,
     SplitSide,
     SplitStack,
+}
+
+const NO_NEEDS: &[Need] = &[];
+const PIN: &[Need] = &[Need::Op(<sessions::SetFavorite as Op>::NAME)];
+const RENAME: &[Need] = &[Need::Op(<sessions::RenameSession as Op>::NAME)];
+const DELETE: &[Need] = &[Need::Op(<session_ops::DeleteSession as Op>::NAME)];
+const ENABLE_TOPICS: &[Need] = &[Need::Op(<sessions::SetTopics as Op>::NAME)];
+const NEW_TOPIC: &[Need] = &[Need::Op(<sessions::CreateTopic as Op>::NAME)];
+const DISABLE_TOPICS: &[Need] = &[Need::Op(<sessions::MergeTopics as Op>::NAME)];
+const GROUP_TOPICS: &[Need] = &[Need::Op(<sessions::AttachTopic as Op>::NAME)];
+
+impl MenuKind {
+    /// The operations the row action runs on the crab. The splits are the
+    /// window's own layout and ask the crab for nothing.
+    #[allow(dead_code)] // read through `unavailable`, which has no window caller yet
+    pub fn needs(&self) -> &'static [Need] {
+        match self {
+            MenuKind::Pin => PIN,
+            MenuKind::Rename => RENAME,
+            MenuKind::AssignProject => NO_NEEDS,
+            MenuKind::Delete => DELETE,
+            MenuKind::EnableTopics => ENABLE_TOPICS,
+            MenuKind::NewTopic => NEW_TOPIC,
+            MenuKind::DisableTopics => DISABLE_TOPICS,
+            MenuKind::GroupTopics => GROUP_TOPICS,
+            MenuKind::SplitSide | MenuKind::SplitStack => NO_NEEDS,
+        }
+    }
+
+    /// Why the action is greyed out on the crab that answered `hello`, or
+    /// `None` when it can run. No handshake yet greys nothing out.
+    #[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
+    pub fn unavailable(&self, hello: Option<&HelloReply>) -> Option<String> {
+        cap::check(hello?, self.needs())
+            .err()
+            .map(|why| why.reason())
+    }
 }
 
 /// One item of a context menu. The labels are the interface: Pin flips to
@@ -67,6 +107,29 @@ pub fn menu_item_disabled(label: &'static str) -> Stateful<Div> {
         .text_sm()
         .text_color(rgb(palette::current().text_faint))
         .child(SharedString::from(label))
+}
+
+/// A row the crab will not run, with the reason under its label: a missing
+/// scope, an older crab, or an action that only works on this machine. Drawn
+/// like [`menu_item_disabled`], so the menu keeps its shape, and the reason
+/// says why instead of leaving the user to guess.
+#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
+pub fn menu_item_unavailable(label: &'static str, reason: String) -> Stateful<Div> {
+    menu_item_disabled(label).flex().flex_col().child(
+        div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_faint))
+            .child(SharedString::from(reason)),
+    )
+}
+
+/// The row for `label`: pickable, or greyed out with its reason.
+#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
+pub fn menu_item_gated(label: &'static str, unavailable: Option<String>) -> Stateful<Div> {
+    match unavailable {
+        Some(reason) => menu_item_unavailable(label, reason),
+        None => menu_item(label),
+    }
 }
 
 /// A menu's card: the bordered, shadowed column every context menu is drawn
@@ -151,4 +214,84 @@ pub fn dismissible_menu_popover(
         .snap_to_window_with_margin(Edges::all(px(8.0)))
         .child(menu_card(id, items).on_mouse_down_out(dismiss))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrabs::backend::Scope;
+
+    const ALL_KINDS: [MenuKind; 10] = [
+        MenuKind::Pin,
+        MenuKind::Rename,
+        MenuKind::AssignProject,
+        MenuKind::Delete,
+        MenuKind::EnableTopics,
+        MenuKind::NewTopic,
+        MenuKind::DisableTopics,
+        MenuKind::GroupTopics,
+        MenuKind::SplitSide,
+        MenuKind::SplitStack,
+    ];
+
+    #[test]
+    fn every_needed_operation_is_declared_by_the_crab() {
+        let declared: Vec<&str> = opencrabs::backend::registry()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for kind in &ALL_KINDS {
+            for need in kind.needs() {
+                if let Need::Op(op) = need {
+                    assert!(declared.contains(op), "a menu item needs undeclared {op}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_greyed_out_before_the_handshake_or_on_a_local_crab() {
+        let local = HelloReply::for_caller(Scope::ALL, true);
+        for kind in &ALL_KINDS {
+            assert_eq!(kind.unavailable(None), None);
+            assert_eq!(kind.unavailable(Some(&local)), None);
+        }
+    }
+
+    #[test]
+    fn a_read_only_token_greys_out_every_ledger_write() {
+        let hello = HelloReply::for_caller(&[Scope::Read], false);
+        for kind in &ALL_KINDS {
+            let why = kind.unavailable(Some(&hello));
+            if kind.needs().is_empty() {
+                assert_eq!(why, None);
+            } else {
+                let why = why.expect("a write needs more than read");
+                assert!(why.contains("needs a2a:"), "{why}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_needs_admin_while_rename_needs_manage() {
+        let hello = HelloReply::for_caller(&[Scope::Read, Scope::Manage], false);
+        assert_eq!(MenuKind::Rename.unavailable(Some(&hello)), None);
+        let why = MenuKind::Delete
+            .unavailable(Some(&hello))
+            .expect("delete is admin");
+        assert!(why.contains("a2a:admin"), "{why}");
+    }
+
+    #[test]
+    fn an_older_crab_greys_out_what_it_does_not_declare() {
+        let mut hello = HelloReply::for_caller(Scope::ALL, false);
+        hello
+            .ops
+            .retain(|known| known.name != <sessions::MergeTopics as Op>::NAME);
+        let why = MenuKind::DisableTopics
+            .unavailable(Some(&hello))
+            .expect("not declared");
+        assert!(why.contains("older"), "{why}");
+        assert_eq!(MenuKind::EnableTopics.unavailable(Some(&hello)), None);
+    }
 }
