@@ -1128,13 +1128,8 @@ impl Dashboard {
                     logging::info("agent ready");
                     // The footer's denominator comes from the service, the
                     // same number compaction enforces for this session.
-                    if let Some(b) = agent_bridge::bridge() {
-                        self.ctx_max = match self.chat_state.session() {
-                            Some(sid) => b.service.context_limit_for_session(sid),
-                            None => b
-                                .service
-                                .context_window_for_model(&b.service.provider_model()),
-                        };
+                    if let Some(facts) = self.backend.facts(self.chat_state.session()) {
+                        self.ctx_max = facts.context_limit;
                     }
                     // A window opened on an empty ledger has no conversation
                     // to send into: make one before the first message can be
@@ -1281,9 +1276,9 @@ impl Dashboard {
                     // The last prompt size came from the old provider's
                     // tokenizer, so it goes with it (#2644).
                     if self.chat_state.session() == Some(session)
-                        && let Some(b) = agent_bridge::bridge()
+                        && let Some(facts) = self.backend.facts(Some(session))
                     {
-                        self.ctx_max = b.service.context_limit_for_session(session);
+                        self.ctx_max = facts.context_limit;
                         self.turn.ctx_tokens = None;
                     }
                     // A pick is a commitment: apply it, say so once, and put
