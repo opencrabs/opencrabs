@@ -434,6 +434,17 @@ impl SessionSearchTool {
                 // neither of which a reader ever saw (#3091).
                 return None;
             }
+            // A row can match only inside reasoning while still carrying a
+            // visible answer. Rendering it would answer the query with a row
+            // that does not contain the query, so a visible row has to name
+            // at least one of the terms itself (#3091).
+            let lower = body.to_lowercase();
+            if !terms
+                .iter()
+                .any(|term| lower.contains(&term.to_lowercase()))
+            {
+                return None;
+            }
             let title = title_map
                 .get(&msg.session_id)
                 .map(String::as_str)
