@@ -474,13 +474,12 @@ impl AgentService {
                 if truncated
                     && let Some(cb) = progress_callback
                 {
-                        cb(
-                            session_id,
-                            ProgressEvent::SelfHealingAlert {
-                                message: truncated_alert_message(),
-                            },
-                        );
-                    }
+                    cb(
+                        session_id,
+                        ProgressEvent::SelfHealingAlert {
+                            message: truncated_alert_message(),
+                        },
+                    );
                 }
             }
         }
