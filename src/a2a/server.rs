@@ -2,7 +2,8 @@
 //!
 //! Serves:
 //! - `GET  /.well-known/agent.json` — Agent Card discovery
-//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped)
+//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped; `gui/call`
+//!   gates per backend operation)
 //! - `POST /a2a/pair`               — One-time code → scoped session token
 //! - `GET  /a2a/health`             — Health check
 
@@ -363,6 +364,16 @@ async fn handle_jsonrpc(
             )),
         )
             .into_response();
+    }
+
+    // gui/call carries its own per-operation scope gate, and a refusal there
+    // is an HTTP 403 rather than a 200 with an error body. It runs against
+    // the process's primary crab, not the gateway's own service.
+    if req.method == "gui/call" {
+        let ctx = crate::backend::primary();
+        let (status, response) =
+            handler::gui::handle_call(ctx.as_deref(), &granted.0, req.id, req.params).await;
+        return (status, Json(response)).into_response();
     }
 
     // message/stream returns SSE instead of JSON
