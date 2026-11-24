@@ -760,41 +760,17 @@ pub fn spawn_create_session(
     provider: Option<String>,
     model: Option<String>,
 ) {
-    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-session-create", move |runtime| {
-        let sink = thread_sink;
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e}"))?;
-            let service =
-                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
-            let working_directory = Some(
-                opencrabs::utils::cwd::launch_cwd()
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            service
-                .create_session_with_provider(
-                    Some("New Chat".to_string()),
-                    provider,
-                    model,
-                    working_directory,
-                )
-                .await
-                .map(|s| s.id)
-                .map_err(|e| format!("create session: {e}"))
-        });
-        match result {
-            Ok(id) => {
-                let _ = sink.send(TurnEvent::SessionCreated(id));
-            }
-            Err(e) => {
-                let _ = sink.send(TurnEvent::SessionCreateFailed(e));
-            }
-        }
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::CreateSession { provider, model },
+        move |result| {
+            let event = match result {
+                Ok(id) => TurnEvent::SessionCreated(id),
+                Err(e) => TurnEvent::SessionCreateFailed(e.into_message()),
+            };
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionCreateFailed(format!(
             "session thread spawn: {e}"
@@ -822,31 +798,20 @@ pub fn spawn_track_files(
     session_id: Uuid,
     paths: Vec<PathBuf>,
 ) {
-    let db_path = backend.local_db_path();
     if paths.is_empty() {
         return;
     }
-    let spawned = spawn_worker("gui-file-track", move |runtime| {
-        runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => {
-                    crate::logging::error(&format!("file track db connect: {e}"));
-                    return;
-                }
-            };
-            let service =
-                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-            for path in paths {
-                // The name in the log is the file's own: a failure has to
-                // say which attachment did not get tracked.
-                let name = path.display().to_string();
-                if let Err(e) = service.get_or_create_file(session_id, path, None).await {
-                    crate::logging::error(&format!("file track {name}: {e}"));
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::TrackFiles { session_id, paths },
+        |result| match result {
+            Ok(untracked) => {
+                for line in untracked {
+                    crate::logging::error(&line);
                 }
             }
-        });
-    });
+            Err(e) => crate::logging::error(&e.into_message()),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("file track thread spawn: {e}"));
     }
@@ -1017,36 +982,17 @@ pub async fn load_files(
     backend: crate::backend_glue::Backend,
     session_id: Uuid,
 ) -> Result<Vec<SessionFile>, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = spawn_worker("gui-file-list", move |runtime| {
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e:#}"))?;
-            let service =
-                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-            let files = service
-                .list_files_for_session(session_id)
-                .await
-                .map_err(|e| format!("{e:#}"))?;
-            Ok(files
-                .into_iter()
-                .map(|f| SessionFile {
-                    path: f.path,
-                    size: f.size,
-                })
-                .collect())
-        });
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("file list thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("file list worker: {e}")),
-    }
+    let files = backend
+        .call(opencrabs::backend::session_ops::SessionFiles { session_id })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)?;
+    Ok(files
+        .into_iter()
+        .map(|f| SessionFile {
+            path: f.path,
+            size: f.size,
+        })
+        .collect())
 }
 
 pub fn spawn_delete_session(
@@ -1054,30 +1000,17 @@ pub fn spawn_delete_session(
     session_id: Uuid,
     sink: EventSink,
 ) {
-    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-session-delete", move |runtime| {
-        let sink = thread_sink;
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e}"))?;
-            let service =
-                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
-            service
-                .delete_session(session_id)
-                .await
-                .map_err(|e| format!("delete session: {e}"))
-        });
-        match result {
-            Ok(()) => {
-                let _ = sink.send(TurnEvent::SessionDeleted(session_id));
-            }
-            Err(e) => {
-                let _ = sink.send(TurnEvent::SessionDeleteFailed(e));
-            }
-        }
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::DeleteSession { session_id },
+        move |result| {
+            let event = match result {
+                Ok(()) => TurnEvent::SessionDeleted(session_id),
+                Err(e) => TurnEvent::SessionDeleteFailed(e.into_message()),
+            };
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionDeleteFailed(format!(
             "session delete thread spawn: {e}"
@@ -1092,33 +1025,28 @@ pub fn spawn_delete_session(
 /// as every other bridge call: 4 MB thread, own current-thread runtime,
 /// result back over the event channel.
 pub fn spawn_plan_path(backend: crate::backend_glue::Backend, session_id: Uuid, sink: EventSink) {
-    let db_path = backend.local_db_path();
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-plan-path", move |runtime| {
-        let sink = thread_sink;
-        // Reproduce `plan_json_path`'s resolution: the project dir when
-        // the session is bound, the profile `session/` fallback when it
-        // is not (or the DB is unreachable). Never the global pool.
-        let dir = runtime
-            .block_on(async move {
-                match Database::connect(&db_path).await {
-                    Ok(db) => {
-                        opencrabs::utils::plan_files::project_session_dir(session_id, db.pool())
-                            .await
-                    }
-                    Err(e) => {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::PlanPath { session_id },
+        move |result| {
+            // The crab reproduces `plan_json_path`'s resolution: the project
+            // dir when the session is bound, the profile `session/` fallback
+            // when it is not (or the ledger is unreachable).
+            let path = match result {
+                Ok(reply) => {
+                    if let Some(e) = reply.db_error {
                         crate::logging::error(&format!("plan path db: {e}"));
-                        None
                     }
+                    Some(PathBuf::from(reply.plan.path))
                 }
-            })
-            .unwrap_or_else(|| opencrabs::config::opencrabs_home().join("session"));
-        let path = dir.join(format!(".opencrabs_plan_{session_id}.json"));
-        let _ = sink.send(TurnEvent::PlanPath {
-            session: session_id,
-            path: Some(path),
-        });
-    });
+                Err(_) => None,
+            };
+            let _ = thread_sink.send(TurnEvent::PlanPath {
+                session: session_id,
+                path,
+            });
+        },
+    );
     if spawned.is_err() {
         let _ = sink.send(TurnEvent::PlanPath {
             session: session_id,
