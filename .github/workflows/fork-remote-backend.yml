@@ -316,9 +316,28 @@ jobs:
 
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          # Its own key: sharing the `test` key would have the two jobs evict
-          # each other's units, and they start together anyway.
-          key: fork-rb-libsuite-v1
+          # Same cache entry as the `test` job, not its own. Measured on the
+          # fork (gh api repos/loonix/opencrabs/actions/caches): this job's own
+          # entry was v0-rust-fork-rb-libsuite-v1-lib-suite-Linux-x64-75856716-
+          # 978feb66 (1224 MB), a strict subset of the test job's
+          # v0-rust-fork-rb-test-v2-test-Linux-x64-75856716-978feb66 (2107 MB):
+          # same profile (citest), same env hash (identical env block), same
+          # lock hash (same Cargo.lock), only the GITHUB_JOB segment differed.
+          # rust-cache v2 composes the key as prefix + (shared-key OR key+job)
+          # + os/arch + env-hash + lock-hash, so `shared-key` here replaces
+          # `key + GITHUB_JOB` and lands this job on test's exact key: a FULL
+          # match restore (no pre-clean) of the 2.1 GB citest target instead of
+          # downloading and keeping a second 1.2 GB copy of a subset of it.
+          #
+          # The old "its own key" note feared the two jobs evicting each
+          # other's units. That race only exists when both jobs WRITE the same
+          # key. `save-if: false` removes it at the source: lib-suite's dep set
+          # is a subset of test's (default features only, no gui), so test
+          # stays the only writer and this job never saves. One entry instead
+          # of two also frees 1.2 GB of the 10 GB repo cache budget, which is
+          # eviction pressure that turns warm branches cold.
+          shared-key: fork-rb-test-v2-test
+          save-if: false
           cache-on-failure: true
 
       - name: Install mold + ALSA + X11 dev
