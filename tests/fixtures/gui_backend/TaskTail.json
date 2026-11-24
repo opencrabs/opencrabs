@@ -1,0 +1,14 @@
+{
+  "op": "tasks.tail",
+  "scope": "a2a:read",
+  "request": {
+    "session": "6f1c2d3e-0000-4000-8000-000000000001",
+    "task": "7a2b3c4d-0000-4000-8000-000000000010",
+    "path": null,
+    "lines": 5
+  },
+  "response": {
+    "path": "/tmp/opencrabs-bg/7a2b3c4d-0000-4000-8000-000000000010.log",
+    "text": "running 12 tests\ntest ok\n"
+  }
+}

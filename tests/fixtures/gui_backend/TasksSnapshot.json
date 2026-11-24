@@ -1,0 +1,24 @@
+{
+  "op": "tasks.snapshot",
+  "scope": "a2a:read",
+  "request": {
+    "sessions": [
+      "6f1c2d3e-0000-4000-8000-000000000001",
+      "6f1c2d3e-0000-4000-8000-000000000002"
+    ]
+  },
+  "response": [
+    {
+      "session": "6f1c2d3e-0000-4000-8000-000000000001",
+      "tasks": [
+        {
+          "task_id": "7a2b3c4d-0000-4000-8000-000000000010",
+          "label": "cargo test",
+          "kind": "detached",
+          "secs": 32,
+          "ours": true
+        }
+      ]
+    }
+  ]
+}
