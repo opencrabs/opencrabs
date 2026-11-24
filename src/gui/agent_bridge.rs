@@ -330,32 +330,27 @@ pub fn spawn_update_checks(sink: EventSink) {
 
 /// Delete one session's messages from the ledger, as the TUI's ctrl+k does. The
 /// session row stays, so the conversation is kept and only its history clears (#2430).
+/// The work is the backend's `ClearMessages`, on its own `spawn_worker` lane.
 pub fn spawn_clear_messages(
     backend: crate::backend_glue::Backend,
     session_id: Uuid,
     sink: EventSink,
 ) {
-    let db_path = backend.local_db_path();
     // Both arms report: the job may fail to reach a worker, and the worker may
     // fail to run it, and the window must not keep the old rows either way.
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-clear-messages", move |runtime| {
-        let event = runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
-            };
-            let service =
-                opencrabs::services::MessageService::new(ServiceContext::new(db.pool().clone()));
-            match service.delete_messages_for_session(session_id).await {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::ClearMessages { session_id },
+        move |result| {
+            let event = match result {
                 Ok(()) => TurnEvent::MessagesCleared(session_id),
-                Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
+                Err(e) => TurnEvent::ClearFailed(e.into_message()),
+            };
+            if let Err(e) = thread_sink.send(event) {
+                crate::logging::error(&format!("clear result not delivered: {e}"));
             }
-        });
-        if let Err(e) = thread_sink.send(event) {
-            crate::logging::error(&format!("clear result not delivered: {e}"));
-        }
-    });
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("clear thread: {e}"));
         let _ = sink.send(TurnEvent::ClearFailed(format!("clear: {e}")));
