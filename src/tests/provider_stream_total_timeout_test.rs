@@ -54,71 +54,75 @@ fn compat_total_timeout_is_not_below_the_native_stream_providers() {
 #[test]
 fn the_stream_clients_carry_no_total_timeout() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let families = [
-        (
-            "src/brain/provider/custom_openai_compatible.rs",
-            "build_stream_http_client",
-        ),
-        ("src/brain/provider/anthropic.rs", "build_stream_client"),
-        ("src/brain/provider/gemini.rs", "build_stream_client"),
-    ];
 
-    for (rel, builder) in families {
-        let src = std::fs::read_to_string(manifest.join(rel))
-            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
-
-        // 1. The stream-client builder exists...
-        let head = format!("fn {builder}() -> Client {{");
-        let start = src.find(&head).unwrap_or_else(|| {
+    // 1. The one stream transport every provider shares carries no ceiling,
+    //    and neither does the tuning it is built from. Both moved into the
+    //    shared HTTP module when the per-provider builders were retired
+    //    (#2843), so the scan follows the seam rather than the file it used
+    //    to live in.
+    let http = std::fs::read_to_string(manifest.join("src/utils/http.rs"))
+        .unwrap_or_else(|e| panic!("cannot read src/utils/http.rs: {e}"));
+    for (anchor, label) in [
+        ("fn streaming_transport_ref()", "the stream transport"),
+        ("fn provider_tuning(", "the provider transport tuning"),
+    ] {
+        let start = http.find(anchor).unwrap_or_else(|| {
             panic!(
-                "{rel}: `{builder}()` is gone — that is the client that \
-                                         carries no total ceiling (#1687)"
+                "{anchor} is gone from src/utils/http.rs, and that is the seam \
+                 that carries no total ceiling (#1687)"
             )
         });
-        let rest = &src[start..];
-        let body = &rest[..rest
-            .find(
-                "
-}",
-            )
-            .unwrap_or(rest.len())];
-
-        // 2a. ...and sets no total timeout.
+        let rest = http
+            .get(start..)
+            .expect("find returns a char boundary, so get cannot miss");
+        let body = rest
+            .get(..rest.find("\n}").unwrap_or(rest.len()))
+            .expect("a search offset is a char boundary");
         assert!(
             !body.contains(".timeout("),
-            "{rel}: `{builder}()` sets a total request timeout again, which is a wall clock on \
+            "{label} sets a total request timeout again, which is a wall clock on \
              every stream it serves (#1687).\n{body}"
         );
+    }
 
-        // 2b. ...and `stream()` posts through it, not through the timed client.
-        let sstart = src
-            .find("async fn stream(")
-            .unwrap_or_else(|| panic!("{rel}: no `stream()` found"));
-        let srest = &src[sstart..];
-        let send = &srest[..srest
-            .find(
-                "
-    async fn ",
-            )
-            .or_else(|| {
-                srest.find(
-                    "
-    fn ",
-                )
-            })
-            .unwrap_or(srest.len())];
+    // 2. Each family's `stream()` posts through that transport, never through
+    //    the buffered client that carries a total timeout.
+    for rel in [
+        "src/brain/provider/custom_openai_compatible.rs",
+        "src/brain/provider/anthropic.rs",
+        "src/brain/provider/gemini.rs",
+    ] {
+        let src = std::fs::read_to_string(manifest.join(rel))
+            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+        let send = method_body(&src, "async fn stream(");
         assert!(
             send.contains(".stream_client"),
             "{rel}: `stream()` no longer posts on the total-timeout-free client (#1687)"
         );
         for (idx, line) in send.lines().enumerate() {
+            let trimmed = line.trim();
+            let timed = trimmed == ".client"
+                || trimmed.starts_with(".client.")
+                || trimmed.starts_with("self.client.");
             assert!(
-                line.trim() != ".client",
-                "{rel}: `stream()` still reaches for the timed `client` at relative line {idx} \
-                 — that is the #1687 ceiling back on the stream path"
+                !timed,
+                "{rel}: `stream()` still reaches for the timed `client` at relative line \
+                 {idx}, which puts the #1687 ceiling back on the stream path"
             );
         }
     }
+}
+
+/// The body of one `impl` method: from its signature to the closing brace at
+/// the impl indentation. Brace counting would be fooled by the `{}` inside the
+/// tracing format strings these bodies are full of.
+fn method_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let start = src.find(signature).unwrap_or_else(|| {
+        panic!("`{signature}` is gone, so this guard cannot scan what it cannot find")
+    });
+    let rest = src.get(start..).expect("find returns a char boundary");
+    rest.get(..rest.find("\n    }").unwrap_or(rest.len()))
+        .expect("a search offset is a char boundary")
 }
 
 #[test]

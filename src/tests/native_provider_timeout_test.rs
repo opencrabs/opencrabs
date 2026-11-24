@@ -232,9 +232,9 @@ fn with_timeout_touches_only_the_request_client() {
         let body = &rest[..rest.find("\n    }").unwrap_or(rest.len())];
 
         assert!(
-            body.contains("self.client = build_request_client("),
-            "{family}: `with_timeout()` no longer rebuilds the non-streaming \
-             client, so the key is a no-op again (#1689)"
+            body.contains("self.client = crate::utils::http::buffered_transport("),
+            "{family}: `with_timeout()` no longer swaps the buffered client, \
+             so the key is a no-op again (#1689)"
         );
         assert!(
             !body.contains("stream_client"),
