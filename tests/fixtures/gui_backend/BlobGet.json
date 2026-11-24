@@ -1,0 +1,6 @@
+{
+  "name": "blob.get",
+  "scope": "a2a:read",
+  "params": { "path": "/home/crab/.opencrabs/gui-icons/topic.png" },
+  "reply": { "Ok": { "size": 3, "base64": "cG5n" } }
+}
