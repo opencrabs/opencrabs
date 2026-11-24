@@ -1524,6 +1524,7 @@ async fn cmd_chat_inner(
 
                         // TUI: wire cancel token and send response via TuiEvent
                         // Non-TUI: send response back to the originating channel
+                        #[cfg(feature = "telegram")]
                         let tg = telegram_state.clone();
                         let transports = crate::cli::resume_delivery::ResumeTransports {
                             #[cfg(feature = "discord")]
@@ -1549,6 +1550,10 @@ async fn cmd_chat_inner(
                         // Telegram: use full streaming pipeline (typing, tool msgs, edit loop).
                         // The bot may not be authenticated yet at startup, so we spawn a
                         // task that waits for it before calling resume_session.
+                        // Telegram (#130): full streaming pipeline on resume.
+                        // The whole arm is telegram-only (teloxide types), so
+                        // the no-telegram build gets an empty stub arm below.
+                        #[cfg(feature = "telegram")]
                         if channel == "telegram"
                             && let Some(ref cid) = channel_chat_id
                             && let Ok(chat_id) = cid.parse::<i64>()
@@ -1656,6 +1661,12 @@ async fn cmd_chat_inner(
                                     }
                                 }
                             });
+                            continue;
+                        }
+                        // No-telegram build: consume the telegram branch so
+                        // the loop keeps compiling without teloxide.
+                        #[cfg(not(feature = "telegram"))]
+                        if channel == "telegram" {
                             continue;
                         }
                         // Discord (#1990): boot recovery rides the tracked
