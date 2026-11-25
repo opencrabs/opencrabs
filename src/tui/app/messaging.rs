@@ -3842,6 +3842,9 @@ impl App {
             self.is_processing = true;
             self.processing_started_at = Some(std::time::Instant::now());
             self.streaming_output_tokens = 0;
+            // Every turn starts with the capped reasoning view again (#3093);
+            // Ctrl+O re-expands it for as long as this turn runs.
+            self.live_reasoning_full = false;
             self.error_message = None;
             self.error_message_shown_at = None;
             self.intermediate_text_received = false;
@@ -4044,6 +4047,8 @@ impl App {
         if self.is_current_session(session_id) {
             self.is_processing = true;
             self.processing_started_at = Some(std::time::Instant::now());
+            // Background-task resumes start capped too (#3093).
+            self.live_reasoning_full = false;
             self.cancel_token = Some(token.clone());
             // Background-task turns carry their own system prompt and push no
             // user row, so the anchor has to be explicit (#2127).

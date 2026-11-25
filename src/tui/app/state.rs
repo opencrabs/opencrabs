@@ -479,6 +479,12 @@ pub struct App {
     pub(crate) streaming_render_cache: Option<(usize, Vec<ratatui::text::Line<'static>>)>,
     /// Reasoning/thinking content from providers like MiniMax (display-only, cleared on complete)
     pub streaming_reasoning: Option<String>,
+    /// Whether the live reasoning stream renders in FULL instead of the
+    /// capped status view (#3093). Ctrl+O flips it while a turn streams,
+    /// so a long thinking phase can be read (or judged degenerate) before
+    /// deciding to interrupt, not after. A new turn starts capped again:
+    /// the status view is the default, the full wall is the exception.
+    pub live_reasoning_full: bool,
     pub error_message: Option<String>,
     /// When error_message was set — used to auto-dismiss after 2.5s
     pub error_message_shown_at: Option<std::time::Instant>,
@@ -1158,6 +1164,7 @@ impl App {
             streaming_response: None,
             streaming_render_cache: None,
             streaming_reasoning: None,
+            live_reasoning_full: false,
             error_message: None,
             error_message_shown_at: None,
             notification: None,

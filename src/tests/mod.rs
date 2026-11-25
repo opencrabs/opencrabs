@@ -772,6 +772,7 @@ pub mod glm_reasoning_test;
 pub mod kimi_reasoning_test;
 pub mod lazy_tools_test;
 pub mod legacy_doc_support_test;
+pub mod live_reasoning_toggle_test;
 pub mod local_provider_gate_test;
 pub mod loop_break_test;
 pub mod loop_guard_test;

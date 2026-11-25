@@ -308,6 +308,17 @@ impl App {
             .map(crate::tui::render::chat::turn_anchor)
     }
 
+    /// `ctrl+o` while a turn streams flips the LIVE reasoning view between
+    /// the capped status and the full wrapped stream (#3093). An idle turn
+    /// leaves the flag alone, so the key keeps its stored-turn meaning; a
+    /// fresh send resets the flag, so the full wall never persists across
+    /// turns.
+    pub(crate) fn toggle_live_reasoning(&mut self) {
+        if self.is_processing && self.streaming_reasoning.is_some() {
+            self.live_reasoning_full = !self.live_reasoning_full;
+        }
+    }
+
     /// `ctrl+o`: open or close the newest turn, working-out and all.
     ///
     /// The fold is the outer layer, so it drives the toggle: expanding a tool
@@ -2386,10 +2397,21 @@ impl App {
                 self.error_message_shown_at = Some(std::time::Instant::now());
             }
         } else if event.code == KeyCode::Char('o') && event.modifiers == KeyModifiers::CONTROL {
-            // Ctrl+O: open or close the newest turn, its fold, its tool groups
-            // and its reasoning details. Scoped to that turn so a long
-            // transcript does not reflow out from under the user.
-            self.toggle_newest_turn(true);
+            // Ctrl+O while a turn streams owns the LIVE reasoning (#3093):
+            // the stored turn underneath is not what the user is watching,
+            // the capped Thinking line is. Flip that view between the capped
+            // status and the full wrapped stream; the newest-turn toggle
+            // keeps its meaning once the turn has settled. The approval
+            // path never reaches here, and the flag resets on the next
+            // send, so nothing persists across turns.
+            if self.is_processing && self.streaming_reasoning.is_some() {
+                self.toggle_live_reasoning();
+            } else {
+                // Ctrl+O: open or close the newest turn, its fold, its tool
+                // groups and its reasoning details. Scoped to that turn so a
+                // long transcript does not reflow out from under the user.
+                self.toggle_newest_turn(true);
+            }
         } else if keys::is_clipboard_paste(&event) {
             // Ctrl+V (#1740), or Cmd+V passed through as SUPER (#1812): paste
             // or attach from the OS clipboard. File-shaped clipboard text
