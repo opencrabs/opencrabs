@@ -15,17 +15,26 @@ use super::*;
 /// lands, so `/onboard` typed by hand never runs the wizard on this machine
 /// for it. An operation is asked of the handshake, and with none yet it
 /// passes as it always has: the crab's own refusal arrives as a notice.
+///
+/// `/restart` cycles this process (`SelfUpdater`), so it asks the same
+/// capability the wizard does: with a crab elsewhere it would restart the
+/// window's own service instead of the crab the user is talking to.
 pub(crate) fn refused(
     action: commands::GuiAction,
     backend: &crate::backend_glue::Backend,
     hello: Option<&opencrabs::backend::hello::HelloReply>,
 ) -> Option<String> {
-    use opencrabs::backend::cap::Need;
-    let why = commands::needs(action)
-        .iter()
-        .find_map(|need| match *need {
-            Need::Cap(cap) => backend.lacks(cap),
-            Need::Op(_) => None,
+    use opencrabs::backend::cap::{Cap, Need};
+    let this_process = match action {
+        commands::GuiAction::Text(text_commands::TextCommand::Restart) => backend.lacks(Cap::Setup),
+        _ => None,
+    };
+    let why = this_process
+        .or_else(|| {
+            commands::needs(action).iter().find_map(|need| match *need {
+                Need::Cap(cap) => backend.lacks(cap),
+                Need::Op(_) => None,
+            })
         })
         .or_else(|| commands::unavailable(action, hello))?;
     Some(format!("{}: {why}", command_name(action)))
