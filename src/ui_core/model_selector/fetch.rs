@@ -315,7 +315,7 @@ pub async fn fetch_provider_models(
                 "[fetch_provider_models] Gemini: fetched {} live chat models",
                 models.len()
             );
-            models
+            return models;
         }
         "openrouter" => {
             // OpenRouter - /api/v1/models
