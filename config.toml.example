@@ -845,6 +845,10 @@ allowed_users = []                      # Trello member IDs allowed to @mention 
 # Cascadia Code, DejaVu Sans Mono, Noto Sans Mono, Liberation Mono, Courier New.
 # A saved family that is not installed falls back to that walk.
 # mono_font = "auto"
+# The strip of other crabs this window can pair with and talk to, drawn left of
+# the sessions rail. Off by default: with it off the strip is not drawn and no
+# paired crab is probed. Settings (General) flips it for this window.
+# remote_crabs = false
 
 # ========================================
 # Daemon Mode (systemd / launchd service)

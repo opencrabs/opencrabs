@@ -28,6 +28,8 @@ const RENDER: &str = include_str!("../dashboard_render.rs");
 const RAIL: &str = include_str!("../dashboard_rail.rs");
 const PALETTE: &str = include_str!("../command_palette.rs");
 const KEYS: &str = include_str!("../dashboard_keys.rs");
+const CONFIG_RELOAD: &str = include_str!("../dashboard_config.rs");
+const SETTINGS: &str = include_str!("../dashboard_settings.rs");
 
 fn known(id: &str, label: &str, url: &str) -> KnownInstance {
     KnownInstance {
@@ -323,9 +325,36 @@ fn the_share_address_says_when_it_cannot_be_reached() {
 }
 
 #[test]
-fn the_strip_always_offers_the_way_to_pair_the_first_crab() {
+fn the_strip_is_drawn_only_behind_the_remote_crabs_flag() {
+    // Off by default: a single-crab install must not spend a column on it.
+    // The only way out of the function without a strip is the flag check.
     let element = fn_body(WIRING, "instance_strip_element");
-    assert!(!element.contains("return None"), "{element}");
+    assert_eq!(element.matches("return None").count(), 1, "{element}");
+    assert!(
+        element.contains("if !self.remote_crabs {\n            return None;"),
+        "{element}"
+    );
+    assert!(APP.contains("remote_crabs: Config::current().gui.remote_crabs,"));
+    // While off no paired crab is probed: the loop's target list is empty.
+    let probe = fn_body(WIRING, "spawn_instance_probe");
+    assert!(
+        probe.contains("if !this.remote_crabs {\n                        return Vec::new();"),
+        "{probe}"
+    );
+    // Switching off while a remote crab is held goes home first, so a
+    // hidden strip never leaves the window talking to a crab it cannot see.
+    let set = fn_body(WIRING, "set_remote_crabs");
+    assert!(set.contains("self.instance_clear(cx);"), "{set}");
+    // The switch is this window's: it writes this machine's file, and a
+    // reload of that file folds into the window whichever crab is held.
+    let toggle = fn_body(WIRING, "toggle_remote_crabs");
+    assert!(
+        toggle.contains("Config::write_key(\"gui\", \"remote_crabs\""),
+        "{toggle}"
+    );
+    assert!(CONFIG_RELOAD.contains("self.set_remote_crabs(config.gui.remote_crabs, cx);"));
+    assert!(SETTINGS.contains("body.push(self.remote_crabs_row(cx));"));
+    // Once on, the `+` that pairs the first crab is always there.
     assert!(STRIP.contains("children.push(self.add_mark(cx));"));
     assert!(STRIP.contains("this.open_pair(cx)"));
     // The card is painted over the window from the strip, not in its 56 px.

@@ -235,10 +235,14 @@ impl Dashboard {
 
     /// The strip as a cached view, handed one frame of plain data.
     ///
-    /// Drawn even while the window knows no other crab: the `+` under the
-    /// workspace mark is how the first one gets paired, and a column that
-    /// only appears once a crab is paired would hide the way to pair one.
+    /// Drawn only with `[gui] remote_crabs` on: a machine with one crab
+    /// spends no column on it. With the switch on it is drawn even while the
+    /// window knows no other crab, because the `+` under the workspace mark is
+    /// how the first one gets paired.
     pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.remote_crabs {
+            return None;
+        }
         let frame = StripFrame::from_model(&self.instances, now(), self.instance_error.clone());
         let view = self.instance_strip.clone();
         view.update(cx, |strip, cx| strip.set_frame(frame, cx));
@@ -298,6 +302,43 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Fold a new value of `[gui] remote_crabs` into the window.
+    ///
+    /// Switching it off while a remote crab is held goes home first, through
+    /// the same swap a click on the mark makes: a hidden strip must not leave
+    /// the window talking to a crab the reader can no longer see or leave.
+    /// An open `+` card is closed too, so no invisible card keeps the keys.
+    pub(crate) fn set_remote_crabs(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.remote_crabs == on {
+            return;
+        }
+        if !on {
+            self.instance_clear(cx);
+            self.instance_strip
+                .update(cx, |strip, cx| strip.close_card(cx));
+        }
+        self.remote_crabs = on;
+        logging::info(&format!(
+            "instances: remote crabs strip switched {}",
+            match on {
+                true => "on",
+                false => "off",
+            }
+        ));
+        cx.notify();
+    }
+
+    /// Flip `[gui] remote_crabs` from the settings modal: written to this
+    /// machine's config, never through the held crab, because it is a window
+    /// preference. A failed write leaves the window as it was and says so.
+    pub(crate) fn toggle_remote_crabs(&mut self, cx: &mut Context<Self>) -> Result<bool, String> {
+        let next = !self.remote_crabs;
+        opencrabs::config::Config::write_key("gui", "remote_crabs", &next.to_string())
+            .map_err(|e| format!("could not save gui.remote_crabs: {e}"))?;
+        self.set_remote_crabs(next, cx);
+        Ok(next)
+    }
+
     /// Whether the strip's `+` card is up. While it is, it owns the keyboard.
     pub(crate) fn instance_card_open(&self, cx: &App) -> bool {
         self.instance_strip.read(cx).card_open()
@@ -317,7 +358,12 @@ impl Dashboard {
                 cx.background_executor().timer(PROBE_INTERVAL).await;
                 // Snapshot the targets on the UI thread: the model is not
                 // shared state and the worker must not read it.
+                // With the strip switched off no paired crab is probed: a
+                // hidden feature must not keep talking to the network.
                 let targets = match this.update(cx, |this, _cx| {
+                    if !this.remote_crabs {
+                        return Vec::new();
+                    }
                     this.instances
                         .entries()
                         .iter()

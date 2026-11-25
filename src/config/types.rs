@@ -2625,6 +2625,13 @@ pub struct GuiConfig {
     /// proportional face in a code block loses column alignment.
     #[serde(default)]
     pub mono_font: Option<String>,
+
+    /// Whether the window draws the strip of other crabs it can talk to, and
+    /// probes them. Off by default: a machine with one crab must not spend a
+    /// column, or a network probe, on a feature it never asked for. The
+    /// settings modal flips it, and so does editing `[gui] remote_crabs`.
+    #[serde(default)]
+    pub remote_crabs: bool,
 }
 
 /// Debug configuration options

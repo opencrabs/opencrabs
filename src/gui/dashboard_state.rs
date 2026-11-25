@@ -719,6 +719,10 @@ pub(crate) struct Dashboard {
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.
     pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
+    /// `[gui] remote_crabs`: whether the strip is drawn and its crabs probed.
+    /// Read from this machine's config when the window opens and on every
+    /// reload, because it is a window preference, never the held crab's.
+    pub(crate) remote_crabs: bool,
     /// The last instance error, drawn as one mark at the bottom of the strip.
     /// `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,

@@ -708,6 +708,7 @@ pub(crate) fn run() {
                         rail_view,
                         instances: instances::Instances::default(),
                         instance_strip,
+                        remote_crabs: Config::current().gui.remote_crabs,
                         instance_error: None,
                         instance_epoch: 0,
                         composer: chat_leaf::Composer::new(editor),

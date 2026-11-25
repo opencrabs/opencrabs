@@ -109,6 +109,15 @@ fn the_theme_round_trips_through_toml() {
 }
 
 #[test]
+fn remote_crabs_is_off_unless_the_config_says_so() {
+    assert!(!GuiConfig::default().remote_crabs);
+    let absent: GuiConfig = toml::from_str("theme = \"auto\"").unwrap();
+    assert!(!absent.remote_crabs);
+    let on: GuiConfig = toml::from_str("remote_crabs = true").unwrap();
+    assert!(on.remote_crabs);
+}
+
+#[test]
 fn accents_parse_with_or_without_a_hash() {
     assert_eq!(parse_accent("#d76414"), Some(0xd76414));
     assert_eq!(parse_accent("d76414"), Some(0xd76414));
