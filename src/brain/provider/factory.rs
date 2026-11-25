@@ -173,7 +173,7 @@ static REGISTRATIONS: LazyLock<Vec<ProviderRegistration>> = LazyLock::new(|| {
             session_id: "gemini",
             aliases: &[],
             is_enabled: |c| c.providers.gemini.as_ref().is_some_and(|p| p.enabled),
-            factory: sync_factory(try_create_gemini),
+            factory: Box::new(|config| Box::pin(try_create_gemini(config))),
             config_field: |c| c.providers.gemini.as_ref(),
         },
         ProviderRegistration {
@@ -2363,7 +2363,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
 }
 
 /// Try to create Gemini provider if configured
-fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
+async fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     let gemini_config = match &config.providers.gemini {
         Some(cfg) => cfg,
         None => return Ok(None),
