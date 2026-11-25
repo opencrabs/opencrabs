@@ -5,16 +5,20 @@
 //! A remote crab is a `RemoteCrab` on a port nothing listens on, so a
 //! discovery that reached it comes back as the transport's refusal, named
 //! after the crab, and one fetched here would not.
+//!
+//! The catalogue is asked without waiting: a crab that is slow to answer
+//! never holds the window while the picker opens.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opencrabs::backend::models::CatalogueProvider;
 use opencrabs::backend::{BackendError, Scope};
 use opencrabs::ui_core::model_selector::CUSTOM_PROVIDER_IDX;
 
 use crate::backend_glue::{Backend, RemoteCrab};
+use crate::dashboard_models::ask_catalogue;
 use crate::model_fetch::{self, FetchRequest, LOCAL_FETCHES};
 use crate::models;
 
@@ -136,4 +140,40 @@ fn a_provider_with_no_list_endpoint_is_never_queued() {
         .map(|request| request.provider_id)
         .collect();
     assert_eq!(queue, ["openai", "lab"]);
+}
+
+#[test]
+fn opening_the_picker_does_not_wait_for_a_slow_crab() {
+    // A crab that takes the connection and never answers: a read waits on
+    // it up to the transport's deadline. `open_models` asks through this
+    // door, so it returns as soon as the ask is out.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+    let port = listener.local_addr().expect("the port's address").port();
+    let slow = Backend::Remote(Arc::new(RemoteCrab::new(
+        "slow",
+        format!("http://127.0.0.1:{port}"),
+        None,
+        PathBuf::from("unused.db"),
+    )));
+
+    let asked = Instant::now();
+    let mut reply = ask_catalogue(&slow);
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "the ask waited {:?} for the crab",
+        asked.elapsed()
+    );
+    assert!(
+        matches!(reply.try_recv(), Ok(None)),
+        "the slow crab has not answered yet"
+    );
+
+    // Closing the port ends the read; its answer still arrives, as a failure
+    // named after the crab.
+    drop(listener);
+    let answer = futures::executor::block_on(reply).expect("the worker answers");
+    let error = answer
+        .expect_err("nothing answered the read")
+        .into_message();
+    assert!(error.contains("slow"), "{error}");
 }
