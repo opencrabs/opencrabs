@@ -1,4 +1,5 @@
-//! The window's blob cache (`blob_cache.rs`, `blob_cache_store.rs`).
+//! The window's blob cache (`blob_cache.rs`, `blob_cache_store.rs`) and the
+//! icon a remote crab keeps from an upload (`Backend::keep_icon_image`).
 //!
 //! `localize` runs inside a frame, so its promises are about time and
 //! network: a kept copy answers with no fetch, a missing one is asked for
@@ -16,7 +17,7 @@ use opencrabs::backend::Ctx;
 use serde_json::Value;
 
 use crate::agent_bridge::TurnEvent;
-use crate::backend_glue::Backend;
+use crate::backend_glue::{Backend, Kept};
 use crate::backend_remote::RemoteCrab;
 use crate::blob_cache_store::BlobStore;
 
@@ -179,4 +180,44 @@ fn one_crab_path_has_one_slot_and_keeps_its_extension() {
     assert!(store.slot(png).starts_with("/cache/crab"));
     let odd = store.slot(Path::new("/home/crab/x.p/n g"));
     assert_eq!(odd.parent(), Some(Path::new("/cache/crab")));
+}
+
+#[test]
+fn a_local_icon_is_written_here_at_once() {
+    let backend = Backend::local(PathBuf::from("unused.db"));
+    let kept = backend.keep_icon_image("a.png", b"png", |filename, bytes| {
+        assert_eq!(bytes, b"png");
+        Ok(format!("img:{filename}"))
+    });
+    match kept {
+        Kept::Now(stored) => assert_eq!(stored, Ok("img:a.png".to_string())),
+        Kept::Later(_) => panic!("the local crab's icon store is on this disk"),
+    }
+}
+
+#[test]
+fn a_remote_icon_goes_up_as_an_upload_and_comes_back_stored() {
+    let served = serve();
+    let cache = tempfile::tempdir().expect("cache");
+    let backend = Backend::Remote(crab_at(served.url.clone(), cache.path()));
+
+    let kept = backend.keep_icon_image(
+        "pick.png",
+        b"png",
+        |_: &str, _: &[u8]| -> Result<String, String> {
+            panic!("a remote crab's icon is never written on this disk")
+        },
+    );
+    let Kept::Later(reply) = kept else {
+        panic!("a remote crab keeps the icon over the wire");
+    };
+    let stored = futures::executor::block_on(reply).expect("kept");
+
+    let name = stored.strip_prefix("img:").expect("an img: value");
+    assert!(
+        !name.is_empty() && !name.contains('/') && !name.contains(".."),
+        "{stored}"
+    );
+    let icon = served.home.path().join("gui-icons").join(name);
+    assert_eq!(std::fs::read(&icon).expect("the icon on the crab"), b"png");
 }

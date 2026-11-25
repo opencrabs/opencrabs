@@ -110,6 +110,9 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     # janela: C5b, the window's copies of a remote crab's files (blob.get)
     ("src/gui/blob_cache_store.rs", "cached"): "stats the window's blob cache, never the crab's disk",
     ("src/gui/blob_cache_store.rs", "keep"): "writes the window's blob cache; the local crab never reaches it",
+    # janela: C5b, a picked icon image
+    ("src/gui/dashboard_topics.rs", "read_picked_image"): "reads the file picked on this machine; a remote crab is sent its bytes (blob.put)",
+    ("src/gui/dashboard_topics.rs", "write_icon_here"): "the local crab's icon store, on this disk; a remote crab keeps it by sessions.icon_from_upload",
     # janela: C7, layout and rail activity of this window, keyed by crab
     ("src/gui/layout_store.rs", "load"): "this window's layout",
     ("src/gui/layout_store.rs", "save"): "this window's layout",

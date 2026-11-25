@@ -5,6 +5,7 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use crate::backend_glue::Kept;
 
 impl Dashboard {
     /// The chat's menu (#2480): what can be done to the conversation it
@@ -786,26 +787,16 @@ impl Dashboard {
     /// The copy gets a fresh uuid name, so two picks of the same file never
     /// fight over one slot and an old icon stays untouched until the rename
     /// is submitted. Failures land in the notices, never silent.
+    ///
+    /// The file is read on this machine, where it was picked. Where it is
+    /// kept is the crab's: the local crab's icon store is on this disk and
+    /// is written here at once; a crab on another machine is sent the bytes
+    /// and the draft takes the icon when its reply lands.
     pub(crate) fn attach_icon_image(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        let meta = match std::fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                self.turn.live.notices.push(format!("icon image: {e}"));
-                cx.notify();
-                return;
-            }
-        };
-        if !topic_icons::image_pick_allowed(&path, meta.len()) {
-            self.turn.live.notices.push(
-                "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
-            );
-            cx.notify();
-            return;
-        }
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_picked_image(&path) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                self.turn.live.notices.push(format!("icon image: {e}"));
+            Err(notice) => {
+                self.turn.live.notices.push(notice);
                 cx.notify();
                 return;
             }
@@ -816,22 +807,70 @@ impl Dashboard {
             .unwrap_or("png")
             .to_ascii_lowercase();
         let filename = format!("{}.{ext}", uuid::Uuid::new_v4());
-        let dir = topic_icons::image_store_dir();
-        if let Err(e) =
-            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&filename), &bytes))
+        match self
+            .backend
+            .keep_icon_image(&filename, &bytes, write_icon_here)
         {
-            self.turn.live.notices.push(format!("icon image: {e}"));
-            cx.notify();
-            return;
+            Kept::Now(kept) => self.icon_image_kept(kept, &filename, bytes, cx),
+            Kept::Later(reply) => {
+                cx.spawn(async move |this, cx| {
+                    let kept = reply.await;
+                    this.update(cx, |this, cx| {
+                        this.icon_image_kept(kept, &filename, bytes, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
-        let stored = topic_icons::img_store_name(&filename);
-        if let Some(format) = topic_icons::image_format(&filename) {
+    }
+
+    /// The picked icon was kept as `kept` (its stored value), or failed: the
+    /// draft takes it and its picture is cached from the bytes in hand.
+    fn icon_image_kept(
+        &mut self,
+        kept: Result<String, String>,
+        filename: &str,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let stored = match kept {
+            Ok(stored) => stored,
+            Err(e) => {
+                self.turn.live.notices.push(format!("icon image: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(format) = topic_icons::image_format(filename) {
             self.icon_images
                 .insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
         }
         self.topic_draft_icon = Some(stored);
         cx.notify();
     }
+}
+
+/// The bytes of an icon image picked on this machine, or the notice that
+/// refuses it: an unreadable file, or one the picker does not take.
+fn read_picked_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("icon image: {e}"))?;
+    if !topic_icons::image_pick_allowed(path, meta.len()) {
+        return Err(
+            "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
+        );
+    }
+    std::fs::read(path).map_err(|e| format!("icon image: {e}"))
+}
+
+/// Keep `bytes` as `filename` in the local crab's icon store, on this disk,
+/// and answer the value a topic stores for it.
+fn write_icon_here(filename: &str, bytes: &[u8]) -> Result<String, String> {
+    let dir = topic_icons::image_store_dir();
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join(filename), bytes))
+        .map_err(|e| e.to_string())?;
+    Ok(topic_icons::img_store_name(filename))
 }
 
 /// The group picker's rows after the field is applied (#2864).

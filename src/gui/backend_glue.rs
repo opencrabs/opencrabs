@@ -8,6 +8,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use futures::future::LocalBoxFuture;
+use opencrabs::backend::blob::BlobPut;
+use opencrabs::backend::sessions::IconFromUpload;
+
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
 use opencrabs::backend::{BackendError, Ctx, Facts, Op};
 use opencrabs::remote::instance_store::KnownInstance;
@@ -139,6 +145,44 @@ impl Backend {
         }
     }
 
+    /// Keep a picked icon image (`filename`, `bytes`) on the crab, and
+    /// answer the value a topic stores for it (`img:<file>`).
+    ///
+    /// The local crab's icon store is on this disk: `write_here` writes the
+    /// file there and the value is ready at once, as the picker always did.
+    /// A crab on another machine is sent the bytes by `blob.put` and keeps
+    /// its upload as an icon (`sessions.icon_from_upload`); that is two
+    /// round trips, so the value comes [`Kept::Later`].
+    pub fn keep_icon_image(
+        &self,
+        filename: &str,
+        bytes: &[u8],
+        write_here: impl FnOnce(&str, &[u8]) -> Result<String, String>,
+    ) -> Kept {
+        match self {
+            Backend::Local(_) => Kept::Now(write_here(filename, bytes)),
+            Backend::Remote(_) => {
+                let backend = self.clone();
+                let put = BlobPut {
+                    name: filename.to_string(),
+                    base64: BASE64.encode(bytes),
+                };
+                Kept::Later(Box::pin(async move {
+                    let upload = backend
+                        .call(put)
+                        .await
+                        .map_err(BackendError::into_message)?;
+                    backend
+                        .call(IconFromUpload {
+                            upload: upload.path,
+                        })
+                        .await
+                        .map_err(BackendError::into_message)
+                }))
+            }
+        }
+    }
+
     /// Feed `session`'s events into `sink` until the returned [`Watch`]
     /// drops. A local crab has nothing to open: its agent service already
     /// forwards every event into the window's sink, so it answers `None`.
@@ -154,3 +198,10 @@ impl Backend {
     }
 }
 
+/// Where [`Backend::keep_icon_image`] left a picked icon.
+pub enum Kept {
+    /// Written on this disk: the stored value, or why it failed.
+    Now(Result<String, String>),
+    /// Sent to the crab: the stored value once its replies land.
+    Later(LocalBoxFuture<'static, Result<String, String>>),
+}
