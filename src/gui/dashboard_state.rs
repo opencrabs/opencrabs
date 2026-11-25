@@ -796,6 +796,10 @@ pub(crate) struct Dashboard {
     /// used to print the launch directory and a branch read once at startup,
     /// so a `/cd` moved the session and left the footer naming the old place.
     pub(crate) footer_dir: Option<FooterPlace>,
+    /// The event stream of the remote conversation on screen, opened by
+    /// [`Dashboard::sync_remote_watch`]. Without it a remote crab's turn
+    /// streams nothing and its facts (model, directory) are never read.
+    pub(crate) remote_watch: Option<crate::dashboard_instances::RemoteWatch>,
 }
 
 /// Who asked for a send.

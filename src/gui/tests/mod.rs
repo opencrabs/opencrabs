@@ -24,6 +24,7 @@ mod models_picker_test;
 mod plan_strip_test;
 mod pool_door_test;
 mod prompt_files_test;
+mod remote_watch_wiring_test;
 mod sidebar_action_test;
 mod topic_icon_files_test;
 mod transcript_tile_files_test;

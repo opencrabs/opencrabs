@@ -246,11 +246,19 @@ impl Backend {
         }
     }
 
+    /// Which remote crab this is, by identity, or `None` for this machine.
+    /// A forget and a fresh pair is another crab even under the same name.
+    pub fn remote_key(&self) -> Option<usize> {
+        match self {
+            Backend::Local(_) => None,
+            Backend::Remote(crab) => Some(Arc::as_ptr(crab) as usize),
+        }
+    }
+
     /// Feed `session`'s events into `sink` until the returned [`Watch`]
     /// drops. A local crab has nothing to open: its agent service already
     /// forwards every event into the window's sink, so it answers `None`.
     /// `Err` means the reader's thread never started.
-    #[allow(dead_code)] // the instance rail (C3) opens one with a remote session
     pub fn watch(&self, session: Uuid, sink: EventSink) -> Result<Option<Watch>, String> {
         match self {
             Backend::Local(_) => Ok(None),

@@ -12,6 +12,9 @@ impl Render for Dashboard {
         // Advance from whatever repaint came in. The animation receipt is
         // cleared only by its own callback, not by an unrelated repaint.
         self.tick_middle_scroll(cx);
+        // A remote conversation reads its turn and its facts through an event
+        // stream; keep exactly one open on the one on screen.
+        self.sync_remote_watch();
         // The frame the window is showing, read where the window is in hand
         // (#3082). Cheap: one comparison unless a drag moved it.
         self.observe_window(window);

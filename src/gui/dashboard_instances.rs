@@ -31,6 +31,17 @@ use opencrabs::remote::instance_store::{InstanceFile, InstanceStore, now};
 /// channel chip already pays.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The event stream held open on one remote conversation.
+pub(crate) struct RemoteWatch {
+    /// The crab it reads, by identity: a forget and a fresh pair is another
+    /// crab even under the same name.
+    crab: usize,
+    session: Uuid,
+    /// `None` when the reader could not start; kept so the window does not
+    /// retry on every frame.
+    _watch: Option<crate::backend_glue::Watch>,
+}
+
 impl Dashboard {
     /// Read `state/remote/instances.json` into the window's model.
     ///
@@ -85,6 +96,38 @@ impl Dashboard {
         self.instances.clear_selection();
         let home = self.home_backend.clone();
         self.instance_switch(home, cx);
+    }
+
+    /// Keep one event stream open on the remote conversation on screen, and
+    /// none otherwise.
+    ///
+    /// The stream is how a remote turn's progress (the streamed answer, the
+    /// reasoning, the tool calls) reaches the card, and its first read is what
+    /// fills the facts the footer names the model and the directory from.
+    /// Cheap per frame: one comparison unless the crab or the session moved.
+    pub(crate) fn sync_remote_watch(&mut self) {
+        let want = self.backend.remote_key().zip(self.chat_session);
+        let have = self.remote_watch.as_ref().map(|w| (w.crab, w.session));
+        if want == have {
+            return;
+        }
+        // The old stream closes before the next one opens.
+        self.remote_watch = None;
+        let Some((crab, session)) = want else {
+            return;
+        };
+        let watch = match self.backend.watch(session, self.sink.clone()) {
+            Ok(watch) => watch,
+            Err(e) => {
+                tracing::warn!("events of remote session {session} not opened: {e}");
+                None
+            }
+        };
+        self.remote_watch = Some(RemoteWatch {
+            crab,
+            session,
+            _watch: watch,
+        });
     }
 
     /// Hand the window a different crab and reload what it shows from it.
