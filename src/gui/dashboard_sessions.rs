@@ -652,8 +652,12 @@ impl Dashboard {
         cx.notify();
 
         if let Some(kind) = document_kind {
+            // The document is read where `localize` says it is on this
+            // machine: the local crab's own path, or a remote crab's kept
+            // copy (asked for when there is none yet), never the crab's path
+            // read off this disk.
+            let load_path = self.backend.localize(&path);
             cx.spawn(async move |this, cx| {
-                let load_path = path.clone();
                 let result = cx
                     .background_executor()
                     .spawn(async move { preview_document::parse(&load_path, kind) })

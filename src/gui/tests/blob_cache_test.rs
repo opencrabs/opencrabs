@@ -523,3 +523,16 @@ fn a_transcript_link_reaches_the_opener_only_through_openable_url() {
     );
     assert!(!body.contains("url_command(&url)"));
 }
+
+#[test]
+fn a_previewed_document_is_read_where_localize_says() {
+    let body = sessions_fn("open_preview");
+    let localized = body
+        .find("let load_path = self.backend.localize(&path);")
+        .expect("the document's path goes through localize");
+    let read = body
+        .find("preview_document::parse(&load_path")
+        .expect("the document is read from load_path");
+    assert!(localized < read, "localized before it is read");
+    assert!(!body.contains("let load_path = path.clone();"));
+}
