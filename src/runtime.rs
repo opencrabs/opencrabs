@@ -85,7 +85,7 @@ mod tests {
         let builder = &bridge[builder_at..];
         let builder = &builder[..builder.find(".build()").expect("builder ends in .build()")];
         assert!(
-            builder.contains(".thread_stack_size(crate::runtime::WORKER_STACK_SIZE)"),
+            builder.contains(".thread_stack_size(opencrabs::runtime::WORKER_STACK_SIZE)"),
             "the window surface runtime is back on the 2 MiB worker stack (#2080)"
         );
     }

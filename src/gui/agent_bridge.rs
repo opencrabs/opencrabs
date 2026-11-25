@@ -419,7 +419,7 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
             // overflowed its stack` (#2080).
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
-                .thread_stack_size(crate::runtime::WORKER_STACK_SIZE)
+                .thread_stack_size(opencrabs::runtime::WORKER_STACK_SIZE)
                 .enable_all()
                 .build()
             {
