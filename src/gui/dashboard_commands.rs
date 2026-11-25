@@ -7,6 +7,43 @@
 
 use super::*;
 
+/// The note a command leaves when it is refused before it runs, or `None`
+/// when it runs.
+///
+/// A capability is asked of the backend the window holds, not of the
+/// handshake: a remote crab lacks a local-only one before its `hello`
+/// lands, so `/onboard` typed by hand never runs the wizard on this machine
+/// for it. An operation is asked of the handshake, and with none yet it
+/// passes as it always has: the crab's own refusal arrives as a notice.
+pub(crate) fn refused(
+    action: commands::GuiAction,
+    backend: &crate::backend_glue::Backend,
+    hello: Option<&opencrabs::backend::hello::HelloReply>,
+) -> Option<String> {
+    use opencrabs::backend::cap::Need;
+    let why = commands::needs(action)
+        .iter()
+        .find_map(|need| match *need {
+            Need::Cap(cap) => backend.lacks(cap),
+            Need::Op(_) => None,
+        })
+        .or_else(|| commands::unavailable(action, hello))?;
+    Some(format!("{}: {why}", command_name(action)))
+}
+
+/// The name a refused command is called by in its note.
+fn command_name(action: commands::GuiAction) -> &'static str {
+    match action {
+        commands::GuiAction::OpenOnboard(name) => name,
+        commands::GuiAction::Text(command) => text_commands::name(command),
+        _ => slash::GUI_SUPPORTED
+            .iter()
+            .copied()
+            .find(|name| commands::parse_command(name) == Some(commands::Outcome::Run(action)))
+            .unwrap_or("this command"),
+    }
+}
+
 impl Dashboard {
     /// Run a submitted command, or say why it does not run here.
     ///
@@ -35,6 +72,12 @@ impl Dashboard {
                 return;
             }
         };
+        // What the palette greys out does not run when typed by hand either.
+        if let Some(line) = refused(action, &self.backend, self.hello.as_ref()) {
+            self.turn.live.notices.push(line);
+            cx.notify();
+            return;
+        }
         match action {
             commands::GuiAction::OpenThemes => {
                 // The toggle closes it, so ask first: `/theme` on the open

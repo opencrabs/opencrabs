@@ -12,6 +12,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::future::LocalBoxFuture;
 use opencrabs::backend::blob::BlobPut;
+use opencrabs::backend::cap::{Cap, Unavailable};
 use opencrabs::backend::sessions::IconFromUpload;
 
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
@@ -96,6 +97,19 @@ impl Backend {
                 })
             }
             Backend::Remote(crab) => crate::backend_remote::spawn(crab.clone(), op, done),
+        }
+    }
+
+    /// Why this backend cannot do `cap`, or `None` when it can.
+    ///
+    /// Decided by which crab the window holds, never by the handshake: a
+    /// remote crab lacks a local-only capability before its `hello` lands,
+    /// so an action that would act on this machine does not fail open.
+    pub fn lacks(&self, cap: Cap) -> Option<String> {
+        match self {
+            Backend::Local(_) => None,
+            Backend::Remote(_) if cap.available(false) => None,
+            Backend::Remote(_) => Some(Unavailable::LocalOnly(cap).reason()),
         }
     }
 
