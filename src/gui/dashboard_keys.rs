@@ -86,6 +86,13 @@ impl Dashboard {
             self.theme_modal_key(ks, cx);
             return;
         }
+        // The strip's `+` card owns every key while it is up: its fields hold
+        // an address and a pairing code, and a character meant for them must
+        // never reach the composer underneath.
+        if self.instance_card_open(cx) {
+            self.instance_card_key(&ev.keystroke, cx);
+            return;
+        }
         // The Seeker card owns every key while it is up, and the chord that
         // opens it sits ahead of every other reader: one field that finds a
         // conversation, a command or a surface is only useful if the composer

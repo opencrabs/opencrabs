@@ -372,6 +372,9 @@ code-graph = ["tree-sitter", "tree-sitter-rust"]
 # build with those features pays nothing extra.
 gui = [
     "dep:gpui",
+    # The strip's share card draws a QR of the pairing link, so another crab
+    # can be paired without typing an address.
+    "dep:qrcode",
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-app-kit",

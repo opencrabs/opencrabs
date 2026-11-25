@@ -25,7 +25,7 @@ use opencrabs::backend::Op;
 use opencrabs::backend::cap;
 use opencrabs::backend::hello::Hello;
 use opencrabs::remote::instance_client::{self, Target};
-use opencrabs::remote::instance_store::{InstanceStore, now};
+use opencrabs::remote::instance_store::{InstanceFile, InstanceStore, now};
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays.
@@ -133,13 +133,12 @@ impl Dashboard {
         .detach();
     }
 
-    /// The strip as a cached view, handed one frame of plain data. `None`
-    /// while the window knows no other crab and has nothing to warn about:
-    /// a column holding only this window's own mark would be noise.
+    /// The strip as a cached view, handed one frame of plain data.
+    ///
+    /// Drawn even while the window knows no other crab: the `+` under the
+    /// workspace mark is how the first one gets paired, and a column that
+    /// only appears once a crab is paired would hide the way to pair one.
     pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.instances.entries().is_empty() && self.instance_error.is_none() {
-            return None;
-        }
         let frame = StripFrame::from_model(&self.instances, now(), self.instance_error.clone());
         let view = self.instance_strip.clone();
         view.update(cx, |strip, cx| strip.set_frame(frame, cx));
@@ -148,6 +147,43 @@ impl Dashboard {
                 .cached(instance_strip::strip_root_style())
                 .into_any_element(),
         )
+    }
+
+    /// A pairing went through: the strip hands over the store as it now
+    /// reads, already loaded off the UI thread, and the window opens the new
+    /// crab.
+    ///
+    /// The crab the window held stays selected in the fresh model, so the
+    /// pick below is a switch and not the second click that goes home. The
+    /// one exception is a crab paired again while it is open: its old token
+    /// is the one the window holds, so it is picked anew to take the new one.
+    pub(crate) fn instance_paired(
+        &mut self,
+        file: &InstanceFile,
+        host_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let held = self.instances.selected_host_id().map(str::to_string);
+        self.instances = Instances::from_file(file);
+        self.instance_error = None;
+        if let Some(held) = held.as_deref()
+            && held != host_id
+        {
+            self.instances.select(held);
+        }
+        self.instance_picked(host_id, cx);
+        cx.notify();
+    }
+
+    /// Whether the strip's `+` card is up. While it is, it owns the keyboard.
+    pub(crate) fn instance_card_open(&self, cx: &App) -> bool {
+        self.instance_strip.read(cx).card_open()
+    }
+
+    /// Hand one key to the strip's card.
+    pub(crate) fn instance_card_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        self.instance_strip
+            .update(cx, |strip, cx| strip.card_key(ks, cx));
     }
 
     /// Start the probe loop. Called once from the window's constructor; the
