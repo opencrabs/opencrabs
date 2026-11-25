@@ -6,6 +6,8 @@ use crate::tests::gui_dashboard_source::DASHBOARD;
 
 const MENU: &str = include_str!("../gui/menu.rs");
 const PROJECTS: &str = include_str!("../gui/projects.rs");
+/// The project writes moved behind the backend's `ProjectCommand`.
+const BACKEND_PROJECTS: &str = include_str!("../backend/projects.rs");
 const PROJECTS_SCREEN: &str = include_str!("../gui/projects_screen.rs");
 const PROJECT_REPOSITORY: &str = include_str!("../db/repository/project.rs");
 const SESSIONS: &str = include_str!("../gui/sessions.rs");
@@ -54,10 +56,14 @@ fn session_picker_reuses_the_service_and_returns_after_success() {
         "AssignSession(Uuid)",
         "ProjectsMode::List | ProjectsMode::AssignSession(_) => self.rows.len()",
         "ProjectsMode::List | ProjectsMode::AssignSession(_) => &mut self.selected",
-        "service.assign_session(session_id, project_id).await?",
     ] {
         assert!(PROJECTS.contains(needle), "missing picker model: {needle}");
     }
+    let needle = "service.assign_session(session_id, project_id).await?";
+    assert!(
+        BACKEND_PROJECTS.contains(needle),
+        "missing picker model: {needle}"
+    );
     for needle in [
         "this.assign_session_to_project(id, cx);",
         "self.assign_session_to_project(project_id, cx);",

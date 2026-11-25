@@ -5,6 +5,12 @@
 use crate::tests::gui_dashboard_source::DASHBOARD;
 
 const PROJECTS: &str = include_str!("../gui/projects.rs");
+/// The screen's reads and writes moved behind the backend's `ProjectList`,
+/// `ProjectCommand` and `ProjectDelete`; the window only asks for them.
+const BACKEND_PROJECTS: &str = include_str!("../backend/projects.rs");
+/// The lane every backend call runs on, and the backend's one door onto it.
+const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+const BACKEND_GLUE: &str = include_str!("../gui/backend_glue.rs");
 const PROJECTS_SCREEN: &str = include_str!("../gui/projects_screen.rs");
 const PROJECTS_VIEW: &str = include_str!("../gui/projects_view.rs");
 const GUI_COMMANDS: &str = include_str!("../gui/commands.rs");
@@ -107,7 +113,7 @@ fn squeezed(source: &str) -> String {
 
 #[test]
 fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
-    let projects = squeezed(PROJECTS);
+    let projects = squeezed(BACKEND_PROJECTS);
     for needle in [
         "AssignMany { project_id: Uuid, session_ids: Vec<Uuid> }",
         "ClearMany { project_id: Uuid, session_ids: Vec<Uuid> }",
@@ -130,8 +136,10 @@ fn bulk_assignment_clear_and_archive_keep_their_own_service_paths() {
 
 #[test]
 fn project_actions_use_the_shared_service_and_reject_stale_results() {
+    // The body is the crab's now: it opens the ledger through the crab's own
+    // door instead of a path of its own, with the same service calls.
     for needle in [
-        "Database::connect(&db_path).await?",
+        "let db = ctx.database().await?;",
         "ProjectService::new(ServiceContext::new(db.pool().clone()))",
         "service.list_projects().await?",
         "service.create_project(name, None).await?",
@@ -141,10 +149,32 @@ fn project_actions_use_the_shared_service_and_reject_stale_results() {
         "service.get_sessions_for_project(id).await?",
         "service.get_unassigned_sessions().await?",
         "service.get_assignable_sessions().await?",
-        ".stack_size(4 * 1024 * 1024)",
-        ".name(\"gui-projects\".into())",
     ] {
-        assert!(PROJECTS.contains(needle), "missing service path: {needle}");
+        assert!(
+            BACKEND_PROJECTS.contains(needle),
+            "missing service path: {needle}"
+        );
+    }
+    // The window asks through the backend, whose one door is the named 4 MB
+    // lane: the thread is named after the operation and sized by the lane.
+    for (source, needle) in [
+        (
+            PROJECTS,
+            ".call(opencrabs::backend::projects::ProjectList { detail })",
+        ),
+        (
+            PROJECTS,
+            ".call(opencrabs::backend::projects::ProjectCommand { action })",
+        ),
+        (BACKEND_GLUE, "crate::agent_bridge::spawn_worker(O::NAME,"),
+        (AGENT_BRIDGE, "const WORKER_STACK: usize = 4 * 1024 * 1024;"),
+        (AGENT_BRIDGE, ".stack_size(WORKER_STACK)"),
+        (
+            BACKEND_PROJECTS,
+            "const NAME: &'static str = \"projects.list\";",
+        ),
+    ] {
+        assert!(source.contains(needle), "missing service path: {needle}");
     }
     for needle in [
         "crate::projects::run(db_path, action).await",
@@ -161,16 +191,16 @@ fn project_actions_use_the_shared_service_and_reject_stale_results() {
 
 #[test]
 fn project_rows_keep_service_order_and_escape_unwinds_the_nearest_surface() {
-    let list = PROJECTS
+    let list = BACKEND_PROJECTS
         .find("let projects = service.list_projects().await?;")
         .expect("the worker reads the service list");
-    let iterate = PROJECTS
+    let iterate = BACKEND_PROJECTS
         .find("for project in projects {")
         .expect("rows iterate that list directly");
-    let stats = PROJECTS
+    let stats = BACKEND_PROJECTS
         .find("service.get_project_stats(project.id).await?")
         .expect("each row loads its own counts");
-    let push = PROJECTS
+    let push = BACKEND_PROJECTS
         .find("rows.push(ProjectRow {")
         .expect("the same project and counts form one row");
     assert!(list < iterate && iterate < stats && stats < push);
