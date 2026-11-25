@@ -134,6 +134,7 @@ domains! {
     settings,
     models,
     shell,
+    update,
 }
 
 pub use blob::BlobRef;

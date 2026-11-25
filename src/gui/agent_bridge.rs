@@ -361,29 +361,22 @@ pub fn spawn_clear_messages(
     }
 }
 
-/// Run `/evolve` on its own thread, as the TUI does: download the latest
-/// release and report the outcome. The text comes back as `EvolveDone` (#2406).
-pub fn spawn_evolve(sink: EventSink, session_id: Uuid) {
+/// Run `/evolve` on the crab the window holds, as the TUI does: download the
+/// latest release and report the outcome. The text comes back as
+/// `EvolveDone` (#2406). With the local crab that is this process, as it
+/// always was; with a crab elsewhere it is that crab's binary, and a token
+/// without admin is refused there with the note the greyed out command shows.
+pub fn spawn_evolve(backend: crate::backend_glue::Backend, sink: EventSink, session_id: Uuid) {
+    use opencrabs::backend::update::Evolve;
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-evolve", move |runtime| {
-        let text = runtime.block_on(async move {
-            let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
-            let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
-            match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx).await {
-                Ok(result) if result.success => {
-                    if result.output.is_empty() {
-                        "Evolve finished.".to_string()
-                    } else {
-                        result.output
-                    }
-                }
-                Ok(result) => format!(
-                    "Evolve failed: {}",
-                    result.error.unwrap_or_else(|| "unknown error".to_string())
-                ),
-                Err(e) => format!("Evolve error: {e}"),
+    let spawned = backend.spawn(Evolve { session_id }, move |reply| {
+        let text = match reply {
+            Ok(text) => text,
+            Err(e @ opencrabs::backend::BackendError::Forbidden { .. }) => {
+                opencrabs::backend::cap::notice(<Evolve as opencrabs::backend::Op>::NAME, &e)
             }
-        });
+            Err(e) => format!("Evolve error: {}", e.into_message()),
+        };
         if let Err(e) = thread_sink.send(TurnEvent::EvolveDone(text)) {
             crate::logging::error(&format!("evolve result not delivered: {e}"));
         }

@@ -141,7 +141,7 @@ impl Dashboard {
                     .live
                     .notices
                     .push("Checking for a new release...".to_string());
-                agent_bridge::spawn_evolve(self.sink.clone(), session);
+                agent_bridge::spawn_evolve(self.backend.clone(), self.sink.clone(), session);
             }
         }
     }

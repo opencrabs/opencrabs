@@ -190,6 +190,8 @@ const OPEN_TASKS: &[Need] = &[Need::Op(<tasks::TasksSnapshot as Op>::NAME)];
 /// The wizard writes this machine's config, keys and services.
 const OPEN_ONBOARD: &[Need] = &[Need::Cap(Cap::Setup)];
 const CD: &[Need] = &[Need::Op(<session_ops::ApplyCd as Op>::NAME)];
+/// `/evolve` replaces the binary of the crab that runs it.
+const EVOLVE: &[Need] = &[Need::Op(<opencrabs::backend::update::Evolve as Op>::NAME)];
 
 /// The operations and capabilities `action` needs before it can be picked.
 ///
@@ -202,6 +204,7 @@ pub fn needs(action: GuiAction) -> &'static [Need] {
         GuiAction::OpenTasks => OPEN_TASKS,
         GuiAction::OpenOnboard(_) => OPEN_ONBOARD,
         GuiAction::Text(TextCommand::Cd) => CD,
+        GuiAction::Evolve => EVOLVE,
         _ => NO_NEEDS,
     }
 }
@@ -566,6 +569,20 @@ mod tests {
         // Reading the rail and the tasks needs nothing more than read.
         assert_eq!(unavailable(GuiAction::OpenSessions, Some(&hello)), None);
         assert_eq!(unavailable(GuiAction::OpenTasks, Some(&hello)), None);
+    }
+
+    #[test]
+    fn evolve_without_admin_is_greyed_out_and_never_runs_here() {
+        use opencrabs::backend::Scope;
+        // A token that sends and manages still cannot replace the crab's
+        // binary, and the window must not fall back to updating its own.
+        let hello = remote_hello(&[Scope::Read, Scope::Send, Scope::Manage]);
+        let why = unavailable(GuiAction::Evolve, Some(&hello)).expect("needs admin");
+        assert!(why.contains("a2a:admin"), "{why}");
+        assert_eq!(
+            needs(GuiAction::Evolve),
+            &[Need::Op(<opencrabs::backend::update::Evolve as Op>::NAME)]
+        );
     }
 
     #[test]
