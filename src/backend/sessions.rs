@@ -555,6 +555,47 @@ impl Op for SetTopicIcon {
     }
 }
 
+/// Keep an uploaded image as a custom topic icon and answer the value a
+/// topic stores for it (`img:<file>`), for [`SetTopicIcon`] to write.
+///
+/// A window on another machine cannot write this crab's `gui-icons/`: it
+/// sends the picked file by `blob.put` and names the upload here. Only a file
+/// in the upload directory is taken. The copy keeps the upload's own file
+/// name (`<16 hex of its sha256>-<safe name>`), a bare name the icon store
+/// accepts, so the same bytes kept twice are one icon and the answer repeats.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IconFromUpload {
+    /// The path `blob.put` answered.
+    pub upload: String,
+}
+
+impl Op for IconFromUpload {
+    const NAME: &'static str = "sessions.icon_from_upload";
+    const SCOPE: Scope = Scope::Send;
+    type Reply = String;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let home = super::blob::home_of(ctx);
+        let uploads = home.join(super::blob::UPLOAD_DIR);
+        let source = super::blob::resolve(&[uploads], &self.upload)?;
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && !name.contains(['/', '\\']) && !name.contains(".."))
+            .ok_or_else(|| BackendError::BadParams(format!("not an icon name: {}", self.upload)))?
+            .to_string();
+        let dir = home.join("gui-icons");
+        let target = dir.join(&name);
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&source, &target))
+        })
+        .await
+        .map_err(|e| BackendError::Failed(format!("icon: worker: {e}")))?
+        .map_err(failed)?;
+        Ok(format!("{ICON_IMG_PREFIX}{name}"))
+    }
+}
+
 /// Turn topics on or off for one session. The caller re-reads afterwards.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetTopics {
@@ -695,6 +736,7 @@ ops! {
     LoadTopicIcons,
     LoadTelegramTopicTitles,
     SetTopicIcon,
+    IconFromUpload,
     SetTopics,
     MergeTopics,
     SetFavorite,
@@ -1070,6 +1112,49 @@ mod tests {
             );
             let still = repo(&gateway).await.topic_icons().await.expect("icons");
             assert_eq!(still, vec![(topic, "img:crab.png".to_string())]);
+        }
+
+        #[tokio::test]
+        async fn icon_from_upload_has_parity() {
+            use base64::Engine as _;
+            let gateway = Gateway::start().await;
+            let upload = gateway
+                .local(crate::backend::blob::BlobPut {
+                    name: "crab.png".into(),
+                    base64: base64::engine::general_purpose::STANDARD.encode(b"png"),
+                })
+                .await
+                .expect("upload");
+            let answer = parity!(
+                gateway,
+                IconFromUpload {
+                    upload: upload.path.clone(),
+                }
+            );
+            let stored = answer["Ok"].as_str().expect("a stored value").to_string();
+            let name = stored.strip_prefix(ICON_IMG_PREFIX).expect("an img: value");
+            assert!(name.ends_with("-crab.png"), "{stored}");
+            let ctx = Ctx::new("/nowhere/opencrabs.db".into()).with_home(gateway.home().into());
+            let blob = icon_blob(&ctx, &stored).expect("the icon store accepts the name");
+            assert_eq!(std::fs::read(&blob.path).expect("the icon"), b"png");
+            forbidden!(
+                gateway,
+                IconFromUpload {
+                    upload: upload.path
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn icon_from_upload_takes_only_an_upload() {
+            let gateway = Gateway::start().await;
+            let path = gateway.ctx.db_path().to_string_lossy().into_owned();
+            let answer = parity!(gateway, IconFromUpload { upload: path });
+            assert!(answer["Err"].is_object(), "{answer}");
+            assert!(
+                !gateway.home().join("gui-icons").exists(),
+                "a refused upload wrote no icon"
+            );
         }
 
         #[test]
