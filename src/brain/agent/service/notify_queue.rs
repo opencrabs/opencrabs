@@ -63,6 +63,13 @@ pub(crate) fn mark_delayed(context_text: &str, age_secs: i64) -> String {
     )
 }
 
+/// The marker `mark_delayed` opens its header with (#3175).
+///
+/// The rest of the header carries the queue age, so it cannot be a fixed
+/// string: the age changes on every boot, which is exactly why the header has
+/// to be recognised by its opening and cut at the blank line that ends it.
+pub(crate) const DELAYED_MARK_PREFIX: &str = "[DELAYED PUSH]";
+
 /// The busy-lane framing prepended to a push that lands while its target is
 /// mid-turn (fork #13). It lives here, beside the durable-queue text
 /// normalisation it has to survive, because the two are one contract.
@@ -82,7 +89,39 @@ pub(crate) const BUSY_LANE_WRAPPER: &str =
 ///    the very delivery that should have retired it, and the next boot
 ///    re-delivered it: one duplicate per boot, forever.
 pub(crate) fn durable_context_text(context_text: &str) -> String {
-    strip_busy_wrapper(context_text).to_string()
+    // Both framings, until neither applies. A push can pick up more than one:
+    // a redelivery marks a row that may already carry the busy-lane wrapper,
+    // and the two can arrive in either order (#3175).
+    let mut rest = context_text;
+    loop {
+        let before = rest;
+        rest = strip_delayed_mark(strip_busy_wrapper(rest));
+        if rest == before {
+            return rest.to_string();
+        }
+    }
+}
+
+/// Strip the delayed-push header a boot redelivery carries (#3175).
+///
+/// [`mark_delayed`] prepends the header to the in-memory copy only, so the
+/// identity `persist` wrote is the text underneath it. Recognised by its
+/// opening and cut at the blank line that closes the header, because the age
+/// inside changes on every boot and a fixed-string strip cannot match it.
+///
+/// Repeated, like the busy-lane strip: a row re-offered across several boots
+/// can be marked more than once. A text that opens with the marker but carries
+/// no blank line is left alone rather than emptied: eating the whole push
+/// would retire a row for a delivery that still has its own text to match.
+pub(crate) fn strip_delayed_mark(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(tail) = rest.strip_prefix(DELAYED_MARK_PREFIX) {
+        match tail.find("\n\n") {
+            Some(idx) => rest = &tail[idx + 2..],
+            None => break,
+        }
+    }
+    rest
 }
 
 /// Strip every leading busy-lane framing wrapper.
@@ -356,10 +395,13 @@ const CLEAR_MATCH_STEP: std::time::Duration = std::time::Duration::from_millis(2
 /// INSERT of the delivering route when it lands a moment later. Stopping at
 /// the first success would leave exactly that second row behind.
 ///
-/// Match is WRAPPER-BLIND (see [`strip_busy_wrapper`]) so a row written before
-/// the #439 normalisation — still carrying the busy-lane framing — is retired
-/// rather than left immortal until the age reaper. Content-exact otherwise:
-/// any OTHER undelivered push for the same session survives.
+/// Match is FRAMING-BLIND (see [`durable_context_text`]) so a row written
+/// before the #439 normalisation, still carrying the busy-lane framing, is
+/// retired rather than left immortal until the age reaper, and so is a
+/// delivery carrying the delayed-push header a boot redelivery adds (#3175).
+/// Both sides are normalised, because a row may carry a framing the key does
+/// not. Content-exact otherwise: any OTHER undelivered push for the same
+/// session survives.
 ///
 /// A clear that retires nothing is LOUD (M4): a chokepoint that returns a
 /// silent success cannot corroborate its own failure. The two shapes are kept
@@ -475,11 +517,15 @@ async fn clear_matching_rows(
     display_text: &str,
 ) -> anyhow::Result<usize> {
     let mut retired = 0usize;
+    // Both sides, not only the key (#3175): a row written by a build that
+    // stored the delayed header would otherwise never match its own delivery,
+    // and that row would re-answer on every boot until the age reaper took it.
+    let key = durable_context_text(context_text);
     for row in repo.all().await? {
         if row.session_id != session_id || row.display_text != display_text {
             continue;
         }
-        if strip_busy_wrapper(&row.context_text) != context_text {
+        if durable_context_text(&row.context_text) != key {
             continue;
         }
         repo.clear(row.id).await?;
