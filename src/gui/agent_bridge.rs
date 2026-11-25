@@ -413,8 +413,13 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
         .name("gui-agent-boot".into())
         .spawn(move || {
             let sink = thread_sink;
+            // Channel agents and cron turns run on these workers, so they need
+            // the same stack as the binary's runtime: at the 2 MiB default the
+            // first channel turn aborts the window with `tokio-rt-worker has
+            // overflowed its stack` (#2080).
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
+                .thread_stack_size(crate::runtime::WORKER_STACK_SIZE)
                 .enable_all()
                 .build()
             {
