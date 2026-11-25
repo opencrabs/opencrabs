@@ -1142,6 +1142,18 @@ fn spawn_resume(
             cancel,
         },
         move |result| {
+            // Busy here can only be this crab's own turn on the session
+            // (`Ctx::claim_own_turn`): that turn is answering it already and
+            // settles the card itself, so the resume steps aside without a
+            // Failed card of its own.
+            if matches!(result, Err(opencrabs::backend::BackendError::Busy)) {
+                tracing::info!(
+                    session = %session_id,
+                    "boot resume skipped: the window already runs a turn on this session"
+                );
+                finish_boot_resume(&thread_pending, &thread_sink);
+                return;
+            }
             let event = match result {
                 Ok(Some(response)) => {
                     boot_report::record_delivered();
