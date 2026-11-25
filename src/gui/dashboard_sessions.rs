@@ -481,6 +481,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             if let Err(e) = sessions::set_topics(backend.clone(), id, true).await {
                 logging::error(&format!("enable topics {id}: {e}"));
@@ -493,6 +494,11 @@ impl Dashboard {
             }
             let result = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
+                // A swap while the flag was out: the read-back and the
+                // conversation `after` would open are the crab's it left.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match result {
                     Ok(ids) => {
                         this.sessions.topics = ids.into_iter().collect();
@@ -561,11 +567,18 @@ impl Dashboard {
 
     /// Re-read the pinned ids. A separate fetch from the rows because the
     /// sidecar can change on its own (the TUI pins too).
+    ///
+    /// The pins are the crab's the read went to, so a swap while it was out
+    /// drops them.
     pub(crate) fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             let result = sessions::load_favorites(backend).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match result {
                     Ok(ids) => this.sessions.favorites = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("favorites refresh: {e}")),

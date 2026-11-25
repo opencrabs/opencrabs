@@ -326,6 +326,7 @@ impl Dashboard {
         let in_flight = self.previews_in_flight.clone();
         let dirty = self.previews_dirty.clone();
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             // Released on drop, so a task whose view went away still frees the
             // slot instead of wedging previews for the rest of the run.
@@ -333,7 +334,11 @@ impl Dashboard {
             match sessions::load_previews(backend, ids).await {
                 Ok(pairs) => {
                     this.update(cx, |this, cx| {
-                        this.sessions.previews = pairs;
+                        // Lines read from the crab the window left are not
+                        // kept; the request queued behind them still runs.
+                        if this.instance_epoch == epoch {
+                            this.sessions.previews = pairs;
+                        }
                         // A request that arrived while this one ran is served
                         // now, from the same completion, never from a timer.
                         if dirty.replace(false) {

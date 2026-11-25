@@ -667,14 +667,21 @@ impl Dashboard {
     }
 
     /// Re-read which sessions are topics and what each topic's parent is.
+    ///
+    /// Like the rail's refetch, an answer from the crab the window has since
+    /// left is dropped before it reaches the store or the panes it notifies.
     pub(crate) fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             let parents = sessions::load_topic_parents(backend.clone()).await;
             let closed = sessions::load_closed(backend.clone()).await;
             let icons = sessions::load_topic_icons(backend.clone()).await;
             let topics = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match closed {
                     Ok(ids) => this.sessions.closed = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("closed refresh: {e}")),
