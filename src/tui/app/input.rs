@@ -300,12 +300,22 @@ impl App {
 
     /// The newest turn's anchor id, if there is one. `ctrl+o` is scoped to this
     /// turn so a long transcript does not reflow under the user.
-    fn newest_turn_anchor(&self) -> Option<String> {
+    pub(crate) fn newest_turn_anchor(&self) -> Option<String> {
         let turns = crate::tui::render::chat::turn_ranges(&self.messages);
         let last = turns.last()?;
         self.messages
             .get(last.start)
             .map(crate::tui::render::chat::turn_anchor)
+    }
+
+    /// Whether the newest turn is sticky-expanded (#3094). A `turn_expanded`
+    /// entry that exists as `true` means Ctrl+O (or a header click) opened the
+    /// turn; blocks constructed later inside that turn inherit that state so
+    /// the user's choice stays sticky instead of whack-a-mole. Absent or
+    /// `false` means folded is the default and nothing inherits.
+    pub(crate) fn newest_turn_is_expanded(&self) -> bool {
+        self.newest_turn_anchor()
+            .is_some_and(|anchor| self.turn_expanded.get(&anchor).copied().unwrap_or(false))
     }
 
     /// `ctrl+o` while a turn streams flips the LIVE reasoning view between
@@ -1438,6 +1448,13 @@ impl App {
             && !group.calls.is_empty()
         {
             let count = group.calls.len();
+            // The flushed group inherits the turn's sticky expansion (#3094):
+            // if the user opened this turn, the flushed group stays open with
+            // everything else under that header.
+            let turn_expanded = self.newest_turn_is_expanded();
+            let mut group = group;
+            // The renderer reads the GROUP's flag (#3094).
+            group.expanded = turn_expanded;
             self.messages.push(DisplayMessage {
                 id: Uuid::new_v4(),
                 role: "tool_group".to_string(),
@@ -1448,7 +1465,7 @@ impl App {
                 approval: None,
                 approve_menu: None,
                 details: None,
-                expanded: false,
+                expanded: turn_expanded,
                 expanded_full: false,
                 tool_group: Some(group),
                 duration_secs: None,

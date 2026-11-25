@@ -4186,6 +4186,13 @@ impl App {
         // Matches DB reload order from expand_message.
         if let Some(group) = self.active_tool_group.take() {
             let count = group.calls.len();
+            // The finalized group inherits the turn's sticky expansion
+            // (#3094), matching the ToolCallCompleted flush sites: on an
+            // expanded turn it stays open with the rest of the turn.
+            let turn_expanded = self.newest_turn_is_expanded();
+            let mut group = group;
+            // The renderer reads the GROUP's flag (#3094).
+            group.expanded = turn_expanded;
             self.messages.push(DisplayMessage {
                 id: Uuid::new_v4(),
                 role: "tool_group".to_string(),
@@ -4196,7 +4203,7 @@ impl App {
                 approval: None,
                 approve_menu: None,
                 details: None,
-                expanded: false,
+                expanded: turn_expanded,
                 expanded_full: false,
                 tool_group: Some(group),
                 duration_secs: None,
@@ -4337,7 +4344,10 @@ impl App {
                 );
             }
         } else {
-            // Add assistant message to UI
+            // The final answer row inherits the turn's sticky expansion
+            // (#3094): if the user opened the turn mid-stream, the answer
+            // arrives readable instead of folding the working-out shut again.
+            let turn_expanded = self.newest_turn_is_expanded();
             let assistant_msg = DisplayMessage {
                 id: response.message_id,
                 role: "assistant".to_string(),
@@ -4348,7 +4358,7 @@ impl App {
                 approval: None,
                 approve_menu: None,
                 details: reasoning_details.clone(),
-                expanded: false,
+                expanded: turn_expanded,
                 expanded_full: false,
                 tool_group: None,
                 duration_secs: self

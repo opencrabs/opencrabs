@@ -2839,14 +2839,20 @@ impl App {
                     completed: false,
                     tool_input: tool_input.clone(),
                 };
+                // Read the turn's sticky expansion BEFORE taking the
+                // routed-state borrow: `session_state_mut` holds `&mut self`
+                // for the block, so the read cannot happen inside it.
+                let turn_expanded = self.newest_turn_is_expanded();
                 {
                     let mut state = self.session_state_mut(session_id);
                     if let Some(group) = state.active_tool_group_mut() {
                         group.calls.push(entry);
                     } else {
+                        // A live group born on a sticky-expanded turn arrives
+                        // open (#3094), matching the flushed rows below it.
                         state.set_active_tool_group(Some(ToolCallGroup {
                             calls: vec![entry],
-                            expanded: false,
+                            expanded: turn_expanded,
                         }));
                     }
                 }
@@ -2906,25 +2912,35 @@ impl App {
                     }
                 };
 
-                // Build a tool_group DisplayMessage helper.
-                let make_tool_group = |group: ToolCallGroup| DisplayMessage {
-                    id: Uuid::new_v4(),
-                    role: "tool_group".to_string(),
-                    content: format!(
-                        "{} tool call{}",
-                        group.calls.len(),
-                        if group.calls.len() == 1 { "" } else { "s" }
-                    ),
-                    timestamp: chrono::Utc::now(),
-                    token_count: None,
-                    cost: None,
-                    approval: None,
-                    approve_menu: None,
-                    details: None,
-                    expanded: false,
-                    expanded_full: false,
-                    tool_group: Some(group),
-                    duration_secs: None,
+                // Build a tool_group DisplayMessage helper. Groups born
+                // mid-turn inherit the turn's sticky expansion (#3094): on a
+                // ctrl+o-expanded live turn they arrive open instead of
+                // collapsed whack-a-mole. Snapshot the flag once per event.
+                let new_group_expanded = self.newest_turn_is_expanded();
+                let make_tool_group = move |mut group: ToolCallGroup| {
+                    // The renderer reads the GROUP's flag for tool_group rows;
+                    // stamp it alongside the row flag so both agree.
+                    group.expanded = new_group_expanded;
+                    let expanded = new_group_expanded;
+                    DisplayMessage {
+                        id: Uuid::new_v4(),
+                        role: "tool_group".to_string(),
+                        content: format!(
+                            "{} tool call{}",
+                            group.calls.len(),
+                            if group.calls.len() == 1 { "" } else { "s" }
+                        ),
+                        timestamp: chrono::Utc::now(),
+                        token_count: None,
+                        cost: None,
+                        approval: None,
+                        approve_menu: None,
+                        details: None,
+                        expanded,
+                        expanded_full: false,
+                        tool_group: Some(group),
+                        duration_secs: None,
+                    }
                 };
 
                 // Raw vs stripped accounting for the "eating intermediate
@@ -2980,6 +2996,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|r| !r.trim().is_empty());
 
+                // Read the turn's sticky expansion BEFORE the routed-state
+                // borrow (#3094): the borrow holds `&mut self` for the block,
+                // so the thinking row inherits via this hoisted snapshot.
+                let turn_expanded = self.newest_turn_is_expanded();
                 {
                     let mut state = self.session_state_mut(session_id);
                     // Clear the in-flight streaming response — the
@@ -3038,6 +3058,13 @@ impl App {
                         // still happens AFTER the thinking row so
                         // order stays: think → tools → next.
                         let reasoning_text = reasoning_details.unwrap_or_default();
+                        // A new thinking row inherits the turn's expansion
+                        // (#3094): on a sticky-expanded newest turn it arrives
+                        // in the capped state instead of collapsed, in step
+                        // with tool groups born in the same turn. Full walls
+                        // still need a second Ctrl+O (expanded_full), matching
+                        // the 3-state cycle (#727). `turn_expanded` is the
+                        // hoisted snapshot read above the borrow.
                         state.push_message(DisplayMessage {
                             id: Uuid::new_v4(),
                             role: "assistant".to_string(),
@@ -3048,7 +3075,7 @@ impl App {
                             approval: None,
                             approve_menu: None,
                             details: Some(reasoning_text),
-                            expanded: false,
+                            expanded: turn_expanded,
                             expanded_full: false,
                             tool_group: None,
                             duration_secs: None,
@@ -3167,6 +3194,9 @@ impl App {
                 // edits affect the active pane's render; background
                 // edits keep the inactive pane's "X tool calls"
                 // badge accurate live.
+                // Read the turn's sticky expansion BEFORE the routed-state
+                // borrow (#3094): the borrow holds `&mut self` for the block.
+                let turn_expanded = self.newest_turn_is_expanded();
                 {
                     let mut state = self.session_state_mut(session_id);
                     let updated = if let Some(group) = state.active_tool_group_mut() {
@@ -3198,9 +3228,11 @@ impl App {
                         if let Some(group) = state.active_tool_group_mut() {
                             group.calls.push(entry);
                         } else {
+                            // Live groups inherit the turn's sticky expansion
+                            // (#3094), same as the flushed rows below.
                             state.set_active_tool_group(Some(ToolCallGroup {
                                 calls: vec![entry],
-                                expanded: false,
+                                expanded: turn_expanded,
                             }));
                         }
                     }
@@ -3232,6 +3264,10 @@ impl App {
                         .is_some_and(|g| g.calls.iter().all(|c| c.completed));
                     if all_done && let Some(group) = self.active_tool_group.take() {
                         let count = group.calls.len();
+                        let turn_expanded = self.newest_turn_is_expanded();
+                        // The renderer reads the GROUP's flag (#3094).
+                        let mut group = group;
+                        group.expanded = turn_expanded;
                         self.messages.push(DisplayMessage {
                             id: Uuid::new_v4(),
                             role: "tool_group".to_string(),
@@ -3246,7 +3282,7 @@ impl App {
                             approval: None,
                             approve_menu: None,
                             details: None,
-                            expanded: false,
+                            expanded: turn_expanded,
                             expanded_full: false,
                             tool_group: Some(group),
                             duration_secs: None,
@@ -3483,13 +3519,18 @@ impl App {
                     tool_input: serde_json::Value::Null,
                     task_id: Some(task_id),
                 };
+                // Read the turn's sticky expansion BEFORE the routed-state
+                // borrow (#3094): the borrow holds `&mut self` for the block.
+                let turn_expanded = self.newest_turn_is_expanded();
                 let mut state = self.session_state_mut(session_id);
                 if let Some(group) = state.active_tool_group_mut() {
                     group.calls.push(entry);
                 } else {
+                    // Detached-task groups inherit the sticky expansion too
+                    // (#3094): on an expanded live turn the row arrives open.
                     state.set_active_tool_group(Some(ToolCallGroup {
                         calls: vec![entry],
-                        expanded: false,
+                        expanded: turn_expanded,
                     }));
                 }
                 if self.is_current_session(session_id) && self.auto_scroll {
