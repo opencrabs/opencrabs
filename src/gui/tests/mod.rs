@@ -8,6 +8,7 @@
 mod composer_orb_test;
 mod layout_guard_test;
 mod main_test;
+mod menu_test;
 mod plan_strip_test;
 mod pool_door_test;
 mod prompt_files_test;
