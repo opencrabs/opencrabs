@@ -62,11 +62,11 @@ BASELINES = {
     # handover quoted 57 from F4's report; this tree has 36 raw grep hits
     # for `local_db_path(` in src/gui, all of them code, so 57 is not this
     # tree's number and 36 is.
-    "R1": 2,
+    "R1": 0,
     # Ledger opened by the window outside LOCAL_ONLY: the L1/L2/L3/L5
     # functions the inventory routes to an `op`, not migrated yet
     # (sessions.rs 37, agent_bridge.rs 12, transcript.rs 8, the rest 5).
-    "R2": 2,
+    "R2": 0,
     # The agent service reached around the backend: the `facto` and
     # `chamada` sites of L6/L7/L8 plus agent_bridge.rs outside `build`.
     "R3": 0,
