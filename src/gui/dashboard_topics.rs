@@ -716,6 +716,7 @@ impl Dashboard {
             let Some(format) = topic_icons::image_format(stored) else {
                 continue;
             };
+            let path = self.backend.localize(&path);
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));

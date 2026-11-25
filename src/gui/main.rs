@@ -31,6 +31,7 @@ mod app;
 mod attachment_view;
 mod backend_glue;
 mod bang;
+mod blob_cache;
 mod boot;
 mod breakdown;
 mod channel_chip;
