@@ -10,7 +10,7 @@
 //!    by the dispatcher but never published, so they were undiscoverable.
 //! 3. **Missing handlers / silent TUI-only gaps.** `/approve` and `/skills`
 //!    had no channel handler, and TUI-only commands (`/theme`, `/whisper`,
-//!    `/rebuild`, `/onboard*`) fell through to "unknown command" — which
+//!    `/rebuild`, `/onboard*`) fell through to "unknown command"  -  which
 //!    reads like a bug rather than a surface that does not exist in chat.
 
 use crate::channels::commands::{ChannelCommand, format_help, handle_command, is_tui_only_command};
@@ -23,7 +23,7 @@ use crate::tests::agent_service_mocks::create_test_service_full;
 // `owner_user_id(allowed, bot_owner)` delegates to
 // `config::owner::resolve_owner_id`, so the menu publishes the same owner the
 // command-level owner gate accepts. `bot_owner` decides first; the allow list
-// is the positional fallback — and the *first parseable* entry wins there,
+// is the positional fallback  -  and the *first parseable* entry wins there,
 // because the shipped convention allows the wildcard `"*"` first in the list.
 
 #[test]
@@ -104,7 +104,7 @@ fn catalog_has_no_duplicate_command_names() {
     for c in &catalog {
         assert!(
             seen.insert(c.command.clone()),
-            "duplicate menu chip `{}` — Telegram renders both",
+            "duplicate menu chip `{}`  -  Telegram renders both",
             c.command
         );
     }

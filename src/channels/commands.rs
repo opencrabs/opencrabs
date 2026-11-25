@@ -278,11 +278,11 @@ pub enum ChannelCommand {
     /// `/discard` — cancel the in-flight turn when needed, then engine
     /// cleanup back to NoPlan (handled by the channel handler).
     DiscardPlan,
-    /// `/approve [approve-only|auto-session|auto-always]` — show or set the
+    /// `/approve [approve-only|auto-session|auto-always]`  -  show or set the
     /// tool-approval policy. Same config key and same accepted values as the
     /// TUI's slash-command tool, so both surfaces stay in step.
     Approve(String),
-    /// `/skills` — enumerate every loaded skill with the `/name` that runs it.
+    /// `/skills`  -  enumerate every loaded skill with the `/name` that runs it.
     Skills(String),
     /// A command that exists only in the TUI (terminal presets, clipboard,
     /// wizard screens, local rebuild). The reply explains what it does and
@@ -2740,7 +2740,7 @@ fn schedule_exit() -> String {
     "👋 Exiting OpenCrabs. Starting it again needs access to the machine it runs on.".to_string()
 }
 
-/// `/approve [approve-only|auto-session|auto-always]` — read or set the
+/// `/approve [approve-only|auto-session|auto-always]`  -  read or set the
 /// tool-approval policy. Deliberately identical to the TUI slash-command
 /// tool's `handle_approve`: same config key (`agent.approval_policy`), same
 /// accepted values, same two messages. Two surfaces, one policy.
@@ -2751,9 +2751,9 @@ pub(crate) fn handle_approve_policy(arg: &str) -> String {
             Ok(cfg) => format!(
                 "🔐 Current approval policy: `{}`\n\n\
                  Set it with `/approve <policy>`:\n\
-                 • `approve-only` — ask before every tool call\n\
-                 • `auto-session` — auto-approve on approval callbacks\n\
-                 • `auto-always` — never ask (YOLO, the shipped default)",
+                 • `approve-only`  -  ask before every tool call\n\
+                 • `auto-session`  -  auto-approve on approval callbacks\n\
+                 • `auto-always`  -  never ask (YOLO, the shipped default)",
                 cfg.agent.approval_policy
             ),
             Err(e) => format!("❌ Failed to read config: {e}"),
@@ -2773,7 +2773,7 @@ pub(crate) fn handle_approve_policy(arg: &str) -> String {
     }
 }
 
-/// `/skills` — enumerate every loaded skill (built-in + user + project) with
+/// `/skills`  -  enumerate every loaded skill (built-in + user + project) with
 /// the slash that runs it. The Telegram menu lists them one entry at a time,
 /// which is impossible to survey on a phone; this is the whole toolbox in one
 /// reply. Sorted by name so the list is stable between calls.
@@ -2787,7 +2787,7 @@ pub(crate) fn format_skills() -> String {
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     let mut out = format!("# 🧰 Skills ({})\n\n", skills.len());
     for s in &skills {
-        out.push_str(&format!("• `{}` — {}\n", s.slash_name, s.description));
+        out.push_str(&format!("• `{}`  -  {}\n", s.slash_name, s.description));
     }
     out.push_str("\nSend a skill's slash command to run it.");
     out
@@ -2830,7 +2830,7 @@ pub(crate) fn tui_only_notice(cmd: &str) -> String {
     let base = cmd.split([' ', ':']).next().unwrap_or(cmd).to_string();
     let detail = match base.as_str() {
         "/theme" => {
-            "Themes are terminal colour presets for the TUI — there is nothing a chat \
+            "Themes are terminal colour presets for the TUI  -  there is nothing a chat \
              channel could render, so the setting has no meaning here."
         }
         "/whisper" => {
@@ -2839,14 +2839,14 @@ pub(crate) fn tui_only_notice(cmd: &str) -> String {
              speech-to-text runs on inbound audio."
         }
         "/rebuild" => {
-            "Rebuild compiles the local source tree and restarts this process — it needs a \
+            "Rebuild compiles the local source tree and restarts this process  -  it needs a \
              Rust toolchain on the host and is deliberately TUI-only. Use `/evolve` for \
              the normal release upgrade."
         }
         "/onboard" => {
             "The setup wizard is a multi-screen TUI flow (provider, workspace, channels, \
              voice, image, persona). In chat use `/models` to switch model, `/doctor` to \
-             health-check, and just ask me to change any setting — I write it with \
+             health-check, and just ask me to change any setting  -  I write it with \
              `config_manager`."
         }
         _ => "That command only exists in the TUI.",

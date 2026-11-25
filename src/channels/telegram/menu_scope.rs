@@ -16,8 +16,7 @@
 /// `allowed_users` is a *list*, not an ordered pair: the shipped convention
 /// permits the wildcard `"*"` anywhere in it, and plenty of real configs put
 /// it first (`allowed_users = ["*", "1608111860"]`). Callers used to take
-/// `.first()` and parse it, which returned `None` on exactly those configs —
-/// and every owner-menu path treats `None` as "no owner configured", so
+/// `.first()` and parse it, which returned `None` on exactly those configs, and every owner-menu path treats `None` as "no owner configured", so
 /// `register_scoped_menus` returned early and the Telegram `/` picker was
 /// left with nothing but `/start`. The first entry that parses wins;
 /// non-numeric entries (`"*"`, channel handles, typos) are skipped instead of

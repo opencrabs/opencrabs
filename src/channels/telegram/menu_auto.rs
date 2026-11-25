@@ -113,7 +113,7 @@ pub(crate) async fn maybe_auto_register(
         // registered so `menu_refresh` re-publishes it on skills changes.
         SoloEval::OtherHumans(humans) => {
             tracing::debug!(
-                "Telegram: group {chat_id} has other humans ({humans:?}) — publishing the \
+                "Telegram: group {chat_id} has other humans ({humans:?})  -  publishing the \
                  owner catalog under a per-user scope they cannot see"
             );
             telegram_state.set_solo_evaluated(chat_id, true).await;

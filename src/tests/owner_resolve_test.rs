@@ -77,7 +77,7 @@ fn resolve_owner_id_explicit_bot_owner_decides() {
 fn resolve_owner_id_positional_fallback_skips_the_wildcard() {
     // The regression the Telegram menu path shipped with: `.first().parse()`
     // returned None on `["*", "<id>"]`, which silently disabled every owner
-    // menu — the `/` picker was left with nothing but `/start`.
+    // menu  -  the `/` picker was left with nothing but `/start`.
     let allowed = v(&["*", "1608111860"]);
     let bot_owner: Vec<String> = Vec::new();
     assert_eq!(resolve_owner_id(&allowed, &bot_owner), Some(1_608_111_860));
