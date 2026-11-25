@@ -54,8 +54,8 @@ pub struct RemoteCrab {
     base_url: String,
     /// The bearer the pairing handed out, when the gateway wants one.
     token: Option<String>,
-    /// This window's own ledger, for the bridge callers that still open a
-    /// ledger by path (see [`crate::backend_glue::Backend::local_db_path`]).
+    /// This window's own ledger, kept across hops so what belongs to the
+    /// window stays on this machine whichever crab it looks at.
     window_ledger: PathBuf,
     /// The per-frame values last read from the crab.
     cache: FactsCache,

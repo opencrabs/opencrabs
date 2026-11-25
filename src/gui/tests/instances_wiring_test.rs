@@ -71,6 +71,14 @@ fn fn_body(src: &str, name: &str) -> String {
     body
 }
 
+/// The window's own ledger a remote backend carries.
+fn window_ledger(backend: &Backend) -> PathBuf {
+    match backend {
+        Backend::Remote(crab) => crab.window_ledger().to_path_buf(),
+        Backend::Local(_) => panic!("a local backend has no window ledger of its own"),
+    }
+}
+
 #[test]
 fn a_remote_backend_keeps_the_window_ledger_of_home() {
     let ledger = PathBuf::from("/tmp/window-ledger.db");
@@ -79,9 +87,9 @@ fn a_remote_backend_keeps_the_window_ledger_of_home() {
     assert!(matches!(remote, Backend::Remote(_)));
     // What belongs to the window (dismissed hints) stays on this machine's
     // ledger whichever crab the window looks at, and a second hop keeps it.
-    assert_eq!(remote.local_db_path(), ledger);
+    assert_eq!(window_ledger(&remote), ledger);
     let again = Backend::remote(&known("b:2", "beta", "http://b:7878"), &remote);
-    assert_eq!(again.local_db_path(), ledger);
+    assert_eq!(window_ledger(&again), ledger);
 }
 
 #[test]

@@ -5,7 +5,6 @@
 //! another one over its gateway (`backend_remote.rs`). The callers do not
 //! change between the two, because both answer the same [`Op`] values.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
@@ -30,7 +29,7 @@ impl Backend {
     /// A local backend on the ledger at `db_path`, with no service yet and
     /// not recorded as the primary: the helper tests reach a ledger through.
     #[cfg(test)]
-    pub fn local(db_path: PathBuf) -> Self {
+    pub fn local(db_path: std::path::PathBuf) -> Self {
         Backend::Local(Arc::new(Ctx::new(db_path)))
     }
 
@@ -50,23 +49,6 @@ impl Backend {
             Some(known.token.clone()),
             window_ledger,
         )))
-    }
-
-    /// The ledger file of a local crab.
-    ///
-    /// A bridge for functions that still open the ledger themselves: each
-    /// one takes a `Backend` and reads its path on the first line. The count
-    /// of callers only goes down as those functions move behind an `Op`.
-    ///
-    /// A remote crab's ledger is not on this machine, so a remote backend
-    /// answers with the window's own: right for what belongs to the window
-    /// (dismissed hints), and for the crab's data the reason those callers
-    /// still have to move behind an `Op`.
-    pub fn local_db_path(&self) -> PathBuf {
-        match self {
-            Backend::Local(ctx) => ctx.db_path().to_path_buf(),
-            Backend::Remote(crab) => crab.window_ledger().to_path_buf(),
-        }
     }
 
     /// Run `op` and wait for its reply.
