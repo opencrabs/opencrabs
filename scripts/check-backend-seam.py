@@ -87,7 +87,7 @@ BASELINES = {
     # because src/remote/scopes.rs maps the A2A method "tasks/get" to its
     # scope (a2a:read). That is the A2A protocol table, not the panel; it
     # leaves with the panel's server side or stays as the one known site.
-    "R7": 1,
+    "R7": 0,
 }
 
 # Functions of the window that may touch the disk, the ledger or the service
