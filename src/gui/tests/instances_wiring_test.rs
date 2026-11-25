@@ -40,6 +40,7 @@ fn known(id: &str, label: &str, url: &str) -> KnownInstance {
         added_at: 100,
         last_ok: 0,
         glyph: None,
+        routes: Vec::new(),
     }
 }
 

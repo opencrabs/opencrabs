@@ -1273,6 +1273,7 @@ fn pair_and_store(url: &str, code: &str, label: &str) -> anyhow::Result<(String,
         added_at: now(),
         last_ok: 0,
         glyph,
+        routes: paired.routes,
     })?;
     Ok((paired.host_id, store.load()?))
 }
