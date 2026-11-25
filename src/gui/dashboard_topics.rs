@@ -861,7 +861,8 @@ impl Dashboard {
 /// sent no file falls back to the stored value resolved in the icon store,
 /// which is the local crab's own path. Either goes through
 /// `Backend::localize_allowed`: a remote copy is read only when it is of a
-/// kind this machine opens (no `svg`, no `.bin`).
+/// kind this machine opens (no `svg`, no `.bin`), and it decodes as the kind
+/// of that same file.
 pub(crate) fn read_icon_images(
     backend: &crate::backend_glue::Backend,
     icons: &HashMap<uuid::Uuid, String>,
@@ -876,7 +877,10 @@ pub(crate) fn read_icon_images(
         else {
             continue;
         };
-        let Some(format) = topic_icons::image_format(stored) else {
+        // The decoder is told the kind of the file that is checked and read,
+        // never the kind the stored value claims: a crab that names
+        // `img:x.svg` beside a `.png` file gets a png decode or nothing.
+        let Some(format) = topic_icons::image_format(&path.to_string_lossy()) else {
             continue;
         };
         let Some(path) = backend.localize_allowed(&path) else {

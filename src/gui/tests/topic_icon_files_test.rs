@@ -124,6 +124,31 @@ fn a_remote_crab_icon_of_a_kind_not_opened_here_is_never_read() {
 }
 
 #[test]
+fn a_remote_icon_decodes_as_its_file_not_as_its_stored_value() {
+    let cache = tempfile::tempdir().expect("cache");
+    let crab = crab_with_cache(cache.path());
+    let on_crab = Path::new("/home/crab/.opencrabs/gui-icons/claims-svg.png");
+    BlobStore::at(cache.path().to_path_buf())
+        .keep(on_crab, PICTURE)
+        .expect("keep");
+    let backend = Backend::Remote(crab.clone());
+
+    let topic = uuid::Uuid::from_u128(10);
+    let icons = HashMap::from([(topic, "img:claims-svg.svg".to_string())]);
+    let files = HashMap::from([(topic, on_crab.to_path_buf())]);
+    let images = read_icon_images(&backend, &icons, &files);
+
+    let image = images
+        .get("img:claims-svg.svg")
+        .expect("the png file is read");
+    assert_eq!(
+        image.format,
+        gpui::ImageFormat::Png,
+        "the decoder is told the checked file's kind, never the stored value's"
+    );
+}
+
+#[test]
 fn a_local_crab_icon_is_read_from_its_own_path() {
     let dir = tempfile::tempdir().expect("dir");
     let path = dir.path().join("local-icon.png");
