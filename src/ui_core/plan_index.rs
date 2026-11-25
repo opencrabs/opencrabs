@@ -9,6 +9,8 @@
 //! Nothing here draws. The index is file I/O plus the loader's own state rules,
 //! which is why it can live in `ui_core` and be linked by a terminal frontend.
 
+pub mod sweep;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;

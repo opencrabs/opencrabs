@@ -76,6 +76,15 @@ async fn async_main() -> Result<()> {
         tracing::info!("🧹 Cleaned up {} orphaned temp file(s)", removed);
     }
 
+    // Retire dead plan files (#3107): a plan stale on both axes (file mtime
+    // and the session's last message both older than the window) moves into
+    // its session archive with a timestamp, every stale copy across all
+    // roots. Archive, never delete; the classify-only paint sweep stays
+    // read-only.
+    if let Err(e) = opencrabs::ui_core::plan_index::sweep::retire_dead_plans_at_startup().await {
+        tracing::warn!("plan retirement pass skipped: {e}");
+    }
+
     // Run CLI application
     let result = cli::run().await;
 
