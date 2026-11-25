@@ -615,6 +615,7 @@ impl Dashboard {
         // before. Document bytes and Markdown parsing use the async path below.
         self.preview_video = if open.kind == preview::PreviewKind::Video {
             Some(preview::VideoFacts::probe(
+                &self.backend,
                 &opencrabs::config::opencrabs_home(),
                 &open.path,
             ))
@@ -685,7 +686,10 @@ impl Dashboard {
         self.preview_document = Some(preview_document::DocumentState::text(generation));
         self.preview_video = None;
         self.preview_zoom = 1.0;
-        let path = self.prompt_docs.get(&id).cloned();
+        let path = self
+            .prompt_docs
+            .get(&id)
+            .map(|path| self.backend.localize(path));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let parsed = cx
@@ -750,7 +754,7 @@ impl Dashboard {
             };
             Some(preview::actions_row(
                 open.open_label(),
-                open.path.exists(),
+                self.backend.localize(&open.path).exists(),
                 open_file,
                 reveal_file,
             ))
@@ -779,6 +783,7 @@ impl Dashboard {
                 height: document_height,
             });
         preview::body(
+            &self.backend,
             open,
             actions,
             self.preview_zoom,

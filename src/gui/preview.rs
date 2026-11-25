@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::attachment_view;
+use crate::backend_glue::Backend;
 use crate::logging;
 use crate::modal_shell;
 use crate::palette;
@@ -67,6 +68,14 @@ impl Preview {
         match self.kind {
             PreviewKind::Video => "play",
             PreviewKind::Image | PreviewKind::File | PreviewKind::Message => "open",
+        }
+    }
+
+    /// The same preview, its path the one `backend` answers on this machine.
+    pub fn localized(&self, backend: &Backend) -> Self {
+        Self {
+            path: backend.localize(&self.path),
+            ..self.clone()
         }
     }
 
@@ -315,7 +324,8 @@ impl VideoFacts {
     /// `ffmpeg` is probed here, once, and its absence is a log line and a
     /// glyph, never an error the user has to act on: the clip still plays in
     /// the system player, which is what they wanted in the first place.
-    pub fn probe(home: &Path, source: &Path) -> Self {
+    pub fn probe(backend: &Backend, home: &Path, source: &Path) -> Self {
+        let source = &backend.localize(source);
         let mut facts = Self::default();
         if !source.is_file() {
             return facts;
@@ -562,6 +572,7 @@ pub struct DocumentBody<'a> {
 /// the caller mints the listeners and this only decides the content. A message
 /// preview passes `None`: it has no file to open or reveal (#3053).
 pub fn body(
+    backend: &Backend,
     preview: &Preview,
     actions: Option<AnyElement>,
     zoom: f32,
@@ -571,8 +582,8 @@ pub fn body(
     middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let content = match preview.kind {
-        PreviewKind::Image => image_body(preview, zoom, wheel),
-        PreviewKind::Video => video_body(preview, facts.and_then(|f| f.poster.as_deref())),
+        PreviewKind::Image => image_body(backend, preview, zoom, wheel),
+        PreviewKind::Video => video_body(backend, preview, facts.and_then(|f| f.poster.as_deref())),
         PreviewKind::File => file_body(preview, document, middle_click),
         PreviewKind::Message => message_body(document, middle_click),
     };
@@ -596,10 +607,12 @@ pub fn body(
 const IMAGE_BOX: (f32, f32) = (720.0, 480.0);
 
 fn image_body(
+    backend: &Backend,
     preview: &Preview,
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let preview = &preview.localized(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }
@@ -664,7 +677,8 @@ pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> 
     }
 }
 
-fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
+fn video_body(backend: &Backend, preview: &Preview, poster: Option<&Path>) -> AnyElement {
+    let preview = &preview.localized(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }
