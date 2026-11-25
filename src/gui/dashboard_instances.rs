@@ -94,6 +94,10 @@ impl Dashboard {
     /// menus what this crab lets the window do. Until that handshake lands the
     /// window holds none, which greys nothing out: a refusal still arrives as
     /// a notice, the way it did before the handshake existed.
+    ///
+    /// What the window keeps per crab is read again from the new one: the
+    /// usage view for the period on screen, the mission control snapshot and
+    /// the channel chip. None of them is left showing the crab it left.
     fn instance_switch(&mut self, backend: Backend, cx: &mut Context<Self>) {
         self.backend = backend;
         self.hello = None;
@@ -101,6 +105,16 @@ impl Dashboard {
         self.instance_epoch = self.instance_epoch.wrapping_add(1);
         self.refresh_rail(cx);
         self.fetch_hello(cx);
+        self.reload_usage(cx);
+        self.mc = None;
+        self.mc_err = None;
+        self.mc_loading = false;
+        if self.screen == Screen::MissionControl {
+            self.fetch_mission_control(cx);
+        }
+        self.channel_chip = None;
+        self.chip_channel_names.clear();
+        self.refresh_chip_names(cx);
         cx.notify();
     }
 

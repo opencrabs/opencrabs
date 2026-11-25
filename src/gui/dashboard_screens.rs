@@ -79,6 +79,14 @@ impl Dashboard {
             return;
         }
         logging::info(&format!("period -> {period:?}: fetching"));
+        self.reload_usage(cx);
+    }
+
+    /// Read the usage view for the period on screen from the crab the window
+    /// holds. A period switch asks for it, and so does a crab swap, whose
+    /// period did not change but whose ledger did.
+    pub(crate) fn reload_usage(&mut self, cx: &mut Context<Self>) {
+        let period = self.dash.period;
         self.pending += 1;
         let pending = self.pending;
         let backend = self.backend.clone();
