@@ -560,7 +560,9 @@ impl Op for SetTopicIcon {
 ///
 /// A window on another machine cannot write this crab's `gui-icons/`: it
 /// sends the picked file by `blob.put` and names the upload here. Only a file
-/// in the upload directory is taken. The copy keeps the upload's own file
+/// in the upload directory is taken, named `[A-Za-z0-9._-]` with a picture's
+/// extension (no `svg`) and no bigger than the blob ceiling; anything else is
+/// `BadParams` and writes nothing. The copy keeps the upload's own file
 /// name (`<16 hex of its sha256>-<safe name>`), a bare name the icon store
 /// accepts, so the same bytes kept twice are one icon and the answer repeats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,9 +583,15 @@ impl Op for IconFromUpload {
         let name = source
             .file_name()
             .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty() && !name.contains(['/', '\\']) && !name.contains(".."))
+            .filter(|name| icon_name_allowed(name))
             .ok_or_else(|| BackendError::BadParams(format!("not an icon name: {}", self.upload)))?
             .to_string();
+        let size = tokio::fs::metadata(&source).await.map_err(failed)?.len();
+        if size > super::blob::MAX_BLOB_BYTES {
+            return Err(BackendError::BadParams(format!(
+                "icon: {size} bytes, over the blob ceiling"
+            )));
+        }
         let dir = home.join("gui-icons");
         let target = dir.join(&name);
         tokio::task::spawn_blocking(move || {
@@ -594,6 +602,27 @@ impl Op for IconFromUpload {
         .map_err(failed)?;
         Ok(format!("{ICON_IMG_PREFIX}{name}"))
     }
+}
+
+/// The extensions an icon kept from an upload may have, lowercased: the
+/// pictures every window decodes as one. No `svg`, which carries script.
+pub const ICON_UPLOAD_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Whether `name` may become a file in `gui-icons/` by [`IconFromUpload`]:
+/// only `[A-Za-z0-9._-]`, no `..`, and an extension in
+/// [`ICON_UPLOAD_EXTENSIONS`]. Anyone holding `send` reaches this, so the
+/// store only ever takes a bare picture name.
+fn icon_name_allowed(name: &str) -> bool {
+    let plain = !name.is_empty()
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    plain
+        && std::path::Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ICON_UPLOAD_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 /// Turn topics on or off for one session. The caller re-reads afterwards.
@@ -1155,6 +1184,74 @@ mod tests {
                 !gateway.home().join("gui-icons").exists(),
                 "a refused upload wrote no icon"
             );
+        }
+
+        #[tokio::test]
+        async fn icon_from_upload_refuses_what_is_not_a_picture_name() {
+            use base64::Engine as _;
+            let gateway = Gateway::start().await;
+            for name in ["x.sh", "x.svg", "x.desktop", "x.png.exe"] {
+                let upload = gateway
+                    .local(crate::backend::blob::BlobPut {
+                        name: name.into(),
+                        base64: base64::engine::general_purpose::STANDARD.encode(b"#!/bin/sh"),
+                    })
+                    .await
+                    .expect("upload");
+                let answer = parity!(
+                    gateway,
+                    IconFromUpload {
+                        upload: upload.path
+                    }
+                );
+                assert_eq!(answer["Err"]["kind"], "bad_params", "{name}: {answer}");
+            }
+            assert!(
+                !gateway.home().join("gui-icons").exists(),
+                "a refused name wrote no icon"
+            );
+        }
+
+        #[tokio::test]
+        async fn icon_from_upload_refuses_a_path_out_of_the_uploads() {
+            let gateway = Gateway::start().await;
+            let tmp = gateway.home().join("tmp");
+            std::fs::create_dir_all(tmp.join("gui-uploads")).expect("uploads");
+            std::fs::write(tmp.join("x.png"), b"png").expect("beside the uploads");
+            let upload = gateway
+                .home()
+                .join(crate::backend::blob::UPLOAD_DIR)
+                .join("../x.png")
+                .to_string_lossy()
+                .into_owned();
+            let answer = parity!(gateway, IconFromUpload { upload });
+            assert!(answer["Err"].is_object(), "{answer}");
+            assert!(
+                !gateway.home().join("gui-icons").exists(),
+                "a refused path wrote no icon"
+            );
+        }
+
+        #[test]
+        fn an_icon_name_is_plain_and_a_picture() {
+            for name in ["0123abcd-crab.png", "a.JPG", "a_b-c.jpeg", "x.gif", "x.webp"] {
+                assert!(icon_name_allowed(name), "{name}");
+            }
+            for name in [
+                "",
+                "x.sh",
+                "x.svg",
+                "x.desktop",
+                "x",
+                "../x.png",
+                "a/b.png",
+                "a\\b.png",
+                "a b.png",
+                "a..png",
+                "ação.png",
+            ] {
+                assert!(!icon_name_allowed(name), "{name}");
+            }
         }
 
         #[test]
