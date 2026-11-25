@@ -79,6 +79,31 @@ impl Preview {
         }
     }
 
+    /// The same preview as the overlay may decode it on this machine (SEC5).
+    ///
+    /// An image or a clip is drawn from [`Backend::localize_allowed`], and
+    /// what it is drawn as is decided by that copy's own extension. A remote
+    /// crab's copy the allowlist does not let open (a `.bmp`, a `.mkv`, kept
+    /// here as `.bin`) is `None` there: the preview becomes a file, shown and
+    /// never decoded. Any other kind is [`localized`](Self::localized), as it
+    /// was. The local crab's copy is its own path, so its preview is the same.
+    pub fn localized_allowed(&self, backend: &Backend) -> Self {
+        match self.kind {
+            PreviewKind::Image | PreviewKind::Video => match backend.localize_allowed(&self.path) {
+                Some(copy) => Self {
+                    kind: kind_of(&copy),
+                    path: copy,
+                    ..self.clone()
+                },
+                None => Self {
+                    kind: PreviewKind::File,
+                    ..self.localized(backend)
+                },
+            },
+            PreviewKind::File | PreviewKind::Message => self.localized(backend),
+        }
+    }
+
     /// Open `path`, deciding the kind from its extension.
     pub fn of(path: PathBuf) -> Self {
         let kind = kind_of(&path);
@@ -481,9 +506,19 @@ impl VideoFacts {
     /// `ffmpeg` is probed here, once, and its absence is a log line and a
     /// glyph, never an error the user has to act on: the clip still plays in
     /// the system player, which is what they wanted in the first place.
+    ///
+    /// The clip is read from [`Backend::localize_allowed`], and only when that
+    /// copy is a video by its own extension (SEC5): a remote crab's copy
+    /// outside the allowlist is never stat'ed nor handed to `ffmpeg`.
     pub fn probe(backend: &Backend, home: &Path, source: &Path) -> Self {
-        let source = &backend.localize(source);
         let mut facts = Self::default();
+        let Some(source) = backend
+            .localize_allowed(source)
+            .filter(|copy| kind_of(copy) == PreviewKind::Video)
+        else {
+            return facts;
+        };
+        let source = &source;
         if !source.is_file() {
             return facts;
         }
@@ -740,10 +775,18 @@ pub fn body(
     middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let content = match preview.kind {
-        PreviewKind::Image => image_body(backend, preview, zoom, wheel),
-        PreviewKind::Video => video_body(backend, preview, facts.and_then(|f| f.poster.as_deref())),
         PreviewKind::File => file_body(preview, document, middle_click),
         PreviewKind::Message => message_body(document, middle_click),
+        // A picture or a clip is decoded from the copy `localized_allowed`
+        // answers, as the kind that copy's extension says; one the allowlist
+        // refuses is a file (SEC5).
+        PreviewKind::Image | PreviewKind::Video => match preview.localized_allowed(backend).kind {
+            PreviewKind::Image => image_body(backend, preview, zoom, wheel),
+            PreviewKind::Video => {
+                video_body(backend, preview, facts.and_then(|f| f.poster.as_deref()))
+            }
+            PreviewKind::File | PreviewKind::Message => file_body(preview, None, middle_click),
+        },
     };
     let document_open =
         matches!(preview.kind, PreviewKind::File | PreviewKind::Message) && document.is_some();
@@ -770,7 +813,7 @@ fn image_body(
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let preview = &preview.localized(backend);
+    let preview = &preview.localized_allowed(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }
@@ -813,7 +856,12 @@ fn image_body(
 pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> String {
     match preview.kind {
         PreviewKind::Image => {
-            let dims = image_dims(&preview.path);
+            // The header measures the copy only when its own extension is an
+            // image's: a remote crab's `.bin` is never decoded here (SEC5).
+            let dims = match kind_of(&preview.path) {
+                PreviewKind::Image => image_dims(&preview.path),
+                _ => None,
+            };
             let percent = (zoom * 100.0).round() as i32;
             format!(
                 "{} \u{b7} {percent}% \u{b7} scroll to zoom",
@@ -836,7 +884,7 @@ pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> 
 }
 
 fn video_body(backend: &Backend, preview: &Preview, poster: Option<&Path>) -> AnyElement {
-    let preview = &preview.localized(backend);
+    let preview = &preview.localized_allowed(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }
