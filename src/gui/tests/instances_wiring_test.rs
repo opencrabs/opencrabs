@@ -363,3 +363,49 @@ fn the_card_owns_the_keyboard_before_the_seeker_and_the_composer() {
         .expect("the Seeker is in on_key");
     assert!(card < seeker, "the card reads keys first");
 }
+
+/// A paired crab must be removable from the window. The class pinned here is
+/// "the strip can add a crab but never drop one": the right-click on a badge
+/// opens the card, the card's forget rewrites the store off the UI thread, and
+/// the window goes home first when the crab being forgotten is the open one.
+#[test]
+fn a_badge_right_click_forgets_its_crab_off_the_ui_thread() {
+    let badge = fn_body(STRIP, "badge");
+    assert!(
+        badge.contains("on_mouse_down(MouseButton::Right, ask)"),
+        "{badge}"
+    );
+    assert!(
+        badge.contains("this.open_manage(&manage_badge, cx)"),
+        "{badge}"
+    );
+
+    let card = fn_body(STRIP, "manage_body");
+    assert!(
+        card.contains("format!(\"esquecer {}\", view.label)"),
+        "{card}"
+    );
+    assert!(card.contains("this.manage_open(cx)"), "{card}");
+    assert!(card.contains("this.manage_forget(cx)"), "{card}");
+
+    let forget = fn_body(STRIP, "manage_forget");
+    assert!(forget.contains("background_executor()"), "{forget}");
+    assert!(forget.contains("forget_instance(&forget)"), "{forget}");
+    assert!(
+        forget.contains("dash.instance_forgotten(&file, &host_id, cx)"),
+        "{forget}"
+    );
+    assert!(STRIP.contains("store.remove(host_id)?;"));
+
+    let forgotten = fn_body(WIRING, "instance_forgotten");
+    let home = forgotten
+        .find("self.instance_clear(cx);")
+        .expect("forgetting the open crab goes home");
+    let reload = forgotten
+        .find("Instances::from_file(file)")
+        .expect("the strip reloads from the store");
+    assert!(
+        home < reload,
+        "home first, so no screen keeps the dropped token"
+    );
+}

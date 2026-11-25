@@ -232,6 +232,29 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// A crab was forgotten: the strip hands over the store as it now reads.
+    ///
+    /// If the window was on that crab it goes home first, through the same
+    /// swap a click on the mark makes, so nothing on screen keeps talking to
+    /// a crab whose token was just thrown away.
+    pub(crate) fn instance_forgotten(
+        &mut self,
+        file: &InstanceFile,
+        host_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.instances.selected_host_id() == Some(host_id) {
+            self.instance_clear(cx);
+        }
+        let held = self.instances.selected_host_id().map(str::to_string);
+        self.instances = Instances::from_file(file);
+        self.instance_error = None;
+        if let Some(held) = held.as_deref() {
+            self.instances.select(held);
+        }
+        cx.notify();
+    }
+
     /// Whether the strip's `+` card is up. While it is, it owns the keyboard.
     pub(crate) fn instance_card_open(&self, cx: &App) -> bool {
         self.instance_strip.read(cx).card_open()

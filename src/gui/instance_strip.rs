@@ -21,9 +21,9 @@
 //!    the pointer cannot slide away between the press and the release.
 
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Div, IntoElement, Keystroke, Render,
-    SharedString, StyleRefinement, WeakEntity, Window, anchored, deferred, div, point, prelude::*,
-    px, rems, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, IntoElement, Keystroke, MouseButton,
+    MouseDownEvent, Render, SharedString, StyleRefinement, WeakEntity, Window, anchored, deferred,
+    div, point, prelude::*, px, rems, rgb,
 };
 use opencrabs::config::{A2aConfig, Config};
 use opencrabs::remote::instance_client;
@@ -185,6 +185,10 @@ impl InstanceStrip {
         let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
             this.pick(host_id.clone(), cx);
         });
+        let manage_badge = badge.clone();
+        let ask = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+            this.open_manage(&manage_badge, cx);
+        });
 
         let mut cell = div()
             .id(SharedString::from(format!(
@@ -200,6 +204,7 @@ impl InstanceStrip {
             .h(rems(BADGE_REM))
             .cursor_pointer()
             .on_click(click)
+            .on_mouse_down(MouseButton::Right, ask)
             .tooltip(move |_window, cx| crate::hint::mic_tooltip(title.clone(), cx))
             .child(
                 div()
@@ -352,6 +357,18 @@ pub(crate) enum StripCard {
     Minting,
     /// This crab's address, a fresh code and the QR that carries both.
     Share(ShareView),
+    /// A badge was right-clicked: open that crab, or forget it.
+    Manage(ManageView),
+}
+
+/// The crab a right-click asked about, held by value so the card still names
+/// it while the store is being rewritten.
+pub(crate) struct ManageView {
+    pub(crate) host_id: String,
+    pub(crate) label: SharedString,
+    pub(crate) title: SharedString,
+    /// A forget is in flight; the buttons stop answering until it lands.
+    pub(crate) busy: bool,
 }
 
 impl InstanceStrip {
@@ -377,6 +394,80 @@ impl InstanceStrip {
         self.card = None;
         self.card_error = None;
         cx.notify();
+    }
+
+    /// A badge was right-clicked: the card that opens or forgets that crab.
+    ///
+    /// Forgetting lives behind the right-click and a second, named button,
+    /// never on the left-click: the left-click is the pick, and a slip of the
+    /// hand there must not cost a pairing.
+    pub(crate) fn open_manage(&mut self, badge: &StripBadge, cx: &mut Context<Self>) {
+        self.card_epoch = self.card_epoch.wrapping_add(1);
+        self.card = Some(StripCard::Manage(ManageView {
+            host_id: badge.host_id.clone(),
+            label: badge.label.clone(),
+            title: badge.title.clone(),
+            busy: false,
+        }));
+        self.card_error = None;
+        cx.notify();
+    }
+
+    /// The managed crab's "abrir": the same pick a left-click makes.
+    fn manage_open(&mut self, cx: &mut Context<Self>) {
+        let Some(StripCard::Manage(view)) = self.card.as_ref() else {
+            return;
+        };
+        let host_id = SharedString::from(view.host_id.clone());
+        self.close_card(cx);
+        if self.frame.selected.as_deref() != Some(host_id.as_ref()) {
+            self.pick(host_id, cx);
+        }
+    }
+
+    /// The managed crab's "esquecer": drop its row from the store off the UI
+    /// thread, then hand the window the store as it now reads.
+    fn manage_forget(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.card_epoch;
+        let host_id = match self.card.as_mut() {
+            Some(StripCard::Manage(view)) if !view.busy => {
+                view.busy = true;
+                view.host_id.clone()
+            }
+            _ => return,
+        };
+        self.card_error = None;
+        cx.notify();
+        let forget = host_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { forget_instance(&forget) })
+                .await;
+            this.update(cx, |strip, cx| match result {
+                Ok(file) => {
+                    if strip.card_epoch == epoch {
+                        strip.close_card(cx);
+                    }
+                    strip
+                        .dashboard
+                        .update(cx, |dash, cx| dash.instance_forgotten(&file, &host_id, cx))
+                        .ok();
+                }
+                Err(e) => {
+                    if strip.card_epoch != epoch {
+                        return;
+                    }
+                    if let Some(StripCard::Manage(view)) = strip.card.as_mut() {
+                        view.busy = false;
+                    }
+                    strip.card_error = Some(SharedString::from(format!("esquecer: {e:#}")));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Mint a code for this crab and build the card that carries it.
@@ -618,6 +709,16 @@ impl InstanceStrip {
                 "esc fecha",
                 self.minting_body(cx),
             ),
+            StripCard::Manage(view) => {
+                let body = self.manage_body(view, cx);
+                (
+                    "instance-manage-modal",
+                    "Este crab",
+                    "abrir mostra as sessões dele; esquecer apaga o emparelhamento",
+                    "esc fecha",
+                    body,
+                )
+            }
             StripCard::Share(share) => {
                 let share = share.clone();
                 (
@@ -661,7 +762,11 @@ impl InstanceStrip {
         )
     }
 
-    fn card_button(id: &'static str, label: &'static str, accent: bool) -> gpui::Stateful<Div> {
+    fn card_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        accent: bool,
+    ) -> gpui::Stateful<Div> {
         let p = palette::current();
         div()
             .id(id)
@@ -672,7 +777,7 @@ impl InstanceStrip {
             .bg(rgb(if accent { p.accent } else { p.panel_hi }))
             .text_size(rems(0.75))
             .text_color(rgb(if accent { p.bg } else { p.text }))
-            .child(SharedString::from(label))
+            .child(label.into())
     }
 
     fn card_error_line(&self) -> Option<AnyElement> {
@@ -799,6 +904,47 @@ impl InstanceStrip {
     }
 
     /// The share card while the code is being minted, or why it was not.
+    /// The right-click card: who the crab is, "abrir", and "esquecer" named
+    /// after the crab so nobody forgets the wrong one.
+    fn manage_body(&self, view: &ManageView, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let mut body: Vec<AnyElement> = vec![
+            div()
+                .text_size(rems(0.75))
+                .text_color(rgb(p.text_muted))
+                .child(view.title.clone())
+                .into_any_element(),
+        ];
+        if let Some(err) = self.card_error_line() {
+            body.push(err);
+        }
+        let open = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_open(cx));
+        let forget = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_forget(cx));
+        let forget_label = if view.busy {
+            SharedString::from("a esquecer…")
+        } else {
+            SharedString::from(format!("esquecer {}", view.label))
+        };
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(Self::card_button("instance-manage-open", "abrir", true).on_click(open))
+                .child(
+                    Self::card_button("instance-manage-forget", forget_label, false)
+                        .on_click(forget),
+                )
+                .into_any_element(),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(body)
+            .into_any_element()
+    }
+
     fn minting_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette::current();
         let mut body: Vec<AnyElement> = Vec::new();
@@ -1292,4 +1438,13 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Drop one crab from the store and read the store back, the pair a forget
+/// hands the window. A host that was already gone is not an error: the strip
+/// still reloads, so a stale badge left by another window disappears too.
+fn forget_instance(host_id: &str) -> anyhow::Result<InstanceFile> {
+    let store = InstanceStore::new(InstanceStore::default_path());
+    store.remove(host_id)?;
+    store.load()
 }
