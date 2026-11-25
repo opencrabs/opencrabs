@@ -2919,8 +2919,12 @@ impl Render for Dashboard {
         // The instance strip is the outermost of the three columns: it picks
         // the crab, the rail lists that crab's sessions, the panel shows one of
         // them. Added first so it sits on the far left, and drawn on every
-        // screen, because which crab you are talking to is not a chat-only fact.
-        root = root.child(self.instance_strip_element(cx));
+        // screen, because which crab you are talking to is not a chat-only
+        // fact. Opt-in though (#3178): the gate is read once at window open,
+        // so a user who never turned the rail on keeps the width.
+        if self.instance_rail {
+            root = root.child(self.instance_strip_element(cx));
+        }
         if self.rail_open {
             let width = self.rail_width;
             let grab = cx.listener(move |this, _ev: &MouseDownEvent, window, _cx| {

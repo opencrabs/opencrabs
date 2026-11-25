@@ -218,6 +218,15 @@ pub const SPECS: &[SettingSpec] = &[
         group: SettingsSection::Advanced,
     },
     SettingSpec {
+        section: "gui",
+        key: "instance_rail",
+        label: "Remote instance rail",
+        kind: SettingKind::Toggle,
+        restart: true,
+        blurb: "the left column of remote crabs; off until you ask for it (#3178)",
+        group: SettingsSection::Advanced,
+    },
+    SettingSpec {
         section: "memory",
         key: "vector_enabled",
         label: "Vector embeddings",
@@ -345,6 +354,7 @@ pub fn step_number(spec: &SettingSpec, current: u64, dir: i32) -> u64 {
 /// Read every row's current value out of the loaded config, in SPECS order.
 pub fn current_values(config: &Config) -> Vec<RowValue> {
     let a = &config.agent;
+    let g = &config.gui;
     let m = &config.memory;
     SPECS
         .iter()
@@ -361,6 +371,7 @@ pub fn current_values(config: &Config) -> Vec<RowValue> {
             }
             ("agent", "time_marker_interval_secs") => RowValue::Number(a.time_marker_interval_secs),
             ("agent", "debug_logs") => RowValue::Bool(a.debug_logs),
+            ("gui", "instance_rail") => RowValue::Bool(g.instance_rail),
             ("memory", "vector_enabled") => RowValue::Bool(m.vector_enabled),
             ("memory", "sweep_interval_secs") => RowValue::Number(m.sweep_interval_secs),
             ("memory", "backfill_interval_secs") => RowValue::Number(m.backfill_interval_secs),

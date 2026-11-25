@@ -2625,6 +2625,14 @@ pub struct GuiConfig {
     /// proportional face in a code block loses column alignment.
     #[serde(default)]
     pub mono_font: Option<String>,
+
+    /// The remote-instance rail (#3178): the 56 px column with the crabs this
+    /// window can look at. Off by default, so a user who never asked for
+    /// remote-instance management does not lose the width; opt in here or in
+    /// the settings modal. The change needs a restart: the rail's mount and
+    /// its probe loop are both decided once, when the window opens.
+    #[serde(default)]
+    pub instance_rail: bool,
 }
 
 /// Debug configuration options

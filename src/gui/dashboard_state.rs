@@ -725,6 +725,10 @@ pub(crate) struct Dashboard {
     /// is looking at. Read once when the window opens and after a pairing; the
     /// health of each one is the probe loop's business, not the render's.
     pub(crate) instances: instances::Instances,
+    /// Whether the rail is on at all (#3178). Read once from the config when
+    /// the window opens, because the mount and the probe loop are both decided
+    /// there: the settings row therefore carries the restart chip.
+    pub(crate) instance_rail: bool,
     /// The strip drawn as a cached view, the same way the rail is (#2933): a
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.
