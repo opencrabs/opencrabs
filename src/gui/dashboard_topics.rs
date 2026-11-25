@@ -707,7 +707,9 @@ impl Dashboard {
     /// Re-read the custom icon images the rail and tabs draw (#2790). One
     /// file read per icon, at refresh time; the paint only clones an Arc.
     /// A missing or undecodable file logs and drops out, so the row falls
-    /// back to its platform mark instead of drawing a blank box.
+    /// back to its platform mark instead of drawing a blank box. A remote
+    /// crab's icon goes through `Backend::localize_allowed`: a kind outside
+    /// the blob cache's allowlist is never fetched nor read.
     pub(crate) fn refresh_icon_images(&mut self) {
         let mut images = HashMap::new();
         for stored in self.sessions.topic_icons.values() {
@@ -717,7 +719,11 @@ impl Dashboard {
             let Some(format) = topic_icons::image_format(stored) else {
                 continue;
             };
-            let path = self.backend.localize(&path);
+            // A remote crab's icon is read from its kept copy, and only when
+            // the copy is of a kind this machine opens (no `svg`, no `.bin`).
+            let Some(path) = self.backend.localize_allowed(&path) else {
+                continue;
+            };
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));

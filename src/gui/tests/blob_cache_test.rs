@@ -221,3 +221,153 @@ fn a_remote_icon_goes_up_as_an_upload_and_comes_back_stored() {
     let icon = served.home.path().join("gui-icons").join(name);
     assert_eq!(std::fs::read(&icon).expect("the icon on the crab"), b"png");
 }
+
+/// A remote crab at the discard port with `names` already kept in `cache`,
+/// under `/home/crab/`: answers from the cache only, never the network.
+fn remote_with_kept(cache: &Path, names: &[&str]) -> (Backend, Arc<RemoteCrab>) {
+    let crab = crab_at("http://127.0.0.1:9".into(), cache);
+    let store = BlobStore::at(cache.to_path_buf());
+    for name in names {
+        store
+            .keep(&Path::new("/home/crab").join(name), b"#!/bin/sh\n")
+            .expect("keep");
+    }
+    (Backend::Remote(crab.clone()), crab)
+}
+
+#[test]
+fn a_remote_crab_s_launcher_or_script_never_reaches_the_opener() {
+    let cache = tempfile::tempdir().expect("cache");
+    let names = [
+        "x.desktop",
+        "x.sh",
+        "x.svg",
+        "x.command",
+        "x.exe",
+        "x.bat",
+        "x.jar",
+        "x.ps1",
+        "x",
+    ];
+    let (backend, crab) = remote_with_kept(cache.path(), &names);
+
+    for name in names {
+        let on_crab = Path::new("/home/crab").join(name);
+        let kept = backend.cached_blob(&on_crab).expect("the copy is kept");
+        assert_eq!(
+            kept.extension().and_then(|e| e.to_str()),
+            Some("bin"),
+            "{name} is kept as .bin"
+        );
+        assert_eq!(
+            backend.openable(&on_crab),
+            Err(crate::blob_cache_store::NOT_OPENED_HERE),
+            "{name} must not reach the system opener"
+        );
+        assert!(
+            backend.revealable(&on_crab).starts_with(cache.path()),
+            "{name}: reveal shows the cache, not a place the crab named"
+        );
+    }
+    assert_eq!(crab.blob_fetches(), 0, "every answer came from the cache");
+}
+
+#[test]
+fn a_remote_crab_s_picture_opens_from_its_copy() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, _crab) = remote_with_kept(cache.path(), &["x.png", "y.PDF"]);
+
+    let png = backend
+        .openable(Path::new("/home/crab/x.png"))
+        .expect("a png opens");
+    assert!(png.starts_with(cache.path()), "{}", png.display());
+    assert_eq!(png.extension().and_then(|e| e.to_str()), Some("png"));
+    let pdf = backend
+        .openable(Path::new("/home/crab/y.PDF"))
+        .expect("a pdf opens");
+    assert_eq!(pdf.extension().and_then(|e| e.to_str()), Some("pdf"));
+}
+
+#[test]
+fn a_remote_file_not_fetched_yet_is_not_opened() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, crab) = remote_with_kept(cache.path(), &[]);
+
+    assert_eq!(
+        backend.openable(Path::new("/home/crab/x.png")),
+        Err(crate::blob_cache_store::NOT_OPENED_HERE),
+        "never the crab's own path on this disk"
+    );
+    assert_eq!(crab.blob_fetches(), 0, "asking to open fetches nothing");
+}
+
+#[test]
+fn a_remote_icon_outside_the_allowlist_is_neither_fetched_nor_read() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, crab) = remote_with_kept(cache.path(), &["a.png"]);
+
+    assert_eq!(
+        backend.localize_allowed(Path::new("/home/crab/a.png")),
+        Some(BlobStore::at(cache.path().to_path_buf()).slot(Path::new("/home/crab/a.png")))
+    );
+    for name in ["a.svg", "a.sh", "a.desktop"] {
+        assert_eq!(
+            backend.localize_allowed(&Path::new("/home/crab").join(name)),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(crab.blob_fetches(), 0);
+}
+
+#[test]
+fn the_local_crab_opens_and_reveals_its_own_path_as_before() {
+    let dir = tempfile::tempdir().expect("dir");
+    let backend = Backend::local(dir.path().join("opencrabs.db"));
+    for name in ["x.sh", "x.desktop", "x.svg", "x.png"] {
+        let file = dir.path().join(name);
+        assert_eq!(backend.openable(&file), Ok(file.clone()), "{name}");
+        assert_eq!(backend.revealable(&file), file, "{name}");
+        assert_eq!(
+            backend.localize_allowed(&file),
+            Some(file.clone()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_slot_keeps_only_an_allowed_extension() {
+    let store = BlobStore::at(PathBuf::from("/cache/crab"));
+    let ext = |name: &str| {
+        store
+            .slot(&Path::new("/home/crab").join(name))
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_string)
+    };
+    assert_eq!(ext("a.PNG").as_deref(), Some("png"));
+    assert_eq!(ext("a.mp4").as_deref(), Some("mp4"));
+    assert_eq!(ext("a.txt").as_deref(), Some("txt"));
+    for name in ["a.desktop", "a.sh", "a.svg", "a.lnk", "a.app", "a"] {
+        assert_eq!(ext(name).as_deref(), Some("bin"), "{name}");
+    }
+}
+
+#[test]
+fn the_preview_hands_the_opener_only_what_openable_answers() {
+    const SESSIONS: &str = include_str!("../dashboard_sessions.rs");
+    let (_, body) = SESSIONS
+        .split_once("fn preview_body(")
+        .expect("preview_body");
+    let body = body.split("\n    pub(crate) fn ").next().unwrap_or(body);
+    assert!(body.contains("self.backend.openable(&open.path)"));
+    assert!(body.contains("self.backend.revealable(&open.path)"));
+    assert_eq!(
+        body.matches("preview::open_command(").count(),
+        1,
+        "one opener call, fed by openable"
+    );
+    assert!(!body.contains("open_command(&open.path)"));
+    assert!(!body.contains("reveal_command(&open.path)"));
+}

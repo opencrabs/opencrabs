@@ -737,25 +737,50 @@ impl Dashboard {
         let actions = if open.kind == preview::PreviewKind::Message {
             None
         } else {
-            let path = open.path.clone();
-            let open_file = {
-                let path = path.clone();
-                cx.listener(move |_this, _ev, _window, _cx| {
-                    preview::launch(&preview::open_command(&path));
-                })
+            // A crab on another machine is not trusted by this one: the
+            // system opener only ever gets what `openable` answers (the
+            // local crab's own path, or a remote crab's kept copy of a kind
+            // that is shown rather than run). Reveal shows the folder of the
+            // path the window holds here, which for a remote crab is its
+            // cache directory, never a place the crab named.
+            let target = self.backend.openable(&open.path);
+            let exists = self.backend.localize(&open.path).exists();
+            let refused = match &target {
+                Err(notice) if exists => Some(*notice),
+                _ => None,
             };
+            let open_file = cx.listener(move |_this, _ev, _window, _cx| match &target {
+                Ok(path) => preview::launch(&preview::open_command(path)),
+                Err(notice) => logging::warn(&format!("preview: {notice}")),
+            });
             let reveal_file = {
-                let path = path.clone();
+                let path = self.backend.revealable(&open.path);
                 cx.listener(move |_this, _ev, _window, _cx| {
                     preview::launch(&preview::reveal_command(&path));
                 })
             };
-            Some(preview::actions_row(
+            let row = preview::actions_row(
                 open.open_label(),
-                self.backend.localize(&open.path).exists(),
+                exists && refused.is_none(),
                 open_file,
                 reveal_file,
-            ))
+            );
+            Some(match refused {
+                Some(notice) => div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(notice),
+                    )
+                    .child(row)
+                    .into_any_element(),
+                None => row,
+            })
         };
         let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
             let lines = match ev.delta {
