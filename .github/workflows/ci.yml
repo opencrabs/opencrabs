@@ -683,6 +683,14 @@ jobs:
             exit 1
           fi
           echo "slice binary: $exe"
+          # Results are written to disk as they happen, not held in a shell
+          # variable until the end (#2944). The slice used to report nothing
+          # at all when it was cancelled mid-run: zero MODULE lines, zero
+          # `test result:` lines, no verdict in either direction. A per-module
+          # file on disk survives a later module's crash, and the summary
+          # below survives the job's own failure, so the receipt outlives the
+          # log scrollback.
+          mkdir -p slice-results
           status=0
           for m in config::winlock tests::utils_shell_test \
                    tests::utils_cwd_test tests::browser_default_windows_test \
@@ -694,20 +702,48 @@ jobs:
             out=$("$exe" "$m" 2>&1)
             rc=$?
             set -e
+            # The full output of this module, kept whatever the verdict is.
+            printf '%s\n' "$out" > "slice-results/$m.txt"
             n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
             failed=$(printf '%s\n' "$out" | sed -n 's/.*; \([0-9]*\) failed.*/\1/p' | head -n1)
             if [ $rc -ne 0 ]; then
               echo "::warning::Windows slice FAILS (rc=$rc, failed=${failed:-?}): $m"
               printf '%s\n' "$out" | tail -20
+              printf '%s FAIL rc=%s failed=%s\n' "$m" "$rc" "${failed:-?}" >> slice-results/summary.txt
               status=1
             elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
               echo "::warning::Windows slice ZERO-MATCH: $m names no tests here (renamed by a sibling PR)"
+              printf '%s ZERO-MATCH\n' "$m" >> slice-results/summary.txt
               status=1
             else
               echo "Windows slice PASS: $m ($n tests)"
+              printf '%s PASS %s tests\n' "$m" "$n" >> slice-results/summary.txt
             fi
           done
+          # The summary is also the job summary: the one place a reader looks
+          # for "did the slice have a verdict".
+          {
+            echo "### Windows scoped slice"
+            echo ""
+            echo '```'
+            cat slice-results/summary.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+
+      # The slice's receipts, kept whether it passed, failed, or was
+      # interrupted after some modules ran (#2944). `always()` covers the
+      # failure and the step-skip cases; a job killed by the runner's own
+      # timeout cannot upload anything, which is exactly why the results are
+      # written to disk DURING the run and not collected at the end.
+      - name: "Upload (windows): the slice's results"
+        if: "always()"
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-slice-results
+          path: slice-results
+          if-no-files-found: ignore
+          retention-days: 14
 
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
