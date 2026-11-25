@@ -384,6 +384,12 @@ pub fn validate_host_id(id: &str) -> Result<()> {
     validate_announced_host_id(id)
 }
 
+/// Whether `id` is one this client derived from a URL because the remote
+/// announced none. Such a row has no announced identity to confirm a move by.
+pub fn is_derived_host_id(id: &str) -> bool {
+    id.starts_with(DERIVED_PREFIX)
+}
+
 /// What a remote is allowed to announce: never the reserved `url:` form, so a
 /// remote cannot impersonate a host we keyed by its URL.
 fn validate_announced_host_id(id: &str) -> Result<()> {
