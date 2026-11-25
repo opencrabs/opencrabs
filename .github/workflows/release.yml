@@ -562,6 +562,27 @@ jobs:
               opencrabs.desktop opencrabs-gui.desktop opencrabs.png
           fi
 
+      # The shipped binary is stripped, so a Windows panic report cannot name
+      # a single frame: every symbol the debugger would read lives in the PDB
+      # the MSVC link already wrote beside the exe (#3134). Zip those two
+      # files as their own asset instead of touching the shipped archive: the
+      # binary the users run does not change by a byte, and whoever triages a
+      # crash downloads the symbols as a sibling file. A missing PDB must fail
+      # the job, the same law the partial-archive checks above follow.
+      - name: Pack Windows symbols
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          for p in opencrabs.pdb opencrabs-gui.pdb; do
+            if [ ! -f "$p" ]; then
+              echo "::error::$p was not linked; refusing to publish a partial symbol archive"
+              exit 1
+            fi
+          done
+          7z a ../../../opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.pdb.zip \
+            opencrabs.pdb opencrabs-gui.pdb
+
       # The floor check above reads what the binary asks for. This runs it, on
       # the distribution that floor names, out of the archive that is about to
       # be uploaded. v0.5.13 passed every other check in this job and then
@@ -606,6 +627,7 @@ jobs:
           path: |
             opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.tar.gz
             opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.zip
+            opencrabs-v${{ steps.version.outputs.version }}-${{ matrix.asset_suffix }}.pdb.zip
 
   create-release:
     name: Create Release
