@@ -5,11 +5,14 @@
 //! so they travel together as [`Facts`]: one read, cached by the surface,
 //! refreshed when an event says they moved.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::tasks::SessionTasks;
 use super::{BackendError, Ctx, Op, Scope};
 
 /// What a surface needs to draw a session's footer and pickers.
@@ -87,11 +90,121 @@ impl Op for ContextBase {
     }
 }
 
-ops! { ContextBase }
+/// Read [`Facts`] as an operation: what a surface on another machine fills
+/// its [`FactsCache`] with. `session: None` asks for the crab-wide facts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoadFacts {
+    /// The session to read, or none for the crab-wide facts.
+    #[serde(default)]
+    pub session: Option<Uuid>,
+}
+
+impl Op for LoadFacts {
+    const NAME: &'static str = "facts.load";
+    const SCOPE: Scope = Scope::Read;
+    type Reply = Facts;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        facts_for(ctx, self.session)
+    }
+}
+
+ops! { ContextBase, LoadFacts }
+
+/// The per-frame values of a crab reached over the wire, kept on this side.
+///
+/// A local crab answers [`facts_for`] and `TasksSnapshot` from memory inside
+/// a frame. A remote one would need a round trip, so the surface reads this
+/// instead: every read is a lookup and nothing here can reach the network.
+/// Whoever owns the cache fills it ([`store_facts`](Self::store_facts),
+/// [`store_tasks`](Self::store_tasks)) when a session opens and when an
+/// event says the values moved. A value never fetched reads as `None`, the
+/// same answer a crab that is still booting gives.
+#[derive(Debug, Default)]
+pub struct FactsCache {
+    inner: Mutex<Cached>,
+}
+
+#[derive(Debug, Default)]
+struct Cached {
+    /// The last facts read, by session (`None` is the crab-wide entry).
+    facts: HashMap<Option<Uuid>, Facts>,
+    /// The last running tasks read, by session. A session asked about and
+    /// found idle is kept with no rows, so it is asked again next refresh.
+    tasks: HashMap<Uuid, Vec<super::tasks::TaskRow>>,
+}
+
+impl FactsCache {
+    /// The cached facts for `session`, or `None` when none were read yet.
+    pub fn facts(&self, session: Option<Uuid>) -> Option<Facts> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|cached| cached.facts.get(&session).cloned())
+    }
+
+    /// Keep `facts` as the answer for `session`.
+    pub fn store_facts(&self, session: Option<Uuid>, facts: Facts) {
+        if let Ok(mut cached) = self.inner.lock() {
+            cached.facts.insert(session, facts);
+        }
+    }
+
+    /// The sessions whose facts are cached, the crab-wide entry included.
+    pub fn facts_sessions(&self) -> Vec<Option<Uuid>> {
+        self.inner
+            .lock()
+            .map(|cached| cached.facts.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// The cached running tasks of `sessions`, in their order, with the
+    /// shape `TasksSnapshot` answers: an idle or never read session is left
+    /// out, so an empty answer means nothing is known to run.
+    pub fn tasks(&self, sessions: &[Uuid]) -> Vec<SessionTasks> {
+        let Ok(cached) = self.inner.lock() else {
+            return Vec::new();
+        };
+        sessions
+            .iter()
+            .filter_map(|session| {
+                let tasks = cached.tasks.get(session)?;
+                (!tasks.is_empty()).then(|| SessionTasks {
+                    session: *session,
+                    tasks: tasks.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Keep the answer of a `TasksSnapshot` over `asked`. A session asked
+    /// about and missing from `reply` is idle now.
+    pub fn store_tasks(&self, asked: &[Uuid], reply: Vec<SessionTasks>) {
+        let Ok(mut cached) = self.inner.lock() else {
+            return;
+        };
+        for session in asked {
+            cached.tasks.insert(*session, Vec::new());
+        }
+        for row in reply {
+            cached.tasks.insert(row.session, row.tasks);
+        }
+    }
+
+    /// The sessions whose tasks are cached, idle ones included.
+    pub fn tasks_sessions(&self) -> Vec<Uuid> {
+        self.inner
+            .lock()
+            .map(|cached| cached.tasks.keys().copied().collect())
+            .unwrap_or_default()
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::parity::{Gateway, forbidden, parity};
+    use crate::backend::tasks::{TaskKind, TaskRow};
 
     #[test]
     fn facts_are_not_ready_before_boot() {
@@ -133,7 +246,10 @@ mod tests {
             facts.working_directory,
             service.get_working_directory_for_session(session)
         );
-        assert_eq!(facts.context_limit, service.context_limit_for_session(session));
+        assert_eq!(
+            facts.context_limit,
+            service.context_limit_for_session(session)
+        );
         assert_eq!(facts.provider, service.provider_name_for_session(session));
         assert_eq!(facts.model, service.provider_model_for_session(session));
         assert_eq!(
@@ -188,5 +304,97 @@ mod tests {
         let json = serde_json::to_string(&facts).expect("encode");
         let back: Facts = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, facts, "{json}");
+    }
+
+    fn sample(provider: &str) -> Facts {
+        Facts {
+            working_directory: PathBuf::from("/home/crab/project"),
+            context_limit: 200_000,
+            provider: provider.into(),
+            model: "claude-x".into(),
+            served_model: "claude-x".into(),
+            base_context_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn load_facts_has_parity() {
+        let gateway = Gateway::start().await;
+        let answer = parity!(gateway, LoadFacts { session: None });
+        assert_eq!(answer["Err"]["kind"], "not_ready", "{answer}");
+        parity!(
+            gateway,
+            LoadFacts {
+                session: Some(Uuid::new_v4()),
+            }
+        );
+        forbidden!(gateway, LoadFacts { session: None });
+    }
+
+    #[test]
+    fn load_facts_without_params_asks_for_the_crab_wide_ones() {
+        let op: LoadFacts = serde_json::from_value(serde_json::json!({})).expect("decode");
+        assert_eq!(op.session, None);
+    }
+
+    #[test]
+    fn a_cache_never_filled_answers_none() {
+        let cache = FactsCache::default();
+        assert_eq!(cache.facts(None), None);
+        assert_eq!(cache.facts(Some(Uuid::new_v4())), None);
+        assert!(cache.tasks(&[Uuid::new_v4()]).is_empty());
+    }
+
+    #[test]
+    fn cached_facts_are_kept_per_session() {
+        let cache = FactsCache::default();
+        let session = Uuid::new_v4();
+        cache.store_facts(None, sample("crab-wide"));
+        cache.store_facts(Some(session), sample("session"));
+        assert_eq!(cache.facts(None), Some(sample("crab-wide")));
+        assert_eq!(cache.facts(Some(session)), Some(sample("session")));
+        assert_eq!(cache.facts(Some(Uuid::new_v4())), None);
+        cache.store_facts(Some(session), sample("moved"));
+        assert_eq!(cache.facts(Some(session)), Some(sample("moved")));
+        let mut known = cache.facts_sessions();
+        known.sort();
+        let mut expected = vec![None, Some(session)];
+        expected.sort();
+        assert_eq!(known, expected);
+    }
+
+    #[test]
+    fn a_task_snapshot_replaces_what_the_asked_sessions_ran() {
+        let cache = FactsCache::default();
+        let (busy, idle) = (Uuid::new_v4(), Uuid::new_v4());
+        let row = TaskRow {
+            task_id: Uuid::new_v4(),
+            label: "cargo test".into(),
+            kind: TaskKind::Detached,
+            secs: 3,
+            ours: true,
+        };
+        cache.store_tasks(
+            &[busy, idle],
+            vec![SessionTasks {
+                session: busy,
+                tasks: vec![row.clone()],
+            }],
+        );
+        assert_eq!(
+            cache.tasks(&[idle, busy]),
+            vec![SessionTasks {
+                session: busy,
+                tasks: vec![row],
+            }]
+        );
+        // The task ended: the next snapshot leaves the session out.
+        cache.store_tasks(&[busy], Vec::new());
+        assert!(cache.tasks(&[busy, idle]).is_empty());
+        let mut known = cache.tasks_sessions();
+        known.sort();
+        let mut expected = vec![busy, idle];
+        expected.sort();
+        assert_eq!(known, expected);
     }
 }
