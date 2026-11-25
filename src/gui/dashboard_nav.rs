@@ -36,8 +36,16 @@ impl Dashboard {
     /// the onboarding path (launchd on macOS, systemd user unit on Linux).
     /// This is the only way the GUI ever starts one, and only on a click:
     /// nothing here spawns a ChannelManager or claims a channel lock.
+    ///
+    /// The service it installs is this machine's, so a crab elsewhere gets
+    /// the reason instead of an install here.
     pub(crate) fn start_daemon(&mut self, cx: &mut Context<Self>) {
         if self.daemon_starting {
+            return;
+        }
+        if let Some(why) = self.backend.lacks(opencrabs::backend::cap::Cap::Setup) {
+            self.daemon_error = Some(SharedString::from(why));
+            cx.notify();
             return;
         }
         self.daemon_starting = true;
