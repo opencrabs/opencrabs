@@ -211,8 +211,9 @@ pub fn remote_url_opens(url: &str) -> bool {
     if *scheme != "mailto:" {
         return true;
     }
-    remote_mailto(url)
-        .is_some_and(|draft| draft[scheme.len()..].eq_ignore_ascii_case(&url[scheme.len()..]))
+    // The scheme is ASCII and already matched in any case, so comparing the
+    // whole link is comparing what follows it.
+    remote_mailto(url).is_some_and(|draft| draft.eq_ignore_ascii_case(url))
 }
 
 /// How many times a `mailto:` part is percent-decoded before it must have
