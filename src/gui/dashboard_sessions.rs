@@ -600,7 +600,7 @@ impl Dashboard {
             // and a refused link is said in the reader instead.
             opencrabs::ui_core::links::ClickTarget::Url(url) => {
                 match self.backend.openable_url(&url) {
-                    Ok(url) => preview::launch(&preview::url_command(url)),
+                    Ok(_) => preview::launch(&preview::url_command(&url)),
                     Err(notice) => {
                         logging::warn(&format!("transcript link: {notice}: {url}"));
                         let shown = url.replace('`', "");

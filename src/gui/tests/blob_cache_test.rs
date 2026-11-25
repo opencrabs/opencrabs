@@ -528,7 +528,13 @@ fn a_transcript_link_reaches_the_opener_only_through_openable_url() {
         1,
         "one opener call, fed by openable_url"
     );
-    assert!(!body.contains("url_command(&url)"));
+    let gate = body
+        .find("match self.backend.openable_url(&url)")
+        .expect("the link is matched on openable_url");
+    let opened = body
+        .find("Ok(_) => preview::launch(&preview::url_command(&url))")
+        .expect("the opener runs only in the Ok arm");
+    assert!(gate < opened, "openable_url is asked before the opener");
 }
 
 #[test]
