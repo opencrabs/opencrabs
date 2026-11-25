@@ -39,6 +39,11 @@ pub const SCOPE_MANAGE: &str = "a2a:manage";
 /// else so stored state never contains typos that silently grant nothing.
 pub const ALL_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_SEND, SCOPE_MANAGE];
 
+/// The non-elevated scopes: what a credential holds when nobody named
+/// anything more. The open loopback posture (no api_key) carries exactly
+/// these, so a local process never gains an elevated scope by default.
+pub const BASE_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_SEND];
+
 /// Scopes a pairing code carries only when the operator named them. Every
 /// default the pairing surface offers stays inside the complement.
 pub const ELEVATED_SCOPES: &[&str] = &[SCOPE_MANAGE];
