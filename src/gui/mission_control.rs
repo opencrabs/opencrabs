@@ -15,9 +15,9 @@
 /// re-exports it rather than making every caller reach into the crate.
 pub use opencrabs::brain::mission_control::TimeWindow;
 use opencrabs::brain::mission_control::{
-    ACTIVITY_LIMIT, McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem,
-    activity_service, analytics_service, inbox_service, schedule_service,
+    McActivity, McAnalytics, McInboxItem, McInboxKind, McScheduleItem,
 };
+#[cfg(test)]
 use opencrabs::db::{Database, Pool};
 use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
 // The tests below build a tool registry to decide against.
@@ -381,57 +381,42 @@ pub async fn decide(
         .map_err(opencrabs::backend::BackendError::into_message)
 }
 
-/// Read the snapshot for `window` on a thread that owns its reactor.
+/// Read the snapshot for `window` through the crab (`MissionLoad`).
 ///
-/// The thread is 4 MB and named, exactly like [`super::agent_bridge::load_files`],
-/// because the caller waits on it from a gpui task.
+/// The four reads run on the backend's 4 MB worker lane with its own
+/// reactor, because the caller waits on it from a gpui task; the snapshot
+/// comes back in the panels' own types.
 pub async fn load(
     backend: crate::backend_glue::Backend,
     window: TimeWindow,
 ) -> Result<Snapshot, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-mission-control".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = tx.send(Err(format!("tokio runtime failed: {e}")));
-                    return;
-                }
-            };
-            let result = runtime.block_on(async move {
-                let db = Database::connect(&db_path)
-                    .await
-                    .map_err(|e| format!("db connect: {e:#}"))?;
-                Ok(read_from_pool(db.pool().clone(), window).await)
-            });
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("mission control thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("mission control thread failed to spawn: {e}")),
+    backend
+        .call(opencrabs::backend::mission::MissionLoad { window })
+        .await
+        .map(Snapshot::from)
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+impl From<opencrabs::backend::mission::MissionSnapshot> for Snapshot {
+    fn from(wire: opencrabs::backend::mission::MissionSnapshot) -> Self {
+        let parts = wire.into_parts();
+        Snapshot {
+            inbox: parts.inbox,
+            activity: parts.activity,
+            schedule: parts.schedule,
+            analytics: parts.analytics,
+            window: parts.window,
+        }
     }
 }
 
-/// The four reads, given a pool. Separate from [`load`] so a test can point it
-/// at an in-memory database instead of the live one.
+/// The four reads, given a pool: the crab's own read, in the panels' types.
+/// The tests point it at an in-memory database instead of the live one.
+#[cfg(test)]
 pub async fn read_from_pool(pool: Pool, window: TimeWindow) -> Snapshot {
-    Snapshot {
-        inbox: inbox_service::list(),
-        activity: activity_service::recent(ACTIVITY_LIMIT),
-        schedule: schedule_service::list(pool.clone()).await,
-        analytics: analytics_service::summary(pool, window).await,
-        window,
-    }
+    opencrabs::backend::mission::MissionSnapshot::read(pool, window)
+        .await
+        .into()
 }
 
 #[cfg(test)]

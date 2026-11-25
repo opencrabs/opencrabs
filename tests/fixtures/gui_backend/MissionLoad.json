@@ -1,0 +1,56 @@
+{
+  "op": "mission.load",
+  "scope": "a2a:read",
+  "request": {
+    "window": "Week"
+  },
+  "response": {
+    "Ok": {
+      "inbox": [
+        {
+          "id": "prop_tool_9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+          "label": "hello_tool",
+          "summary": "repetitive work",
+          "kind": "ProposedTool",
+          "source": "rsi-cycle",
+          "created_at": "2026-11-25T00:00:00Z"
+        }
+      ],
+      "activity": [
+        {
+          "timestamp": "2026-11-25T00:00:00Z",
+          "detail": "applied hello_tool",
+          "level": "Success",
+          "source": "rsi"
+        }
+      ],
+      "schedule": [],
+      "analytics": {
+        "tool_total_calls": 12,
+        "tool_total_fails": 1,
+        "top_tools": [{ "name": "bash", "total": 10, "failures": 1, "fail_rate": 0.1 }],
+        "flakiest_tools": [],
+        "rsi_applied_total": 1,
+        "rsi_last_call_ts": 1764028800,
+        "tool_events_since_rsi": 3,
+        "rsi_top_dimensions": [["tool_reliability", 2]],
+        "brain_files": [{ "name": "SOUL.md", "kb": 2.5 }],
+        "brain_total_kb": 2.5,
+        "phantom_total": 0,
+        "phantom_resolved": 0,
+        "phantom_resolved_pct": 0.0,
+        "phantom_by_model": [],
+        "streaming_total": 0,
+        "streaming_total_tools": 0,
+        "streaming_by_model": [],
+        "brain_verify_passes": 0,
+        "brain_verify_rollbacks": 0,
+        "brain_verify_fail_closed": 0,
+        "model_tools": [],
+        "decisions": []
+      },
+      "window": "Week"
+    }
+  },
+  "response_no_ledger": { "Err": { "kind": "failed", "detail": "db connect: unable to open database file" } }
+}
