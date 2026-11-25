@@ -148,9 +148,9 @@ use crate::mission_control_view::{
     mission_control_body, mission_control_detail, mission_control_logs,
 };
 use crate::overlays::{
-    DEFAULT_TOPIC_ICON, TopicPick, cd_entries_for, confirm_delete_overlay,
-    confirm_disable_topics_overlay, split_pick_overlay, topic_info_overlay, topic_pick,
-    topic_prompt_overlay, update_prompt_overlay, warning_overlay,
+    DEFAULT_TOPIC_ICON, TopicPick, confirm_delete_overlay, confirm_disable_topics_overlay,
+    split_pick_overlay, topic_info_overlay, topic_pick, topic_prompt_overlay,
+    update_prompt_overlay, warning_overlay,
 };
 use crate::pane_chrome::{
     central, chat_measure, pane_composer_dim, rotation_chord, split_chord, split_pane_width,
