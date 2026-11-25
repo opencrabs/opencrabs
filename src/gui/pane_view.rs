@@ -764,6 +764,8 @@ impl Render for PaneView {
                 older: Some(older_click),
                 // Every tile in this leaf opens its own file (#2914).
                 attachments: pane_attachments,
+                // The crab whose files the tiles draw, localized on this machine.
+                backend: Some(self.backend.clone()),
                 // A pane draws the chips its rows carry (#2825). The toggle
                 // is minted by the row menu, which every pane now opens.
                 reactions: self.transcript.reactions.clone(),

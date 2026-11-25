@@ -2720,7 +2720,7 @@ fn bubble(
     message_id: Option<uuid::Uuid>,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     full: bool,
     open: Option<&ClickHandler>,
@@ -3011,7 +3011,7 @@ fn forward_block(
     _time: &str,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     full: bool,
 ) -> Div {
@@ -3215,10 +3215,21 @@ fn transcript_toggle(key: &str, open: bool) -> impl IntoElement {
         .child(SharedString::from(label))
 }
 
+/// What an attachment tile needs from the row's owner: the click minted per
+/// file, keyed by the crab's path, and where that path is on this machine
+/// (`Backend::localize`). A tile is keyed and named by the crab's path and is
+/// drawn, stat'ed and played from the local one, so a crab on another machine
+/// never has its path stat'ed or decoded on this disk.
+#[derive(Clone, Copy)]
+struct Tiles<'a> {
+    clicks: &'a HashMap<String, ClickHandler>,
+    localize: &'a dyn Fn(&std::path::Path) -> std::path::PathBuf,
+}
+
 fn history_attachments(
     paths: &[std::path::PathBuf],
     content_width: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
 ) -> Div {
     if paths.is_empty() {
         return div();
@@ -3255,7 +3266,7 @@ fn history_attachments(
                 .gap_1()
                 .child(crate::composer_orb::player_plain(
                     &format!("history-{key}-{index}"),
-                    path,
+                    &(handlers.localize)(path),
                     None,
                     &[],
                     content_width,
@@ -3289,13 +3300,14 @@ fn history_attachments(
                 let key = path.to_string_lossy().to_string();
                 // Cloned, not taken: the same file can appear in more than one
                 // message, and every tile of it must open it.
-                match handlers.get(&key).cloned() {
-                    Some(handler) => attachment_cell(path, side)
+                let local = (handlers.localize)(path);
+                match handlers.clicks.get(&key).cloned() {
+                    Some(handler) => attachment_cell(path, &local, side)
                         .id(SharedString::from(format!("attachment-{key}")))
                         .cursor_pointer()
                         .on_click(move |event, window, cx| handler(event, window, cx))
                         .into_any_element(),
-                    None => attachment_cell(path, side).into_any_element(),
+                    None => attachment_cell(path, &local, side).into_any_element(),
                 }
             } else {
                 fold_cell(plan.folded, side)
@@ -3308,8 +3320,10 @@ fn history_attachments(
 }
 
 /// One non-audio attachment: the picture or kind glyph in a square box, with
-/// the file name under it. The box owns the size, not the caption.
-fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
+/// the file name under it. The box owns the size, not the caption. The kind is
+/// read from the crab's `path`; the picture and the facts from `local`, where
+/// that file is on this machine.
+fn attachment_cell(path: &std::path::Path, local: &std::path::Path, side: f32) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
     let tile: AnyElement = if attachment.is_image() {
         div()
@@ -3325,14 +3339,14 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             // box and the radius lands inside the tile's own arc. `Cover` on
             // the original painted a larger quad and its arc sat outside the
             // tile's, which is what let pixels past the corner (#2796).
-            .child(crate::thumbs::picture(path, px(concentric_radius(1.0))))
+            .child(crate::thumbs::picture(local, px(concentric_radius(1.0))))
             .into_any_element()
     } else {
         // A document and a clip have nothing to draw, so the box states what a
         // thumbnail would have shown: the kind by its glyph, then how big it
         // is and the day it changed. One `stat`, on the same pass that already
         // loads the images beside it.
-        let caption = crate::preview::FileFacts::probe(path).tile_caption();
+        let caption = crate::preview::FileFacts::probe(local).tile_caption();
         let mut boxed = div()
             .flex()
             .flex_col()
@@ -4330,7 +4344,7 @@ fn block_view(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     mode: RowMode<'_>,
 ) -> Div {
@@ -4575,7 +4589,7 @@ fn live_block(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
 ) -> Option<AnyElement> {
     let text = block_text(block);
     let d = drag.filter(|_| !text.trim().is_empty())?;
@@ -4683,7 +4697,7 @@ fn live_row_body(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     edit_row: Option<&InlineEditView>,
 ) -> AnyElement {
     if let Some(editing) = edit_row.filter(|editing| editing.id == live_edit_id(slot)) {
@@ -4800,7 +4814,7 @@ fn live_view(
     expanded: bool,
     ctx: (Option<u32>, u32),
     live_click: Option<&ClickHandler>,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     interaction: LiveInteraction<'_>,
 ) -> Div {
     let LiveInteraction {
@@ -5876,6 +5890,10 @@ pub struct InlineEditView {
 #[derive(Default)]
 pub struct ViewHooks {
     pub attachments: HashMap<String, ClickHandler>,
+    /// The crab this transcript shows, so an attachment tile is drawn from
+    /// where `Backend::localize` puts that crab's file on this machine. `None`
+    /// draws the paths as they are.
+    pub backend: Option<crate::backend_glue::Backend>,
     pub drag: Option<Rc<CopyDrag>>,
     /// The wheel over the transcript, minted by the owning view so a tick up
     /// releases its follow and a tick down re-arms it (#2698).
@@ -6162,6 +6180,7 @@ pub fn view(
     let row_cap = message_max_width(content_width);
     let ViewHooks {
         attachments: attachment_handlers,
+        backend,
         drag,
         wheel,
         middle_click,
@@ -6185,6 +6204,14 @@ pub fn view(
         voice_pending,
         trailing,
     } = hooks;
+    let localize = |path: &std::path::Path| match &backend {
+        Some(backend) => backend.localize(path),
+        None => path.to_path_buf(),
+    };
+    let tiles = Tiles {
+        clicks: &attachment_handlers,
+        localize: &localize,
+    };
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
     }
@@ -6334,7 +6361,7 @@ pub fn view(
             },
             content_width,
             row_cap,
-            &attachment_handlers,
+            tiles,
             None,
             RowMode {
                 full: true,
@@ -6470,7 +6497,7 @@ pub fn view(
                             block,
                             content_width,
                             row_cap,
-                            &attachment_handlers,
+                            tiles,
                             Some(&selection),
                             RowMode {
                                 full: full_body,
@@ -6489,7 +6516,7 @@ pub fn view(
                         block,
                         content_width,
                         row_cap,
-                        &attachment_handlers,
+                        tiles,
                         None,
                         RowMode {
                             full: full_body,
@@ -6619,7 +6646,7 @@ pub fn view(
             state.live_expanded,
             (ctx_used, ctx_max),
             live_click.as_ref(),
-            &attachment_handlers,
+            tiles,
             LiveInteraction {
                 drag: drag.as_ref(),
                 press: &live_press,

@@ -600,6 +600,8 @@ impl Render for Dashboard {
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
+                        // The crab whose files the tiles draw, localized on this machine.
+                        backend: Some(self.backend.clone()),
                         drag: Some(self.copy_drag.clone()),
                         wheel: Some(wheel),
                         middle_click: Some(middle_click),
