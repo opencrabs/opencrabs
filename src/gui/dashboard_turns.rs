@@ -2034,6 +2034,10 @@ impl Dashboard {
                 // lands while he is listening to another clip waits, and a
                 // conversation off screen starts silent.
                 agent_bridge::TurnEvent::VoiceReplySaved { session, path } => {
+                    // The path is the crab's. The local crab answers it as it
+                    // is; a crab on another machine answers its copy here, so
+                    // the player never opens a path this disk does not own.
+                    let path = self.backend.localize(&path);
                     if self.chat_state.session() == Some(session) {
                         // Every outcome leaves a line (#3092). The player
                         // reports a clip that would not open and nothing else,
