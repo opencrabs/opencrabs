@@ -134,11 +134,11 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             agent_bridge::queue_push(session, Self::pending_message(text, display.clone()));
             cx.notify();
             return;
-        };
+        }
         let cancel = tokio_util::sync::CancellationToken::new();
         let shown = display.clone().unwrap_or_else(|| text.clone());
         // A command can send into a conversation whose pane was switched away,
@@ -161,7 +161,7 @@ impl Dashboard {
         // lands in that conversation's artifacts, exactly as the window's does.
         let attached = editor::marker_paths(&original);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session,
             text,
             display,
@@ -366,10 +366,10 @@ impl Dashboard {
         if waiting.is_empty() {
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the text, the same rule the window keeps.
             return;
-        };
+        }
         let msgs = agent_bridge::queue_take(session);
         let Some(joined) = agent_bridge::PendingMessage::join(&msgs) else {
             return;
@@ -395,7 +395,7 @@ impl Dashboard {
         }
         let attached = editor::marker_paths(&joined.context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session,
             joined.context_text,
             Some(joined.display_text),
@@ -637,7 +637,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
             self.composer
@@ -646,7 +646,7 @@ impl Dashboard {
             self.sync_composer_hint(cx);
             cx.notify();
             return;
-        };
+        }
         // The turn goes to the conversation on screen. With none open there
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
@@ -681,7 +681,7 @@ impl Dashboard {
         // the session's artifacts, not just in the message text.
         let attached = editor::marker_paths(&original);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             sid,
             text,
             display,

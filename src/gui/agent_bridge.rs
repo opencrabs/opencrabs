@@ -1055,101 +1055,12 @@ pub fn spawn_plan_path(backend: crate::backend_glue::Backend, session_id: Uuid, 
     }
 }
 
-/// Race a turn against its stop token (#2657).
-///
-/// The service reads the token cooperatively: at tool-iteration boundaries,
-/// and once a streaming call has returned. Inside one long provider stream
-/// neither checkpoint runs, so a stop was invisible until the answer finished
-/// (`turn cancelled by Esc`, then `turn done` tens of seconds later). Racing
-/// the whole turn is the window's equivalent of the terminal's
-/// `handle.abort()`: when the token fires the future is dropped where it
-/// stands, which runs the service's own drop guards and keeps the text it
-/// already streamed.
-///
-/// Biased on the token, so a stop that lands in the same poll as the answer
-/// wins. The user asked for the turn to be gone; painting an answer over their
-/// cancellation is what makes a stop look like it did nothing.
-///
-/// `None` means the stop fired and the turn was dropped. `Some(output)` is the
-/// turn's own result, untouched.
-pub async fn race_turn<F>(
-    turn: F,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Option<F::Output>
-where
-    F: std::future::Future,
-{
-    tokio::pin!(turn);
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => None,
-        output = &mut turn => Some(output),
-    }
-}
-
-/// Cut the trailing unanswered pair before a resend duplicates it (#2697).
-///
-/// A turn writes its `user` row and an empty `assistant` placeholder at the
-/// moment it starts, before the provider is asked. A stop that lands after the
-/// first token cannot hand the text back (the `untouched()` hand-back only
-/// covers a stop that beat the token), so that pair stays behind with no
-/// answer, and sending the same text again appended a second copy of it.
-///
-/// The pair is cut only when it is provably leftover: the newest row is an
-/// `assistant` row whose content is still empty, and the row before it is a
-/// `user` row carrying exactly the outgoing text. Anything else ends the walk.
-/// A real answer, a turn that ran a tool (tool activity lives on the assistant
-/// row, so an empty one answered nothing), and a different question are
-/// history, and history is never touched.
-async fn drop_unanswered_duplicate(
-    messages: &opencrabs::services::MessageService,
-    session_id: Uuid,
-    outgoing: &str,
-) {
-    let rows = match messages
-        .list_recent_messages_for_session(session_id, 2)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            crate::logging::error(&format!("gui dedup read: {e}"));
-            return;
-        }
-    };
-    let Some(placeholder) = rows.last() else {
-        return;
-    };
-    if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
-        return;
-    }
-    let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-        return;
-    };
-    if question.role != "user" {
-        return;
-    }
-    // The ledger keeps the redacted form of the text the turn was given.
-    let stored = opencrabs::utils::sanitize::redact_secrets(outgoing);
-    if question.content.trim() != stored.trim() {
-        return;
-    }
-    for row in [question, placeholder] {
-        if let Err(e) = messages.delete_message(row.id).await {
-            crate::logging::error(&format!("gui dedup delete: {e}"));
-            return;
-        }
-    }
-    crate::logging::info(&format!(
-        "gui dedup: dropped the unanswered pair a resend would have duplicated \
-         (session {session_id})"
-    ));
-}
-
-/// Run one turn on a 4 MB thread: the TUI's `send_message_with_tools_and_mode`
-/// call with the queue-completion handshake the TUI does around it.
+/// Run one turn as the backend's `TurnSend`, on its own `spawn_worker` lane.
 ///
 /// The progress forwarder (`install_progress_forwarder`) already streams
-/// events to `sink`; this thread only delivers the terminal event.
+/// events to `sink`; this door only delivers the terminal event. The body
+/// (the resend dedup, the call into the service, the race against `cancel`)
+/// is the crab's and lives in `backend::turn`.
 ///
 /// `display` is the row the user should read for this turn: the receipt of a
 /// command, or a channel's clean rendering of a wrapped message. The model
@@ -1157,7 +1068,7 @@ async fn drop_unanswered_duplicate(
 /// (#2756). Callers with nothing to hide pass `None` and history keeps the
 /// text that was sent.
 pub fn spawn_turn(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     content: String,
     display: Option<String>,
@@ -1168,69 +1079,37 @@ pub fn spawn_turn(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-agent-turn", move |runtime| {
-        let sink = thread_sink;
-        runtime.block_on(async move {
-            // Before the turn writes its rows: a resend of the text an
-            // unanswered turn left behind must not stack a second copy of
-            // it in history (#2697).
-            // Compare against the row history will actually hold, which is
-            // the display line when a turn hides its prompt (#2756).
-            let persisted = display.as_deref().unwrap_or(&content);
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            drop_unanswered_duplicate(&messages, session_id, persisted).await;
-            let turn = service.send_message_with_tools_and_display(
-                session_id,
-                content,
-                display,
-                None,
-                Some(cancel.clone()),
-                None,
-                None,
-                "tui",
-                None,
-                None,
-            );
-            // A cooperative token only lands where the service looks for
-            // it, and inside one provider stream it never looks (#2657).
-            let Some(outcome) = race_turn(turn, &cancel).await else {
-                let _ = sink.send(TurnEvent::Cancelled {
+    let spawned = backend.spawn(
+        opencrabs::backend::turn::TurnSend {
+            session_id,
+            content,
+            display,
+            voice,
+            cancel,
+        },
+        move |result| {
+            let event = match result {
+                Ok(Some(response)) => TurnEvent::Done {
                     session: session_id,
-                });
-                return;
+                    content: response.content,
+                    context_tokens: response.context_tokens,
+                    tokens_per_second: response.tokens_per_second,
+                    voice: response.voice,
+                    completed_plan: response.completed_plan.map(Box::new),
+                },
+                // The stop dropped the turn where it stood (#2657): no Done
+                // and no Failed will come, so this is what settles the card.
+                Ok(None) => TurnEvent::Cancelled {
+                    session: session_id,
+                },
+                Err(e) => TurnEvent::Failed {
+                    session: session_id,
+                    text: e.into_message(),
+                },
             };
-            match outcome {
-                Ok(response) => {
-                    // A text turn never carries a spoken block (#3096). The
-                    // model is told to write one only when the message
-                    // begins with the voice note, and a model that drifts
-                    // must not print it into the card or hand it to any
-                    // later reader. Stripped here, before the settle draws
-                    // the answer and before anything can speak it.
-                    let content = if voice {
-                        response.content
-                    } else {
-                        opencrabs::channels::voice::spoken::visible(&response.content)
-                    };
-                    let _ = sink.send(TurnEvent::Done {
-                        session: session_id,
-                        content,
-                        context_tokens: response.context_tokens,
-                        tokens_per_second: response.tokens_per_second,
-                        voice,
-                        completed_plan: response.completed_plan.map(Box::new),
-                    });
-                }
-                Err(e) => {
-                    let msg = opencrabs::brain::agent::format_user_error(&e);
-                    let _ = sink.send(TurnEvent::Failed {
-                        session: session_id,
-                        text: msg,
-                    });
-                }
-            }
-        });
-    });
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::Failed {
             session: session_id,
@@ -1239,76 +1118,62 @@ pub fn spawn_turn(
     }
 }
 
-/// Re-run one interrupted turn on a 4 MB thread (#2627).
+/// Re-run one interrupted turn as the backend's `TurnResume` (#2627).
 ///
-/// `resume_interrupted_turn`, not `send_message_with_tools_and_mode`: a resume
-/// is a one-shot recovery and must never re-track itself. If this turn is
-/// interrupted too (a stop, another crash) the session has already been
-/// cleared from `pending_requests`, so it cannot resume forever (#729).
+/// The turn itself is the crab's (`backend::turn`). What stays here is this
+/// window's boot accounting: the outcome is counted in the boot report before
+/// the card settles, and the summary goes out once the last resume is done.
 fn spawn_resume(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     content: String,
     sink: EventSink,
     cancel: tokio_util::sync::CancellationToken,
     pending: Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    use opencrabs::brain::agent::service::boot_report;
+
     let thread_sink = sink.clone();
     let thread_pending = pending.clone();
-    let spawned = spawn_worker("gui-agent-resume", move |runtime| {
-        let sink = thread_sink;
-        let turn_sink = sink.clone();
-        runtime.block_on(async move {
-            let turn = service.resume_interrupted_turn(
-                session_id,
-                content,
-                None,
-                Some(cancel.clone()),
-                None,
-                None,
-                "tui",
-                None,
-            );
-            // A resumed turn is a turn: the same stop applies, and the
-            // same cooperative gap (#2657).
-            let Some(outcome) = race_turn(turn, &cancel).await else {
-                // It answered nobody, so it is not a delivered resume; the
-                // summary must not claim otherwise.
-                opencrabs::brain::agent::service::boot_report::record_failed();
-                let _ = turn_sink.send(TurnEvent::Cancelled {
-                    session: session_id,
-                });
-                return;
-            };
-            match outcome {
-                Ok(response) => {
-                    opencrabs::brain::agent::service::boot_report::record_delivered();
-                    let _ = turn_sink.send(TurnEvent::Done {
+    let spawned = backend.spawn(
+        opencrabs::backend::turn::TurnResume {
+            session_id,
+            content,
+            cancel,
+        },
+        move |result| {
+            let event = match result {
+                Ok(Some(response)) => {
+                    boot_report::record_delivered();
+                    TurnEvent::Done {
                         session: session_id,
                         content: response.content,
                         context_tokens: response.context_tokens,
                         tokens_per_second: response.tokens_per_second,
-                        // A resumed turn re-runs a prompt parked by a dead
-                        // process, and that prompt is the words only: the
-                        // recording it came from is not in hand here. It
-                        // answers in text rather than guessing at speech
-                        // (#3096).
-                        voice: false,
+                        voice: response.voice,
                         completed_plan: response.completed_plan.map(Box::new),
-                    });
+                    }
+                }
+                // It answered nobody, so it is not a delivered resume; the
+                // summary must not claim otherwise.
+                Ok(None) => {
+                    boot_report::record_failed();
+                    TurnEvent::Cancelled {
+                        session: session_id,
+                    }
                 }
                 Err(e) => {
-                    opencrabs::brain::agent::service::boot_report::record_failed();
-                    let msg = opencrabs::brain::agent::format_user_error(&e);
-                    let _ = turn_sink.send(TurnEvent::Failed {
+                    boot_report::record_failed();
+                    TurnEvent::Failed {
                         session: session_id,
-                        text: msg,
-                    });
+                        text: e.into_message(),
+                    }
                 }
-            }
-        });
-        finish_boot_resume(&thread_pending, &sink);
-    });
+            };
+            let _ = thread_sink.send(event);
+            finish_boot_resume(&thread_pending, &thread_sink);
+        },
+    );
     if let Err(e) = spawned {
         // A worker that never took the job must still resolve the boot line, or
         // the summary is never emitted at all.
@@ -1497,6 +1362,11 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         boot_report::record_interrupted(*session_id);
     }
     let pending = Arc::new(AtomicUsize::new(0));
+    // The window's own crab runs the resumes, so a resumed turn holds its
+    // session on the same crab a sent one does.
+    let resume_backend = opencrabs::backend::primary()
+        .map(crate::backend_glue::Backend::Local)
+        .unwrap_or_else(|| service_backend(service.clone()));
     for (session_id, message) in plan.pushes {
         // A push turn killed mid-tool: re-deliver the push, never replay the
         // tool call it was inside (#12). The window's local route claims it,
@@ -1606,7 +1476,7 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         // would run it twice (#2627, same rule as the terminal at
         // `resume_delivery.rs`).
         spawn_resume(
-            service.clone(),
+            resume_backend.clone(),
             session_id,
             opencrabs::brain::agent::service::restart_recovery::CONTINUATION_PROMPT.to_string(),
             sink.clone(),
@@ -2326,6 +2196,7 @@ async fn crab_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::backend::turn::{drop_unanswered_duplicate, race_turn};
     use opencrabs::brain::tools::suggest_options::SuggestionStyle;
 
     /// The surface claim must wait for the window and fire exactly once,

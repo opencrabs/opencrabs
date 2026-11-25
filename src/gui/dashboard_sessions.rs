@@ -30,7 +30,7 @@ impl Dashboard {
         display_text: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: key it to the session it finished on, so it
             // resumes when the stack is ready (#2629).
             agent_bridge::queue_push(
@@ -38,7 +38,7 @@ impl Dashboard {
                 agent_bridge::PendingMessage::system(context_text, display_text),
             );
             return;
-        };
+        }
         self.turn.live.begin(display_text.clone());
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
@@ -49,7 +49,7 @@ impl Dashboard {
         self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session_id,
             context_text,
             Some(display_text.clone()),
@@ -104,7 +104,7 @@ impl Dashboard {
         display_text: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: key it to the session it finished on, so it
             // resumes when the stack is ready (#2629).
             agent_bridge::queue_push(
@@ -112,7 +112,7 @@ impl Dashboard {
                 agent_bridge::PendingMessage::system(context_text, display_text),
             );
             return;
-        };
+        }
         let mut live = transcript::LiveTurn::default();
         live.begin(display_text.clone());
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -124,7 +124,7 @@ impl Dashboard {
         );
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session_id,
             context_text,
             Some(display_text.clone()),
@@ -362,12 +362,12 @@ impl Dashboard {
         if waiting.is_empty() {
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the text. Clearing it here dropped whatever
             // the user typed whenever the window polled before the stack came
             // up (#2629).
             return;
-        };
+        }
         // No open conversation: keep the queue and open one. The queue drains
         // again when that session lands (`SessionCreated`).
         let Some(sid) = self.chat_session else {
@@ -393,7 +393,7 @@ impl Dashboard {
             self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
             agent_bridge::spawn_turn(
-                bridge.service.clone(),
+                self.backend.clone(),
                 sid,
                 joined.context_text,
                 Some(joined.display_text),
