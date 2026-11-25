@@ -9,8 +9,20 @@
 //!
 //! Credentials never show a value: a provider row says only whether a key is
 //! configured. Key material never reaches the source, status line, or a log.
+//!
+//! The values and the writes are the crab's (`settings.load`,
+//! `settings.write`, `settings.credential_write`): the doors at the bottom
+//! of this file ask the window's backend, so a window pointed at another
+//! crab reads and writes that crab's config, never this machine's.
 
+use opencrabs::backend::cap::{self, Unavailable};
+use opencrabs::backend::settings::{
+    CredentialWrite, SettingEntry, SettingWrite, SettingsLoad, Write,
+};
+use opencrabs::backend::{BackendError, Op};
 use opencrabs::config::Config;
+
+use crate::backend_glue::Backend;
 
 /// What a row's control does to its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,14 +118,8 @@ pub struct SettingSpec {
     pub blurb: &'static str,
 }
 
-/// A row's current value, read out of the loaded config.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RowValue {
-    Bool(bool),
-    Choice(String),
-    OptBool(Option<bool>),
-    Number(u64),
-}
+/// A row's current value, as the crab's config holds it.
+pub use opencrabs::backend::settings::SettingValue as RowValue;
 
 /// Every row, in index order. This array is the storage order: a row's index
 /// here is the index into the live values, so the rail filters it and never
@@ -379,57 +385,53 @@ pub fn current_values(config: &Config) -> Vec<RowValue> {
 
 /// One keyed provider in the credentials section: where its key writes and
 /// whether one is configured. The key itself is never read into a row.
-pub struct CredSpec {
-    pub section: String,
-    pub label: String,
-    pub configured: bool,
-}
+pub use opencrabs::backend::settings::Credential as CredSpec;
 
 /// The chat providers that take an API key, in display order. CLI subprocess
-/// providers carry no key and are not listed.
+/// providers carry no key and are not listed. The list is the crab's own
+/// (`backend::settings::credentials`), the one `settings.credential_write`
+/// checks a slot against.
 pub fn credential_rows(config: &Config) -> Vec<CredSpec> {
-    let p = &config.providers;
-    let named: &[(&str, &str, Option<&opencrabs::config::ProviderConfig>)] = &[
-        ("providers.anthropic", "Anthropic", p.anthropic.as_ref()),
-        ("providers.openai", "OpenAI", p.openai.as_ref()),
-        ("providers.openrouter", "OpenRouter", p.openrouter.as_ref()),
-        ("providers.minimax", "MiniMax", p.minimax.as_ref()),
-        ("providers.zai", "z.ai (GLM)", p.zai.as_ref()),
-        ("providers.moonshot", "Moonshot AI", p.moonshot.as_ref()),
-        ("providers.xiaomi", "Xiaomi MiMo", p.xiaomi.as_ref()),
-        ("providers.gemini", "Google Gemini", p.gemini.as_ref()),
-        ("providers.github", "GitHub Copilot", p.github.as_ref()),
-        ("providers.bedrock", "AWS Bedrock", p.bedrock.as_ref()),
-        ("providers.vertex", "Google Vertex", p.vertex.as_ref()),
-        (
-            "providers.opencrabs",
-            "OpenCrabs (built-in)",
-            p.opencrabs.as_ref(),
-        ),
-        ("providers.qwen", "Qwen", p.qwen.as_ref()),
-        ("providers.ollama", "Ollama", p.ollama.as_ref()),
-        ("providers.opencode", "OpenCode API", p.opencode.as_ref()),
-    ];
-    let mut rows: Vec<CredSpec> = named
+    opencrabs::backend::settings::credentials(config)
+}
+
+/// The rows' values from the crab's answer, in SPECS order. A spec the crab
+/// did not answer (a crab older than the window) gets a paintable Bool
+/// placeholder, which `write_op` refuses for any other kind, so it never
+/// writes.
+pub fn values_from(entries: &[SettingEntry]) -> Vec<RowValue> {
+    SPECS
         .iter()
-        .map(|(section, label, cfg)| CredSpec {
-            section: (*section).to_string(),
-            label: (*label).to_string(),
-            configured: cfg
-                .and_then(|c| c.api_key.as_ref())
-                .is_some_and(|k| !k.is_empty()),
+        .map(|spec| {
+            entries
+                .iter()
+                .find(|entry| entry.section == spec.section && entry.key == spec.key)
+                .map(|entry| entry.value.clone())
+                .unwrap_or(RowValue::Bool(false))
         })
-        .collect();
-    if let Some(customs) = &p.custom {
-        for (name, cfg) in customs {
-            rows.push(CredSpec {
-                section: format!("providers.custom.{name}"),
-                label: format!("Custom: {name}"),
-                configured: cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()),
-            });
-        }
+        .collect()
+}
+
+/// The write a row's file operation travels as.
+pub fn wire_write(op: WriteOp) -> Write {
+    match op {
+        WriteOp::SetScalar(v) => Write::Set(v),
+        WriteOp::SetString(v) => Write::SetString(v),
+        WriteOp::Remove => Write::Remove,
     }
-    rows
+}
+
+/// The status line while the crab's settings are on their way.
+pub const READING: &str = "reading the crab's settings...";
+
+/// The status line for a refused or failed `op`: a refusal about access
+/// reads as the greyed out action would (`cap::notice`), anything else
+/// keeps the line the modal always printed, `<prefix>: <reason>`.
+pub fn failure_line(op: &str, prefix: &str, err: BackendError) -> String {
+    if Unavailable::from_error(op, &err).is_some() {
+        return cap::notice(op, &err);
+    }
+    format!("{prefix}: {}", err.into_message())
 }
 
 /// The value a control paints, in one place so the row and its tests agree.
@@ -472,3 +474,48 @@ pub fn pane_index(
         .position(|candidate| *candidate == row)
         .unwrap_or_default()
 }
+
+/// The crab's settings: every row's value in SPECS order and the credential
+/// rows. Never a key: a credential row says only whether one is configured.
+pub async fn load(backend: &Backend) -> Result<(Vec<RowValue>, Vec<CredSpec>), BackendError> {
+    let loaded = backend.call(SettingsLoad {}).await?;
+    Ok((values_from(&loaded.values), loaded.credentials))
+}
+
+/// Write `value` to `spec`'s key on the crab. `Ok(None)` when the value does
+/// not fit the row (a caller bug, so nothing is sent); otherwise the crab's
+/// answer, the value as written.
+pub async fn write(
+    backend: &Backend,
+    spec: &SettingSpec,
+    value: &RowValue,
+) -> Result<Option<String>, BackendError> {
+    let Some(op) = write_op(spec, value) else {
+        return Ok(None);
+    };
+    let write = SettingWrite {
+        section: spec.section.to_string(),
+        key: spec.key.to_string(),
+        write: wire_write(op),
+    };
+    backend.call(write).await.map(Some)
+}
+
+/// Write one provider's key on the crab. The answer never carries it.
+pub async fn write_credential(
+    backend: &Backend,
+    section: &str,
+    api_key: &str,
+) -> Result<(), BackendError> {
+    backend
+        .call(CredentialWrite {
+            section: section.to_string(),
+            api_key: api_key.to_string(),
+        })
+        .await
+}
+
+/// The wire names, for the status line's refusal notice.
+pub const LOAD_OP: &str = SettingsLoad::NAME;
+pub const WRITE_OP: &str = SettingWrite::NAME;
+pub const CREDENTIAL_OP: &str = CredentialWrite::NAME;
