@@ -20,6 +20,7 @@ use opencrabs::backend::settings::{
     CredentialWrite, SettingEntry, SettingWrite, SettingsLoad, Write,
 };
 use opencrabs::backend::{BackendError, Op};
+#[cfg(test)]
 use opencrabs::config::Config;
 
 use crate::backend_glue::Backend;
@@ -349,6 +350,9 @@ pub fn step_number(spec: &SettingSpec, current: u64, dir: i32) -> u64 {
 }
 
 /// Read every row's current value out of the loaded config, in SPECS order.
+/// The window reads the crab's values through `settings.load`; this is the
+/// local reading its tests check the crab's answer against.
+#[cfg(test)]
 pub fn current_values(config: &Config) -> Vec<RowValue> {
     let a = &config.agent;
     let m = &config.memory;
@@ -391,6 +395,7 @@ pub use opencrabs::backend::settings::Credential as CredSpec;
 /// providers carry no key and are not listed. The list is the crab's own
 /// (`backend::settings::credentials`), the one `settings.credential_write`
 /// checks a slot against.
+#[cfg(test)]
 pub fn credential_rows(config: &Config) -> Vec<CredSpec> {
     opencrabs::backend::settings::credentials(config)
 }
