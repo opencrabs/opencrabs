@@ -461,6 +461,7 @@ fn a_remote_crab_s_link_reaches_the_opener_only_for_web_and_mail() {
         "http://example.com",
         "HTTPS://Example.com",
         "mailto:crab@example.com",
+        "mailto:crab@example.com?subject=hi&body=a%20b&cc=x@example.com",
     ] {
         assert_eq!(backend.openable_url(url), Ok(url), "{url}");
     }
@@ -478,6 +479,12 @@ fn a_remote_crab_s_link_reaches_the_opener_only_for_web_and_mail() {
         "mailto:",
         "",
         " https://example.com",
+        "https://example.com/a b",
+        "https://example.com/\n",
+        "mailto:a@example.com?attach=/etc/passwd",
+        "mailto:a@example.com?subject=x&ATTACHMENT=~/.ssh/id_rsa",
+        "mailto:a@example.com?att%61ch=/etc/passwd",
+        "mailto:a@example.com?subject=x&attach",
     ] {
         assert_eq!(
             backend.openable_url(url),

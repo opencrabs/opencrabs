@@ -182,14 +182,40 @@ pub const REMOTE_URL_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
 pub const REMOTE_URL_NOT_OPENED: &str =
     "a remote crab's link: only http, https and mailto links are opened here";
 
+/// The fields a remote crab's `mailto:` link may carry. Some mail clients
+/// honour `attach=<path>`, which would send a file of this machine; only
+/// the draft's addressees and text are let through.
+pub const REMOTE_MAILTO_FIELDS: &[&str] = &["to", "cc", "bcc", "subject", "body", "in-reply-to"];
+
 /// Whether a link from a remote crab's transcript may reach [`url_command`]:
-/// it starts with one of [`REMOTE_URL_SCHEMES`] in any case, and something
-/// follows the scheme. Pure.
+/// it starts with one of [`REMOTE_URL_SCHEMES`] in any case, something
+/// follows the scheme, it holds no whitespace or control character, and a
+/// `mailto:` names only [`REMOTE_MAILTO_FIELDS`] (a field name with a
+/// percent escape is refused, so `att%61ch` cannot pass). Pure.
 pub fn remote_url_opens(url: &str) -> bool {
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
     let lower = url.to_ascii_lowercase();
-    REMOTE_URL_SCHEMES
+    let Some(scheme) = REMOTE_URL_SCHEMES
         .iter()
-        .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len())
+        .find(|scheme| lower.starts_with(*scheme) && lower.len() > scheme.len())
+    else {
+        return false;
+    };
+    if *scheme != "mailto:" {
+        return true;
+    }
+    let Some((_, query)) = lower.split_once('?') else {
+        return true;
+    };
+    query
+        .split('&')
+        .filter(|field| !field.is_empty())
+        .all(|field| {
+            let name = field.split_once('=').map_or(field, |(name, _)| name);
+            REMOTE_MAILTO_FIELDS.contains(&name)
+        })
 }
 
 /// The command that shows a file in its folder with the file selected.
