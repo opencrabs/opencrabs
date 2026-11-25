@@ -146,6 +146,7 @@ A turn started by `gui/call` belongs to the caller, not to the window:
 for `open_terminal` (the folder is on the other machine) and `true` for
 `open_external` (it opens a downloaded copy). Capabilities are local to the
 client and never travel in a call.
+`setup` (the `/onboard` wizard, daemon install) and `logs` (the log viewer) are local only: they act on this machine.
 
 ## Scopes
 

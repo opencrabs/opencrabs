@@ -20,16 +20,22 @@ pub enum Cap {
     OpenTerminal,
     /// Open a file in an external app. Remote does it on the cached copy.
     OpenExternal,
+    /// The setup wizard (`/onboard` and its single-step doors) and the daemon
+    /// install. Only local: they write this machine's config, keys and
+    /// services, never the other crab's.
+    Setup,
+    /// The log viewer. Only local: it reads this machine's log folder.
+    Logs,
 }
 
 impl Cap {
     /// Every capability.
-    pub const ALL: &'static [Cap] = &[Cap::OpenTerminal, Cap::OpenExternal];
+    pub const ALL: &'static [Cap] = &[Cap::OpenTerminal, Cap::OpenExternal, Cap::Setup, Cap::Logs];
 
     /// Whether a backend in this process (`local`) or across the wire has it.
     pub fn available(self, local: bool) -> bool {
         match self {
-            Cap::OpenTerminal => local,
+            Cap::OpenTerminal | Cap::Setup | Cap::Logs => local,
             Cap::OpenExternal => true,
         }
     }
@@ -148,6 +154,16 @@ mod tests {
     fn a_remote_backend_cannot_open_a_terminal() {
         assert!(!Cap::OpenTerminal.available(false));
         assert!(Cap::OpenExternal.available(false));
+    }
+
+    #[test]
+    fn setup_and_logs_are_only_on_this_machine() {
+        assert!(!Cap::Setup.available(false));
+        assert!(!Cap::Logs.available(false));
+        assert!(Cap::Setup.available(true));
+        assert!(Cap::Logs.available(true));
+        assert!(Cap::ALL.contains(&Cap::Setup));
+        assert!(Cap::ALL.contains(&Cap::Logs));
     }
 
     fn remote_hello(scopes: &[Scope]) -> HelloReply {
