@@ -122,6 +122,12 @@ impl Op for DeleteSession {
 /// A file that cannot be tracked must never fail the turn, so each one that
 /// fails comes back as the line the window logs, and the rest go on. Only a
 /// ledger that does not open fails the operation.
+///
+/// At the remote door a file is tracked only when the blob door would serve
+/// it ([`super::blob::resolve`]: inside the crab's roots, uploads included,
+/// symlinks resolved), and it is tracked by its resolved path. Anything
+/// else comes back as an untracked line. The local door tracks any path, as
+/// the window always did.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackFiles {
     /// The session the files belong to.
@@ -142,11 +148,27 @@ impl Op for TrackFiles {
             .await
             .map_err(|e| BackendError::Failed(format!("file track db connect: {e}")))?;
         let service = FileService::new(ServiceContext::new(db.pool().clone()));
+        let roots = (super::door::current() == super::door::Door::Remote)
+            .then(|| super::blob::roots(&super::blob::home_of(ctx)));
         let mut untracked = Vec::new();
         for path in self.paths {
             // The name in the line is the file's own: a failure has to say
             // which attachment did not get tracked.
             let name = path.display().to_string();
+            let path = match &roots {
+                None => path,
+                Some(roots) => match path
+                    .to_str()
+                    .ok_or(super::blob::BlobError::Denied)
+                    .and_then(|requested| super::blob::resolve(roots, requested))
+                {
+                    Ok(real) => real,
+                    Err(e) => {
+                        untracked.push(format!("file track {name}: {e}"));
+                        continue;
+                    }
+                },
+            };
             if let Err(e) = service
                 .get_or_create_file(self.session_id, path, None)
                 .await
@@ -830,6 +852,88 @@ mod tests {
                     paths: vec![file],
                 }
             );
+        }
+
+        fn remote_send() -> crate::backend::door::Caller {
+            crate::backend::door::Caller {
+                principal: "loopback-open".into(),
+                scopes: vec![Scope::Read, Scope::Send],
+            }
+        }
+
+        async fn tracked(gateway: &Gateway, session_id: Uuid) -> Vec<TrackedFile> {
+            gateway
+                .local(SessionFiles { session_id })
+                .await
+                .expect("session files")
+        }
+
+        /// A remote caller cannot put a file the blob door would not serve
+        /// on a session's list: the crab's home itself is outside every root.
+        #[tokio::test]
+        async fn a_remote_caller_tracks_no_file_outside_the_roots() {
+            let gateway = Gateway::start().await;
+            let chat = session(&gateway).await;
+            let file = gateway.home().join("note.txt");
+            std::fs::write(&file, "hello").expect("seed file");
+            let untracked = crate::backend::door::remote_as(
+                remote_send(),
+                gateway.local(TrackFiles {
+                    session_id: chat.id,
+                    paths: vec![file.clone()],
+                }),
+            )
+            .await
+            .expect("the ledger opens");
+            assert_eq!(
+                untracked,
+                vec![format!(
+                    "file track {}: blob: path not allowed",
+                    file.display()
+                )]
+            );
+            assert!(tracked(&gateway, chat.id).await.is_empty());
+        }
+
+        /// Inside a root (an upload, a session file) the remote caller
+        /// tracks as before.
+        #[tokio::test]
+        async fn a_remote_caller_tracks_a_file_inside_a_root() {
+            let gateway = Gateway::start().await;
+            let chat = session(&gateway).await;
+            let dir = gateway.home().join(crate::backend::blob::UPLOAD_DIR);
+            std::fs::create_dir_all(&dir).expect("upload dir");
+            let file = dir.join("note.txt");
+            std::fs::write(&file, "hello").expect("seed file");
+            let untracked = crate::backend::door::remote_as(
+                remote_send(),
+                gateway.local(TrackFiles {
+                    session_id: chat.id,
+                    paths: vec![file],
+                }),
+            )
+            .await
+            .expect("the ledger opens");
+            assert!(untracked.is_empty(), "{untracked:?}");
+            assert_eq!(tracked(&gateway, chat.id).await.len(), 1);
+        }
+
+        /// The window tracks a file outside the roots, as it always did.
+        #[tokio::test]
+        async fn the_local_door_tracks_any_path() {
+            let gateway = Gateway::start().await;
+            let chat = session(&gateway).await;
+            let file = gateway.home().join("note.txt");
+            std::fs::write(&file, "hello").expect("seed file");
+            let untracked = gateway
+                .local(TrackFiles {
+                    session_id: chat.id,
+                    paths: vec![file],
+                })
+                .await
+                .expect("the ledger opens");
+            assert!(untracked.is_empty(), "{untracked:?}");
+            assert_eq!(tracked(&gateway, chat.id).await.len(), 1);
         }
 
         #[tokio::test]
