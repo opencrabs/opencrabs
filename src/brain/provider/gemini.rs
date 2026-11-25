@@ -13,10 +13,8 @@
 //! Gemini uses `"user"` and `"model"` (not `"assistant"`)
 //!
 //! ## Supported Models
-//! - gemini-2.0-flash
-//! - gemini-3.1-flash-image-preview
-//! - gemini-1.5-pro
-//! - gemini-1.5-flash
+//! Resolved live from `GET /models` at startup when the config names none;
+//! `FALLBACK_MODELS` is the offline floor.
 
 use super::error::{ProviderError, Result};
 use super::r#trait::{Provider, ProviderStream};
@@ -32,6 +30,153 @@ use std::sync::Arc;
 
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Google's rolling alias for the newest Flash model.
+///
+/// The default must never be a pinned version. `gemini-2.0-flash` was the
+/// hardcoded default until Google shut it down, and every config that left
+/// `default_model` unset then failed with a 404 on every request (#3149).
+/// Google maintains this alias, so it cannot go stale the same way.
+pub const LATEST_FLASH_MODEL: &str = "gemini-flash-latest";
+
+/// Offline floor for `resolve_default_model`: models verified live against
+/// the models API, used only when that call cannot be made.
+pub const FALLBACK_MODELS: &[&str] = &[
+    LATEST_FLASH_MODEL,
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-image-preview",
+];
+
+/// How long the startup model probe may take before the built-in floor wins.
+/// Boot must not hang on a slow API, and the floor is a working model.
+#[cfg(not(test))]
+const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Families that answer `generateContent` but are not general-purpose chat:
+/// image generation, speech, music, transcription, robotics, and Google's
+/// research and computer-use previews. The method list alone cannot exclude
+/// them, so they are named here.
+const NON_CHAT_MARKERS: &[&str] = &[
+    "image",
+    "nano-banana",
+    "tts",
+    "omni",
+    "lyria",
+    "transcribe",
+    "robotics",
+    "computer-use",
+    "deep-research",
+    "antigravity",
+    "embedding",
+    "aqa",
+    "learnlm",
+];
+
+/// Whether a model id is a candidate for a chat default.
+pub(crate) fn is_chat_model(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    if !(n.starts_with("gemini-") || n.starts_with("gemma-")) {
+        return false;
+    }
+    !NON_CHAT_MARKERS.iter().any(|marker| n.contains(marker))
+}
+
+/// The version number carried by a model id: `gemini-3.8-flash` -> 3.8,
+/// `gemini-2.5-flash` -> 2.5, an alias with no number -> 0.0.
+fn version_of(name: &str) -> f32 {
+    name.split('-')
+        .find_map(|part| {
+            let numeric = !part.is_empty()
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.')
+                && part.chars().any(|c| c.is_ascii_digit());
+            numeric.then(|| part.parse::<f32>().ok()).flatten()
+        })
+        .unwrap_or(0.0)
+}
+
+/// Rank a chat candidate: newest first, then stable over preview, then the
+/// full model over its `lite` sibling.
+fn chat_rank(name: &str) -> (i32, u8, u8) {
+    let version = (version_of(name) * 100.0).round() as i32;
+    let stable = u8::from(!name.contains("preview") && !name.contains("experimental"));
+    let full = u8::from(!name.contains("lite"));
+    (version, stable, full)
+}
+
+/// Pick the model to use when the config names none, from a list the caller
+/// got from the live models API.
+///
+/// Google's rolling alias wins whenever it is offered, because it tracks the
+/// newest Flash without us pinning anything. Otherwise the newest stable
+/// Flash is chosen, then the newest Pro, then any chat-capable model. `None`
+/// means the list held nothing usable and the caller should keep its floor.
+pub(crate) fn pick_default_model(models: &[String]) -> Option<String> {
+    let chat: Vec<&str> = models
+        .iter()
+        .map(String::as_str)
+        .filter(|m| is_chat_model(m))
+        .collect();
+    if chat.is_empty() {
+        return None;
+    }
+    // The alias tracks Google's newest Flash, so preferring it means nothing
+    // here needs editing when a version retires.
+    if chat.contains(&LATEST_FLASH_MODEL) {
+        return Some(LATEST_FLASH_MODEL.to_string());
+    }
+    best_in(&chat, "flash")
+        .or_else(|| best_in(&chat, "pro"))
+        .or_else(|| chat.iter().max_by_key(|m| chat_rank(m)).copied())
+        .map(str::to_string)
+}
+
+/// The highest-ranked model in `chat` whose id contains `tier`.
+fn best_in<'a>(chat: &[&'a str], tier: &str) -> Option<&'a str> {
+    chat.iter()
+        .filter(|m| m.contains(tier))
+        .max_by_key(|m| chat_rank(m))
+        .copied()
+}
+
+/// Test builds must not reach the network. `create_provider` is called by
+/// timeout-wiring tests that have no interest in the model list, and a probe
+/// there would make them depend on Google being reachable. The picker itself
+/// is unit-tested against a live-shaped list.
+#[cfg(test)]
+async fn probe_default_model(_api_key: &str) -> String {
+    LATEST_FLASH_MODEL.to_string()
+}
+
+#[cfg(not(test))]
+async fn probe_default_model(api_key: &str) -> String {
+    let probe = GeminiProvider::new(api_key.to_string());
+    let fetched = match tokio::time::timeout(MODEL_PROBE_TIMEOUT, probe.fetch_models()).await {
+        Ok(list) => list,
+        Err(_) => {
+            tracing::warn!(
+                "gemini: model list probe timed out after {:?}; using the built-in default",
+                MODEL_PROBE_TIMEOUT
+            );
+            Vec::new()
+        }
+    };
+    match pick_default_model(&fetched) {
+        Some(model) => {
+            tracing::info!("gemini: no default_model configured, resolved live default {model}");
+            model
+        }
+        None => {
+            tracing::warn!(
+                "gemini: no usable model in the fetched list; using {LATEST_FLASH_MODEL}"
+            );
+            LATEST_FLASH_MODEL.to_string()
+        }
+    }
+}
 
 /// Google Gemini provider
 #[derive(Clone)]
@@ -109,7 +254,7 @@ impl GeminiProvider {
             request_timeout: None,
             stream_idle_timeout: None,
             thinking_loop_timeout: None,
-            model: "gemini-2.0-flash".to_string(),
+            model: LATEST_FLASH_MODEL.to_string(),
             cached_content_name: Arc::new(std::sync::Mutex::new(None)),
             configured_context_window: None,
         }
@@ -151,6 +296,16 @@ impl GeminiProvider {
     pub fn with_model(mut self, model: String) -> Self {
         self.model = model;
         self
+    }
+
+    /// The model to use when the config names none.
+    ///
+    /// Asks the models API for the live list and picks from it, so a config
+    /// that leaves `default_model` unset follows Google's releases instead of
+    /// pinning a version that gets shut down (#3149). The built-in floor is
+    /// used only when the call fails, times out, or answers nothing usable.
+    pub async fn resolve_default_model(api_key: &str) -> String {
+        probe_default_model(api_key).await
     }
 
     /// Override the context-window budget from `providers.gemini.context_window`.
@@ -794,12 +949,10 @@ impl Provider for GeminiProvider {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        vec![
-            "gemini-2.0-flash".to_string(),
-            "gemini-3.1-flash-image-preview".to_string(),
-            "gemini-1.5-pro".to_string(),
-            "gemini-1.5-flash".to_string(),
-        ]
+        // Offline floor only. The live list comes from `fetch_models()`, and
+        // `resolve_default_model` prefers it, so nothing here is a model the
+        // provider depends on staying alive (#3149).
+        FALLBACK_MODELS.iter().map(|m| m.to_string()).collect()
     }
 
     async fn fetch_models(&self) -> Vec<String> {
@@ -870,14 +1023,11 @@ impl Provider for GeminiProvider {
         self.thinking_loop_timeout
     }
 
-    fn context_window(&self, model: &str) -> Option<u32> {
-        match model {
-            "gemini-2.0-flash" => Some(1_000_000),
-            "gemini-3.1-flash-image-preview" => Some(1_000_000),
-            "gemini-1.5-pro" => Some(2_000_000),
-            "gemini-1.5-flash" => Some(1_000_000),
-            _ => Some(1_000_000),
-        }
+    fn context_window(&self, _model: &str) -> Option<u32> {
+        // One window for the whole family today (#3149 pruned the dead
+        // 2.0-flash and 1.5 arms). If Google splits windows per model again,
+        // match on names from the live list, never on retired ones.
+        Some(1_000_000)
     }
 
     fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {

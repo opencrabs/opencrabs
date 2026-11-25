@@ -1499,7 +1499,7 @@ stt_model = "qwen3.8-omni-flash"             # transcription on day 0, sent as i
 
 ### Google Gemini
 
-**Models:** `gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-pro` — fetched live from the Gemini API
+**Models:** resolved live from the Gemini models API at startup when `default_model` is unset, preferring Google's rolling `gemini-flash-latest` alias. Nothing is pinned, so a retired version cannot break the provider.
 
 **Setup** in `keys.toml` — get a key at [aistudio.google.com](https://aistudio.google.com):
 ```toml

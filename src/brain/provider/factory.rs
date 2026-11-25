@@ -2377,10 +2377,13 @@ fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         }
     };
 
-    let model = gemini_config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "gemini-2.0-flash".to_string());
+    let model = match gemini_config.default_model.as_deref() {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        // Nothing pinned in config: ask Google for the live list and pick
+        // from it (#3149). The old hardcoded fallback pointed at a model
+        // Google had already shut down.
+        _ => GeminiProvider::resolve_default_model(&api_key).await,
+    };
 
     tracing::info!("Using Gemini provider with model: {}", model);
     let mut provider = GeminiProvider::new(api_key).with_model(model);
