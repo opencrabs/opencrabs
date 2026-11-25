@@ -429,13 +429,30 @@ impl Op for RecordTurnStopped {
 ///
 /// A port of the terminal's `generate_brain_files_background`: one completion
 /// through the service's provider, parsed into the five brain files and
-/// written into `workspace` on the crab. The reply is how many landed.
+/// written into the brain workspace on the crab. The reply is how many
+/// landed. Only the five fixed names are ever written, at any door; where
+/// they land is [`brain_workspace`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainGenerate {
     /// The onboarding prompt.
     pub prompt: String,
-    /// The crab's brain workspace.
+    /// The crab's brain workspace. Kept as the local door passes it; at the
+    /// remote door it is ignored (see [`brain_workspace`]).
     pub workspace: PathBuf,
+}
+
+/// The folder `BrainGenerate` writes into for a caller that asked for
+/// `requested`.
+///
+/// A remote caller does not get to name a folder on the crab's disk: it gets
+/// the crab's own brain path (`BrainLoader::resolve_path`), whatever it sent.
+/// The crab's own process, the window on it included, keeps the workspace it
+/// passed, as before.
+fn brain_workspace(requested: PathBuf) -> PathBuf {
+    match super::door::current() {
+        super::door::Door::Remote => crate::brain::prompt_builder::BrainLoader::resolve_path(),
+        super::door::Door::Local => requested,
+    }
 }
 
 impl Op for BrainGenerate {
@@ -477,10 +494,11 @@ impl Op for BrainGenerate {
                     ("TOOLS.md", &parsed[3]),
                     ("MEMORY.md", &parsed[4]),
                 ];
+                let workspace = brain_workspace(self.workspace);
                 let mut written = 0;
                 for (name, content) in &files {
                     if let Some(content) = content {
-                        if let Err(e) = std::fs::write(self.workspace.join(name), content) {
+                        if let Err(e) = std::fs::write(workspace.join(name), content) {
                             return Err(BackendError::Failed(format!("writing {name}: {e}")));
                         }
                         written += 1;
@@ -1167,6 +1185,26 @@ mod tests {
                 }
             );
             assert!(!workspace.join("SOUL.md").exists(), "nothing was written");
+        }
+
+        #[tokio::test]
+        async fn brain_generate_by_the_remote_door_writes_in_the_crabs_brain_only() {
+            // A remote caller naming `/tmp/x`-like folders gets the crab's own
+            // brain path; the local door keeps the workspace it passed.
+            let gateway = Gateway::start().await;
+            let elsewhere = tempfile::tempdir().expect("tempdir");
+            let requested = elsewhere.path().join("x");
+            let remote = gateway
+                .within(crate::backend::door::remote(async {
+                    brain_workspace(requested.clone())
+                }))
+                .await;
+            assert_eq!(remote, gateway.home(), "the crab's brain, under its home");
+            assert_ne!(remote, requested, "never the caller's folder");
+            let local = gateway
+                .within(async { brain_workspace(requested.clone()) })
+                .await;
+            assert_eq!(local, requested, "the local door is unchanged");
         }
 
         #[tokio::test]
