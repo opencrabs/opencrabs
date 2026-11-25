@@ -25,6 +25,8 @@ const APP: &str = include_str!("../app.rs");
 const CONFIG: &str = include_str!("../dashboard_config.rs");
 const FINDER: &str = include_str!("../dashboard_finder.rs");
 const RAIL: &str = include_str!("../dashboard_rail.rs");
+const SESSIONS: &str = include_str!("../dashboard_sessions.rs");
+const TOPICS: &str = include_str!("../dashboard_topics.rs");
 
 fn remote() -> Backend {
     Backend::Remote(Arc::new(RemoteCrab::new(
@@ -226,4 +228,127 @@ fn a_refetch_with_a_stale_epoch_leaves_the_rail_alone() {
         .expect("the refetch tells the panes");
     assert!(stale < rows, "a stale answer never reaches `sessions`");
     assert!(stale < panes, "nor `follow_crab`, through `notify_panes`");
+}
+
+/// Where `needle` sits in `body`, or a panic naming what was looked for.
+fn at(body: &str, needle: &str, what: &str) -> usize {
+    body.find(needle)
+        .unwrap_or_else(|| panic!("{what}: no `{needle}`"))
+}
+
+/// An arrival that writes per-crab state takes the epoch when it leaves, and
+/// on landing returns before its first write when the epoch moved. The guard
+/// is `!=` and a `return`, so an answer from the crab still on screen goes on
+/// to the write.
+fn assert_dropped_when_stale(src: &str, name: &str, first_write: &str) {
+    let body = fn_body(src, name);
+    let taken = at(&body, "let epoch = self.instance_epoch;", name);
+    let spawned = at(&body, "cx.spawn(", name);
+    assert!(
+        taken < spawned,
+        "{name}: the epoch is taken before the read leaves"
+    );
+    let guard = at(&body, "if this.instance_epoch != epoch {", name);
+    let (_, after_guard) = body.split_at(guard);
+    let first_line = after_guard
+        .lines()
+        .nth(1)
+        .map(str::trim)
+        .unwrap_or_default();
+    assert_eq!(first_line, "return;", "{name}: a stale answer returns");
+    let write = at(&body, first_write, name);
+    assert!(
+        guard < write,
+        "{name}: a stale answer never reaches `{first_write}`"
+    );
+}
+
+#[test]
+fn a_mission_control_read_of_the_crab_left_behind_touches_nothing() {
+    // Not even the loading flag: the swap cleared it and may have the new
+    // crab's read out, which a stale answer must not unlock.
+    assert_dropped_when_stale(SCREENS, "fetch_mission_control", "this.mc_loading = false;");
+    assert_dropped_when_stale(
+        SCREENS,
+        "fetch_mission_control",
+        "this.mc = Some(snapshot);",
+    );
+}
+
+#[test]
+fn a_mission_control_decision_on_the_crab_left_behind_paints_no_notice() {
+    assert_dropped_when_stale(SCREENS, "decide_selected", "this.mc_notice = Some(");
+    assert_dropped_when_stale(
+        SCREENS,
+        "decide_selected",
+        "this.fetch_mission_control(cx);",
+    );
+}
+
+#[test]
+fn a_usage_read_of_the_crab_left_behind_is_dropped() {
+    assert_dropped_when_stale(SCREENS, "reload_usage", "this.state = state;");
+}
+
+#[test]
+fn pins_and_topic_state_of_the_crab_left_behind_are_dropped() {
+    assert_dropped_when_stale(SESSIONS, "refresh_favorites", "this.sessions.favorites =");
+    assert_dropped_when_stale(SESSIONS, "enable_topics_then", "this.sessions.topics =");
+    assert_dropped_when_stale(SESSIONS, "enable_topics_then", "after(this, cx);");
+    assert_dropped_when_stale(TOPICS, "refresh_topic_state", "this.sessions.topics =");
+    // The topic refresh tells the panes too, the same road `follow_crab`
+    // takes from the rail's refetch.
+    assert_dropped_when_stale(TOPICS, "refresh_topic_state", "this.notify_panes(cx);");
+}
+
+#[test]
+fn rail_previews_of_the_crab_left_behind_are_not_kept_but_the_queue_still_drains() {
+    let body = fn_body(RAIL, "refresh_previews");
+    let taken = at(
+        &body,
+        "let epoch = self.instance_epoch;",
+        "refresh_previews",
+    );
+    assert!(taken < at(&body, "cx.spawn(", "refresh_previews"));
+    let guard = at(
+        &body,
+        "if this.instance_epoch == epoch {",
+        "refresh_previews",
+    );
+    let write = at(&body, "this.sessions.previews = pairs;", "refresh_previews");
+    let drain = at(&body, "if dirty.replace(false) {", "refresh_previews");
+    assert!(guard < write, "the write sits inside the epoch check");
+    // The request the swap queued behind the stale read is still served.
+    assert!(write < drain, "the queued request runs whatever the epoch");
+    let (_, inside) = body.split_at(guard);
+    let closed = inside
+        .lines()
+        .skip(1)
+        .find(|line| line.trim() == "}")
+        .expect("the check closes");
+    let (guarded, _) = inside.split_once(closed).expect("the guarded block");
+    assert!(
+        !guarded.contains("dirty.replace"),
+        "the drain is outside the check"
+    );
+}
+
+#[test]
+fn every_arrival_pinned_here_reads_the_epoch_the_swap_moves() {
+    let switch = fn_body(WIRING, "instance_switch");
+    let bumped = at(
+        &switch,
+        "self.instance_epoch = self.instance_epoch.wrapping_add(1);",
+        "instance_switch",
+    );
+    for reread in [
+        "self.refresh_rail(cx);",
+        "self.reload_usage(cx);",
+        "self.fetch_mission_control(cx);",
+    ] {
+        assert!(
+            bumped < at(&switch, reread, "instance_switch"),
+            "{reread} leaves with the new epoch"
+        );
+    }
 }
