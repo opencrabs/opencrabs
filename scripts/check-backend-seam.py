@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Ratchets on the seam between the GUI and the backend, R1 to R7.
+r"""Ratchets on the seam between the GUI and the backend, R1 to R8.
 
 The GUI is moving behind `crate::backend`: every place the window opens the
 ledger, holds the agent service, or touches the disk by itself is a door the
@@ -33,7 +33,7 @@ Limits
   A LOCAL_ONLY entry matches every function of that name in that file.
 
 Functions
-  R2, R3 and R6 exempt whole functions. A function is `fn <name>` up to its
+  R2, R3, R6 and R8 exempt whole functions. A function is `fn <name>` up to its
   matching brace, found on the blanked text, so braces inside strings and
   comments do not confuse it. A site is inside every function whose body
   contains it; an exemption on any enclosing function applies.
@@ -88,6 +88,13 @@ BASELINES = {
     # scope (a2a:read). That is the A2A protocol table, not the panel; it
     # leaves with the panel's server side or stays as the one known site.
     "R7": 0,
+    # Something done on this machine by the window that, with a remote crab,
+    # belongs to the crab: config loaded or keys written here, a process
+    # spawned, a folder probed, or a `ask_crab` call (the synchronous door
+    # that always answers with the local crab). Measured 2026-11-25 on rb/p0
+    # @ 65a3c628a, outside LOCAL_ONLY. Each package moves its sites behind
+    # the backend and the number goes down.
+    "R8": 15,
 }
 
 # Functions of the window that may touch the disk, the ledger or the service
@@ -441,7 +448,21 @@ def rules(root: Path, local_only: set[tuple[str, str]]) -> list[Result]:
             ),
         )
     )
+    out.append(
+        Result(
+            "R8",
+            "local action outside the backend",
+            scan(gui, R8_PATTERN, lambda s, o: in_any(s, o, local_only)),
+        )
+    )
     return out
+
+
+# R8: config loaded, keys written, a process spawned, a folder probed, or the
+# synchronous local door (`ask_crab`). `std::process::Command::new` counts once.
+R8_PATTERN = re.compile(
+    r"Config::load|\b(?:write_keys?|save_keys)\(|std::process::Command(?:::new)?|\bCommand::new|\.is_dir\(\)|\bask_crab\("
+)
 
 
 OPS = re.compile(r"\bops!\s*\{([^}]*)\}")
@@ -572,6 +593,15 @@ def self_test() -> int:
     expect_fail("R7 gui", {"src/gui/a.rs": "fn remote_panel() {}\n"}, "src/gui/a.rs:1")
     expect_fail("R7 remote", {"src/remote/a.rs": 'fn f() {\n    call("tasks/get");\n}\n'}, "src/remote/a.rs:2")
     expect_fail("R7 rows", {"src/remote/a.rs": "fn f() {\n    remote_rail_rows();\n}\n"}, "src/remote/a.rs:2")
+    expect_fail("R8 config", {"src/gui/a.rs": "fn f() {\n    let c = Config::load();\n}\n"}, "src/gui/a.rs:2")
+    expect_fail("R8 keys", {"src/gui/a.rs": "fn f() {\n    config::write_keys(&k);\n}\n"}, "src/gui/a.rs:2")
+    expect_fail("R8 command", {"src/gui/a.rs": "fn f() {\n    std::process::Command::new(\"git\");\n}\n"}, "src/gui/a.rs:2")
+    expect_fail("R8 is_dir", {"src/gui/a.rs": "fn f() {\n    p.is_dir();\n}\n"}, "src/gui/a.rs:2")
+    expect_fail("R8 ask_crab", {"src/gui/a.rs": "fn f() {\n    crate::status::ask_crab(op);\n}\n"}, "src/gui/a.rs:2")
+    # `std::process::Command::new` is one site, not two; a definition is none.
+    code, text = run({"src/gui/a.rs": "fn ask_crab<O>(op: O) {}\nfn f() {\n    std::process::Command::new(x);\n}\n"}, {**zero, "R8": 1})
+    if code != 0:
+        failures.append(f"R8 counts once: wanted exit 0 at baseline 1, got {code}:\n{text}")
 
     # A count below the baseline fails too, and says what to write.
     code, text = run({"src/gui/a.rs": ""}, {**zero, "R1": 2})
@@ -613,7 +643,7 @@ def self_test() -> int:
     expect_pass(
         "LOCAL_ONLY, localize, seam files",
         {
-            "src/gui/thumbs.rs": "fn prune() {\n    let f = || std::fs::remove_file(p);\n    Database::connect(p);\n}\n",
+            "src/gui/thumbs.rs": "fn prune() {\n    let f = || std::fs::remove_file(p);\n    Database::connect(p);\n    Config::load();\n}\n",
             "src/gui/b.rs": "fn g() {\n    let p = localize(x);\n    p.exists();\n}\n",
             "src/gui/backend_glue.rs": "fn h() { x.service.y(); if is_remote {} }\n",
             "src/gui/agent_bridge.rs": "async fn build() -> R { s.service.z(); }\n",
@@ -653,7 +683,7 @@ def self_test() -> int:
         for f in failures:
             print(f"self-test FAIL: {f}")
         return 1
-    print("self-test OK: 7 rules planted (19 cases), below-baseline, 7 exemption cases, stale LOCAL_ONLY")
+    print("self-test OK: 8 rules planted (24 cases), below-baseline, 7 exemption cases, stale LOCAL_ONLY")
     return 0
 
 
