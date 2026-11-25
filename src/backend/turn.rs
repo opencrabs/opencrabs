@@ -5,9 +5,10 @@
 //! all run here. The surface keeps only what is its own: the event sink it
 //! settles the card through and the boot accounting of its own launch.
 //!
-//! The progress of a running turn does not travel on the reply. It still
-//! reaches the surface through the service's own forwarder, so the reply is
-//! only the terminal outcome.
+//! The progress of a running turn does not travel on the reply. The window's
+//! own turn reaches it through the service's own forwarder; a remote turn
+//! publishes it as [`Event::Turn`] on its session's `gui/events` stream. The
+//! reply is only the terminal outcome.
 //!
 //! A tool that needs approval asks a remote surface the way a channel asks
 //! its chat: the turn publishes [`Event::ApprovalRequested`] on its session
@@ -34,7 +35,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::a2a::server::gui_stream;
-use crate::brain::agent::{AgentError, AgentService, ApprovalCallback, ToolApprovalInfo};
+use crate::brain::agent::{
+    AgentError, AgentService, ApprovalCallback, ProgressCallback, ToolApprovalInfo,
+};
 use crate::db::models::Message;
 
 use super::door::{self, Caller, Door};
@@ -136,7 +139,7 @@ impl Op for TurnSend {
             None,
             Some(cancel.clone()),
             remote_approval(&service, crate::utils::check_approval_policy),
-            None,
+            caller.as_ref().map(|_| stream_progress()),
             channel,
             None,
             None,
@@ -590,6 +593,21 @@ impl Drop for PendingGuard {
 /// that answer and asks nobody, `None` leaves the call to a human.
 type PolicyGrant = fn() -> Option<(bool, bool)>;
 
+/// A remote turn's progress (the streamed answer, the reasoning, the tool
+/// calls), handed to every surface watching its session on `gui/events`.
+///
+/// The window's own turn keeps the service's forwarder and passes no
+/// override; a remote caller has no forwarder on this process, so without
+/// this its card saw nothing until the reply settled it.
+fn stream_progress() -> ProgressCallback {
+    Arc::new(|session_id, progress| {
+        gui_stream::publish(&Event::Turn {
+            session_id,
+            progress,
+        });
+    })
+}
+
 /// The approval callback a turn runs with.
 ///
 /// `None`, the window's turn as it always was, unless the turn came in by
@@ -1006,6 +1024,22 @@ mod tests {
         }
     }
 
+    /// The first approval request `sub` sees within `wait`, skipping the
+    /// turn's progress, which a remote turn streams to the same watchers.
+    async fn request_within(
+        sub: &mut gui_stream::Subscription,
+        wait: Duration,
+    ) -> Option<Event> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, sub.next()).await {
+                Ok(Some(event @ Event::ApprovalRequested { .. })) => return Some(event),
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
     /// Watch `id`, run one turn on it by the remote door, and answer its
     /// first approval request by the remote door with `approved` and
     /// `always`. Returns the turn's result and the subscription, which saw
@@ -1074,8 +1108,8 @@ mod tests {
         let (result, mut sub) = turn_answered(&gateway, id, true, true).await;
         assert!(matches!(result, Ok(Some(_))), "{result:?}");
         assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let more = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
-        assert!(more.is_err(), "a second request reached the subscriber: {more:?}");
+        let more = request_within(&mut sub, Duration::from_millis(200)).await;
+        assert!(more.is_none(), "a second request reached the subscriber: {more:?}");
     }
 
     /// The window's turn, with a remote surface watching its session: no
@@ -1128,8 +1162,8 @@ mod tests {
         let result = door::remote(gateway.local(send(id))).await;
         assert!(matches!(result, Ok(Some(_))), "{result:?}");
         assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1, "the policy granted it");
-        let asked = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
-        assert!(asked.is_err(), "an auto policy still asked: {asked:?}");
+        let asked = request_within(&mut sub, Duration::from_millis(200)).await;
+        assert!(asked.is_none(), "an auto policy still asked: {asked:?}");
     }
 
     fn info(session_id: Uuid) -> ToolApprovalInfo {
@@ -1269,8 +1303,8 @@ mod tests {
         let result = door::remote_as(loopback, gateway.local(send(id))).await;
         assert!(matches!(result, Ok(Some(_))), "{result:?}");
         assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0, "denied, as before");
-        let asked = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
-        assert!(asked.is_err(), "a send-only turn reached the watcher: {asked:?}");
+        let asked = request_within(&mut sub, Duration::from_millis(200)).await;
+        assert!(asked.is_none(), "a send-only turn reached the watcher: {asked:?}");
     }
 
     /// With `manage` the remote turn asks, as the turns above show; without
@@ -1495,5 +1529,50 @@ mod tests {
         );
         drop(register_running(id, "bob", &CancellationToken::new()));
         assert_eq!(turn_principal(id).as_deref(), Some("bob"));
+    }
+
+    /// A remote turn's progress reaches whoever watches its session: the
+    /// stream is the only way a remote card sees the answer being written,
+    /// the reasoning and the tool calls before the reply settles it.
+    #[tokio::test]
+    async fn a_remote_turns_progress_reaches_its_watchers() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let (gateway, _ran) =
+            gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
+        let id = session(&gateway).await;
+        let (result, mut sub) = turn_answered(&gateway, id, true, false).await;
+        assert!(matches!(result, Ok(Some(_))), "{result:?}");
+        let mut progress = 0usize;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(200), sub.next()).await
+        {
+            if let Event::Turn { session_id, .. } = event {
+                assert_eq!(session_id, id, "progress landed on another session");
+                progress += 1;
+            }
+        }
+        assert!(progress > 0, "a remote turn streamed no progress to its watcher");
+    }
+
+    /// Every progress kind the service emits travels the same way: the
+    /// callback publishes it unchanged, on its own session.
+    #[tokio::test]
+    async fn the_stream_progress_callback_publishes_each_event_on_its_session() {
+        let id = Uuid::new_v4();
+        let mut sub = gui_stream::hub().subscribe(id);
+        let publish = stream_progress();
+        publish(id, crate::brain::agent::ProgressEvent::Thinking);
+        let event = tokio::time::timeout(Duration::from_secs(5), sub.next())
+            .await
+            .expect("an event within 5s")
+            .expect("the session channel stays open");
+        assert_eq!(
+            event,
+            Event::Turn {
+                session_id: id,
+                progress: crate::brain::agent::ProgressEvent::Thinking,
+            }
+        );
     }
 }
