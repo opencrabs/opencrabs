@@ -2482,10 +2482,34 @@ mod tests {
             "rows are cleared before any resume runs, or a crash mid-resume replays them (#729)"
         );
 
-        let resume = src
+        // Read the shipped source only: this test spells its own needles, so
+        // on the whole file every one of them is found in the test itself.
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let door = shipped
             .split("fn spawn_resume(")
             .nth(1)
-            .expect("the resume runner");
+            .expect("the resume runner")
+            .split("/// Resolve the boot accounting")
+            .next()
+            .expect("the resume runner has an end");
+        assert!(
+            door.contains("turn::TurnResume {"),
+            "the resume runner hands the turn to the backend's resume"
+        );
+        // The turn itself runs in the backend's `TurnResume`.
+        let resume = include_str!("../backend/turn.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped turn source before the tests")
+            .split("impl Op for TurnResume")
+            .nth(1)
+            .expect("the resume runner")
+            .split("/// Race a turn against its stop token")
+            .next()
+            .expect("the resume runner has an end");
         assert!(
             resume.contains("resume_interrupted_turn("),
             "a resume goes through the untracked path"
@@ -2495,7 +2519,7 @@ mod tests {
             "a resume that re-tracked itself would resume forever (#729)"
         );
         assert!(
-            src.contains("spawn_boot_resume(bridge.service.clone()"),
+            shipped.contains("spawn_boot_resume(bridge.service.clone()"),
             "the window's boot actually runs the scan"
         );
     }
