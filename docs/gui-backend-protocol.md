@@ -93,6 +93,29 @@ JSON-RPC response whose `result` is one `Event`, tagged by `kind`:
 | `rail_changed` | none | reloads the rail, never patches it |
 | `transcript_changed` | `session_id` | reloads that transcript |
 | `tasks_changed` | none | reloads the background tasks |
+| `approval_requested` | `session_id`, `request_id`, `tool_name`, `tool_description`, `tool_input`, `capabilities` | asks its user, then answers with `turn.approval_answer` |
+
+### Tool approval
+
+A turn this client started by `gui/call` (`turn.send`, `turn.resume`) that
+reaches a tool needing approval, under a policy that does not grant it,
+publishes `approval_requested` on its session and waits. `tool_input` is the
+JSON the model gave the tool; `capabilities` lists what the tool may touch.
+
+The client answers with `turn.approval_answer`, params
+`{"session_id", "request_id", "approved", "always"}`, the ids copied from the
+event. `always: true` approves this call and every later tool of the same
+turn. The reply is `true` when the waiting tool took the answer and `false`
+when it reached nothing: already answered, timed out, or a `session_id` that
+is not the request's.
+
+- With no subscriber on the session when the tool asks, or no answer within
+  300 s, the tool is denied and the turn goes on with that denial.
+- The policy is the one a channel reads: `auto-session` and `auto-always`
+  grant without asking, and no event is sent.
+- Only a turn that came in by `gui/call` asks. A turn the crab's own window
+  started never sends `approval_requested`, even while a client watches its
+  session.
 
 ### Capabilities
 
@@ -124,6 +147,7 @@ output.
 | `sessions.load` | `LoadSessions` | `a2a:read` | the rail's sessions, newest first, at most 200 rows; params `{}`, reply a list of session rows |
 | `sessions.rename` | `RenameSession` | `a2a:manage` | rename a session or topic; params `{"id", "title"}`, reply `null` |
 | `session_ops.clear_messages` | `ClearMessages` | `a2a:manage` | delete one session's messages, keep the session; params `{"session_id"}`, reply `null` |
+| `turn.approval_answer` | `ApprovalAnswer` | `a2a:send` | answer one `approval_requested`; params `{"session_id", "request_id", "approved", "always"}`, reply `true` if a waiting tool took it |
 
 ### Fixture shape
 
