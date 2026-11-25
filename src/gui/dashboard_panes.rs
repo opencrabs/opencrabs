@@ -194,9 +194,13 @@ impl Dashboard {
     /// window's transcript (#2689), the frame goes with it too, so a restart
     /// does not re-centre a window the user placed (#3082), and the rail goes
     /// with it, so a sidebar closed before a restart opens closed (#3105).
+    ///
+    /// The file is the one of the crab whose panes are on screen
+    /// (`layout_crab`): the window's own crab keeps `gui_layout.json`, a
+    /// picked remote writes its own.
     pub(crate) fn persist_layout(&self) {
         layout_store::save(
-            &layout_store::path(),
+            &layout_store::path_for(self.layout_crab.as_deref()),
             self.panes.as_ref(),
             self.pane_focus,
             self.chat_session,
@@ -424,9 +428,113 @@ impl Dashboard {
     /// rail's refetch and the topic refresh, have to tell the panes that draw
     /// from it. A rename or an icon change that leaves every count the same
     /// would otherwise sit behind a stale strip until something else moved it.
+    ///
+    /// The rail's refetch is also the first moment the window holds the rows
+    /// of a crab it was just handed, so the swap of layout and drafts that a
+    /// pick asks for runs here first (`follow_crab`). It is a comparison when
+    /// the crab did not change.
     pub(crate) fn notify_panes(&mut self, cx: &mut Context<Self>) {
+        self.follow_crab(cx);
         for pane in self.pane_states.values() {
             pane.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    /// Give the window the layout and drafts of the crab the strip picked,
+    /// keeping those of the crab it leaves (C7).
+    ///
+    /// Runs once the picked crab's rows are in `sessions`, because the layout
+    /// it brings back names that crab's conversations and a leaf the rail
+    /// does not hold is pruned. Nothing happens while the crab on screen is
+    /// still the one picked.
+    ///
+    /// Leaving: every pane's draft and the chat's own are filed under their
+    /// conversations, the layout is written to the leaving crab's file, and
+    /// both are parked under that crab. The split goes with them, so a pane of
+    /// one crab is never drawn through another crab's backend.
+    ///
+    /// Arriving: the parked drafts and layout come back, or the crab's layout
+    /// file on a first visit. The conversation the layout was showing opens
+    /// and the split is put back through `restore_layout`, the same door a
+    /// launch uses.
+    pub(crate) fn follow_crab(&mut self, cx: &mut Context<Self>) {
+        let crab = self.instances.selected_host_id().map(str::to_owned);
+        if crab == self.layout_crab {
+            return;
+        }
+
+        self.stash_all_pane_drafts(cx);
+        if let Some(chat) = self.chat_session {
+            let draft = self.composer.editor.update(cx, |ed, cx| ed.take_draft(cx));
+            self.composer.drafts.store(chat, draft);
+        }
+        self.persist_layout();
+        let leaving = layout_store::ParkedCrab {
+            layout: Some(self.layout_snapshot()),
+            drafts: std::mem::take(&mut self.composer.drafts),
+        };
+        // Moved before anything below can write the layout, so every write
+        // from here on lands in the arriving crab's file.
+        let left = std::mem::replace(&mut self.layout_crab, crab.clone());
+        self.crab_windows.park(left, leaving);
+        self.pane_states.clear();
+        self.parked_panes.clear();
+        self.pane_focus = None;
+        self.panes = self.chat_session.map(PaneTree::leaf);
+
+        let arriving = self
+            .crab_windows
+            .unpark_or_load(crab.as_deref(), &layout_store::path_for(crab.as_deref()));
+        self.composer.drafts = arriving.drafts;
+        self.rail_seen =
+            rail_activity::SeenPlans::load(Some(rail_activity::seen_path_for(crab.as_deref())));
+        if let Some(chat) = self.chat_session
+            && let Some(draft) = self.composer.drafts.take(chat)
+        {
+            self.composer
+                .editor
+                .update(cx, |ed, cx| ed.restore_state(draft, cx));
+        }
+        self.sync_composer_session(cx);
+        logging::info(&format!(
+            "gui layout: crab {:?}, layout {}",
+            self.layout_crab,
+            if arriving.layout.is_some() {
+                "back"
+            } else {
+                "none"
+            }
+        ));
+        let Some(layout) = arriving.layout else {
+            cx.notify();
+            return;
+        };
+        let known: std::collections::HashSet<Uuid> =
+            self.sessions.items.iter().map(|item| item.id).collect();
+        let chat = layout
+            .chat
+            .filter(|id| known.contains(id))
+            .or_else(|| layout_store::boot_session(&layout, &known));
+        if let Some(chat) = chat
+            && self.chat_session != Some(chat)
+        {
+            self.open_session_handing_back(chat, false, cx);
+        }
+        self.restore_layout(Some(layout), cx);
+        cx.notify();
+    }
+
+    /// The layout the window is showing, as the snapshot `follow_crab` parks.
+    /// The tree is kept as it is, one leaf included: `restore_layout` reads a
+    /// single leaf as the plain chat.
+    pub(crate) fn layout_snapshot(&self) -> layout_store::SavedLayout {
+        layout_store::SavedLayout {
+            version: layout_store::VERSION,
+            panes: self.panes.clone(),
+            focus: self.pane_focus,
+            chat: self.chat_session,
+            window: self.window_frame,
+            rail_open: Some(self.rail_open),
         }
     }
 

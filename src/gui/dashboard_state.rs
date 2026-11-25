@@ -728,6 +728,15 @@ pub(crate) struct Dashboard {
     /// This process's own crab, the one the window started with. A pick on
     /// the strip replaces `backend`; going home puts this one back.
     pub(crate) home_backend: crate::backend_glue::Backend,
+    /// The crab whose layout and drafts the window holds right now: the host
+    /// id of a picked remote, `None` for this window's own crab. It trails the
+    /// strip's pick until the picked crab's rows arrive (`follow_crab`), so a
+    /// layout written in between still goes to the file of the crab on screen.
+    pub(crate) layout_crab: Option<String>,
+    /// The layout and drafts of every crab the window has left in this run,
+    /// so picking a crab and coming back puts the split and the half-typed
+    /// text back where they were.
+    pub(crate) crab_windows: layout_store::CrabWindows,
     /// What the crab in `backend` answered to the handshake: the scopes this
     /// window holds there and the operations it declares. `None` until it
     /// answers, which greys nothing out.

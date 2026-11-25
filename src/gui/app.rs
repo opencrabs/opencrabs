@@ -204,7 +204,7 @@ pub(crate) fn run() {
     // thread, and put back once the conversation is open: the chat's leaf has
     // to exist before the tree can agree with it. Nothing is drawn from it
     // until then, so a stale or unreadable file costs one log line.
-    let saved_layout = layout_store::load(&layout_store::path());
+    let saved_layout = layout_store::load(&layout_store::path_for(None));
     // The frame that file remembers (#3082). Kept beside the tree because
     // `restore_layout` consumes the tree, and the boot needs the frame before
     // the window exists.
@@ -509,8 +509,10 @@ pub(crate) fn run() {
                         rail: rail_activity::RailActivity::default(),
                         rail_index: rail_activity::PlanIndex::default(),
                         rail_seen: rail_activity::SeenPlans::load(Some(
-                            opencrabs::config::opencrabs_home().join("rail_seen.json"),
+                            rail_activity::seen_path_for(None),
                         )),
+                        layout_crab: None,
+                        crab_windows: layout_store::CrabWindows::default(),
                         preview_refreshed_at: None,
                         previews_in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
                         previews_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
