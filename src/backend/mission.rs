@@ -75,6 +75,10 @@ pub fn decide_with(
 /// crab's own files: the two paths are resolved here, the same ones the
 /// terminal resolves, and the tool registry is the crab's service's. Before
 /// boot finished there is no registry, and the answer is `NotReady`.
+///
+/// Scope `manage` gets a caller to the inbox. Installing a proposal writes a
+/// tool the crab will run, so at the remote door `Apply` also needs
+/// `a2a:admin`; `Reject` only archives. The local door decides either.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MissionDecide {
     /// The proposal's inbox id (`prop_tool_<uuid>`, `prop_cmd_<uuid>`, ...).
@@ -92,6 +96,14 @@ impl Op for MissionDecide {
     type Reply = String;
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        if self.decision == Decision::Apply
+            && let Some(caller) = super::door::caller()
+            && !caller.holds(Scope::Admin)
+        {
+            return Err(BackendError::Forbidden {
+                scope: Scope::Admin,
+            });
+        }
         let Some(tools_path) = DynamicToolLoader::default_path() else {
             return Err(BackendError::Failed(
                 "no tools.toml path for this instance".to_string(),
@@ -723,5 +735,66 @@ mod tests {
                 decision: Decision::Apply,
             }
         );
+    }
+
+    fn decide(decision: Decision) -> MissionDecide {
+        MissionDecide {
+            id: "prop_tool_missing".into(),
+            kind: McInboxKind::ProposedTool,
+            decision,
+        }
+    }
+
+    fn caller(scopes: &[Scope]) -> crate::backend::door::Caller {
+        crate::backend::door::Caller {
+            principal: "api_key".into(),
+            scopes: scopes.to_vec(),
+        }
+    }
+
+    /// Installing a tool by the remote door needs `a2a:admin`, which no wire
+    /// credential carries: the owner's own key is refused before anything
+    /// is read or written.
+    #[tokio::test]
+    async fn a_remote_apply_needs_admin() {
+        let gateway = Gateway::start().await;
+        let wire = caller(&[Scope::Read, Scope::Send, Scope::Manage]);
+        let answer =
+            crate::backend::door::remote_as(wire, gateway.local(decide(Decision::Apply))).await;
+        assert_eq!(
+            answer,
+            Err(BackendError::Forbidden {
+                scope: Scope::Admin
+            })
+        );
+    }
+
+    /// `Reject` stays at `manage` by the remote door: it reaches the crab,
+    /// which here has no service and answers `NotReady`.
+    #[tokio::test]
+    async fn a_remote_reject_needs_only_manage() {
+        let gateway = Gateway::start().await;
+        let manage = caller(&[Scope::Manage]);
+        let answer =
+            crate::backend::door::remote_as(manage, gateway.local(decide(Decision::Reject))).await;
+        assert_eq!(answer, Err(BackendError::NotReady));
+    }
+
+    /// A remote caller that does hold `a2a:admin` gets past the check.
+    #[tokio::test]
+    async fn a_remote_apply_with_admin_reaches_the_crab() {
+        let gateway = Gateway::start().await;
+        let admin = caller(&[Scope::Manage, Scope::Admin]);
+        let answer =
+            crate::backend::door::remote_as(admin, gateway.local(decide(Decision::Apply))).await;
+        assert_eq!(answer, Err(BackendError::NotReady));
+    }
+
+    /// The local door applies as it always did: no scope is asked.
+    #[tokio::test]
+    async fn a_local_apply_is_not_refused() {
+        let gateway = Gateway::start().await;
+        let answer = gateway.local(decide(Decision::Apply)).await;
+        assert_eq!(answer, Err(BackendError::NotReady));
     }
 }
