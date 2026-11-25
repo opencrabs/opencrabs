@@ -21,6 +21,10 @@ impl Backend {
     pub fn localize(&self, path: &Path) -> PathBuf {
         match self {
             Backend::Local(_) => path.to_path_buf(),
+            // A crab on another machine has no copy here yet: the path is
+            // returned as named, so the window shows the file as missing
+            // instead of fetching inside a frame. The on-disk cache is rb/c5b.
+            _ => path.to_path_buf(),
         }
     }
 }
