@@ -46,6 +46,23 @@ pub enum Event {
     },
     /// The background tasks changed: one started, finished or was stopped.
     TasksChanged,
+    /// A remote turn waits for a yes or a no before it runs a tool. The
+    /// answer comes back as `turn.approval_answer` with the same
+    /// `request_id`; without one the tool is denied once the wait runs out.
+    ApprovalRequested {
+        /// The session the turn runs in.
+        session_id: Uuid,
+        /// What the answer names to reach this request.
+        request_id: Uuid,
+        /// The tool that wants to run.
+        tool_name: String,
+        /// What the tool does, as the tool describes itself.
+        tool_description: String,
+        /// The input the model gave the tool.
+        tool_input: serde_json::Value,
+        /// What the tool may touch.
+        capabilities: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -223,6 +240,14 @@ mod tests {
             Event::RailChanged,
             Event::TranscriptChanged { session_id: id },
             Event::TasksChanged,
+            Event::ApprovalRequested {
+                session_id: id,
+                request_id: Uuid::new_v4(),
+                tool_name: "bash".into(),
+                tool_description: "run a command".into(),
+                tool_input: serde_json::json!({"command": "ls"}),
+                capabilities: vec!["ExecuteShell".into()],
+            },
         ] {
             let json = serde_json::to_string(&event).expect("encode");
             let back: Event = serde_json::from_str(&json).expect("decode");

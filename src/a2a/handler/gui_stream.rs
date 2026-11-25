@@ -142,7 +142,8 @@ fn session_of(event: &Event) -> Option<Uuid> {
         | Event::TurnDone { session_id }
         | Event::TurnFailed { session_id, .. }
         | Event::TurnCancelled { session_id }
-        | Event::TranscriptChanged { session_id } => Some(*session_id),
+        | Event::TranscriptChanged { session_id }
+        | Event::ApprovalRequested { session_id, .. } => Some(*session_id),
         Event::RailChanged | Event::TasksChanged => None,
     }
 }
@@ -299,6 +300,27 @@ mod tests {
         assert_eq!(hub.publish(&event), 2);
         assert_eq!(drain(&mut first), vec![event.clone()]);
         assert_eq!(drain(&mut second), vec![event]);
+    }
+
+    /// An approval request asks the people watching its own session, never
+    /// a surface watching another one.
+    #[test]
+    fn an_approval_request_reaches_only_its_session() {
+        let hub = Arc::new(Hub::default());
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut on_a = hub.subscribe(a);
+        let mut on_b = hub.subscribe(b);
+        let event = Event::ApprovalRequested {
+            session_id: a,
+            request_id: Uuid::new_v4(),
+            tool_name: "bash".into(),
+            tool_description: "run a command".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            capabilities: Vec::new(),
+        };
+        assert_eq!(hub.publish(&event), 1);
+        assert_eq!(drain(&mut on_a), vec![event]);
+        assert_eq!(drain(&mut on_b), Vec::<Event>::new(), "b was asked for a");
     }
 
     #[test]
