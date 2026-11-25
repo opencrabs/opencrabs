@@ -521,6 +521,30 @@ mod tests {
         }
     }
 
+    /// A take over the blob ceiling is refused on its length, before a byte
+    /// of it is decoded: this one is not even base64, and the answer is the
+    /// size, not the encoding.
+    #[tokio::test]
+    async fn a_take_over_the_ceiling_is_refused_before_decoding() {
+        let gateway = Gateway::start().await;
+        let oversized = "!".repeat(((MAX_BLOB_BYTES + 6) / 3 * 4) as usize);
+        let take = VoiceTranscribe {
+            session_id: None,
+            ogg_base64: oversized,
+            keep: true,
+        };
+        let local = gateway.local(take.clone()).await;
+        let remote = gateway.within(door::remote(take.run(&gateway.ctx))).await;
+        for answer in [local, remote] {
+            match answer {
+                Err(BackendError::Failed(reason)) => {
+                    assert!(reason.contains("over the 50 MiB limit"), "{reason}")
+                }
+                other => panic!("refused on its size, before decoding: {other:?}"),
+            }
+        }
+    }
+
     /// A spoken answer kept for a remote caller is marked with the path the
     /// crab wrote, inside the roots the crab serves blobs from, so the window
     /// that asked fetches it from the crab instead of opening its own disk.
