@@ -170,7 +170,7 @@ fn the_window_writes_and_swaps_per_crab() {
     for needle in [
         "self.stash_all_pane_drafts(cx);",
         "self.crab_windows.park(left, leaving);",
-        "self.crab_windows\n            .unpark_or_load(",
+        ".unpark_or_load(crab.as_deref(), &layout_store::path_for(crab.as_deref()))",
         "self.restore_layout(Some(layout), cx);",
     ] {
         assert!(body.contains(needle), "follow_crab lost {needle:?}");
