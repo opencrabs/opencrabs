@@ -270,7 +270,7 @@ mod tests {
     /// Write a live plan file and age it by `age`.
     fn seed_plan(dir: &Path, session: Uuid, age: Duration, now: SystemTime) -> PathBuf {
         let path = dir.join(format!("{PLAN_PREFIX}{session}{PLAN_SUFFIX}"));
-        std::fs::write(&path, format!(r#"{{"status":"Active"}}"#)).expect("write plan");
+        std::fs::write(&path, r#"{"status":"Active"}"#).expect("write plan");
         age_file(&path, age, now);
         path
     }
@@ -306,7 +306,7 @@ mod tests {
         activity.insert(dead, old(now));
         activity.insert(live, now);
 
-        let retired = retire_dead_plans(&[root.clone()], &activity, now);
+        let retired = retire_dead_plans(std::slice::from_ref(&root), &activity, now);
         assert_eq!(retired.len(), 1, "only the dead plan retires");
         assert_eq!(retired[0].session, dead);
         let archive = root.join("archive");
@@ -390,7 +390,7 @@ mod tests {
         let md = json.with_extension("md");
         std::fs::write(&md, "# plan").expect("write md");
         age_file(&md, RETIRE_AFTER * 3, now);
-        let retired = retire_dead_plans(&[root.clone()], &HashMap::new(), now);
+        let retired = retire_dead_plans(std::slice::from_ref(&root), &HashMap::new(), now);
         assert_eq!(retired.len(), 1);
         assert_eq!(retired[0].moved.len(), 2, "json and md both moved");
         assert!(!md.exists());
