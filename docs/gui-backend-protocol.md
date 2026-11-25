@@ -176,6 +176,7 @@ output.
 | `settings.load` | `SettingsLoad` | `a2a:admin` | the settings modal's rows read from the crab's config; params `{}`, reply `{"values", "credentials"}`, a credential only `{"section", "label", "configured"}`, never a key |
 | `settings.write` | `SettingWrite` | `a2a:admin` | write one settable key on the crab; params `{"section", "key", "write"}`, a key outside the settable table or a value of the wrong kind is `bad_params`; reply the value as written |
 | `settings.credential_write` | `CredentialWrite` | `a2a:admin` | write one provider's `api_key` in the crab's `keys.toml`; params `{"section", "api_key"}`, an unknown provider or empty key is `bad_params`; reply `null`, the key is never echoed |
+| `shell.run` | `ShellRun` | `a2a:admin` | the window's `!cmd`, run through the platform shell in the crab's launch directory; params `{"cmd"}`, reply the chat's text: the command line, then its output, each stream capped |
 
 ### Fixture shape
 
