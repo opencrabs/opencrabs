@@ -82,7 +82,7 @@ BASELINES = {
     # the `blob` functions of C5, plus L5 prompt files and L7 task detail.
     # L8 migrated its two disk sites (channel ownership, cd entries) to the
     # ChannelStatus and ListDir operations, which took the count to 20.
-    "R6": 15,
+    "R6": 9,
     # The retired remote panel and its polling. The brief expects 0; it is 1
     # because src/remote/scopes.rs maps the A2A method "tasks/get" to its
     # scope (a2a:read). That is the A2A protocol table, not the panel; it
