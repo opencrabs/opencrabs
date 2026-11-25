@@ -9,6 +9,7 @@ mod backend_remote_test;
 mod blob_cache_test;
 mod command_gate_test;
 mod composer_orb_test;
+mod crab_switch_reload_test;
 mod crab_window_test;
 mod dashboard_turns_test;
 mod instances_test;
