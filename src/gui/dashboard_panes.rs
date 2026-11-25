@@ -1077,6 +1077,10 @@ impl Dashboard {
     ///
     /// The branch is cached beside the directory it was read from: `git` is a
     /// subprocess, so it runs when the directory changes and never per frame.
+    /// It runs on the crab the window holds, which owns that directory: the
+    /// question goes out by `self.backend` and the frame never waits for it.
+    /// Until the answer lands the branch reads as unknown, and the answer
+    /// repaints the footer when it does.
     /// With no conversation open there is nothing to name, and the launch
     /// directory is the honest answer for a window that has not been pointed
     /// anywhere yet.
@@ -1093,11 +1097,17 @@ impl Dashboard {
             .as_ref()
             .is_none_or(|place| place.session != session || place.dir != dir);
         if stale {
+            crate::status::ask_git_branch(&self.backend, dir.clone(), self.sink.clone());
             self.footer_dir = Some(FooterPlace {
                 session,
-                branch: git_branch(&dir),
+                branch: None,
                 dir: dir.clone(),
             });
+        }
+        if let Some(place) = self.footer_dir.as_mut()
+            && place.branch.is_none()
+        {
+            place.branch = git_branch(&dir);
         }
         let branch = self
             .footer_dir

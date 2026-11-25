@@ -34,17 +34,77 @@ pub(crate) fn tilde_path(p: &std::path::Path) -> String {
     }
 }
 
-/// The checkout's branch name, or `None` when the directory is not a repo.
-/// This runs a subprocess, so callers keep the answer beside the directory it
-/// was read from and ask again only when that directory changes: it is a
-/// footer label, never a per-frame read.
+/// The checkout's branch name in `dir` as the crab last answered it, or
+/// `None` while the answer is on its way, when the directory is not a repo,
+/// or when the crab refused. Never waits and never runs `git` here: the
+/// frame reads it, and [`ask_git_branch`] is what asks.
 pub(crate) fn git_branch(dir: &std::path::Path) -> Option<String> {
-    ask_crab(opencrabs::backend::status::GitBranch {
-        dir: dir.to_path_buf(),
-    })
-    .ok()
-    .flatten()
+    let answered = BRANCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match answered.as_ref() {
+        Some(place) if place.dir == dir => place.branch.clone(),
+        _ => None,
+    }
 }
+
+/// Ask the crab `backend` names which branch is checked out in `dir`, off
+/// the window's thread. The answer lands where [`git_branch`] reads it, and
+/// `sink` gets [`TurnEvent::Refresh`](crate::agent_bridge::TurnEvent) so the
+/// next frame paints it. `git` is a subprocess on the crab, so the footer
+/// asks when the directory changes, never per frame.
+///
+/// Only the latest question is kept: an answer to an older one (the reader
+/// moved on, or the window swapped crabs) is dropped when it lands.
+pub(crate) fn ask_git_branch(
+    backend: &crate::backend_glue::Backend,
+    dir: std::path::PathBuf,
+    sink: crate::agent_bridge::EventSink,
+) {
+    let asked = {
+        let mut slot = BRANCH
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let asked = slot.as_ref().map_or(0, |place| place.asked.wrapping_add(1));
+        *slot = Some(BranchAnswer {
+            asked,
+            dir: dir.clone(),
+            branch: None,
+        });
+        asked
+    };
+    let spawned = backend.spawn(
+        opencrabs::backend::status::GitBranch { dir },
+        move |reply| {
+            {
+                let mut slot = BRANCH
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match slot.as_mut() {
+                    Some(place) if place.asked == asked => {
+                        place.branch = reply.ok().flatten();
+                    }
+                    _ => return,
+                }
+            }
+            let _ = sink.send(crate::agent_bridge::TurnEvent::Refresh);
+        },
+    );
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("footer branch: {e}"));
+    }
+}
+
+/// The footer's last branch question and, once it lands, its answer.
+struct BranchAnswer {
+    /// Moves on every question, so a late answer to an older one is dropped.
+    asked: u64,
+    dir: std::path::PathBuf,
+    branch: Option<String>,
+}
+
+/// One window per process, one footer: the latest question it asked.
+static BRANCH: std::sync::Mutex<Option<BranchAnswer>> = std::sync::Mutex::new(None);
 
 /// Run `op` on the window's crab and wait for the answer, for a door whose
 /// callers are still synchronous. The op runs on its `spawn_worker` lane
