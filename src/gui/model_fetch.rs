@@ -2,8 +2,27 @@
 //!
 //! Provider request construction, endpoint behavior, response normalization,
 //! and stale-result identity live in `ui_core::model_selector`.
+//!
+//! Two doors, one reply shape. [`spawn`] fetches from this machine with the
+//! request it is handed, keys included: the setup wizard's door, since the
+//! wizard edits this machine. [`discover`] asks the crab the window holds
+//! (`ModelDiscover`), which builds the request from its own config and spends
+//! its own key: the standalone picker's door.
+
+use opencrabs::backend::cap;
+use opencrabs::backend::models::ModelDiscover;
+use opencrabs::backend::{BackendError, Op};
+
+use crate::backend_glue::Backend;
 
 pub use opencrabs::ui_core::model_selector::{FetchOutcome, FetchRequest};
+
+#[cfg(test)]
+thread_local! {
+    /// How many local fetches this thread started, for the test that proves
+    /// the standalone picker never fetches from this machine.
+    pub static LOCAL_FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 pub async fn fetch(request: FetchRequest) -> FetchOutcome {
     opencrabs::ui_core::model_selector::fetch(request).await
@@ -14,6 +33,8 @@ pub fn spawn(
     generation: u64,
     request: FetchRequest,
 ) -> std::sync::mpsc::Receiver<(u64, FetchOutcome)> {
+    #[cfg(test)]
+    LOCAL_FETCHES.with(|count| count.set(count.get() + 1));
     let (sender, receiver) = std::sync::mpsc::channel();
     let failed = sender.clone();
     let failed_provider = (
@@ -52,6 +73,69 @@ pub fn spawn(
         ));
     }
     receiver
+}
+
+/// Ask the crab for `request`'s provider's live models, off the UI thread.
+///
+/// Only the provider's id travels; `request` stays here as the identity the
+/// reply is matched against. The reply lands on the same channel shape
+/// [`spawn`] answers on, so the picker drains both alike.
+///
+/// A refusal about access (no `a2a:admin`, an older crab) is not a fetch
+/// error: the picker keeps the crab's static catalogue, says nothing on
+/// screen, and the reason goes to the log.
+pub fn discover(
+    backend: &Backend,
+    generation: u64,
+    request: FetchRequest,
+) -> std::sync::mpsc::Receiver<(u64, FetchOutcome)> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let failed = sender.clone();
+    let outcome =
+        |request: &FetchRequest, models: Vec<String>, error: Option<String>| FetchOutcome {
+            provider_index: request.provider_index,
+            provider_id: request.provider_id.clone(),
+            provider_name: request.provider_name.clone(),
+            models,
+            error,
+        };
+    let asked = request.clone();
+    let spawned = backend.spawn(
+        ModelDiscover {
+            provider_id: request.provider_id.clone(),
+        },
+        move |reply| {
+            let answer = match reply {
+                Ok(models) => outcome(&asked, models, None),
+                Err(e) => match discover_refusal(&e) {
+                    Some(notice) => {
+                        crate::logging::info(&format!("models: discovery: {notice}"));
+                        outcome(&asked, Vec::new(), None)
+                    }
+                    None => outcome(&asked, Vec::new(), Some(e.into_message())),
+                },
+            };
+            let _ = sender.send((generation, answer));
+        },
+    );
+    if let Err(error) = spawned {
+        let _ = failed.send((
+            generation,
+            outcome(
+                &request,
+                Vec::new(),
+                Some(format!("could not start the model fetch worker: {error}")),
+            ),
+        ));
+    }
+    receiver
+}
+
+/// The log line for a discovery the crab refused for access, or `None` when
+/// the error is the fetch's own and belongs on screen.
+pub fn discover_refusal(err: &BackendError) -> Option<String> {
+    cap::Unavailable::from_error(ModelDiscover::NAME, err)
+        .map(|_| cap::notice(ModelDiscover::NAME, err))
 }
 
 #[cfg(test)]

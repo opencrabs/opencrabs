@@ -19,6 +19,7 @@ mod localized_paths_test;
 mod main_test;
 mod menu_test;
 mod mission_control_gate_test;
+mod models_picker_test;
 mod plan_strip_test;
 mod pool_door_test;
 mod prompt_files_test;

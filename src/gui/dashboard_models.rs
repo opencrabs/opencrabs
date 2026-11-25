@@ -6,6 +6,9 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use opencrabs::backend::Op;
+use opencrabs::backend::cap;
+use opencrabs::backend::models::{ModelCatalogue, ModelDiscover};
 
 impl Dashboard {
     /// Standalone provider selection filters both pointer and keyboard rows.
@@ -69,29 +72,61 @@ impl Dashboard {
 
     /// Reset the one picker catalogue used by `/models` and Brain Fuel. The
     /// optional wizard selector contributes its unsaved provider settings.
+    ///
+    /// Two catalogues, by who the picker serves. The wizard edits this
+    /// machine, so with a selector the rows and the discovery queue are this
+    /// machine's, as they always were. The standalone picker switches the
+    /// crab the window holds, so without one the rows are the crab's own
+    /// (`ModelCatalogue`) and each provider is discovered on the crab
+    /// (`ModelDiscover`, see `start_models_fetch`).
     pub(crate) fn reset_model_picker(
         &mut self,
         current: Option<(String, String)>,
         edited: Option<&ProviderSelectorState>,
     ) {
-        self.models_rows = models::rows_for_picker(
-            current
-                .as_ref()
-                .map(|(provider, model)| (provider.as_str(), model.as_str())),
-            edited,
-        );
-        let mut catalogue = ProviderSelectorState::default();
-        catalogue.load_custom_names();
+        let pair = current
+            .as_ref()
+            .map(|(provider, model)| (provider.as_str(), model.as_str()));
         let active_provider = current
             .as_ref()
             .map(|(provider, _)| provider.as_str())
             .or_else(|| edited.map(|selector| selector.current_provider().id))
             .unwrap_or_default();
-        self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
-            &catalogue,
-            active_provider,
-            edited,
-        );
+        if let Some(edited) = edited {
+            self.models_rows = models::rows_for_picker(pair, Some(edited));
+            let mut catalogue = ProviderSelectorState::default();
+            catalogue.load_custom_names();
+            self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
+                &catalogue,
+                active_provider,
+                Some(edited),
+            );
+        } else {
+            // Read in place, like the config this replaced: the caller marks
+            // the current row and resolves a typed id against these rows in
+            // the same tick. A read is bounded by the transport's deadline.
+            let catalogue = futures::executor::block_on(self.backend.call(ModelCatalogue {}))
+                .unwrap_or_else(|e| {
+                    logging::info(&format!(
+                        "models: catalogue: {}",
+                        cap::notice(<ModelCatalogue as Op>::NAME, &e)
+                    ));
+                    Vec::new()
+                });
+            self.models_rows = models::rows_from_catalogue(&catalogue, pair);
+            // A crab whose handshake already withholds discovery is not asked
+            // provider by provider only to refuse each one: its static
+            // catalogue is the list. Before the handshake lands, the crab's
+            // own refusal says the same, in the log (`model_fetch::discover`).
+            let discover = self.hello.as_ref().is_none_or(|hello| {
+                cap::check(hello, &[cap::Need::Op(<ModelDiscover as Op>::NAME)]).is_ok()
+            });
+            self.models_pending = if discover {
+                models::discovery_queue(&catalogue, active_provider)
+            } else {
+                Vec::new()
+            };
+        }
         self.models_fetch = None;
         self.models_fetch_lifecycle.invalidate();
         self.models_fetch_error = None;
@@ -133,7 +168,14 @@ impl Dashboard {
         self.models_fetch_lifecycle.invalidate();
         if let Some(request) = self.models_pending.first().cloned() {
             let generation = self.models_fetch_lifecycle.begin(&request);
-            self.models_fetch = Some(model_fetch::spawn(generation, request));
+            // The wizard's queue carries this machine's keys and is fetched
+            // here; the standalone picker's names a provider and nothing
+            // else, and the crab fetches it with its own key.
+            self.models_fetch = Some(if self.screen == Screen::Onboard {
+                model_fetch::spawn(generation, request)
+            } else {
+                model_fetch::discover(&self.backend, generation, request)
+            });
             self.models_fetching = true;
         } else {
             self.models_fetching = false;
