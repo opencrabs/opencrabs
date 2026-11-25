@@ -826,6 +826,11 @@ impl InstanceStrip {
                         div()
                             .w_full()
                             .min_w_0()
+                            // A pasted address is longer than the card is
+                            // wide: one line, clipped at the border, never
+                            // drawn past it.
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .flex()
                             .flex_row()
                             .items_center()

@@ -11,6 +11,7 @@
 const GLUE: &str = include_str!("../backend_glue.rs");
 const RENDER: &str = include_str!("../dashboard_render.rs");
 const WIRING: &str = include_str!("../dashboard_instances.rs");
+const STRIP: &str = include_str!("../instance_strip.rs");
 
 /// The body of the first item whose header contains `header`.
 fn item_body<'a>(src: &'a str, header: &str) -> &'a str {
@@ -60,5 +61,14 @@ fn every_frame_keeps_the_remote_conversation_streamed() {
     assert!(
         sync.contains("self.remote_watch = None;"),
         "the old stream must close before the next one opens"
+    );
+}
+
+#[test]
+fn a_pairing_field_clips_what_does_not_fit() {
+    let body = item_body(STRIP, "fn pair_body(");
+    assert!(
+        body.contains(".overflow_hidden()") && body.contains(".whitespace_nowrap()"),
+        "a pasted address must stay inside its field"
     );
 }
