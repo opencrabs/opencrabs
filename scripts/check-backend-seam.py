@@ -31,6 +31,8 @@ What is counted
 Limits
   Text, not types. `use std::fs; fs::read(..)` counts once, at the `use`.
   A LOCAL_ONLY entry matches every function of that name in that file.
+  A `use std::fs::{..}` at module level sits in no function, so LOCAL_ONLY
+  cannot reach it; LOCAL_ONLY_FILES exempts a whole file, for R6 only.
 
 Functions
   R2, R3, R6 and R8 exempt whole functions. A function is `fn <name>` up to its
@@ -152,6 +154,14 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/app.rs", "run"): "process entry, reads the config",
     ("src/gui/boot.rs", "ledger_path"): "where the local ledger lives",
     ("src/gui/boot.rs", "boot_config"): "loads the config before a backend exists",
+}
+
+# Files of the window whose every disk touch is the window's own, for R6 only.
+# LOCAL_ONLY exempts by function and a module-level `use std::fs::{..}` is in
+# no function, so a file that imports `std::fs` for itself enters here, with
+# why, by a reviewed commit. Keep it short: one file is one door left open.
+LOCAL_ONLY_FILES: dict[str, str] = {
+    "src/gui/logging.rs": "this window's log file, on this machine whatever crab it shows",
 }
 
 # R3 exempts the seam itself and the one function that hands the service to it.
@@ -392,7 +402,11 @@ def in_any(src: Source, off: int, names: set[tuple[str, str]]) -> bool:
     return any((src.rel, f[0]) in names for f in src.enclosing(off))
 
 
-def rules(root: Path, local_only: set[tuple[str, str]]) -> list[Result]:
+def rules(
+    root: Path,
+    local_only: set[tuple[str, str]],
+    local_only_files: frozenset[str] = frozenset(),
+) -> list[Result]:
     gui = sources(root, "src/gui")
     out = []
 
@@ -429,7 +443,7 @@ def rules(root: Path, local_only: set[tuple[str, str]]) -> list[Result]:
     )
 
     def r6_skip(src: Source, off: int) -> bool:
-        if in_any(src, off, local_only):
+        if src.rel in local_only_files or in_any(src, off, local_only):
             return True
         inner = src.enclosing(off)
         if not inner:
@@ -505,6 +519,11 @@ def stale_local_only(root: Path, local_only: set[tuple[str, str]]) -> list[str]:
     return stale
 
 
+def stale_local_only_files(root: Path, local_only_files: frozenset[str]) -> list[str]:
+    """LOCAL_ONLY_FILES entries naming a file the tree no longer has."""
+    return [f"{rel} (no such file)" for rel in sorted(local_only_files) if not (root / rel).is_file()]
+
+
 def check(
     root: Path,
     baselines: dict[str, int],
@@ -512,9 +531,10 @@ def check(
     out=print,
     allow_below: bool = False,
     only_files: tuple[str, ...] = (),
+    local_only_files: frozenset[str] = frozenset(),
 ) -> int:
     worst = 0
-    for r in rules(root, local_only):
+    for r in rules(root, local_only, local_only_files):
         sites = r.sites
         if only_files:
             # Measuring scope: count only sites whose file starts with one of
@@ -673,6 +693,30 @@ def self_test() -> int:
             "tests/fixtures/gui_backend/Foo.json": "{}\n",
         },
     )
+    # LOCAL_ONLY_FILES: a listed file's module-level `use std::fs` passes R6,
+    # the same line in a file not listed fails, and the file exemption is R6
+    # only: R8 still counts in a listed file.
+    logging_use = "use std::fs::{File, OpenOptions};\nfn init() {}\n"
+    code, text = run({"src/gui/logging.rs": logging_use}, local_only_files=frozenset({"src/gui/logging.rs"}))
+    if code != 0:
+        failures.append(f"LOCAL_ONLY_FILES exempts R6: wanted exit 0, got {code}:\n{text}")
+    code, text = run(
+        {"src/gui/logging.rs": logging_use, "src/gui/other.rs": logging_use},
+        local_only_files=frozenset({"src/gui/logging.rs"}),
+    )
+    if code != 1 or "src/gui/other.rs:1" not in text or "src/gui/logging.rs:1" in text:
+        failures.append(f"LOCAL_ONLY_FILES is per file: wanted exit 1 naming only other.rs, got {code}:\n{text}")
+    code, text = run(
+        {"src/gui/logging.rs": "fn f() {\n    Config::load();\n}\n"},
+        local_only_files=frozenset({"src/gui/logging.rs"}),
+    )
+    if code != 1 or "src/gui/logging.rs:2" not in text:
+        failures.append(f"LOCAL_ONLY_FILES is R6 only: wanted exit 1 naming the R8 site, got {code}:\n{text}")
+    if stale_local_only_files(plant({"src/gui/a.rs": ""}), frozenset({"src/gui/logging.rs"})) != [
+        "src/gui/logging.rs (no such file)"
+    ]:
+        failures.append("stale LOCAL_ONLY_FILES entry not reported")
+
     # Stale LOCAL_ONLY entries are reported.
     if stale_local_only(plant({"src/gui/thumbs.rs": "fn other() {}\n"}), {("src/gui/thumbs.rs", "prune")}) != [
         "src/gui/thumbs.rs::prune (no such function)"
@@ -685,7 +729,10 @@ def self_test() -> int:
         for f in failures:
             print(f"self-test FAIL: {f}")
         return 1
-    print("self-test OK: 8 rules planted (24 cases), below-baseline, 7 exemption cases, stale LOCAL_ONLY")
+    print(
+        "self-test OK: 8 rules planted (24 cases), below-baseline, 7 exemption cases,"
+        " 3 LOCAL_ONLY_FILES cases, stale LOCAL_ONLY and LOCAL_ONLY_FILES"
+    )
     return 0
 
 
@@ -715,7 +762,20 @@ def main() -> int:
         for s in stale:
             print(f"::error::LOCAL_ONLY names a function that is gone, drop it: {s}")
         return 2
-    return check(args.root, BASELINES, local_only, allow_below=args.allow_below, only_files=tuple(args.files or ()))
+    local_only_files = frozenset(LOCAL_ONLY_FILES)
+    stale_files = stale_local_only_files(args.root, local_only_files)
+    if stale_files:
+        for s in stale_files:
+            print(f"::error::LOCAL_ONLY_FILES names a file that is gone, drop it: {s}")
+        return 2
+    return check(
+        args.root,
+        BASELINES,
+        local_only,
+        allow_below=args.allow_below,
+        only_files=tuple(args.files or ()),
+        local_only_files=local_only_files,
+    )
 
 
 if __name__ == "__main__":
