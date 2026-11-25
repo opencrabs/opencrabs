@@ -132,6 +132,7 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/voice_media.rs", "decode"): "decodes the already localized blob",
     # boot: F4, builds the local crab before a backend exists
     ("src/gui/agent_bridge.rs", "build"): "builds the local Ctx from the window's service",
+    ("src/gui/agent_bridge.rs", "boot_resume"): "boot: rescans the turns this process died inside; a remote crab resumes its own",
     ("src/gui/app.rs", "run"): "process entry, reads the config",
     ("src/gui/boot.rs", "ledger_path"): "where the local ledger lives",
     ("src/gui/boot.rs", "boot_config"): "loads the config before a backend exists",
