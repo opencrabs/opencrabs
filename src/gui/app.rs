@@ -150,14 +150,16 @@ pub(crate) fn run() {
     // every tab drew its name alone until the owner touched a topic: the
     // "topic icons vanished" bug. The rows are already in the database; they
     // just were never read on the way in.
-    let topic_icons: std::collections::HashMap<uuid::Uuid, String> =
-        futures::executor::block_on(sessions::load_topic_icons(backend.clone()))
-            .unwrap_or_else(|e| {
+    // An image icon keeps the file the crab named, so a remote crab's
+    // picture is fetched from that crab, not looked up in this window's store.
+    let (topic_icons, topic_icon_files) = sessions::split_topic_icons(
+        futures::executor::block_on(sessions::load_topic_icons(backend.clone())).unwrap_or_else(
+            |e| {
                 logging::error(&format!("topic icons load: {e}"));
                 Vec::new()
-            })
-            .into_iter()
-            .collect();
+            },
+        ),
+    );
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
@@ -166,6 +168,7 @@ pub(crate) fn run() {
             parents: parents.clone(),
             closed: closed.clone(),
             topic_icons: topic_icons.clone(),
+            topic_icon_files: topic_icon_files.clone(),
             topic_titles: HashMap::new(),
             previews: HashMap::new(),
             selected: None,
@@ -186,6 +189,7 @@ pub(crate) fn run() {
             parents,
             closed,
             topic_icons,
+            topic_icon_files,
             topic_titles: HashMap::new(),
             previews: HashMap::new(),
             selected: None,

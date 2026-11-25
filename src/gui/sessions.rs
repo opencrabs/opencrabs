@@ -69,6 +69,11 @@ pub struct SessionsState {
     pub topics: HashSet<uuid::Uuid>,
     /// The icon each topic carries, shown before its name (#2414).
     pub topic_icons: HashMap<uuid::Uuid, String>,
+    /// For a topic whose icon is an image, the file on the crab that holds
+    /// it (`TopicIcon::blob`). The window localizes this path, never its own
+    /// icon store, so a remote crab's picture is its own. Keyed by topic, in
+    /// this crab's state: never a map by stored name shared across crabs.
+    pub topic_icon_files: HashMap<uuid::Uuid, std::path::PathBuf>,
     /// The live name each Telegram topic carries, resolved once per refresh
     /// pass in ONE query (#2490).
     ///
@@ -762,17 +767,36 @@ pub async fn load_topics(backend: crate::backend_glue::Backend) -> Result<Vec<uu
 }
 
 /// Every topic's own icon. Read with the topic state, the same way the flag is.
+/// An image icon carries the file the crab named for it.
 pub async fn load_topic_icons(
     backend: crate::backend_glue::Backend,
-) -> Result<Vec<(uuid::Uuid, String)>, String> {
-    let icons = backend
+) -> Result<Vec<opencrabs::backend::sessions::TopicIcon>, String> {
+    backend
         .call(opencrabs::backend::sessions::LoadTopicIcons {})
         .await
-        .map_err(opencrabs::backend::BackendError::into_message)?;
-    Ok(icons
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+/// The two maps the state keeps from one icon read: the stored value of
+/// every topic, and the crab's file of every topic whose icon is an image.
+pub fn split_topic_icons(
+    icons: Vec<opencrabs::backend::sessions::TopicIcon>,
+) -> (
+    HashMap<uuid::Uuid, String>,
+    HashMap<uuid::Uuid, std::path::PathBuf>,
+) {
+    let files = icons
+        .iter()
+        .filter_map(|icon| {
+            let blob = icon.blob.as_ref()?;
+            Some((icon.id, std::path::PathBuf::from(&blob.path)))
+        })
+        .collect();
+    let stored = icons
         .into_iter()
         .map(|icon| (icon.id, icon.stored))
-        .collect())
+        .collect();
+    (stored, files)
 }
 
 /// The live name of every Telegram topic session in `items`, in ONE query

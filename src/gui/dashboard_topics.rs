@@ -695,7 +695,11 @@ impl Dashboard {
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
                 }
                 match icons {
-                    Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
+                    Ok(icons) => {
+                        let (stored, files) = sessions::split_topic_icons(icons);
+                        this.sessions.topic_icons = stored;
+                        this.sessions.topic_icon_files = files;
+                    }
                     Err(e) => logging::error(&format!("topic icons refresh: {e}")),
                 }
                 // The custom images follow the stored values, so a rename
@@ -718,27 +722,11 @@ impl Dashboard {
     /// crab's icon goes through `Backend::localize_allowed`: a kind outside
     /// the blob cache's allowlist is never fetched nor read.
     pub(crate) fn refresh_icon_images(&mut self) {
-        let mut images = HashMap::new();
-        for stored in self.sessions.topic_icons.values() {
-            let Some(path) = topic_icons::stored_image_path(stored) else {
-                continue;
-            };
-            let Some(format) = topic_icons::image_format(stored) else {
-                continue;
-            };
-            // A remote crab's icon is read from its kept copy, and only when
-            // the copy is of a kind this machine opens (no `svg`, no `.bin`).
-            let Some(path) = self.backend.localize_allowed(&path) else {
-                continue;
-            };
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
-                }
-                Err(e) => logging::error(&format!("icon image {stored}: {e}")),
-            }
-        }
-        self.icon_images = images;
+        self.icon_images = read_icon_images(
+            &self.backend,
+            &self.sessions.topic_icons,
+            &self.sessions.topic_icon_files,
+        );
     }
 
     /// The cached picture for a stored `img:` value, or None for anything
@@ -862,6 +850,46 @@ impl Dashboard {
         self.topic_draft_icon = Some(stored);
         cx.notify();
     }
+}
+
+/// The pictures for `icons`, keyed by stored value, read where the crab's
+/// file is on this machine.
+///
+/// The file is the one the crab named for the topic (`files`, from
+/// `TopicIcon::blob`), so a remote crab's icon is fetched from that crab by
+/// its own path, never looked up in this window's icon store. A crab that
+/// sent no file falls back to the stored value resolved in the icon store,
+/// which is the local crab's own path. Either goes through
+/// `Backend::localize_allowed`: a remote copy is read only when it is of a
+/// kind this machine opens (no `svg`, no `.bin`).
+pub(crate) fn read_icon_images(
+    backend: &crate::backend_glue::Backend,
+    icons: &HashMap<uuid::Uuid, String>,
+    files: &HashMap<uuid::Uuid, std::path::PathBuf>,
+) -> HashMap<String, Arc<Image>> {
+    let mut images = HashMap::new();
+    for (id, stored) in icons {
+        let Some(path) = files
+            .get(id)
+            .cloned()
+            .or_else(|| topic_icons::stored_image_path(stored))
+        else {
+            continue;
+        };
+        let Some(format) = topic_icons::image_format(stored) else {
+            continue;
+        };
+        let Some(path) = backend.localize_allowed(&path) else {
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
+            }
+            Err(e) => logging::error(&format!("icon image {stored}: {e}")),
+        }
+    }
+    images
 }
 
 /// The bytes of an icon image picked on this machine, or the notice that
