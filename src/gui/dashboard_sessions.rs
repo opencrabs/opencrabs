@@ -686,10 +686,8 @@ impl Dashboard {
         self.preview_document = Some(preview_document::DocumentState::text(generation));
         self.preview_video = None;
         self.preview_zoom = 1.0;
-        let path = self
-            .prompt_docs
-            .get(&id)
-            .map(|path| self.backend.localize(path));
+        let path = self.prompt_docs.get(&id).cloned();
+        let path = path.map(|path| self.backend.localize(&path));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let parsed = cx
