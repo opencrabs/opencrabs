@@ -18,8 +18,10 @@
 //! watches the session.
 //!
 //! A remote turn is the remote caller's, not the window's: the server picks
-//! its history line, its voice and its channel, it waits for any turn on the
-//! session, and only the principal that opened it stops it ([`TurnCancel`]).
+//! its history line and its channel, it waits for any turn on the session,
+//! and only the principal that opened it stops it ([`TurnCancel`]). Its voice
+//! is the caller's: it only decides whether the answer is spoken back to the
+//! caller that recorded the question.
 //! A resume is the crab's own recovery and only the local door runs it.
 
 use std::collections::HashMap;
@@ -241,16 +243,19 @@ impl Op for TurnResume {
 /// A turn's `display`, `voice` and channel as its door decides them.
 ///
 /// The window's turn keeps what it asked for and runs as `tui`. A remote
-/// turn does not choose them: history keeps the words the model read, the
-/// answer is text, and the turn runs as `a2a`, so nothing a channel policy
-/// grants the window reaches it.
+/// turn does not choose its history line or its channel: history keeps the
+/// words the model read, and the turn runs as `a2a`, so nothing a channel
+/// policy grants the window reaches it. Its `voice` is kept: a window looking
+/// at this crab records the question and is answered aloud, and the flag
+/// only decides whether the answer keeps its spoken block for that caller
+/// to have it spoken (`voice.speak`, scope `send` like this turn).
 fn at_door(
     caller: Option<&Caller>,
     display: Option<String>,
     voice: bool,
 ) -> (Option<String>, bool, &'static str) {
     match caller {
-        Some(_) => (None, false, "a2a"),
+        Some(_) => (None, voice, "a2a"),
         None => (display, voice, "tui"),
     }
 }
@@ -1305,11 +1310,18 @@ mod tests {
         assert_eq!(asked.expect("answered"), (true, false));
     }
 
+    /// The server picks a remote turn's history line and channel; the
+    /// caller's voice flag is kept, so a remote window's recording is
+    /// answered aloud.
     #[test]
-    fn the_server_picks_a_remote_turns_display_voice_and_channel() {
+    fn the_server_picks_a_remote_turns_display_and_channel_and_keeps_its_voice() {
         let remote = as_caller("api_key", WIRE);
         assert_eq!(
             at_door(Some(&remote), Some("shown".into()), true),
+            (None, true, "a2a")
+        );
+        assert_eq!(
+            at_door(Some(&remote), Some("shown".into()), false),
             (None, false, "a2a")
         );
     }

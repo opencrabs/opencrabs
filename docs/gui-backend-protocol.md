@@ -127,9 +127,11 @@ is not the request's.
 
 A turn started by `gui/call` belongs to the caller, not to the window:
 
-- `turn.send`: the server ignores `display` and `voice` (history keeps
-  `content`, the answer is text) and runs the turn as the `a2a` channel. Any
-  turn already on the session, a channel's included, answers `busy`.
+- `turn.send`: the server ignores `display` (history keeps `content`) and
+  runs the turn as the `a2a` channel. `voice` is kept: it only decides
+  whether the answer keeps its spoken block, for the caller to have it
+  spoken with `voice.speak`. Any turn already on the session, a channel's
+  included, answers `busy`.
 - `turn.cancel`, params `{"session_id"}`, scope `a2a:send`: stops the
   remote turn on that session. Reply `true` when one was running, `false`
   when none was. Only the principal that started the turn stops it.
