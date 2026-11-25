@@ -342,13 +342,6 @@ fn note_turn_principal(session_id: Uuid, principal: &str) {
     turn_principals().insert(session_id, principal.to_string());
 }
 
-/// A remote turn on `session_id` opened by `principal` and already over, for
-/// the tests of what that turn grants.
-#[cfg(test)]
-pub(crate) fn turn_ran_for(session_id: Uuid, principal: &str) {
-    note_turn_principal(session_id, principal);
-}
-
 /// Register the remote turn on `session_id` that `principal` opened, with
 /// the stop it runs under.
 fn register_running(
@@ -535,6 +528,13 @@ static PENDING: LazyLock<Mutex<HashMap<Uuid, Pending>>> = LazyLock::new(Mutex::d
 /// poisoned lock is read through.
 fn pending() -> MutexGuard<'static, HashMap<Uuid, Pending>> {
     PENDING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A remote turn on `session_id` opened by `principal` and already over, for
+/// the tests of what that turn grants.
+#[cfg(test)]
+pub(crate) fn turn_ran_for(session_id: Uuid, principal: &str) {
+    note_turn_principal(session_id, principal);
 }
 
 /// Hand `answer` to the request `request_id` of `session_id` at the local
