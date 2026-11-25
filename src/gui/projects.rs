@@ -1,13 +1,12 @@
 //! State and service reads for the window's projects screen.
 //!
-//! Every database call runs on a named 4 MB thread with its own current-thread
-//! Tokio runtime. The window only receives owned snapshots, so rendering never
-//! touches SQLite and a closed screen can reject a late result by generation.
+//! Every read and write is the crab's (`ProjectList`, `ProjectCommand`), run on
+//! the backend's 4 MB worker lane with its own current-thread Tokio runtime.
+//! The window only receives owned snapshots, so rendering never touches SQLite
+//! and a closed screen can reject a late result by generation.
 
-use opencrabs::db::Database;
 use opencrabs::db::models::{Project, Session};
-use opencrabs::db::repository::SessionRepository;
-use opencrabs::services::{ProjectService, ServiceContext};
+use opencrabs::services::ProjectService;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -23,12 +22,9 @@ pub enum ProjectsMode {
     AssignSession(Uuid),
 }
 
-#[derive(Debug, Clone)]
-pub struct ProjectRow {
-    pub project: Project,
-    pub sessions: i64,
-    pub files: i64,
-}
+/// The screen's rows, actions and snapshot are the crab's types: the reads
+/// and writes behind them run as `ProjectList` and `ProjectCommand`.
+pub use opencrabs::backend::projects::{ProjectAction, ProjectRow, ProjectsData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AssignmentFilter {
@@ -187,194 +183,28 @@ impl ProjectsState {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ProjectAction {
-    Refresh {
-        detail: Option<Uuid>,
-    },
-    Create {
-        name: String,
-    },
-    Delete {
-        id: Uuid,
-    },
-    Assign {
-        project_id: Uuid,
-        session_id: Uuid,
-    },
-    Unassign {
-        project_id: Uuid,
-        session_id: Uuid,
-    },
-    AssignMany {
-        project_id: Uuid,
-        session_ids: Vec<Uuid>,
-    },
-    ClearMany {
-        project_id: Uuid,
-        session_ids: Vec<Uuid>,
-    },
-    ArchiveMany {
-        project_id: Uuid,
-        session_ids: Vec<Uuid>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct ProjectsData {
-    pub rows: Vec<ProjectRow>,
-    pub detail: Option<(Project, Vec<Session>)>,
-    pub unassigned: Vec<Session>,
-    pub assignable: Vec<Session>,
-    pub notice: Option<String>,
-}
-
-async fn execute(db_path: PathBuf, action: ProjectAction) -> anyhow::Result<ProjectsData> {
-    let db = Database::connect(&db_path).await?;
-    let service = ProjectService::new(ServiceContext::new(db.pool().clone()));
-    let sessions = SessionRepository::new(db.pool().clone());
-    let mut detail_id = None;
-    let notice = match action {
-        ProjectAction::Refresh { detail } => {
-            detail_id = detail;
-            None
-        }
-        ProjectAction::Create { name } => {
-            let name = name.trim().to_string();
-            anyhow::ensure!(!name.is_empty(), "Project name cannot be empty");
-            let project = service.create_project(name, None).await?;
-            Some(format!("Project '{}' created", project.name))
-        }
-        ProjectAction::Delete { id } => {
-            service.delete_project(id).await?;
-            Some("Project deleted; its sessions are now unassigned".to_string())
-        }
-        ProjectAction::Assign {
-            project_id,
-            session_id,
-        } => {
-            service.assign_session(session_id, project_id).await?;
-            detail_id = Some(project_id);
-            Some("Session assigned to project".to_string())
-        }
-        ProjectAction::Unassign {
-            project_id,
-            session_id,
-        } => {
-            service.unassign_session(session_id).await?;
-            detail_id = Some(project_id);
-            Some("Session removed from project".to_string())
-        }
-        ProjectAction::AssignMany {
-            project_id,
-            session_ids,
-        } => {
-            service.get_project_required(project_id).await?;
-            for session_id in &session_ids {
-                service.assign_session(*session_id, project_id).await?;
-            }
-            detail_id = Some(project_id);
-            Some(format!(
-                "{} sessions assigned to project",
-                session_ids.len()
-            ))
-        }
-        ProjectAction::ClearMany {
-            project_id,
-            session_ids,
-        } => {
-            for session_id in &session_ids {
-                service.unassign_session(*session_id).await?;
-            }
-            detail_id = Some(project_id);
-            Some(format!(
-                "{} sessions removed from their projects",
-                session_ids.len()
-            ))
-        }
-        ProjectAction::ArchiveMany {
-            project_id,
-            session_ids,
-        } => {
-            for session_id in &session_ids {
-                sessions.archive(*session_id).await?;
-            }
-            detail_id = Some(project_id);
-            Some(format!("{} sessions archived", session_ids.len()))
-        }
-    };
-
-    let projects = service.list_projects().await?;
-    let mut rows = Vec::with_capacity(projects.len());
-    for project in projects {
-        let stats = service.get_project_stats(project.id).await?;
-        rows.push(ProjectRow {
-            project,
-            sessions: stats.session_count,
-            files: stats.file_count,
-        });
-    }
-    let detail = match detail_id {
-        Some(id) => Some((
-            service.get_project_required(id).await?,
-            service.get_sessions_for_project(id).await?,
-        )),
-        None => None,
-    };
-    let unassigned = service.get_unassigned_sessions().await?;
-    let assignable = service.get_assignable_sessions().await?;
-    Ok(ProjectsData {
-        rows,
-        detail,
-        unassigned,
-        assignable,
-        notice,
-    })
-}
-
 /// Run one read or write and return a complete snapshot for the screen.
 pub async fn run(
     backend: crate::backend_glue::Backend,
     action: ProjectAction,
 ) -> Result<ProjectsData, String> {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-projects".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let message = format!("projects runtime: {error}");
-                    crate::logging::error(&message);
-                    if tx.send(Err(message)).is_err() {
-                        crate::logging::error("projects runtime receiver dropped");
-                    }
-                    return;
-                }
-            };
-            let result = runtime
-                .block_on(execute(db_path, action))
-                .map_err(|error| format!("{error:#}"));
-            if let Err(ref error) = result {
-                crate::logging::error(&format!("projects service: {error}"));
-            }
-            if tx.send(result).is_err() {
-                crate::logging::error("projects service receiver dropped");
-            }
-        });
-    match spawned {
-        Ok(_) => rx
-            .await
-            .unwrap_or_else(|_| Err("projects worker dropped its result".to_string())),
-        Err(error) => {
-            let message = format!("projects thread: {error}");
-            crate::logging::error(&message);
-            Err(message)
+    // A refresh only reads, so it asks with the read scope; every other
+    // action writes and is a command.
+    let result = match action {
+        ProjectAction::Refresh { detail } => {
+            backend
+                .call(opencrabs::backend::projects::ProjectList { detail })
+                .await
+        }
+        action => {
+            backend
+                .call(opencrabs::backend::projects::ProjectCommand { action })
+                .await
         }
     }
+    .map_err(opencrabs::backend::BackendError::into_message);
+    if let Err(ref error) = result {
+        crate::logging::error(&format!("projects service: {error}"));
+    }
+    result
 }

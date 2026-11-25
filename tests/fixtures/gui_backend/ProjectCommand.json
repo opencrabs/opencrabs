@@ -1,0 +1,50 @@
+{
+  "op": "projects.command",
+  "scope": "a2a:manage",
+  "request": {
+    "action": {
+      "ClearMany": {
+        "project_id": "3c1d2e4f-0000-4000-8000-000000000001",
+        "session_ids": []
+      }
+    }
+  },
+  "response": {
+    "Ok": {
+      "rows": [
+        {
+          "project": {
+            "id": "3c1d2e4f-0000-4000-8000-000000000001",
+            "name": "crab",
+            "description": null,
+            "repo_remote": null,
+            "created_at": "2026-11-25T00:00:00Z",
+            "updated_at": "2026-11-25T00:00:00Z"
+          },
+          "sessions": 2,
+          "files": 0
+        }
+      ],
+      "detail": [
+        {
+          "id": "3c1d2e4f-0000-4000-8000-000000000001",
+          "name": "crab",
+          "description": null,
+          "repo_remote": null,
+          "created_at": "2026-11-25T00:00:00Z",
+          "updated_at": "2026-11-25T00:00:00Z"
+        },
+        []
+      ],
+      "unassigned": [],
+      "assignable": [],
+      "notice": "0 sessions removed from their projects"
+    }
+  },
+  "response_failed": {
+    "Err": {
+      "kind": "failed",
+      "detail": "Project name cannot be empty"
+    }
+  }
+}
