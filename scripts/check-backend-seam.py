@@ -107,6 +107,9 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/thumbs.rs", "write_square"): "local thumbnail cache",
     ("src/gui/thumbs.rs", "is_usable"): "local thumbnail cache",
     ("src/gui/thumbs.rs", "prune"): "local thumbnail cache",
+    # janela: C5b, the window's copies of a remote crab's files (blob.get)
+    ("src/gui/blob_cache_store.rs", "cached"): "stats the window's blob cache, never the crab's disk",
+    ("src/gui/blob_cache_store.rs", "keep"): "writes the window's blob cache; the local crab never reaches it",
     # janela: C7, layout and rail activity of this window, keyed by crab
     ("src/gui/layout_store.rs", "load"): "this window's layout",
     ("src/gui/layout_store.rs", "save"): "this window's layout",

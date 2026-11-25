@@ -23,12 +23,22 @@
 //! `TasksChanged`). A read that changed what the window would draw sends it
 //! [`TurnEvent::Refresh`], so the new values show without waiting for a
 //! frame painted for another reason.
+//!
+//! A file of the crab's is never fetched inside a frame either:
+//! [`RemoteCrab::cached_blob`] answers the copy kept on this machine
+//! ([`BlobStore`]), and [`request_blob`] fetches a missing one by `blob.get`
+//! on a thread of its own, then sends the same [`TurnEvent::Refresh`].
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
+use opencrabs::backend::blob::BlobGet;
 use opencrabs::backend::facts::{FactsCache, LoadFacts};
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
 use opencrabs::backend::{BackendError, Event, Facts, Op, Scope};
@@ -38,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent_bridge::{EventSink, TurnEvent};
+use crate::blob_cache_store::BlobStore;
 
 /// The first wait before the event reader dials again after a drop.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -65,6 +76,19 @@ pub struct RemoteCrab {
     facts_lane: Lane,
     /// One read of the running tasks in flight at a time.
     tasks_lane: Lane,
+    /// Its stable id (the `host_id` it announced when paired), the name of
+    /// its directory in the window's blob cache.
+    id: String,
+    /// The copies of its files kept on this machine.
+    blobs: BlobStore,
+    /// The crab paths already asked for by `blob.get`: one fetch each, so a
+    /// missing file is not asked again on every frame.
+    blobs_asked: Mutex<HashSet<PathBuf>>,
+    /// How many `blob.get` fetches started.
+    blob_fetches: AtomicUsize,
+    /// Where a fetched blob tells the window to paint again: the sink of
+    /// the last event reader opened ([`watch`]).
+    blob_sink: Mutex<Option<EventSink>>,
 }
 
 /// The keys the window read from the cache or opened events for.
@@ -142,16 +166,71 @@ impl RemoteCrab {
         token: Option<String>,
         window_ledger: PathBuf,
     ) -> Self {
+        let base_url = base_url.into();
+        // Until the pairing record names it (`with_id`), the gateway's URL is
+        // what tells this crab from another.
+        let id = base_url.trim_end_matches('/').to_string();
         Self {
             name: name.into(),
-            base_url: base_url.into(),
+            blobs: BlobStore::for_crab(&id),
+            id,
+            base_url,
             token,
             window_ledger,
             cache: FactsCache::default(),
             wanted: Mutex::new(Wanted::default()),
             facts_lane: Lane::default(),
             tasks_lane: Lane::default(),
+            blobs_asked: Mutex::new(HashSet::new()),
+            blob_fetches: AtomicUsize::new(0),
+            blob_sink: Mutex::new(None),
         }
+    }
+
+    /// The same crab, known by the stable id its pairing recorded, which
+    /// names its directory in the blob cache.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        if !id.is_empty() {
+            self.blobs = BlobStore::for_crab(&id);
+            self.id = id;
+        }
+        self
+    }
+
+    /// The same crab, its blob copies kept in `dir` instead of the home's
+    /// cache: a test never writes the real one.
+    #[cfg(test)]
+    pub fn with_blob_dir(mut self, dir: PathBuf) -> Self {
+        self.blobs = BlobStore::at(dir);
+        self
+    }
+
+    /// The stable id this crab is known by.
+    #[allow(dead_code)] // read by the tests and by whoever keys a crab's window state
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The copy on this machine of the crab's file at `path`, when one was
+    /// fetched. Synchronous and local: one `stat`, never the network.
+    pub(crate) fn cached_blob(&self, path: &Path) -> Option<PathBuf> {
+        self.blobs.cached(path)
+    }
+
+    /// Send landed blobs' repaints to `sink`, as an opened event reader
+    /// does, without opening one.
+    #[cfg(test)]
+    pub(crate) fn set_blob_sink(&self, sink: EventSink) {
+        if let Ok(mut blob_sink) = self.blob_sink.lock() {
+            *blob_sink = Some(sink);
+        }
+    }
+
+    /// How many `blob.get` fetches this crab started.
+    #[cfg(test)]
+    pub(crate) fn blob_fetches(&self) -> usize {
+        self.blob_fetches.load(Ordering::SeqCst)
     }
 
     /// The facts for `session` as last read from the crab, or `None` when
@@ -327,6 +406,75 @@ pub(crate) fn spawn<O: Op>(
         .map_err(|e| format!("{} thread: {e}", O::NAME))
 }
 
+/// Fetch the crab's file at `path` into the blob cache, off the window's
+/// thread, and answer where the copy lands.
+///
+/// Returns at once: the window calls it while it renders. Each path is asked
+/// for once; a path already asked (in flight, kept, or refused) starts
+/// nothing. A copy that lands sends the window [`TurnEvent::Refresh`] through
+/// the sink of its event reader, so the next frame finds it. A fetch that
+/// fails is logged and not tried again: the file shows as missing.
+pub(crate) fn request_blob(crab: &Arc<RemoteCrab>, path: &Path) -> PathBuf {
+    let slot = crab.blobs.slot(path);
+    let first = crab
+        .blobs_asked
+        .lock()
+        .map(|mut asked| asked.insert(path.to_path_buf()))
+        .unwrap_or(false);
+    if !first {
+        return slot;
+    }
+    crab.blob_fetches.fetch_add(1, Ordering::SeqCst);
+    let fetcher = crab.clone();
+    let wanted = path.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("remote-blob".into())
+        .spawn(move || {
+            let got = instance_client::block_on(async {
+                anyhow::Ok(fetch_blob(&fetcher, &wanted).await)
+            })
+            .unwrap_or_else(|e| Err(format!("{e:#}")));
+            match got {
+                Ok(()) => {
+                    let sink = fetcher.blob_sink.lock().ok().and_then(|sink| sink.clone());
+                    // A closed sink is a window gone: the copy is kept anyway.
+                    if let Some(sink) = sink {
+                        let _ = sink.send(TurnEvent::Refresh);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("{}: blob.get {}: {e}", fetcher.name, wanted.display());
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        if let Ok(mut asked) = crab.blobs_asked.lock() {
+            asked.remove(path);
+        }
+        tracing::warn!("{}: remote-blob thread: {e}", crab.name);
+    }
+    slot
+}
+
+/// One `blob.get` of `path`, kept in `crab`'s blob cache.
+async fn fetch_blob(crab: &RemoteCrab, path: &Path) -> Result<(), String> {
+    let reply = call(
+        crab,
+        BlobGet {
+            path: path.to_string_lossy().into_owned(),
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let bytes = BASE64
+        .decode(reply.base64.as_bytes())
+        .map_err(|e| e.to_string())?;
+    crab.blobs
+        .keep(path, &bytes)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Read `part` of `crab`'s cache again, off the window's thread.
 ///
 /// Returns at once. A refresh asked for while one of the same part runs is
@@ -458,6 +606,9 @@ pub(crate) fn watch(
         wanted.facts.insert(None);
         wanted.facts.insert(Some(session));
         wanted.tasks.insert(session);
+    }
+    if let Ok(mut blob_sink) = crab.blob_sink.lock() {
+        *blob_sink = Some(sink.clone());
     }
     refresh(&crab, Part::Facts, &sink);
     refresh(&crab, Part::Tasks, &sink);

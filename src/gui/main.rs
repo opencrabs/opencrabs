@@ -33,6 +33,7 @@ mod backend_glue;
 mod backend_remote;
 mod bang;
 mod blob_cache;
+mod blob_cache_store;
 mod boot;
 mod breakdown;
 mod channel_chip;

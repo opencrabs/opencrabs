@@ -5,6 +5,7 @@
 //! another one over its gateway (`backend_remote.rs`). The callers do not
 //! change between the two, because both answer the same [`Op`] values.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
@@ -43,12 +44,15 @@ impl Backend {
             Backend::Local(ctx) => ctx.db_path().to_path_buf(),
             Backend::Remote(crab) => crab.window_ledger().to_path_buf(),
         };
-        Backend::Remote(Arc::new(RemoteCrab::new(
-            known.label.clone(),
-            known.url.clone(),
-            Some(known.token.clone()),
-            window_ledger,
-        )))
+        Backend::Remote(Arc::new(
+            RemoteCrab::new(
+                known.label.clone(),
+                known.url.clone(),
+                Some(known.token.clone()),
+                window_ledger,
+            )
+            .with_id(known.host_id.clone()),
+        ))
     }
 
     /// Run `op` and wait for its reply.
@@ -113,6 +117,28 @@ impl Backend {
         }
     }
 
+    /// The copy on this machine of the crab's file at `path`, or `None` when
+    /// there is none yet. Synchronous and never fetches: the window asks
+    /// while it renders. The local crab's files are on this disk, so it
+    /// answers `path` itself and never touches the blob cache.
+    pub fn cached_blob(&self, path: &Path) -> Option<PathBuf> {
+        match self {
+            Backend::Local(_) => Some(path.to_path_buf()),
+            Backend::Remote(crab) => crab.cached_blob(path),
+        }
+    }
+
+    /// Ask for a copy of the crab's file at `path` without waiting for it,
+    /// and answer where it will be. A remote crab fetches it off the frame
+    /// and repaints the window when it lands; the local crab fetches
+    /// nothing and answers `path`.
+    pub fn request_blob(&self, path: &Path) -> PathBuf {
+        match self {
+            Backend::Local(_) => path.to_path_buf(),
+            Backend::Remote(crab) => crate::backend_remote::request_blob(crab, path),
+        }
+    }
+
     /// Feed `session`'s events into `sink` until the returned [`Watch`]
     /// drops. A local crab has nothing to open: its agent service already
     /// forwards every event into the window's sink, so it answers `None`.
@@ -127,3 +153,4 @@ impl Backend {
         }
     }
 }
+

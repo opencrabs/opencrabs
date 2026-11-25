@@ -4,8 +4,8 @@
 //! an icon). The window draws, stats and opens files by path, so before it
 //! touches one it asks [`Backend::localize`] for the path here. For this
 //! process's own crab that is the same path: the disk is shared, nothing is
-//! copied. A crab on another machine answers the bytes through `blob.get`;
-//! the copy it needs lands with the remote backend.
+//! copied. A crab on another machine answers the bytes through `blob.get`,
+//! kept in the window's blob cache (`blob_cache_store.rs`).
 //!
 //! [`BlobRef`]: opencrabs::backend::BlobRef
 
@@ -17,14 +17,13 @@ impl Backend {
     /// The path on this machine for `path` on the crab.
     ///
     /// Synchronous and never fetches: the window calls it while it renders.
-    /// The local crab answers `path` itself.
+    /// The local crab answers `path` itself. A crab on another machine
+    /// answers its cached copy; with no copy yet, the copy is asked for off
+    /// the frame and the answer is where it will land, which does not exist
+    /// until then, so the window shows the file as missing and repaints when
+    /// it arrives.
     pub fn localize(&self, path: &Path) -> PathBuf {
-        match self {
-            Backend::Local(_) => path.to_path_buf(),
-            // A crab on another machine has no copy here yet: the path is
-            // returned as named, so the window shows the file as missing
-            // instead of fetching inside a frame. The on-disk cache is rb/c5b.
-            _ => path.to_path_buf(),
-        }
+        self.cached_blob(path)
+            .unwrap_or_else(|| self.request_blob(path))
     }
 }
