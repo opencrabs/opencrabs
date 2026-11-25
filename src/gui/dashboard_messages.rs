@@ -520,9 +520,14 @@ impl Dashboard {
         };
         let editor = self.new_inline_editor(text, cx);
         // Enter in the row's field is the same confirm as the check under it.
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.msg_edit_confirm(text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    |this, text, cx| this.msg_edit_confirm(text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -561,9 +566,14 @@ impl Dashboard {
         let sequence =
             transcript::live_slot_sequence(&self.turn.live, &self.chat_state.transcript.rows, slot);
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.msg_edit_confirm(text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    |this, text, cx| this.msg_edit_confirm(text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -658,9 +668,14 @@ impl Dashboard {
             return;
         };
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.pane_edit_confirm(session, text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| this.pane_edit_confirm(session, text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -710,9 +725,14 @@ impl Dashboard {
             transcript::live_slot_sequence(&pane.live, &pane.transcript.rows, slot)
         };
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.pane_edit_confirm(session, text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| this.pane_edit_confirm(session, text, cx),
+                    cx,
+                );
             }
         })
         .detach();

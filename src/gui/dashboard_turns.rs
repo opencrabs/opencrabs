@@ -177,6 +177,73 @@ impl Dashboard {
         cx.notify();
     }
 
+    /// Hand a composer's message to `send` once its files are on the crab (P8).
+    ///
+    /// A message with no files goes at once, as it always did. With files,
+    /// [`Backend::carry`](crate::backend_glue::Backend::carry) puts them on the
+    /// crab and points their markers there; the local crab answers on the
+    /// first poll, so a local send is never deferred. A remote upload runs off
+    /// this thread and `send` gets the rewritten text, so the file tracker
+    /// downstream reads the crab's paths. A failed upload, or a crab swapped
+    /// out while it ran, sends nothing: the message goes back to `field`, the
+    /// composer it came from, with the reason.
+    pub(crate) fn send_carried(
+        &mut self,
+        outgoing: editor::Outgoing,
+        field: gpui::WeakEntity<editor::Editor>,
+        send: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if outgoing.files.is_empty() {
+            send(self, outgoing.text, cx);
+            return;
+        }
+        let mut carried = self
+            .backend
+            .carry(outgoing.text.clone(), outgoing.files.clone());
+        if let Some(result) = futures::FutureExt::now_or_never(&mut carried) {
+            self.settle_carry(outgoing, result, field, send, cx);
+            return;
+        }
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let result = carried.await;
+            this.update(cx, |this, cx| {
+                let result = if this.instance_epoch == epoch {
+                    result
+                } else {
+                    Err("the crab changed while the files were sent; nothing was sent".to_string())
+                };
+                this.settle_carry(outgoing, result, field, send, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The end of [`send_carried`](Self::send_carried): the rewritten text to
+    /// `send`, or the whole message back to the composer it came from.
+    fn settle_carry(
+        &mut self,
+        outgoing: editor::Outgoing,
+        result: Result<String, String>,
+        field: gpui::WeakEntity<editor::Editor>,
+        send: impl FnOnce(&mut Self, String, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(text) => send(self, text, cx),
+            Err(reason) => {
+                logging::info(&format!("send refused: {reason}"));
+                let returned = field.update(cx, |field, cx| field.give_back(outgoing, reason, cx));
+                if returned.is_err() {
+                    logging::info("send refused: its composer is gone");
+                }
+                cx.notify();
+            }
+        }
+    }
+
     /// What this session's card should say it is doing right now (#2718), from
     /// whichever owner holds its turn: a split leaf, a turn parked under a
     /// conversation the user switched away from, the open turn, or a turn

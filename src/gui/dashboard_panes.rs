@@ -701,9 +701,16 @@ impl Dashboard {
         if let Some(draft) = self.composer.drafts.take(id) {
             pane_editor.update(cx, |ed, cx| ed.restore_state(draft, cx));
         }
-        cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
-            editor::EditorEvent::Sent(text) => {
-                this.send_from_pane(id, text.clone(), None, SendOrigin::Composer, cx);
+        cx.subscribe(&pane_editor, move |this, field, event, cx| match event {
+            editor::EditorEvent::Sent(outgoing) => {
+                this.send_carried(
+                    outgoing.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| {
+                        this.send_from_pane(id, text, None, SendOrigin::Composer, cx)
+                    },
+                    cx,
+                );
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
             editor::EditorEvent::Below => this.focus_tasks(id, cx),

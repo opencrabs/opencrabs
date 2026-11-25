@@ -11,8 +11,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::future::LocalBoxFuture;
-use opencrabs::backend::blob::BlobPut;
-use opencrabs::backend::cap::{Cap, Unavailable};
+use opencrabs::backend::blob::{self, BlobPut};
+use opencrabs::backend::cap::{self, Cap, Unavailable};
 use opencrabs::backend::sessions::IconFromUpload;
 
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
@@ -197,6 +197,55 @@ impl Backend {
         }
     }
 
+    /// The message `text` as the crab will read it, with `files` sent along.
+    ///
+    /// `files` are the attachments the composer holds for this message (the
+    /// chips and a pasted image), never paths read out of `text`: a quoted
+    /// reply comes from the crab, and a marker planted in it must not make
+    /// this machine read and upload the file it names.
+    ///
+    /// The local crab reads this disk itself, so `text` comes back as it is,
+    /// on the first poll. A crab elsewhere gets each file by `blob.put`, and
+    /// its attachment marker (`<<IMG:..>>`, `<<VID:..>>`, `<<AUD:..>>` with
+    /// the local path) is swapped for the same marker on the crab's copy;
+    /// nothing else in `text` changes. Every file is read before the first
+    /// upload, off the window's thread, so one that cannot be read or is
+    /// over [`MAX_BLOB_BYTES`](blob::MAX_BLOB_BYTES) refuses the whole
+    /// message and nothing is sent.
+    pub fn carry(
+        &self,
+        text: String,
+        files: Vec<PathBuf>,
+    ) -> LocalBoxFuture<'static, Result<String, String>> {
+        match self {
+            Backend::Local(_) => Box::pin(async move { Ok::<_, String>(text) }),
+            Backend::Remote(_) => {
+                let backend = self.clone();
+                Box::pin(async move {
+                    let (tx, rx) = futures::channel::oneshot::channel();
+                    std::thread::Builder::new()
+                        .name("gui-carry".to_string())
+                        .spawn(move || {
+                            let _ = tx.send(read_attachments(&files));
+                        })
+                        .map_err(|e| format!("attachments: {e}"))?;
+                    let read = rx
+                        .await
+                        .map_err(|_| "attachments: the reader stopped".to_string())??;
+                    let mut text = text;
+                    for (local, put) in read {
+                        let kept = backend
+                            .call(put)
+                            .await
+                            .map_err(|e| cap::notice(<BlobPut as Op>::NAME, &e))?;
+                        text = swap_marker(&text, &local, &kept.path);
+                    }
+                    Ok::<_, String>(text)
+                })
+            }
+        }
+    }
+
     /// Feed `session`'s events into `sink` until the returned [`Watch`]
     /// drops. A local crab has nothing to open: its agent service already
     /// forwards every event into the window's sink, so it answers `None`.
@@ -210,6 +259,59 @@ impl Backend {
             }
         }
     }
+}
+
+/// Every file of one message as the upload that carries it, or why the
+/// message cannot go. Read through the crab's own blob reader, rooted at the
+/// file's real folder: the same regular-file check and the same
+/// [`MAX_BLOB_BYTES`](blob::MAX_BLOB_BYTES) ceiling the crab applies to what
+/// it serves.
+fn read_attachments(files: &[PathBuf]) -> Result<Vec<(PathBuf, BlobPut)>, String> {
+    let mut read = Vec::with_capacity(files.len());
+    for local in files {
+        let name = local
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| local.display().to_string());
+        let refuse = |why: String| format!("{name}: {why}; nothing was sent");
+        let real = local.canonicalize().map_err(|e| refuse(e.to_string()))?;
+        let (Some(folder), Some(requested)) = (real.parent(), real.to_str()) else {
+            return Err(refuse("not a file this window can send".to_string()));
+        };
+        let bytes =
+            blob::read(&[folder.to_path_buf()], requested).map_err(|e| refuse(e.to_string()))?;
+        read.push((
+            local.clone(),
+            BlobPut {
+                name: name.clone(),
+                base64: BASE64.encode(bytes),
+            },
+        ));
+    }
+    Ok(read)
+}
+
+/// `text` with the attachment marker for `local` pointing at `crab` instead.
+///
+/// The composer appends a message's markers after its words, so the last
+/// marker naming `local` is the one this send added; an earlier one, in a
+/// quoted reply, is the crab's own text and stays as it was.
+pub(crate) fn swap_marker(text: &str, local: &Path, crab: &str) -> String {
+    let local = local.display().to_string();
+    let found = ["IMG", "VID", "AUD"]
+        .into_iter()
+        .filter_map(|kind| {
+            let marker = format!("<<{kind}:{local}>>");
+            text.rfind(&marker).map(|at| (at, kind, marker.len()))
+        })
+        .max_by_key(|(at, _, _)| *at);
+    let Some((at, kind, len)) = found else {
+        return text.to_string();
+    };
+    let (Some(before), Some(after)) = (text.get(..at), text.get(at + len..)) else {
+        return text.to_string();
+    };
+    format!("{before}<<{kind}:{crab}>>{after}")
 }
 
 /// Where [`Backend::keep_icon_image`] left a picked icon.

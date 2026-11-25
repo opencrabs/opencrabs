@@ -642,3 +642,108 @@ fn the_cd_and_footer_doors_never_read_this_machine() {
         .expect("git_branch");
     assert!(!branch.contains("ask_crab("), "git_branch waits on no crab");
 }
+
+/// A crab whose uploads land under its own temp home, never `~/.opencrabs`.
+fn upload_crab() -> (Served, tempfile::TempDir) {
+    let home = tempfile::tempdir().expect("crab home");
+    let ctx = Ctx::new(home.path().join("unused.db")).with_home(home.path().to_path_buf());
+    (serve(mock(ctx, Scope::ALL)), home)
+}
+
+/// An attachment sent to a remote crab (P8): its bytes go by `blob.put`, and
+/// the message the turn carries names the crab's copy and no path on this
+/// machine. A marker in the quoted reply is the crab's own text: this machine
+/// neither reads nor uploads the file it names.
+#[test]
+fn an_attachment_reaches_a_remote_crab_as_its_own_copy() {
+    let (served, crab_home) = upload_crab();
+    let backend = Backend::Remote(served.crab.clone());
+    let here = tempfile::tempdir().expect("tempdir");
+    let image = here.path().join("a.png");
+    std::fs::write(&image, b"png bytes").expect("write a.png");
+    let text = format!("> <<IMG:/etc/hostname>>\nlook <<IMG:{}>>", image.display());
+
+    let carried =
+        futures::executor::block_on(backend.carry(text, vec![image.clone()])).expect("carried");
+
+    let local = here.path().display().to_string();
+    assert!(
+        !carried.contains(&local),
+        "a local path went out: {carried}"
+    );
+    assert!(
+        carried.starts_with("> <<IMG:/etc/hostname>>\nlook <<IMG:"),
+        "only the sent file's marker changed: {carried}"
+    );
+    let crab_path = carried
+        .rsplit("<<IMG:")
+        .next()
+        .and_then(|rest| rest.strip_suffix(">>"))
+        .expect("the crab's marker");
+    assert!(
+        Path::new(crab_path).starts_with(crab_home.path().canonicalize().expect("real home")),
+        "{crab_path} is the crab's copy"
+    );
+    assert_eq!(
+        std::fs::read(crab_path).expect("the crab kept it"),
+        b"png bytes"
+    );
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        1,
+        "one upload, for the one attached file; the quote's path was not sent"
+    );
+}
+
+/// A file over the blob ceiling refuses the whole message before anything is
+/// uploaded: the crab sees no call at all.
+#[test]
+fn a_file_over_the_ceiling_sends_nothing() {
+    let (served, _crab_home) = upload_crab();
+    let backend = Backend::Remote(served.crab.clone());
+    let here = tempfile::tempdir().expect("tempdir");
+    let small = here.path().join("small.png");
+    std::fs::write(&small, b"ok").expect("write small");
+    let big = here.path().join("big.mp4");
+    let file = std::fs::File::create(&big).expect("create big");
+    file.set_len(opencrabs::backend::blob::MAX_BLOB_BYTES + 1)
+        .expect("size big");
+    let text = format!("two <<IMG:{}>> <<VID:{}>>", small.display(), big.display());
+
+    let refused = futures::executor::block_on(backend.carry(text, vec![small, big]))
+        .expect_err("over the ceiling");
+
+    assert!(refused.contains("big.mp4"), "{refused}");
+    assert!(refused.contains("nothing was sent"), "{refused}");
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 0);
+}
+
+/// The local crab reads this disk itself: the message is carried as it is,
+/// on the first poll, and nothing is read or uploaded.
+#[test]
+fn a_local_crab_carries_the_message_unchanged() {
+    use futures::FutureExt as _;
+    let backend = Backend::local(PathBuf::from("unused.db"));
+    let text = "look <<IMG:/nowhere/a.png>>".to_string();
+    let carried = backend
+        .carry(text.clone(), vec![PathBuf::from("/nowhere/a.png")])
+        .now_or_never()
+        .expect("ready at once");
+    assert_eq!(carried, Ok(text));
+}
+
+/// Only the marker this send appended moves; the same path quoted earlier
+/// in the text, and every other word, stay as they were.
+#[test]
+fn the_swap_touches_the_last_marker_for_the_file_only() {
+    let local = Path::new("/home/me/a b.png");
+    let text = "> <<IMG:/home/me/a b.png>>\nsee <<VID:/x.mp4>> <<IMG:/home/me/a b.png>>";
+    assert_eq!(
+        crate::backend_glue::swap_marker(text, local, "/crab/tmp/gui-uploads/1-a_b.png"),
+        "> <<IMG:/home/me/a b.png>>\nsee <<VID:/x.mp4>> <<IMG:/crab/tmp/gui-uploads/1-a_b.png>>"
+    );
+    assert_eq!(
+        crate::backend_glue::swap_marker("no marker", local, "/crab/x"),
+        "no marker"
+    );
+}

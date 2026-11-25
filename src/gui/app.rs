@@ -320,9 +320,16 @@ pub(crate) fn run() {
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
-                    cx.subscribe(&editor, |this, _editor, event, cx| match event {
-                        editor::EditorEvent::Sent(text) => {
-                            this.send_message(text.clone(), cx);
+                    cx.subscribe(&editor, |this, field, event, cx| match event {
+                        // The files go to the crab first; the text that
+                        // reaches the turn names the crab's copies (P8).
+                        editor::EditorEvent::Sent(outgoing) => {
+                            this.send_carried(
+                                outgoing.clone(),
+                                field.downgrade(),
+                                |this, text, cx| this.send_message(text, cx),
+                                cx,
+                            );
                         }
                         // A chip's thumbnail opens the same overlay a
                         // transcript tile opens: one preview, one code path.
