@@ -113,9 +113,11 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/preview.rs", "duration_secs"): "local ffprobe on the localized path",
     ("src/gui/preview.rs", "mtime_secs"): "stats the path VideoFacts::probe localized",
     ("src/gui/preview.rs", "launch"): "opens the localized file on this machine",
+    ("src/gui/preview.rs", "probe"): "stats the path the overlay and the transcript tile localized",
     ("src/gui/thumbs.rs", "write_square"): "local thumbnail cache",
     ("src/gui/thumbs.rs", "is_usable"): "local thumbnail cache",
     ("src/gui/thumbs.rs", "prune"): "local thumbnail cache",
+    ("src/gui/thumbs.rs", "modified_secs"): "stamps the localized source of a local thumbnail",
     # janela: C5c, the plan strip stats the path set_crab_path localized
     ("src/gui/plan_strip.rs", "refresh"): "stats the plan path set_crab_path localized",
     # janela: C5b, the window's copies of a remote crab's files (blob.get)
