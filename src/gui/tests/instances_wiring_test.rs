@@ -12,8 +12,13 @@ use opencrabs::backend::hello::Hello;
 use opencrabs::backend::{BackendError, Op, cap};
 use opencrabs::remote::instance_store::{InstanceFile, KnownInstance};
 
+use opencrabs::config::A2aConfig;
+use opencrabs::ui_core::text_field::TextField;
+
 use crate::backend_glue::Backend;
-use crate::instance_strip::StripFrame;
+use crate::instance_strip::{
+    PairingForm, ShareView, StripFrame, pair_link, parse_pair_link, qr_modules, share_target,
+};
 use crate::instances::{Health, Instances};
 
 const WIRING: &str = include_str!("../dashboard_instances.rs");
@@ -22,6 +27,7 @@ const APP: &str = include_str!("../app.rs");
 const RENDER: &str = include_str!("../dashboard_render.rs");
 const RAIL: &str = include_str!("../dashboard_rail.rs");
 const PALETTE: &str = include_str!("../command_palette.rs");
+const KEYS: &str = include_str!("../dashboard_keys.rs");
 
 fn known(id: &str, label: &str, url: &str) -> KnownInstance {
     KnownInstance {
@@ -203,4 +209,149 @@ fn the_menus_read_the_handshake_of_the_crab_the_window_holds() {
     let menu = fn_body(RAIL, "rail_menu_popover_for");
     assert!(menu.contains("kind.unavailable(hello)"));
     assert!(menu.contains("crate::menu::menu_item_gated("));
+}
+
+// ── The `+` card: pairing form and share QR ────────────────────────────────
+
+#[test]
+fn a_pairing_link_reads_back_what_it_carries() {
+    let link = pair_link("http://10.0.0.2:18790", "ABCD2345", Some("servidor i7 ç"));
+    assert!(link.starts_with("opencrabs://pair?url="), "{link}");
+    let (url, code, label) = parse_pair_link(&link).expect("our own link parses");
+    assert_eq!(url, "http://10.0.0.2:18790");
+    assert_eq!(code, "ABCD2345");
+    assert_eq!(label.as_deref(), Some("servidor i7 ç"));
+
+    // No name: the link carries none, and the far side uses the agent card's.
+    let bare = pair_link("http://10.0.0.2:18790", "ABCD2345", None);
+    assert!(!bare.contains("label="), "{bare}");
+    let (_, _, label) = parse_pair_link(&bare).expect("a link without a name parses");
+    assert_eq!(label, None);
+}
+
+#[test]
+fn a_pasted_link_fills_the_form_and_anything_else_does_not() {
+    let mut form = PairingForm::default();
+    assert!(parse_pair_link("http://10.0.0.2:18790").is_none());
+    assert!(!form.absorb_link("http://10.0.0.2:18790"));
+    assert!(form.url.is_empty() && form.code.is_empty());
+    assert_eq!(form.field, 0);
+
+    let link = pair_link("http://crab.lan:18790", "WXYZ6789", Some("lenovo"));
+    assert!(form.absorb_link(&format!("  {link}\n")));
+    assert_eq!(form.url.text(), "http://crab.lan:18790");
+    assert_eq!(form.code.text(), "WXYZ6789");
+    assert_eq!(form.label.text(), "lenovo");
+    assert_eq!(form.field, 2, "the caret lands on the one field left");
+}
+
+#[test]
+fn the_pairing_code_never_prints_in_debug() {
+    let form = PairingForm {
+        url: TextField::from_text("http://crab.lan:18790"),
+        code: TextField::from_text("SECRET99"),
+        ..PairingForm::default()
+    };
+    let printed = format!("{form:?}");
+    assert!(!printed.contains("SECRET99"), "{printed}");
+    assert!(printed.contains("<8 chars>"), "{printed}");
+
+    let share = ShareView::new(
+        "http://crab.lan:18790".to_string(),
+        "SECRET99".to_string(),
+        Some("lenovo"),
+        None,
+    );
+    let printed = format!("{share:?}");
+    assert!(!printed.contains("SECRET99"), "{printed}");
+    assert!(
+        share.link.contains("SECRET99"),
+        "the link itself carries it"
+    );
+}
+
+#[test]
+fn the_share_card_draws_a_square_qr_of_its_link() {
+    let share = ShareView::new(
+        "http://crab.lan:18790".to_string(),
+        "ABCD2345".to_string(),
+        Some("lenovo"),
+        None,
+    );
+    assert!(share.width > 0, "a pairing link fits a QR");
+    assert_eq!(share.qr.len(), share.width * share.width);
+    assert_eq!(qr_modules(&share.link), (share.qr.clone(), share.width));
+}
+
+#[test]
+fn the_share_address_says_when_it_cannot_be_reached() {
+    let off = A2aConfig {
+        enabled: false,
+        ..A2aConfig::default()
+    };
+    let (url, warning) = share_target(&off);
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    assert!(warning.is_some_and(|w| w.contains("enabled = true")));
+
+    let advertised = A2aConfig {
+        enabled: true,
+        advertise_url: Some(" http://crab.lan:18790/ ".to_string()),
+        ..A2aConfig::default()
+    };
+    assert_eq!(
+        share_target(&advertised),
+        ("http://crab.lan:18790".to_string(), None)
+    );
+
+    let loopback = A2aConfig {
+        enabled: true,
+        bind: "127.0.0.1".to_string(),
+        advertise_url: None,
+        ..A2aConfig::default()
+    };
+    let (url, warning) = share_target(&loopback);
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    assert!(warning.is_some_and(|w| w.contains("bind")));
+}
+
+#[test]
+fn the_strip_always_offers_the_way_to_pair_the_first_crab() {
+    let element = fn_body(WIRING, "instance_strip_element");
+    assert!(!element.contains("return None"), "{element}");
+    assert!(STRIP.contains("children.push(self.add_mark(cx));"));
+    assert!(STRIP.contains("this.open_pair(cx)"));
+    // The card is painted over the window from the strip, not in its 56 px.
+    let overlay = fn_body(STRIP, "card_overlay");
+    assert!(overlay.contains("deferred("));
+    assert!(overlay.contains("modal_shell::render("));
+}
+
+#[test]
+fn pairing_and_minting_run_off_the_ui_thread() {
+    let submit = fn_body(STRIP, "pair_submit");
+    assert!(submit.contains("background_executor()"));
+    assert!(submit.contains("pair_and_store(&url, &code, &label)"));
+    assert!(submit.contains("dash.instance_paired(&file, &host_id, cx)"));
+    assert!(STRIP.contains("instance_client::block_on(instance_store::pair(url, code, label))"));
+
+    let share = fn_body(STRIP, "open_share");
+    assert!(share.contains("background_executor()"));
+    assert!(share.contains("mint_share()"));
+    assert!(share.contains("strip.card_epoch != epoch"));
+
+    let paired = fn_body(WIRING, "instance_paired");
+    assert!(paired.contains("Instances::from_file(file)"));
+    assert!(paired.contains("self.instance_picked(host_id, cx);"));
+}
+
+#[test]
+fn the_card_owns_the_keyboard_before_the_seeker_and_the_composer() {
+    let flat: String = KEYS.split_whitespace().collect::<Vec<_>>().join(" ");
+    let card = flat
+        .find("self.instance_card_key(&ev.keystroke, cx);")
+        .expect("the card answers keys in on_key");
+    let seeker = flat
+        .find("self.finder_key(ks, cx)")
+        .expect("the Seeker is in on_key");
+    assert!(card < seeker, "the card reads keys first");
 }
