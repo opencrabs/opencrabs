@@ -79,11 +79,12 @@ mod tests {
         // agents and cron. Left at the 2 MiB default it aborted the GUI on
         // start with `tokio-rt-worker has overflowed its stack` (#2080).
         let bridge = include_str!("gui/agent_bridge.rs");
-        let builder_at = bridge
-            .find("tokio::runtime::Builder::new_multi_thread()")
+        let (_, from_builder) = bridge
+            .split_once("tokio::runtime::Builder::new_multi_thread()")
             .expect("the window surface runtime is built in gui/agent_bridge.rs");
-        let builder = &bridge[builder_at..];
-        let builder = &builder[..builder.find(".build()").expect("builder ends in .build()")];
+        let (builder, _) = from_builder
+            .split_once(".build()")
+            .expect("builder ends in .build()");
         assert!(
             builder.contains(".thread_stack_size(opencrabs::runtime::WORKER_STACK_SIZE)"),
             "the window surface runtime is back on the 2 MiB worker stack (#2080)"
