@@ -96,7 +96,7 @@ BASELINES = {
     # that always answers with the local crab). Measured 2026-11-25 on rb/p0
     # @ 65a3c628a, outside LOCAL_ONLY. Each package moves its sites behind
     # the backend and the number goes down.
-    "R8": 7,
+    "R8": 0,
 }
 
 # Functions of the window that may touch the disk, the ledger or the service
