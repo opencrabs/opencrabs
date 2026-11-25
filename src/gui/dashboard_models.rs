@@ -840,7 +840,9 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        if agent_bridge::bridge().is_none() {
+        // Local and remote alike answer no facts while the crab boots, so
+        // this asks the crab the switch goes to, not this machine's service.
+        if self.backend.facts(None).is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
@@ -886,7 +888,7 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        if agent_bridge::bridge().is_none() {
+        if self.backend.facts(None).is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
