@@ -1867,26 +1867,23 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
 /// marker keeps the exchange in the order it happened, so the reloaded turn
 /// carries the answer the user was reading.
 pub fn spawn_record_turn_stopped(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     answer: Option<String>,
 ) {
-    let spawned = spawn_worker("gui-turn-stopped", move |runtime| {
-        runtime.block_on(async move {
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            // What the card streamed goes in first (#2851), so the turn
-            // reads question, answer, verdict, the order the user saw.
-            if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
-                crate::logging::error(&format!("turn stopped row: {e}"));
+    // The two writes are the crab's (`RecordTurnStopped`): the answer the card
+    // streamed, then the marker (#2851), then the recovery ticket (#2850).
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::RecordTurnStopped { session_id, answer },
+        |result| match result {
+            Ok(errors) => {
+                for line in &errors {
+                    crate::logging::error(line);
+                }
             }
-            // The recovery ticket goes with it (#2850): the turn is over
-            // because the user ended it, so no later boot may replay it.
-            let pending = opencrabs::db::PendingRequestRepository::new(service.context().pool());
-            if let Err(e) = pending.delete_session(session_id).await {
-                crate::logging::error(&format!("turn stopped recovery row: {e}"));
-            }
-        });
-    });
+            Err(e) => crate::logging::error(&format!("turn stopped: {}", e.into_message())),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn stopped thread: {e}"));
     }

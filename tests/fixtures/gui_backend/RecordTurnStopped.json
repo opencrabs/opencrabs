@@ -1,0 +1,14 @@
+{
+  "op": "session_ops.record_turn_stopped",
+  "scope": "a2a:manage",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "answer": "The first half of the answer the card had streamed"
+  },
+  "response": {
+    "Ok": []
+  },
+  "response_partial": {
+    "Ok": ["turn stopped recovery row: Failed to delete pending requests"]
+  }
+}

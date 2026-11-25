@@ -361,6 +361,48 @@ impl Op for UndoLastTurn {
     }
 }
 
+/// Record a stopped turn in the session's history, and drop its recovery row.
+///
+/// A cancel drops the turn's future, so nothing inside the turn writes the
+/// row that says it was stopped (#2811), nor deletes its `pending_requests`
+/// ticket (#2850). `answer` is what the card had streamed when the stop
+/// landed (#2851); it goes in before the marker, so the turn reads question,
+/// answer, verdict. The two steps are independent: each failure is a line in
+/// the reply and does not stop the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordTurnStopped {
+    /// The session whose turn was stopped.
+    pub session_id: Uuid,
+    /// What the card had streamed, if anything.
+    pub answer: Option<String>,
+}
+
+impl Op for RecordTurnStopped {
+    const NAME: &'static str = "session_ops.record_turn_stopped";
+    const SCOPE: Scope = Scope::Manage;
+    /// Each step that failed, as the line the window logs.
+    type Reply = Vec<String>;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let session_id = self.session_id;
+        let db = ctx.db().await?;
+        let mut errors = Vec::new();
+        let messages = MessageService::new(ServiceContext::new(db.pool().clone()));
+        // What the card streamed goes in first (#2851), so the turn reads
+        // question, answer, verdict, the order the user saw.
+        if let Err(e) = messages.record_stopped_turn(session_id, self.answer).await {
+            errors.push(format!("turn stopped row: {e}"));
+        }
+        // The recovery ticket goes with it (#2850): the turn is over because
+        // the user ended it, so no later boot may replay it.
+        let pending = crate::db::repository::PendingRequestRepository::new(db.pool().clone());
+        if let Err(e) = pending.delete_session(session_id).await {
+            errors.push(format!("turn stopped recovery row: {e}"));
+        }
+        Ok(errors)
+    }
+}
+
 /// Generate the personalized brain files from the onboarding notes.
 ///
 /// A port of the terminal's `generate_brain_files_background`: one completion
@@ -597,6 +639,7 @@ ops! {
     SwitchModel,
     ScopeCount,
     UndoLastTurn,
+    RecordTurnStopped,
     BrainGenerate,
     ApplyCd,
     TextCommand,
@@ -867,6 +910,48 @@ mod tests {
                 ScopeCount {
                     pair: "p/new".into()
                 }
+            );
+        }
+
+        #[tokio::test]
+        async fn record_turn_stopped_has_parity() {
+            let gateway = Gateway::start().await;
+            let chat = session(&gateway).await;
+            let messages = messages(&gateway).await;
+            for (seq, (role, content)) in [("user", "question"), ("assistant", "")]
+                .into_iter()
+                .enumerate()
+            {
+                let row = Message::new(chat.id, role.into(), content.into(), seq as i32 + 1);
+                messages.create(&row).await.expect("message");
+            }
+            let answer = parity!(
+                gateway,
+                RecordTurnStopped {
+                    session_id: chat.id,
+                    answer: Some("half an answer".into()),
+                }
+            );
+            assert_eq!(answer, serde_json::json!({ "Ok": [] }));
+            let rows = messages.find_by_session(chat.id).await.expect("read");
+            assert!(
+                rows.iter()
+                    .any(|row| row.role == "assistant" && row.content.contains("half an answer")),
+                "the streamed answer reached the ledger: {rows:?}"
+            );
+
+            let before = messages.find_by_session(chat.id).await.expect("read").len();
+            forbidden!(
+                gateway,
+                RecordTurnStopped {
+                    session_id: chat.id,
+                    answer: None,
+                }
+            );
+            assert_eq!(
+                messages.find_by_session(chat.id).await.expect("read").len(),
+                before,
+                "a refused record wrote nothing"
             );
         }
 

@@ -1867,9 +1867,9 @@ impl Dashboard {
                     // future that would have written it is gone, so this call is
                     // the only thing that can put it in the ledger, and the
                     // reload after the stop reads nothing else.
-                    if let Some(bridge) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         agent_bridge::spawn_record_turn_stopped(
-                            bridge.service.clone(),
+                            self.backend.clone(),
                             session,
                             stopped_answer,
                         );
