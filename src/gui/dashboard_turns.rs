@@ -1610,6 +1610,29 @@ impl Dashboard {
                 ) => {
                     self.turn.live.strip_streamed(bytes);
                 }
+                // A retry ladder is silent by design (#3152): `utils::retry`
+                // spends its whole budget on a dead link and then walks the
+                // fallback chain, so the user watches a counting clock for
+                // minutes with no word about the network. The terminal and
+                // every channel already print this line. The window's own turn
+                // folds its events here arm by arm rather than through
+                // `fold_live`, so it needs the arm too, or the one card the
+                // user is actually looking at stays the silent one.
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::RetryAttempt {
+                        attempt,
+                        max,
+                        reason,
+                    },
+                    _,
+                ) => {
+                    self.turn
+                        .live
+                        .notices
+                        .push(crate::live_fold::retry_notice(attempt, max, &reason));
+                    cx.notify();
+                }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet. The follow-up offer is already

@@ -58,6 +58,20 @@ pub(crate) fn rail_activity_line(live: &transcript::LiveTurn) -> String {
     parts.join(" \u{b7} ")
 }
 
+/// The line a card shows while a send is being retried (#3152).
+///
+/// The wording is `send_label`'s, the same function the terminal and every
+/// channel print, so a retry reads the same wherever it is seen. It is built in
+/// one place because the window's own turn folds its events arm by arm instead
+/// of through `fold_live`, and two copies of a format string drift.
+pub(crate) fn retry_notice(attempt: u32, max: u32, reason: &str) -> String {
+    format!(
+        "{}: {}",
+        opencrabs::utils::retry::send_label(attempt, max),
+        reason
+    )
+}
+
 /// Fold one progress event into a live card.
 ///
 /// Free because two owners draw the same card: a split leaf's pane (#2614) and
@@ -140,6 +154,22 @@ pub(crate) fn fold_live(
         // has to drop it too, or the working-out that just got retried stays on
         // screen as the answer until the turn settles (#3021).
         ProgressEvent::StripStreamedContent { bytes, .. } => live.strip_streamed(bytes),
+        // A retry ladder is silent by design (#3152): `utils::retry` does not
+        // fast-fail a dead link, it spends the whole budget and then walks the
+        // fallback chain, so the user stares at a counting clock with no word
+        // about the network. The terminal and every channel already print this
+        // line; the GUI was the one surface that dropped it.
+        //
+        // This arm covers a split leaf's pane, a parked turn and a rail card,
+        // because they all fold through here. The window's own turn does not:
+        // it folds its events arm by arm in `dashboard_turns`, so it carries the
+        // same notice in its own arm rather than silently keeping the old
+        // behaviour on the one card the user is looking at.
+        ProgressEvent::RetryAttempt {
+            attempt,
+            max,
+            reason,
+        } => live.notices.push(retry_notice(attempt, max, &reason)),
         _ => {}
     }
 }
