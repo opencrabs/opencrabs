@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::db::repository::HintDismissalRepository;
 use crate::ui_core::hints::DISMISS_DAYS;
 
+use super::door::{self, Door};
 use super::{BackendError, Ctx, Op, Scope};
 
 /// The hint ids hidden right now (#3120, #3121).
@@ -263,10 +264,61 @@ fn on_config_thread<T: Send>(
     })
 }
 
+/// The text a failed config read or write answers with, by the door it
+/// came in at.
+///
+/// The local door keeps the error's own text, as the window has always shown
+/// it. A TOML parse error quotes the offending line, and in `keys.toml` that
+/// line can be a key, so the remote door answers only that the config could
+/// not be `verb` (read, written) and logs where it broke: the file and the
+/// line and column, never the text.
+pub(super) fn config_failure(name: &str, door: Door, verb: &str, e: &anyhow::Error) -> String {
+    match door {
+        Door::Local => format!("{e}"),
+        Door::Remote => {
+            tracing::warn!(
+                "{name}: the config could not be {verb} for a remote caller ({})",
+                where_it_broke(e)
+            );
+            format!("the crab's config could not be {verb}; see the crab's log")
+        }
+    }
+}
+
+/// The config files `e` names and the line and column of its parse error,
+/// when it has them: what a log may say about a config failure. Nothing
+/// else of the error's text is kept, since its excerpt can hold a key.
+fn where_it_broke(e: &anyhow::Error) -> String {
+    let text = format!("{e:#}");
+    let mut parts: Vec<String> = ["keys.toml", "config.toml", "opencrabs.toml"]
+        .into_iter()
+        .filter(|file| text.contains(file))
+        .map(str::to_string)
+        .collect();
+    let position = text
+        .split_once("TOML parse error at line ")
+        .and_then(|(_, rest)| rest.lines().next())
+        .and_then(|first| first.split_once(", column "))
+        .filter(|(line, column)| {
+            [line, column]
+                .iter()
+                .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        });
+    if let Some((line, column)) = position {
+        parts.push(format!("line {line}, column {column}"));
+    }
+    if parts.is_empty() {
+        "no file or position in the error".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
 /// The crab's settings: every [`SETTABLE`] value and every credential slot,
 /// read fresh from its config so a hand edit shows up. Never a secret's
 /// value: a credential says only whether a key is configured. A config that
-/// does not load is the `Err`, carrying the load's own text.
+/// does not load is the `Err`, carrying the load's own text at the local
+/// door and [`config_failure`]'s at the remote one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettingsLoad {}
 
@@ -282,7 +334,8 @@ impl Op for SettingsLoad {
                 credentials: credentials(&config),
             })
         })?;
-        loaded.map_err(|e| BackendError::Failed(format!("{e}")))
+        let door = door::current();
+        loaded.map_err(|e| BackendError::Failed(config_failure(Self::NAME, door, "read", &e)))
     }
 }
 
@@ -346,6 +399,7 @@ impl Op for SettingWrite {
             key,
             write,
         } = self;
+        let door = door::current();
         let written = on_config_thread(Self::NAME, move || match write {
             Write::Set(v) => Config::write_key(&section, &key, &v),
             Write::SetString(v) => {
@@ -353,7 +407,7 @@ impl Op for SettingWrite {
             }
             Write::Remove => Config::remove_key(&section, &key).map(|()| String::new()),
         })?;
-        written.map_err(|e| BackendError::Failed(format!("{e}")))
+        written.map_err(|e| BackendError::Failed(config_failure(Self::NAME, door, "written", &e)))
     }
 }
 
@@ -392,8 +446,10 @@ impl Op for CredentialWrite {
             )));
         }
         let CredentialWrite { section, api_key } = self;
+        let door = door::current();
         on_config_thread(Self::NAME, move || {
-            let config = Config::load().map_err(|e| BackendError::Failed(format!("{e}")))?;
+            let config = Config::load()
+                .map_err(|e| BackendError::Failed(config_failure(Self::NAME, door, "read", &e)))?;
             if !credentials(&config).iter().any(|c| c.section == section) {
                 return Err(BackendError::BadParams(format!(
                     "{}: {section} is not a credential slot",
@@ -401,7 +457,7 @@ impl Op for CredentialWrite {
                 )));
             }
             Config::write_keys_key(&section, "api_key", &api_key)
-                .map_err(|e| BackendError::Failed(format!("{e}")))
+                .map_err(|e| BackendError::Failed(config_failure(Self::NAME, door, "written", &e)))
         })?
     }
 }
@@ -704,6 +760,67 @@ mod tests {
             }
         );
         assert!(!keys_text(&gateway).contains("sk-refused"));
+    }
+
+    /// A keys file a hand edit broke: the unterminated line carries the key.
+    const BROKEN_KEYS: &str = "[providers.anthropic]\napi_key = \"sk-partido\n";
+
+    fn broken_keys_error() -> anyhow::Error {
+        let parsed = BROKEN_KEYS.parse::<toml_edit::DocumentMut>();
+        anyhow::Error::from(parsed.expect_err("the keys file is broken"))
+            .context("Failed to parse config file: \"/tmp/crab/keys.toml\"")
+    }
+
+    #[test]
+    fn a_config_failure_reads_its_own_text_locally_and_nothing_of_it_remotely() {
+        let e = broken_keys_error();
+        assert_eq!(
+            config_failure("settings.load", Door::Local, "read", &e),
+            format!("{e}"),
+            "the local door keeps the text it always had"
+        );
+        let remote = config_failure("settings.load", Door::Remote, "read", &e);
+        assert_eq!(
+            remote,
+            "the crab's config could not be read; see the crab's log"
+        );
+        assert!(!remote.contains("sk-partido"), "{remote}");
+    }
+
+    #[test]
+    fn the_log_line_of_a_config_failure_names_the_file_and_position_only() {
+        let logged = where_it_broke(&broken_keys_error());
+        assert!(!logged.contains("sk-partido"), "{logged}");
+        assert!(!logged.contains("api_key"), "{logged}");
+        assert!(logged.starts_with("keys.toml, line "), "{logged}");
+        assert!(logged.contains(", column "), "{logged}");
+        assert_eq!(
+            where_it_broke(&anyhow::anyhow!("sk-partido")),
+            "no file or position in the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_keys_file_never_reaches_a_remote_caller() {
+        let gateway = seeded_gateway(BROKEN_KEYS).await;
+        let op = CredentialWrite {
+            section: "providers.anthropic".into(),
+            api_key: "sk-novo".into(),
+        };
+
+        let remote = door::remote(gateway.local(op.clone())).await;
+        assert_eq!(
+            remote,
+            Err(BackendError::Failed(
+                "the crab's config could not be written; see the crab's log".into()
+            ))
+        );
+
+        let Err(BackendError::Failed(local)) = gateway.local(op).await else {
+            panic!("a broken keys file fails the write at the local door too");
+        };
+        assert!(local.contains("TOML parse error"), "today's text: {local}");
+        assert_eq!(keys_text(&gateway), BROKEN_KEYS, "neither door wrote");
     }
 
     #[tokio::test]

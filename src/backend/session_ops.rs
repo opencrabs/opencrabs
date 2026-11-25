@@ -636,9 +636,15 @@ impl Op for TextCommand {
                         }
                         CommandAnswer::ApprovalSet
                     }
-                    Err(e) => {
-                        CommandAnswer::Line(format!("/approve could not write the policy: {e}"))
-                    }
+                    Err(e) => CommandAnswer::Line(format!(
+                        "/approve could not write the policy: {}",
+                        super::settings::config_failure(
+                            Self::NAME,
+                            super::door::current(),
+                            "written",
+                            &e
+                        )
+                    )),
                 }
             }
         })
