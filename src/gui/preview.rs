@@ -571,6 +571,7 @@ pub struct DocumentBody<'a> {
 /// What the shell holds for this file. `actions` is the shared button row, so
 /// the caller mints the listeners and this only decides the content. A message
 /// preview passes `None`: it has no file to open or reveal (#3053).
+#[allow(clippy::too_many_arguments)] // the backend joins the seven the shell already took
 pub fn body(
     backend: &Backend,
     preview: &Preview,
