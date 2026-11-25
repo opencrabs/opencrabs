@@ -1081,14 +1081,19 @@ jobs:
   # cannot outlive the check.
   gui-boot:
     name: GUI boot (Linux, advisory)
-    # No `needs: [lint, audit]` ordering trap here: this job is advisory, so
-    # queuing it behind the test legs would only delay a signal that blocks
-    # nothing. gui-filter has already decided whether it is worth running.
-    needs: [gui-filter]
+    # This job is advisory, so it does not wait on the test legs: queuing it
+    # behind them would only delay a signal that blocks nothing. It does wait
+    # on the two cheap verdicts, because lint and audit each finish in minutes
+    # and a red one means the tree either does not compile or carries an
+    # unrecorded byte-slice site. Without that gate a red fork PR still paid
+    # the full 60 minute GUI build for nothing (#3137).
+    needs: [gui-filter, lint, audit]
     if: >-
       always() &&
       needs.gui-filter.result == 'success' &&
-      needs.gui-filter.outputs.run == 'true'
+      needs.gui-filter.outputs.run == 'true' &&
+      needs.lint.result == 'success' &&
+      needs.audit.result == 'success'
     # ubuntu-24.04 rather than ubuntu-latest: 24.04 is the image release.yml
     # builds the Linux artifacts on (glibc floor 2.39), so the client is booted
     # on the distribution it was linked against.
