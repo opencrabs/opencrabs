@@ -593,7 +593,7 @@ fn a_cd_to_a_missing_folder_is_refused_by_the_crab_in_the_windows_words() {
     assert_eq!(
         reply,
         Err(BackendError::Failed(
-            crate::text_commands::cd_not_a_directory("/nao/existe")
+            opencrabs::backend::session_ops::cd_not_a_directory("/nao/existe")
         ))
     );
 }

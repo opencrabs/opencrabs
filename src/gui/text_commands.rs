@@ -213,11 +213,6 @@ pub fn cd_reply(path: &str) -> String {
     format!("Working directory: {path}")
 }
 
-/// What `/cd` says when the argument is not a directory.
-pub fn cd_not_a_directory(arg: &str) -> String {
-    format!("Not a directory: {arg}")
-}
-
 /// The RTK statistics block.
 pub fn rtk_reply(succeeded: bool, stdout: &str, stderr: &str) -> String {
     let body = if succeeded {
@@ -331,6 +326,9 @@ mod tests {
     #[test]
     fn text_command_cd_reports_the_directory() {
         assert_eq!(cd_reply("/opt/x"), "Working directory: /opt/x");
-        assert_eq!(cd_not_a_directory("nope"), "Not a directory: nope");
+        assert_eq!(
+            opencrabs::backend::session_ops::cd_not_a_directory("nope"),
+            "Not a directory: nope"
+        );
     }
 }
