@@ -193,8 +193,8 @@ pub(crate) fn options_strip(
     buttons
 }
 
-/// Whether the crab the window holds has a speech-to-text engine, which
-/// decides what the composer may promise (#3044).
+/// Whether a speech-to-text engine is configured on the crab the window
+/// holds, which decides what the composer may promise (#3044).
 ///
 /// The crab's answer to `voice.status`, never this machine's config: a window
 /// looking at another crab records only when that crab can hear the take. The
