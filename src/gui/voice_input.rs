@@ -22,31 +22,44 @@
 //! (no device, no permission, a format we cannot read, a provider chain with
 //! nothing in it). Nothing here writes config.
 //!
-//! A recording that comes back with words is saved as an OGG/Opus voice note
-//! (#3044). That is the file the message carries, the same artifact a channel
-//! would have delivered, so the row can play back what was actually said
-//! instead of only the transcript. The save happens after the transcription,
-//! not before: a recording nobody could transcribe becomes no message, and a
-//! file for it would be an orphan.
+//! Hearing the take is the crab's (`voice.transcribe`): its config picks the
+//! engine and its keys pay for it, so a window looking at another crab never
+//! transcribes with this machine's keys. The take goes up as the OGG/Opus voice
+//! note (#3044) the message carries, the same artifact a channel would have
+//! delivered, and the crab keeps it only after it heard words in it: a
+//! recording nobody could transcribe becomes no message, and a file for it
+//! would be an orphan.
 //!
-//! Where it is saved depends on the conversation (#3114). A session that
-//! belongs to a project keeps its clips in that project's attachments folder,
-//! beside every other file the conversation produced, so a project's audio
-//! travels with the project instead of piling up in one profile-wide `voice/`
-//! drawer. Only a session with no project falls back to `<profile home>/voice/`.
+//! Where the crab keeps it depends on the conversation (#3114), on the crab's
+//! own ledger: a session that belongs to a project keeps its clips in that
+//! project's attachments folder, and only a session with no project falls back
+//! to `<profile home>/voice/`. The marker on the sent row names the path the
+//! crab wrote; the window previews its own copy of it (`Backend::localize`).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
-use opencrabs::config::Config;
+use opencrabs::backend::Op as _;
+use opencrabs::backend::voice::{
+    Heard, RECORDING_PREFIX, VoiceReady, VoiceStatus, VoiceTranscribe,
+};
 use uuid::Uuid;
 
+use crate::backend_glue::Backend;
 use crate::logging;
+
+/// The fallback folder for a take: `<profile home>/voice/`, beside `memory/`
+/// and `logs/` (#3114). The crab's rule, named here because the window reads
+/// a take back out of it.
+pub(crate) use opencrabs::backend::voice::VOICE_DIR;
 
 /// The rate every speech endpoint and the bundled whisper accept.
 ///
@@ -62,29 +75,6 @@ pub(crate) const TARGET_RATE: u32 = 16_000;
 /// samples faster than real time cannot grow it without bound. Two minutes is
 /// far past any spoken turn and keeps the worst case at ~8 MB of f32.
 const MAX_SECONDS: u32 = 120;
-
-/// The fallback folder for a take: `<profile home>/voice/`, beside `memory/`
-/// and `logs/` (#3114).
-///
-/// Only a session with no project writes here. A session that belongs to one
-/// keeps its clips in that project's attachments folder, where the rest of its
-/// files live, so the audio is found with the work it belongs to.
-pub(crate) const VOICE_DIR: &str = "voice";
-
-/// What a recording is named, inside whichever folder it lands in.
-///
-/// The prefix is the contract, not decoration: a spoken reply is saved beside
-/// it, and only a `voice-*` file is a message whose words came out of the
-/// microphone. Without it the reply's own clip would read as a recording and
-/// its marker would be taken back out of text the user actually typed.
-const RECORDING_PREFIX: &str = "voice-";
-
-/// What a spoken reply is named, inside the same folder.
-///
-/// Deliberately not [`RECORDING_PREFIX`]: the reply is the agent's own voice,
-/// and a turn that began with typing must never be mistaken for one the
-/// microphone heard when the ledger is read back.
-const REPLY_PREFIX: &str = "reply-";
 
 /// How often the capture thread checks whether it should stop.
 const TICK: Duration = Duration::from_millis(20);
@@ -123,14 +113,26 @@ pub(crate) struct Recording {
 
 /// A finished recording with the words it carried (#3044).
 ///
-/// `audio` is the saved voice note, and `None` means the save failed: the
-/// transcript is still worth sending, so a missing clip never costs the user
-/// their message. `seconds` is how long the take ran, measured from the samples
-/// rather than the clock, so it is the length of the clip the user will hear.
+/// `audio` is the kept voice note, and `None` means the crab could not keep
+/// it: the transcript is still worth sending, so a missing clip never costs
+/// the user their message. `seconds` is how long the take ran, measured from
+/// the samples rather than the clock, so it is the length of the clip the user
+/// will hear.
 pub(crate) struct Spoken {
     pub(crate) text: String,
-    pub(crate) audio: Option<PathBuf>,
+    pub(crate) audio: Option<Clip>,
     pub(crate) seconds: f32,
+}
+
+/// A kept take, by the two names it has.
+///
+/// `on_crab` is the path the crab wrote, the one the sent row's marker carries
+/// so the crab's ledger only ever names its own disk. `here` is the window's
+/// copy of it, what the preview plays: the same path for this process's own
+/// crab, the blob cache's copy for a crab on another machine.
+pub(crate) struct Clip {
+    pub(crate) on_crab: PathBuf,
+    pub(crate) here: PathBuf,
 }
 
 /// One recording in flight.
@@ -229,18 +231,17 @@ impl Drop for Capture {
 
 /// One transcription in flight.
 ///
-/// The chain is `channels::voice::transcribe`, the function voice notes already
-/// go through: box STT, an [OI]-compatible endpoint, Groq, then the bundled
-/// whisper. Reading `Config::current()` here instead of a config captured at
-/// boot is what makes the window inherit whatever the terminal and the channels
-/// are set to, including an edit the reloader applied a moment ago.
+/// The chain is the crab's (`voice.transcribe`): box STT, an [OI]-compatible
+/// endpoint, Groq, then the bundled whisper, read from the crab's config when
+/// the take arrives, so the window inherits whatever the crab is set to,
+/// including an edit its reloader applied a moment ago.
 pub(crate) struct Transcription {
     result: Receiver<Result<Spoken, String>>,
 }
 
 impl Transcription {
-    /// Send a finished recording through the configured chain, off the UI
-    /// thread, and save the voice note beside the words.
+    /// Send a finished recording to the crab the window holds, off the UI
+    /// thread, and have it keep the voice note beside the words.
     ///
     /// Returns immediately. The UI keeps polling the same 50 ms tick it uses
     /// for the microphone, so the answer lands without a second timer.
@@ -248,9 +249,11 @@ impl Transcription {
     /// The session travels with the job because the clip's folder is decided by
     /// the conversation it belongs to (#3114): a project session keeps its take
     /// with the project, and only a session with no project falls back to the
-    /// profile's `voice/`.
+    /// profile's `voice/`. The crab is the one held when the take ends, so a
+    /// swap while the words are being made cannot send the take elsewhere.
     pub(crate) fn start(recording: Recording, session: Option<Uuid>) -> Self {
-        Self::spawn(move || transcribe(recording, session))
+        let crab = held_crab();
+        Self::spawn(move || transcribe(crab, recording, session))
     }
 
     /// The same worker, told not to keep the audio (#3044).
@@ -259,7 +262,8 @@ impl Transcription {
     /// the field, so a clip nobody will send would be an orphan file in the
     /// profile's `voice/` folder the moment the take finished.
     pub(crate) fn start_for_text(recording: Recording) -> Self {
-        Self::spawn(move || transcribe_words(recording))
+        let crab = held_crab();
+        Self::spawn(move || transcribe_words(crab, recording))
     }
 
     /// One thread, one answer. Both entry points share it so the window has a
@@ -289,53 +293,239 @@ impl Transcription {
     }
 }
 
-/// Transcribe one take, then keep its audio as a voice note.
+/// Have the crab hear one take and keep its audio as a voice note.
 ///
-/// The order matters: a take with no words becomes no message, so saving first
-/// would leave a file nothing points at. A save that fails is logged and the
-/// words still go out, because the transcript is what the agent answers.
+/// The crab keeps the clip only after it heard words in it, so a take with no
+/// words leaves no file. A clip the crab could not keep is logged on the crab
+/// and the words still come back, because the transcript is what the agent
+/// answers.
 ///
 /// The session is only needed for where the clip goes (#3114): its project's
 /// attachments folder when it has one, the profile's `voice/` otherwise.
-fn transcribe(recording: Recording, session: Option<Uuid>) -> Result<Spoken, String> {
+pub(crate) fn transcribe(
+    crab: Option<Backend>,
+    recording: Recording,
+    session: Option<Uuid>,
+) -> Result<Spoken, String> {
+    let crab = crab.ok_or_else(no_crab)?;
     let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
-    let (text, language) = transcribe_wav(recording.wav)?;
-    let audio = match save_voice_note(&recording.pcm, session) {
-        Ok(path) => Some(path),
-        Err(reason) => {
-            logging::error(&format!("voice capture: {reason}"));
-            None
-        }
-    };
+    // The take goes up as the voice note it becomes. One that would not
+    // encode is still heard from its WAV, and keeps no clip.
+    let (take, keep) =
+        match opencrabs::channels::voice::opus::encode_ogg_opus(&recording.pcm, TARGET_RATE) {
+            Ok(ogg) => (ogg, true),
+            Err(e) => {
+                logging::error(&format!(
+                    "voice capture: the recording would not encode as a voice note: {e:#}"
+                ));
+                (recording.wav, false)
+            }
+        };
+    let heard = hear(
+        &crab,
+        VoiceTranscribe {
+            session_id: session,
+            ogg_base64: BASE64.encode(&take),
+            keep,
+        },
+    )?;
     logging::info(&format!(
         "voice capture: {seconds:.1}s heard as {}",
-        language.unwrap_or_else(|| "an unreported language".to_string()),
+        heard
+            .language
+            .as_deref()
+            .unwrap_or("an unreported language"),
+    ));
+    Ok(landed(&crab, heard, seconds))
+}
+
+/// Have the crab hear one take and keep nothing but the words (#3044).
+///
+/// The Seeker's own microphone. A search query is not a message, so there is
+/// no row to carry a clip and no reason to keep one: keeping it would leave a
+/// recording on disk that nothing points at, which is the exact orphan the
+/// keep-last order exists to avoid. The WAV goes up as it is, since no clip
+/// is made from it.
+fn transcribe_words(crab: Option<Backend>, recording: Recording) -> Result<Spoken, String> {
+    let crab = crab.ok_or_else(no_crab)?;
+    let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
+    let heard = hear(
+        &crab,
+        VoiceTranscribe {
+            session_id: None,
+            ogg_base64: BASE64.encode(&recording.wav),
+            keep: false,
+        },
+    )?;
+    logging::info(&format!(
+        "voice capture: {seconds:.1}s heard as {}, kept as text only",
+        heard
+            .language
+            .as_deref()
+            .unwrap_or("an unreported language"),
     ));
     Ok(Spoken {
-        text,
-        audio,
+        text: heard.text,
+        audio: None,
         seconds,
     })
 }
 
-/// Transcribe one take and keep nothing but the words (#3044).
-///
-/// The Seeker's own microphone. A search query is not a message, so there is
-/// no row to carry a clip and no reason to write one: saving here would leave
-/// a recording on disk that nothing points at, which is the exact orphan the
-/// save-last order exists to avoid.
-fn transcribe_words(recording: Recording) -> Result<Spoken, String> {
-    let seconds = recording.pcm.len() as f32 / TARGET_RATE as f32;
-    let (text, language) = transcribe_wav(recording.wav)?;
-    logging::info(&format!(
-        "voice capture: {seconds:.1}s heard as {}, kept as text only",
-        language.unwrap_or_else(|| "an unreported language".to_string()),
-    ));
-    Ok(Spoken {
-        text,
-        audio: None,
+/// Ask the crab to hear `take`, waiting on this worker thread. The reply is
+/// a oneshot, which needs no reactor.
+fn hear(crab: &Backend, take: VoiceTranscribe) -> Result<Heard, String> {
+    futures::executor::block_on(crab.call(take))
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+/// The take as the composer holds it: the crab's words, and the clip by the
+/// path the crab wrote and by the window's copy of it. The crab's path is
+/// recorded as a take, so the send path and the row know it for one whatever
+/// disk it is on.
+pub(crate) fn landed(crab: &Backend, heard: Heard, seconds: f32) -> Spoken {
+    let audio = heard.clip.map(|clip| {
+        let on_crab = PathBuf::from(clip.path);
+        remember_take(&on_crab);
+        logging::info(&format!(
+            "voice capture: the crab kept {} bytes of ogg at {}",
+            clip.size.unwrap_or(0),
+            on_crab.display()
+        ));
+        Clip {
+            here: crab.localize(&on_crab),
+            on_crab,
+        }
+    });
+    Spoken {
+        text: heard.text,
+        audio,
         seconds,
-    })
+    }
+}
+
+/// What a take answers when the window holds no crab yet.
+fn no_crab() -> String {
+    "the window is not holding a crab yet: try the take again in a moment".to_string()
+}
+
+/// The crab the window's voice speaks to, and what it said it can do.
+///
+/// The microphone and the hint promise what the crab the window holds can
+/// do, never what this machine's config says (P4). The dashboard hands its
+/// backend in on every tick ([`hold`]); a swap is a new `epoch`, which drops
+/// the last crab's answer and asks the new one. The local crab answers from
+/// its own config on every read, as `voice_ready` always did, so an edit the
+/// reloader applied shows at once.
+pub(crate) struct Held {
+    epoch: u64,
+    crab: Backend,
+    ready: Option<VoiceReady>,
+}
+
+impl Held {
+    /// The crab at `epoch`, with nothing heard from it yet.
+    pub(crate) fn new(crab: Backend, epoch: u64) -> Self {
+        Self {
+            epoch,
+            crab,
+            ready: None,
+        }
+    }
+
+    /// Keep the crab's answer to `voice.status`, unless it is for a crab the
+    /// window has since left.
+    pub(crate) fn answer(&mut self, epoch: u64, ready: VoiceReady) {
+        if self.epoch == epoch {
+            self.ready = Some(ready);
+        }
+    }
+
+    /// Whether the crab can hear a take. A crab on another machine that has
+    /// not answered yet cannot: the microphone is not promised on a guess.
+    pub(crate) fn stt_ready(&self) -> bool {
+        match &self.crab {
+            Backend::Local(ctx) => futures::executor::block_on(VoiceStatus {}.run(ctx))
+                .is_ok_and(|ready| ready.stt_enabled),
+            _ => self.ready.is_some_and(|ready| ready.stt_enabled),
+        }
+    }
+}
+
+static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+fn held() -> MutexGuard<'static, Option<Held>> {
+    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The window holds `crab`, as of swap `epoch`. Cheap on every tick: only a
+/// new epoch replaces the crab and asks a remote one what it can do.
+pub(crate) fn hold(crab: &Backend, epoch: u64) {
+    let mut held = held();
+    if held.as_ref().is_some_and(|held| held.epoch == epoch) {
+        return;
+    }
+    *held = Some(Held::new(crab.clone(), epoch));
+    drop(held);
+    // The local crab answers from its config on every read.
+    if matches!(crab, Backend::Local(_)) {
+        return;
+    }
+    let spawned = crab.spawn(VoiceStatus {}, move |reply| match reply {
+        Ok(ready) => {
+            if let Some(held) = self::held().as_mut() {
+                held.answer(epoch, ready);
+            }
+        }
+        Err(e) => logging::info(&format!(
+            "voice: the crab's voice status: {}",
+            e.into_message()
+        )),
+    });
+    if let Err(e) = spawned {
+        logging::info(&format!("voice: the crab's voice status: {e}"));
+    }
+}
+
+/// The crab the window holds, if it holds one yet.
+fn held_crab() -> Option<Backend> {
+    held().as_ref().map(|held| held.crab.clone())
+}
+
+/// Whether the crab the window holds can hear a take (`voice.status`).
+pub(crate) fn stt_ready() -> bool {
+    held().as_ref().is_some_and(Held::stt_ready)
+}
+
+/// The window's copy of the crab's clip at `path`, for a player to open:
+/// the same path for this process's own crab, the blob cache's copy for a
+/// crab on another machine. A window that holds no crab yet opens `path`.
+pub(crate) fn here(path: &Path) -> PathBuf {
+    match held_crab() {
+        Some(crab) => crab.localize(path),
+        None => path.to_path_buf(),
+    }
+}
+
+/// The takes the crab kept for this window, by the crab's path.
+///
+/// A crab on another machine writes under its own home, which this machine
+/// cannot recognise by folder; the path it answered is a take all the same.
+static TAKES: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+
+fn remember_take(path: &Path) {
+    TAKES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashSet::new)
+        .insert(path.to_path_buf());
+}
+
+fn kept_take(path: &Path) -> bool {
+    TAKES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|takes| takes.contains(path))
 }
 
 /// Whether a path is one of the window's own recordings (#3044).
@@ -352,6 +542,11 @@ fn transcribe_words(recording: Recording) -> Result<Spoken, String> {
 /// actually identifies it, so a file named `voice-<stamp>.ogg` anywhere under
 /// the profile's projects tree is a take, and one outside both homes is not.
 pub(crate) fn is_recording(path: &Path) -> bool {
+    // A take a crab on another machine kept for this window sits under that
+    // crab's home, which no folder rule here can name.
+    if kept_take(path) {
+        return true;
+    }
     let profile = opencrabs::config::opencrabs_home();
     let in_voice = path.parent() == Some(profile.join(VOICE_DIR).as_path());
     let in_projects = path.starts_with(opencrabs::services::ProjectService::projects_dir());
@@ -361,136 +556,6 @@ pub(crate) fn is_recording(path: &Path) -> bool {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(RECORDING_PREFIX))
-}
-
-/// The folder a clip belongs in (#3114).
-///
-/// The session's project attachments folder when the conversation has a
-/// project, so its audio sits with the rest of the work. A session with no
-/// project, or one whose project cannot be read, falls back to the profile's
-/// `voice/`: a recording that nobody can transcribe is no message, but a take
-/// that did come back with words must still find a home.
-fn clip_dir(session: Option<Uuid>) -> PathBuf {
-    project_clip_dir(session).unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))
-}
-
-/// `projects/<slug>/files/` for the session's project, if it has one.
-///
-/// `FileService::project_files_dir` is the same resolver every other attachment
-/// goes through, so a clip lands exactly where a picked file would. It is async
-/// and needs a pool, and this runs on a capture thread with no reactor, so it
-/// drives one of its own. `global_pool()` is the process's open pool, which
-/// keeps this from connecting a second time to the same file.
-fn project_clip_dir(session: Option<Uuid>) -> Option<PathBuf> {
-    let session = session?;
-    let pool = opencrabs::db::global_pool().cloned()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    runtime.block_on(async move {
-        opencrabs::services::FileService::new(opencrabs::services::ServiceContext::new(pool))
-            .project_files_dir(session)
-            .await
-    })
-}
-
-/// Write one take into its folder as an OGG/Opus file.
-///
-/// The same container the channels send, so the clip in the transcript is the
-/// artifact a recipient of a voice note would have received. Named by the
-/// millisecond it was saved: two recordings in one second would otherwise
-/// overwrite each other, and the older message would start playing the newer
-/// audio.
-fn save_voice_note(pcm: &[i16], session: Option<Uuid>) -> Result<PathBuf, String> {
-    let ogg = opencrabs::channels::voice::opus::encode_ogg_opus(pcm, TARGET_RATE)
-        .map_err(|e| format!("the recording would not encode as a voice note: {e:#}"))?;
-    let path = write_clip(&ogg, RECORDING_PREFIX, session)?;
-    logging::info(&format!(
-        "voice capture: saved {} bytes of ogg to {}",
-        ogg.len(),
-        path.display()
-    ));
-    Ok(path)
-}
-
-/// Keep one synthesized answer beside the recordings, for the turn that began
-/// as one (#3044).
-///
-/// `synthesize` already returns OGG/Opus, so the bytes are written as they
-/// arrive: re-encoding a finished clip would only cost time and quality. The
-/// name does not start with [`RECORDING_PREFIX`], so a spoken reply is never
-/// mistaken for something the microphone heard.
-///
-/// The reply follows its conversation into the project folder too (#3114): a
-/// spoken answer belongs with the take that asked for it, not in a profile-wide
-/// drawer the project never sees.
-pub(crate) fn save_reply_audio(ogg: &[u8], session: Option<Uuid>) -> Result<PathBuf, String> {
-    let path = write_clip(ogg, REPLY_PREFIX, session)?;
-    logging::info(&format!(
-        "voice reply: saved {} bytes of ogg to {}",
-        ogg.len(),
-        path.display()
-    ));
-    Ok(path)
-}
-
-/// Write one finished clip into the folder its conversation calls home, named
-/// for the millisecond it was saved.
-///
-/// Two recordings inside one second would otherwise overwrite each other, and
-/// the older message would start playing the newer audio.
-fn write_clip(bytes: &[u8], prefix: &str, session: Option<Uuid>) -> Result<PathBuf, String> {
-    let dir = clip_dir(session);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("the voice folder would not open ({}): {e}", dir.display()))?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or(0);
-    let path = dir.join(format!("{prefix}{stamp}.ogg"));
-    std::fs::write(&path, bytes)
-        .map_err(|e| format!("the clip would not save ({}): {e}", path.display()))?;
-    Ok(path)
-}
-
-fn transcribe_wav(wav: Vec<u8>) -> Result<(String, Option<String>), String> {
-    let config = Config::current();
-    let voice = config.voice_config();
-    if !voice.stt_enabled {
-        return Err(
-            "no speech-to-text provider is configured yet: add one in Settings, and the microphone has somewhere to send the audio"
-                .to_string(),
-        );
-    }
-
-    // A runtime of its own: this is a capture thread with no reactor, and every
-    // remote provider in the chain is a POST. `enable_all` covers the timers
-    // the HTTP client arms for its own timeouts.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("the transcription runtime would not start: {e}"))?;
-    let heard = runtime
-        .block_on(
-            async move { opencrabs::channels::voice::transcribe_with_language(wav, &voice).await },
-        )
-        .map_err(|e| format!("{e:#}"))?;
-    let (text, language) = heard;
-
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err(
-            "the transcription came back empty: check the microphone level and try again"
-                .to_string(),
-        );
-    }
-    logging::info(&format!(
-        "voice capture: transcribed {} character(s) in {}",
-        text.chars().count(),
-        language.as_deref().unwrap_or("an unreported language"),
-    ));
-    Ok((text, language))
 }
 
 /// The stack the transcription thread runs on.

@@ -89,7 +89,8 @@ impl Op for VoiceStatus {
 pub struct VoiceTranscribe {
     /// The conversation the take belongs to, which decides its folder.
     pub session_id: Option<Uuid>,
-    /// The take as OGG/Opus, standard base64.
+    /// The take as OGG/Opus, standard base64. A take that is not kept may
+    /// come as the WAV it was recorded as: the engines read either.
     pub ogg_base64: String,
     /// Whether to keep the take as the message's voice note.
     pub keep: bool,

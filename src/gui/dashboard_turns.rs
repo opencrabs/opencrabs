@@ -979,6 +979,10 @@ impl Dashboard {
         // the file and published it to `Config::current()`, so this tick only
         // re-derives the values the window cached at boot.
         self.drain_config_reloads(cx);
+        // The microphone, the hint and a take speak to the crab the window
+        // holds (P4). A swap is a new epoch, which asks the new crab what it
+        // can hear; every other tick is one comparison.
+        crate::voice_input::hold(&self.backend, self.instance_epoch);
         // Report window focus to the notification transport (#3005). Nothing
         // in the GUI ever called `set_surface_focused`, so the transport read
         // "unknown", and `should_raise` treats unknown as "the user is not

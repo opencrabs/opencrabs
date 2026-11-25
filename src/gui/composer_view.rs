@@ -193,18 +193,19 @@ pub(crate) fn options_strip(
     buttons
 }
 
-/// Whether a speech-to-text engine is configured, which decides what the
-/// composer may promise (#3044).
+/// Whether the crab the window holds has a speech-to-text engine, which
+/// decides what the composer may promise (#3044).
 ///
-/// `Config::current()` is the in-memory mirror behind an `Arc`, so this is a
-/// pointer clone plus the small derivation `voice_config` builds, never a disk
-/// read. It is asked on the UI thread only, the same way the recorder asks
-/// before it sends a take: a window with no engine cannot record, so the hint
-/// names `/voice` instead of a chord that would only print an error.
+/// The crab's answer to `voice.status`, never this machine's config: a window
+/// looking at another crab records only when that crab can hear the take. The
+/// local crab answers from `Config::current()`, the in-memory mirror behind an
+/// `Arc`, so this is never a disk read; a crab on another machine answers from
+/// what it said when the window swapped to it. It is asked on the UI thread
+/// only, the same way the recorder asks before it sends a take: a window with
+/// no engine cannot record, so the hint names `/voice` instead of a chord that
+/// would only print an error.
 pub(crate) fn voice_ready() -> bool {
-    opencrabs::config::Config::current()
-        .voice_config()
-        .stt_enabled
+    crate::voice_input::stt_ready()
 }
 
 /// What the empty field says: the product's prompt plus the keys that act on

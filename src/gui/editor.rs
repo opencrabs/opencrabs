@@ -628,8 +628,13 @@ pub struct Editor {
 pub(crate) struct VoiceDraft {
     /// What the microphone carried.
     pub(crate) text: String,
-    /// The saved clip the marker on the sent row points at.
+    /// The window's copy of the clip, what the preview plays: the crab's
+    /// own path for this process's crab, the blob cache's copy for one on
+    /// another machine.
     pub(crate) clip: PathBuf,
+    /// The clip as the crab kept it, the path the marker on the sent row
+    /// points at, so the crab's ledger only ever names its own disk.
+    pub(crate) on_crab: PathBuf,
     /// How long the take ran, for the preview's own line.
     pub(crate) seconds: f32,
     /// The take's own peaks, so the preview draws the shape that was recorded
@@ -1145,12 +1150,13 @@ impl Editor {
         crate::logging::info(&format!(
             "voice capture: previewing {} character(s) with {} ({:.1}s)",
             spoken.text.chars().count(),
-            clip.display(),
+            clip.on_crab.display(),
             spoken.seconds,
         ));
         self.voice_draft = Some(VoiceDraft {
             text: spoken.text,
-            clip,
+            clip: clip.here,
+            on_crab: clip.on_crab,
             seconds: spoken.seconds,
             levels,
         });
@@ -1966,11 +1972,11 @@ impl Editor {
             }
             payload.push_str(&draft.text);
             payload.push(' ');
-            payload.push_str(&format!("<<AUD:{}>>", draft.clip.display()));
+            payload.push_str(&format!("<<AUD:{}>>", draft.on_crab.display()));
             crate::logging::info(&format!(
                 "voice capture: sent {:.1}s take, {}",
                 draft.seconds,
-                draft.clip.display(),
+                draft.on_crab.display(),
             ));
         }
         self.remember(&text);
