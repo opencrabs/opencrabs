@@ -33,6 +33,7 @@ const VOICE_INPUT: &str = include_str!("../gui/voice_input.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
 const TURN: &str = include_str!("../backend/turn.rs");
+const SPEAK: &str = include_str!("../backend/speak.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 const IMAGE_UTILS: &str = include_str!("../utils/image.rs");
@@ -591,8 +592,14 @@ fn a_spoken_turn_is_answered_aloud() {
         speak.contains("save_reply_audio"),
         "the answer is saved beside the take so the row can play it"
     );
+    // The row is the crab's since L10: the window hands the clip to the
+    // backend's op, which writes the marker.
     assert!(
-        speak.contains("<<AUD:{}>>"),
+        speak.contains("speak::AttachVoiceReply"),
+        "the window puts the clip on the row through the backend"
+    );
+    assert!(
+        SPEAK.contains("<<AUD:{}>>"),
         "the answer row carries its clip the way a recording does"
     );
     assert!(

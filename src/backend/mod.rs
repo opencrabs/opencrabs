@@ -130,6 +130,7 @@ domains! {
     hello,
     blob,
     voice,
+    speak,
     settings,
     models,
     shell,

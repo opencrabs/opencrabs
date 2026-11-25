@@ -863,7 +863,6 @@ pub fn spawn_speak_reply(
     session_id: Uuid,
     text: String,
 ) {
-    let db_path = backend.local_db_path();
     if text.trim().is_empty() {
         return;
     }
@@ -917,46 +916,28 @@ pub fn spawn_speak_reply(
                 return;
             }
         };
-        runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply db connect: {e}"));
-                    return;
-                }
-            };
-            let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
-            // The row this turn wrote. It settles just before this thread
-            // starts, so the last assistant row in the session is the
-            // answer being spoken.
-            let row = match repo.get_last_assistant_message(session_id).await {
-                Ok(row) => row,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply row lookup: {e}"));
-                    return;
-                }
-            };
-            let Some(row) = row else {
-                crate::logging::error("voice reply: the answer row is not in the ledger");
-                return;
-            };
-            let marker = format!("\n\n<<AUD:{}>>", path.display());
-            if let Err(e) = repo.append_content(row.id, &marker).await {
-                crate::logging::error(&format!("voice reply marker: {e}"));
-                return;
-            }
-            crate::logging::info(&format!(
-                "voice reply: {} bytes spoken into {}",
-                audio.len(),
-                path.display()
-            ));
-            let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
-                session: session_id,
-                // The thread is done with it: the marker above is the last
-                // read of the file, so the event takes ownership instead of
-                // leaving a clone to be dropped (#3092).
-                path,
-            });
+        // The row is the crab's: the marker goes on through the backend, so
+        // a remote crab's ledger carries the clip, not this machine's. The
+        // op words each failure as the line this thread used to log.
+        let attach = opencrabs::backend::speak::AttachVoiceReply {
+            session_id,
+            path: path.clone(),
+        };
+        if let Err(e) = runtime.block_on(backend.call(attach)) {
+            crate::logging::error(&e.into_message());
+            return;
+        }
+        crate::logging::info(&format!(
+            "voice reply: {} bytes spoken into {}",
+            audio.len(),
+            path.display()
+        ));
+        let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
+            session: session_id,
+            // The thread is done with it: the log line above is the last
+            // read of the path, so the event takes ownership instead of
+            // leaving a clone to be dropped (#3092).
+            path,
         });
     });
     if let Err(e) = spawned {
