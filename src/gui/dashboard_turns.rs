@@ -2132,8 +2132,11 @@ impl Dashboard {
         &self,
         sessions: Vec<Uuid>,
     ) -> Vec<opencrabs::backend::tasks::SessionTasks> {
+        let Some(ctx) = tasks_ctx(&self.backend) else {
+            return Vec::new();
+        };
         opencrabs::backend::tasks::TasksSnapshot { sessions }
-            .answer(tasks_ctx(&self.backend))
+            .answer(ctx)
             .unwrap_or_default()
     }
 
@@ -2153,7 +2156,7 @@ impl Dashboard {
         task: Uuid,
     ) -> Option<opencrabs::backend::tasks::StopOutcome> {
         opencrabs::backend::tasks::TaskStop { session, task }
-            .answer(tasks_ctx(backend))
+            .answer(tasks_ctx(backend)?)
             .ok()
             .flatten()
     }
@@ -2290,7 +2293,7 @@ impl Dashboard {
                     .and_then(|tail| tail.path.clone()),
                 lines: task_list::TAIL_LINES,
             }
-            .answer(tasks_ctx(&self.backend))
+            .answer(tasks_ctx(&self.backend)?)
             .ok()
             .flatten()?;
             self.task_tails.insert(
@@ -2435,7 +2438,9 @@ impl Dashboard {
     /// Look at the open task again, at most once a [`task_detail::READ_TICK`]:
     /// whether it still runs, where its output is, and what it wrote since.
     fn refresh_task_detail(&mut self) {
-        let ctx = tasks_ctx(&self.backend);
+        let Some(ctx) = tasks_ctx(&self.backend) else {
+            return;
+        };
         let Some(detail) = self.task_detail.as_mut() else {
             return;
         };
@@ -2700,8 +2705,37 @@ impl Dashboard {
 ///
 /// A free function over the field, not a method, so a caller can hold it
 /// while it changes another field of the window.
-fn tasks_ctx(backend: &crate::backend_glue::Backend) -> &opencrabs::backend::Ctx {
+///
+/// `None` for a remote crab: its tasks are not on this machine, and a frame
+/// never waits on the network, so the window shows it running nothing.
+fn tasks_ctx(backend: &crate::backend_glue::Backend) -> Option<&opencrabs::backend::Ctx> {
     match backend {
-        crate::backend_glue::Backend::Local(ctx) => ctx,
+        crate::backend_glue::Backend::Local(ctx) => Some(ctx),
+        // The remote variant is named only in the glue (seam rule R5).
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::backend_glue::{Backend, RemoteCrab};
+
+    #[test]
+    fn a_remote_crab_has_no_tasks_ctx() {
+        let crab = RemoteCrab::new(
+            "elsewhere",
+            "http://127.0.0.1:9",
+            None,
+            PathBuf::from("unused.db"),
+        );
+        assert!(super::tasks_ctx(&Backend::Remote(Arc::new(crab))).is_none());
+    }
+
+    #[test]
+    fn a_local_crab_reads_its_own_tasks_ctx() {
+        assert!(super::tasks_ctx(&Backend::local(PathBuf::from("unused.db"))).is_some());
     }
 }
