@@ -10,15 +10,19 @@ use super::*;
 impl Dashboard {
     /// Re-read the channel chip now (#2452): after a Start click succeeds,
     /// the daemon appears within a second or two, so poll instead of
-    /// waiting for the next 5-second tick. All IO runs off the UI thread.
+    /// waiting for the next 5-second tick. The read is the crab's own, on its
+    /// backend lane, and an answer for a crab the window has since left is
+    /// dropped.
     pub(crate) fn refresh_channel_chip(&mut self, cx: &mut Context<Self>) {
         let names = self.chip_channel_names.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let line = cx
-                .background_executor()
-                .spawn(async move { channel_chip_line_from(&names) })
-                .await;
+            let line = channel_chip_line_from(backend, names).await;
             let _ = this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 if this.channel_chip != line {
                     logging::info(&format!(
                         "channel chip -> {}",

@@ -40,7 +40,7 @@ impl Dashboard {
             return;
         }
         self.finder = Some(PaletteState::new(self.finder_items()));
-        self.finder_channels = configured_channels();
+        self.load_finder_channels(cx);
         self.finder_selecting = false;
         self.finder_activity_reset();
         // The caret blinks on a timer, and the loop dies with the card (#2491).
@@ -624,7 +624,7 @@ impl Dashboard {
                     find::PickFor::NewTopic,
                     self.finder_items(),
                 ));
-                self.finder_channels = configured_channels();
+                self.load_finder_channels(cx);
                 self.refocus_overlay();
                 cx.notify();
             }
@@ -675,7 +675,7 @@ impl Dashboard {
                     find::PickFor::Favorite,
                     self.finder_items(),
                 ));
-                self.finder_channels = configured_channels();
+                self.load_finder_channels(cx);
                 self.refocus_overlay();
                 cx.notify();
             }
@@ -690,7 +690,7 @@ impl Dashboard {
                     find::PickFor::GroupTopics,
                     self.finder_items(),
                 ));
-                self.finder_channels = configured_channels();
+                self.load_finder_channels(cx);
                 self.refocus_overlay();
                 cx.notify();
             }

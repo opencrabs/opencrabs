@@ -355,37 +355,45 @@ pub(crate) fn run() {
                         }
                     })
                     .detach();
-                    // The channel chip's slow probe (#2452): one lock-dir read
-                    // every few seconds, all of it off the UI thread. Exits
-                    // with the view like every other loop here. The names are
-                    // read from the config ONCE, here on the UI thread; the
-                    // worker never calls Config::load (SIGILL, 2026-11-03).
+                    // The channel chip's slow probe (#2452): one lock read
+                    // every few seconds, asked of the crab the window holds.
+                    // The names are the crab's own configured channels, read
+                    // once here and again whenever the crab or its config
+                    // changes; the probe never asks the crab for its config.
                     let chip_names: Vec<String> = {
-                        let names: Vec<String> = configured_channels()
-                            .iter()
-                            .map(|c| c.name().to_string())
-                            .collect();
+                        let names = crate::channel_chip::channel_names(
+                            &futures::executor::block_on(configured_channels(backend.clone())),
+                        );
                         logging::info(&format!(
                             "channel chip probe up: {} configured channel(s)",
                             names.len()
                         ));
                         names
                     };
-                    let probe_names = chip_names.clone();
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_secs(5))
                                 .await;
-                            // Each tick's future owns a copy: spawned work
-                            // must be 'static and may outlive the tick.
-                            let names = probe_names.clone();
-                            let line = cx
-                                .background_executor()
-                                .spawn(async move { channel_chip_line_from(&names) })
-                                .await;
+                            // The crab on screen, read each tick: a swap hands
+                            // the next tick the new crab and its names.
+                            let Ok((backend, epoch, names)) = this.update(cx, |this, _cx| {
+                                (
+                                    this.backend.clone(),
+                                    this.instance_epoch,
+                                    this.chip_channel_names.clone(),
+                                )
+                            }) else {
+                                break;
+                            };
+                            let line = channel_chip_line_from(backend, names).await;
                             if this
                                 .update(cx, |this, cx| {
+                                    // A swap while the read was out: the
+                                    // answer is the crab the window left.
+                                    if this.instance_epoch != epoch {
+                                        return;
+                                    }
                                     if this.channel_chip != line {
                                         logging::info(&format!(
                                             "channel chip -> {}",
@@ -480,7 +488,9 @@ pub(crate) fn run() {
                         seeker_voice_looping: false,
                         seeker_voice_error: None,
                         chip_channel_names: chip_names,
-                        channel_chip: channel_chip_line(),
+                        channel_chip: futures::executor::block_on(channel_chip_line(
+                            backend.clone(),
+                        )),
                         daemon_starting: false,
                         daemon_error: None,
                         pending: 0,
