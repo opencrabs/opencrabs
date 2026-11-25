@@ -28,5 +28,6 @@ mod sidebar_action_test;
 mod topic_icon_files_test;
 mod transcript_tile_files_test;
 mod usage_load_test;
+mod voice_crab_test;
 mod voice_note_row_test;
 mod window_test;
