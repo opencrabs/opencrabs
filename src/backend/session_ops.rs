@@ -499,6 +499,11 @@ impl Op for BrainGenerate {
 /// Apply an operator `/cd` to one session through
 /// `AgentService::apply_operator_cd`, the applier the terminal calls too. The
 /// reply is the canonical directory that was applied.
+///
+/// `dir` is what the user typed: a leading `~` is the crab's home, and the
+/// folder must exist on the crab. The window no longer looks at its own
+/// disk, so a path that is not a directory there fails here, with the line
+/// the window has always printed for it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyCd {
     /// The session whose directory changes.
@@ -513,9 +518,24 @@ impl Op for ApplyCd {
     type Reply = PathBuf;
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let expanded = match self.dir.to_str() {
+            Some(typed) => crate::brain::tools::error::expand_tilde(typed),
+            None => self.dir.clone(),
+        };
+        if !expanded.is_dir() {
+            return Err(BackendError::Failed(cd_not_a_directory(
+                &self.dir.display().to_string(),
+            )));
+        }
         let service = ctx.service()?;
-        Ok(service.apply_operator_cd(self.session_id, &self.dir).await)
+        Ok(service.apply_operator_cd(self.session_id, &expanded).await)
     }
+}
+
+/// What `/cd` says when the argument is not a directory on the crab. The
+/// same words as the window's `text_commands::cd_not_a_directory`.
+pub fn cd_not_a_directory(arg: &str) -> String {
+    format!("Not a directory: {arg}")
 }
 
 /// The crab's half of a text command. The window parses the line and words
@@ -1167,6 +1187,58 @@ mod tests {
                     dir,
                 }
             );
+        }
+
+        #[tokio::test]
+        async fn apply_cd_to_a_missing_folder_is_not_a_directory_by_both_doors() {
+            // The crab checks the folder, not the window: both doors answer
+            // the line the window printed when it looked at its own disk.
+            let gateway = booted().await;
+            let chat = session(&gateway).await;
+            let missing = gateway.home().join("nao").join("existe");
+            let answer = parity!(
+                gateway,
+                ApplyCd {
+                    session_id: chat.id,
+                    dir: missing.clone(),
+                }
+            );
+            assert_eq!(
+                answer,
+                serde_json::json!({
+                    "Err": {
+                        "kind": "failed",
+                        "detail": format!("Not a directory: {}", missing.display()),
+                    }
+                })
+            );
+        }
+
+        #[tokio::test]
+        async fn apply_cd_checks_the_folder_before_the_service() {
+            // No service yet: a missing folder still answers as one, and an
+            // existing one is the service's to apply.
+            let gateway = Gateway::start().await;
+            let missing = gateway.home().join("missing");
+            let answer = parity!(
+                gateway,
+                ApplyCd {
+                    session_id: Uuid::new_v4(),
+                    dir: missing.clone(),
+                }
+            );
+            assert_eq!(
+                answer["Err"]["detail"],
+                serde_json::json!(cd_not_a_directory(&missing.display().to_string()))
+            );
+            let answer = parity!(
+                gateway,
+                ApplyCd {
+                    session_id: Uuid::new_v4(),
+                    dir: gateway.home().to_path_buf(),
+                }
+            );
+            assert_eq!(answer["Err"]["kind"], serde_json::json!("not_ready"));
         }
 
         #[tokio::test]

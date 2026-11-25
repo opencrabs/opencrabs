@@ -207,7 +207,7 @@ impl Dashboard {
             C::Cd => {
                 // The picker owns bare `/cd` (#2527): a screen, not a text
                 // reply that also lights the thinking spinner. With a path
-                // the change applies locally on the bridge service, the same
+                // the change applies on the crab the window holds, the same
                 // applier the terminal uses, with no turn and no spinner.
                 if arg.is_empty() {
                     self.open_cd_picker(cx);
@@ -220,15 +220,11 @@ impl Dashboard {
                         cx.notify();
                         return;
                     };
-                    let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
-                    if !expanded.is_dir() {
-                        self.turn
-                            .live
-                            .notices
-                            .push(text_commands::cd_not_a_directory(&arg));
-                        cx.notify();
-                        return;
-                    }
+                    // The path is the crab's: `~` is its home and the folder
+                    // is checked on its disk, never on this machine's. A path
+                    // that is not a directory there comes back as the same
+                    // "Not a directory" line.
+                    let typed = std::path::PathBuf::from(&arg);
                     // The apply runs off the UI thread: its row write
                     // goes through `deadpool_sqlite`, which needs a Tokio
                     // reactor, and gpui's executor is not one. Awaiting it
@@ -237,12 +233,16 @@ impl Dashboard {
                         Some(_) => agent_bridge::spawn_apply_operator_cd(
                             self.backend.clone(),
                             session,
-                            expanded,
+                            typed,
                             self.sink.clone(),
                         ),
                         None => self.push_session_notice(
                             session,
-                            text_commands::cd_reply(&expanded.display().to_string()),
+                            text_commands::cd_reply(
+                                &opencrabs::brain::tools::error::expand_tilde(&arg)
+                                    .display()
+                                    .to_string(),
+                            ),
                             cx,
                         ),
                     }
