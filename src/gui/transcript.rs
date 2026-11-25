@@ -3219,17 +3219,38 @@ fn transcript_toggle(key: &str, open: bool) -> impl IntoElement {
 /// file, keyed by the crab's path, and where that path is on this machine
 /// (`Backend::localize`). A tile is keyed and named by the crab's path and is
 /// drawn, stat'ed and played from the local one, so a crab on another machine
-/// never has its path stat'ed or decoded on this disk.
+/// never has its path stat'ed or decoded on this disk. What a tile decodes
+/// (a picture, a clip's sound) comes from `allowed` (`Backend::localize_allowed`):
+/// a remote crab's copy of a kind outside the allowlist is `None`, and the tile
+/// draws its kind glyph instead.
 #[derive(Clone, Copy)]
 struct Tiles<'a> {
     clicks: &'a HashMap<String, ClickHandler>,
     localize: &'a dyn Fn(&std::path::Path) -> std::path::PathBuf,
+    allowed: &'a dyn Fn(&std::path::Path) -> Option<std::path::PathBuf>,
+}
+
+/// The copy a tile paints as a picture: the allowed copy of the crab's file
+/// (`Backend::localize_allowed`), and only when that copy's own extension is
+/// an image's. `None` draws the kind glyph and decodes nothing, which is what
+/// a remote crab's `.svg`, `.desktop` or `.bin` gets. The local crab's copy is
+/// its own path, so its tiles are what they were.
+pub(crate) fn tile_picture(copy: Option<&std::path::Path>) -> Option<&std::path::Path> {
+    copy.filter(|copy| Attachment::for_display(copy.to_path_buf()).is_image())
+}
+
+/// Whether the strip hands the crab's file to the audio player: the allowed
+/// copy (`Backend::localize_allowed`) is a sound by its own extension. A
+/// remote copy outside the allowlist is never played; it is a file tile.
+pub(crate) fn plays_as_audio(copy: Option<&std::path::Path>) -> bool {
+    copy.is_some_and(|copy| Attachment::for_display(copy.to_path_buf()).is_audio())
 }
 
 fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: Tiles<'_>) -> Div {
     let Tiles {
         clicks: handlers,
         localize,
+        allowed,
     } = tiles;
     if paths.is_empty() {
         return div();
@@ -3239,7 +3260,7 @@ fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: 
     // kinds of preview without squeezing a player into a thumbnail (#3054).
     let (audio, files): (Vec<_>, Vec<_>) = paths
         .iter()
-        .partition(|path| Attachment::for_display((*path).to_path_buf()).is_audio());
+        .partition(|path| plays_as_audio(allowed(path.as_path()).as_deref()));
     let mut strip = div()
         .flex()
         .flex_col()
@@ -3307,13 +3328,14 @@ fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: 
                 // Cloned, not taken: the same file can appear in more than one
                 // message, and every tile of it must open it.
                 let local = localize(path);
+                let copy = allowed(path);
                 match handlers.get(&key).cloned() {
-                    Some(handler) => attachment_cell(path, &local, side)
+                    Some(handler) => attachment_cell(path, &local, copy.as_deref(), side)
                         .id(SharedString::from(format!("attachment-{key}")))
                         .cursor_pointer()
                         .on_click(move |event, window, cx| handler(event, window, cx))
                         .into_any_element(),
-                    None => attachment_cell(path, &local, side).into_any_element(),
+                    None => attachment_cell(path, &local, copy.as_deref(), side).into_any_element(),
                 }
             } else {
                 fold_cell(plan.folded, side)
@@ -3327,11 +3349,18 @@ fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: 
 
 /// One non-audio attachment: the picture or kind glyph in a square box, with
 /// the file name under it. The box owns the size, not the caption. The kind is
-/// read from the crab's `path`; the picture and the facts from `local`, where
-/// that file is on this machine.
-fn attachment_cell(path: &std::path::Path, local: &std::path::Path, side: f32) -> Div {
+/// read from the crab's `path`; the facts from `local`, where that file is on
+/// this machine. The picture is drawn only from `copy`, the allowed copy
+/// (`Backend::localize_allowed`), when its own extension is an image's
+/// (`tile_picture`); without one the box shows the kind glyph.
+fn attachment_cell(
+    path: &std::path::Path,
+    local: &std::path::Path,
+    copy: Option<&std::path::Path>,
+    side: f32,
+) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
-    let tile: AnyElement = if attachment.is_image() {
+    let tile: AnyElement = if let Some(local) = tile_picture(copy) {
         div()
             .w(px(side))
             .h(px(side))
@@ -6214,9 +6243,14 @@ pub fn view(
         Some(backend) => backend.localize(path),
         None => path.to_path_buf(),
     };
+    let allowed = |path: &std::path::Path| match &backend {
+        Some(backend) => backend.localize_allowed(path),
+        None => Some(path.to_path_buf()),
+    };
     let tiles = Tiles {
         clicks: &attachment_handlers,
         localize: &localize,
+        allowed: &allowed,
     };
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
