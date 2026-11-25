@@ -110,7 +110,7 @@ impl Dashboard {
                     cx.notify();
                 });
             }
-            bang::spawn(cmd.to_string(), self.sink.clone());
+            bang::spawn(&self.backend, cmd.to_string(), self.sink.clone());
             cx.notify();
             return;
         }
@@ -579,7 +579,7 @@ impl Dashboard {
         }
         // `!cmd` runs a shell command here, not a turn, as the terminal does (#2437).
         if let Some(cmd) = opencrabs::ui_core::bang::bang_command(&text) {
-            bang::spawn(cmd.to_string(), self.sink.clone());
+            bang::spawn(&self.backend, cmd.to_string(), self.sink.clone());
             self.turn.live.notices.push(format!("! {cmd}"));
             cx.notify();
             return;

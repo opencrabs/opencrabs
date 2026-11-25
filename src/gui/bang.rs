@@ -1,44 +1,55 @@
-//! The window side of the `!` operator (#2437): runs the command off the
-//! window thread and reports the output. Parsing is in `ui_core::bang`.
+//! The window side of the `!` operator (#2437): asks the crab to run the
+//! command and reports the output. Parsing is in `ui_core::bang`; the run is
+//! the `shell.run` operation, so a remote crab runs it on its own machine.
 
-use opencrabs::ui_core::bang::{is_editor, output_text};
+use opencrabs::backend::Op;
+use opencrabs::backend::cap::{self, Cap};
+use opencrabs::backend::shell::ShellRun;
+use opencrabs::ui_core::bang::is_editor;
+
+use crate::agent_bridge::{EventSink, TurnEvent};
+use crate::backend_glue::Backend;
 
 /// Run a bang command off the window thread and report its output as a
-/// `BangOutput` event. The command runs in the launch directory, as the terminal's
-/// does, through the platform shell.
-pub fn spawn(cmd: String, sink: crate::agent_bridge::EventSink) {
-    let spawned = std::thread::Builder::new()
-        .stack_size(4 * 1024 * 1024)
-        .name("gui-bang".into())
-        .spawn(move || {
-            let text = if is_editor(&cmd) {
-                open_in_terminal(&cmd)
-            } else {
-                run_shell(&cmd)
-            };
-            if let Err(e) = sink.send(crate::agent_bridge::TurnEvent::BangOutput(text)) {
-                crate::logging::error(&format!("bang output not delivered: {e}"));
-            }
-        });
+/// `BangOutput` event. The command runs on the crab the window holds, in that
+/// crab's launch directory, through its platform shell.
+///
+/// An editor needs a terminal on this machine, so it opens here only when the
+/// crab is this machine's; a remote crab answers with the reason instead. A
+/// crab that refuses the shell (no admin scope) answers with the same reason
+/// the greyed out action would give.
+pub fn spawn(backend: &Backend, cmd: String, sink: EventSink) {
+    if is_editor(&cmd) {
+        if let Some(why) = backend.lacks(Cap::OpenTerminal) {
+            deliver(&sink, format!("$ {cmd}\n{why}"));
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .stack_size(4 * 1024 * 1024)
+            .name("gui-bang".into())
+            .spawn(move || deliver(&sink, open_in_terminal(&cmd)));
+        if let Err(e) = spawned {
+            crate::logging::error(&format!("bang thread: {e}"));
+        }
+        return;
+    }
+    let done_sink = sink.clone();
+    let line = cmd.clone();
+    let spawned = backend.spawn(ShellRun { cmd }, move |reply| {
+        let text = match reply {
+            Ok(text) => text,
+            Err(e) => format!("$ {line}\n{}", cap::notice(ShellRun::NAME, &e)),
+        };
+        deliver(&done_sink, text);
+    });
     if let Err(e) = spawned {
         crate::logging::error(&format!("bang thread: {e}"));
     }
 }
 
-fn run_shell(cmd: &str) -> String {
-    use opencrabs::utils::shell::PushShellCommand;
-    let (shell, shell_arg) = opencrabs::utils::shell::shell_pair();
-    let cwd = opencrabs::utils::cwd::launch_cwd();
-    match std::process::Command::new(shell)
-        .push_shell_command(shell_arg, cmd)
-        .current_dir(&cwd)
-        .output()
-    {
-        Ok(out) => format!(
-            "$ {cmd}\n{}",
-            output_text(&out.stdout, &out.stderr, out.status.success())
-        ),
-        Err(e) => format!("$ {cmd}\ncould not start: {e}"),
+fn deliver(sink: &EventSink, text: String) {
+    if let Err(e) = sink.send(TurnEvent::BangOutput(text)) {
+        crate::logging::error(&format!("bang output not delivered: {e}"));
     }
 }
 
