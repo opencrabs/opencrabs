@@ -215,8 +215,6 @@ use opencrabs::ui_core::palette::{
 use opencrabs::ui_core::docs;
 use opencrabs::ui_core::help_keys;
 
-use futures::channel::oneshot;
-
 use gpui::{
     AnyElement, AnyView, App, Application, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent,
     Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
@@ -244,7 +242,6 @@ use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::ui_core::keys::UiKey;
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
-use opencrabs::ui_core::usage::loader::usage_view;
 use opencrabs::ui_core::usage::view_model::UsageViewModel;
 use opencrabs::ui_core::window_controls::{
     TITLEBAR_APPEARS_TRANSPARENT, effective_decorations, platform_draws_caption,

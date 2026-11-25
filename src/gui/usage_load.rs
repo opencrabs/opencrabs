@@ -17,44 +17,24 @@ pub(crate) fn period_word(p: Period) -> &'static str {
     }
 }
 
-/// Fetch the real view on a thread with a real stack. The GUI is a separate
-/// process with no pool of its own, so it uses the loader's by-path door,
-/// which opens the ledger read-only and runs no migrations: the daemon and
-/// the TUI stay the owners of the schema.
+/// Fetch the real view through the crab (`UsageView`) and build the view
+/// model here, so the formatting stays where the drawing is.
 ///
-/// The db path arrives pre-resolved, read from the config once on the main
-/// thread before the window opens. Nothing in here may touch `Config::load`:
-/// gpui's background executor polls its async tasks on Apple dispatch-queue
-/// worker threads whose stacks are tiny, and `Config::load`'s frame chain
-/// (thread-locals, dyld TLV instantiation) blows that stack with a silent
-/// SIGILL. Crash receipt 2026-10-30 08:33:39, exception "Thread stack size
-/// exceeded", frames `ledger_path -> Config::load -> resolve_profile_home
-/// -> _tlv_get_addr`. The tokio runtime and the sqlx work therefore run on
-/// this dedicated 4 MB thread; the future only awaits the result channel.
+/// The read runs on the backend's 4 MB worker lane, never on this future's
+/// thread: gpui's background executor polls its async tasks on Apple
+/// dispatch-queue worker threads whose stacks are tiny, and `Config::load`'s
+/// frame chain (thread-locals, dyld TLV instantiation) blows that stack with a
+/// silent SIGILL. Crash receipt 2026-10-30 08:33:39, exception "Thread stack
+/// size exceeded", frames `ledger_path -> Config::load -> resolve_profile_home
+/// -> _tlv_get_addr`. The future only awaits the worker's answer. The op opens
+/// the ledger by the loader's no-migration door: the daemon and the TUI stay
+/// the owners of the schema.
 pub(crate) async fn load_view(backend: crate::backend_glue::Backend, period: Period) -> LoadState {
-    let db_path = backend.local_db_path();
-    let (tx, rx) = oneshot::channel::<LoadState>();
-    let spawned = std::thread::Builder::new()
-        .name("usage-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => match rt.block_on(usage_view(&db_path, period)) {
-                    Ok(vm) => LoadState::Loaded(Box::new(vm)),
-                    Err(e) => LoadState::Failed(format!("{e:#}").into()),
-                },
-                Err(e) => LoadState::Failed(format!("tokio runtime failed: {e}").into()),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(state) => state,
-            Err(_) => LoadState::Failed("fetch thread dropped its result".into()),
-        },
-        Err(e) => LoadState::Failed(format!("fetch thread failed to spawn: {e}").into()),
+    match backend
+        .call(opencrabs::backend::usage::UsageView { period })
+        .await
+    {
+        Ok(data) => LoadState::Loaded(Box::new(UsageViewModel::build(&data.into(), period))),
+        Err(e) => LoadState::Failed(e.into_message().into()),
     }
 }
