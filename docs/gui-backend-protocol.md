@@ -134,6 +134,7 @@ A turn started by `gui/call` belongs to the caller, not to the window:
   remote turn on that session. Reply `true` when one was running, `false`
   when none was. Only the principal that started the turn stops it.
 - `turn.resume`: local only; the remote door answers `forbidden`.
+- `speak.attach_voice_reply`: local only; the remote door answers `forbidden`, and a `path` with `<<`, `>>` or a control character is `bad_params`.
 - `mission.decide` with `Apply` installs a tool the crab runs: the remote
   door needs `a2a:admin` for it. `Reject` stays at `a2a:manage`.
 - `session_ops.track_files`: a path the blob door would not serve is not
