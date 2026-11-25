@@ -380,6 +380,10 @@ pub(crate) fn to_turn_event(event: Event) -> Option<TurnEvent> {
         // Reload hints for the remote cache, which the window has no event
         // for yet (C4 keeps that cache).
         Event::RailChanged | Event::TranscriptChanged { .. } | Event::TasksChanged => None,
+        // The window has no approval card for a remote turn yet: the request
+        // is not shown, so the crab's own approval timeout denies the tool,
+        // which is what a turn with no callback did before rb/s3b.
+        Event::ApprovalRequested { .. } => None,
     }
 }
 

@@ -3748,8 +3748,11 @@ impl Dashboard {
         // the other rungs never print the number.
         // Asked of the crab (`ContextBase`) synchronously, the way the task
         // roster is: a crab still booting answers `NotReady`, which reads 0.
-        if state.context_percent() >= CONTEXT_TIGHT {
-            let crate::backend_glue::Backend::Local(ctx) = &self.backend;
+        // A crab on another machine is not asked inside a frame: its floor
+        // reads 0 until its facts cache carries the number.
+        if state.context_percent() >= CONTEXT_TIGHT
+            && let crate::backend_glue::Backend::Local(ctx) = &self.backend
+        {
             state.clear_base = opencrabs::backend::facts::ContextBase {}
                 .answer(ctx)
                 .map(u64::from)
