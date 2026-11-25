@@ -69,7 +69,7 @@ BASELINES = {
     "R2": 9,
     # The agent service reached around the backend: the `facto` and
     # `chamada` sites of L6/L7/L8 plus agent_bridge.rs outside `build`.
-    "R3": 16,
+    "R3": 10,
     # ops! names missing an impl, a fixture, or a parity test. The brief
     # expects 0; it is 3 because tests/fixtures/gui_backend/ does not exist
     # yet: LoadSessions, RenameSession and ClearMessages have their impl and
