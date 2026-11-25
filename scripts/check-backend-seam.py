@@ -142,6 +142,9 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
 R3_FILES = {"src/gui/backend_glue.rs"}
 R3_FUNCTIONS = {("src/gui/agent_bridge.rs", "build")}
 R5_FILES = {"src/gui/backend_glue.rs", "src/gui/backend_remote.rs", "src/backend/cap.rs"}
+# R7 exempts the A2A scope table: "tasks/get" there is the protocol's own
+# method name mapped to a2a:read, not the retired panel's polling.
+R7_FILES = {"src/remote/scopes.rs"}
 
 FIXTURES = "tests/fixtures/gui_backend"
 
@@ -424,7 +427,11 @@ def rules(root: Path, local_only: set[tuple[str, str]]) -> list[Result]:
         Result(
             "R7",
             "remote_panel / remote_rail_rows / tasks/get",
-            scan(sources(root, "src/gui", "src/remote"), re.compile(r"remote_panel|remote_rail_rows|tasks/get")),
+            scan(
+                sources(root, "src/gui", "src/remote"),
+                re.compile(r"remote_panel|remote_rail_rows|tasks/get"),
+                lambda s, o: s.rel in R7_FILES,
+            ),
         )
     )
     return out
