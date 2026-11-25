@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use opencrabs::backend::blob::BlobGet;
+use opencrabs::backend::blob::{BlobGet, MAX_BLOB_BYTES};
 use opencrabs::backend::facts::{FactsCache, LoadFacts};
 use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
 use opencrabs::backend::{BackendError, Event, Facts, Op, Scope};
@@ -466,6 +466,15 @@ async fn fetch_blob(crab: &RemoteCrab, path: &Path) -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
+    // The crab serves at most MAX_BLOB_BYTES; a reply past it is refused
+    // before it is decoded, so a wrong crab cannot fill the cache.
+    let encoded = reply.base64.len() as u64;
+    if reply.size > MAX_BLOB_BYTES || encoded / 4 * 3 > MAX_BLOB_BYTES + 3 {
+        return Err(format!(
+            "{} bytes, over the blob ceiling",
+            reply.size.max(encoded / 4 * 3)
+        ));
+    }
     let bytes = BASE64
         .decode(reply.base64.as_bytes())
         .map_err(|e| e.to_string())?;
