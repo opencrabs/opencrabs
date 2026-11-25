@@ -1,0 +1,8 @@
+{
+  "op": "settings.hint_dismissals",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": ["clear", "split"]
+  }
+}

@@ -125,8 +125,6 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/dashboard_topics.rs", "cycle_topic_edge"): "[gui] config of this window",
     ("src/gui/editor.rs", "write_clipboard_image"): "writes locally; the upload is a blob (P8)",
     ("src/gui/fonts.rs", "keep_ui"): "[gui] config of this window",
-    ("src/gui/hint_dismiss.rs", "load"): "dismissed hints belong to this window's user",
-    ("src/gui/hint_dismiss.rs", "dismiss"): "dismissed hints belong to this window's user",
     ("src/gui/logging.rs", "init"): "this window's log file",
     # janela: P3, P4
     ("src/gui/bang.rs", "open_in_terminal"): "local-only capability (Cap::OpenTerminal)",

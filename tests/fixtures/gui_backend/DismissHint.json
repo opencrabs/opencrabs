@@ -1,0 +1,12 @@
+{
+  "op": "settings.dismiss_hint",
+  "scope": "a2a:send",
+  "request": {
+    "hint_id": "clear"
+  },
+  "response": {
+    "Ok": null
+  },
+  "response_write_failed": { "Ok": "hint dismissal write: Failed to dismiss hint" },
+  "response_no_ledger": { "Err": { "kind": "failed", "detail": "unable to open database file" } }
+}
