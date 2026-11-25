@@ -3239,13 +3239,6 @@ pub(crate) fn tile_picture(copy: Option<&std::path::Path>) -> Option<&std::path:
     copy.filter(|copy| Attachment::for_display(copy.to_path_buf()).is_image())
 }
 
-/// Whether the strip hands the crab's file to the audio player: the allowed
-/// copy (`Backend::localize_allowed`) is a sound by its own extension. A
-/// remote copy outside the allowlist is never played; it is a file tile.
-pub(crate) fn plays_as_audio(copy: Option<&std::path::Path>) -> bool {
-    copy.is_some_and(|copy| Attachment::for_display(copy.to_path_buf()).is_audio())
-}
-
 fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: Tiles<'_>) -> Div {
     let Tiles {
         clicks: handlers,
@@ -3345,6 +3338,13 @@ fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: 
         strip = strip.child(row);
     }
     strip
+}
+
+/// Whether the strip hands the crab's file to the audio player: the allowed
+/// copy (`Backend::localize_allowed`) is a sound by its own extension. A
+/// remote copy outside the allowlist is never played; it is a file tile.
+pub(crate) fn plays_as_audio(copy: Option<&std::path::Path>) -> bool {
+    copy.is_some_and(|copy| Attachment::for_display(copy.to_path_buf()).is_audio())
 }
 
 /// One non-audio attachment: the picture or kind glyph in a square box, with
