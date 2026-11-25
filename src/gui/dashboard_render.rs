@@ -3746,9 +3746,13 @@ impl Dashboard {
         // schemas. Counting it tokenises every tool schema, so it is measured
         // only when the context rung is live: this runs on every frame, and
         // the other rungs never print the number.
+        // Asked of the crab (`ContextBase`) synchronously, the way the task
+        // roster is: a crab still booting answers `NotReady`, which reads 0.
         if state.context_percent() >= CONTEXT_TIGHT {
-            state.clear_base = agent_bridge::bridge()
-                .map(|b| u64::from(b.service.base_context_tokens_raw()))
+            let crate::backend_glue::Backend::Local(ctx) = &self.backend;
+            state.clear_base = opencrabs::backend::facts::ContextBase {}
+                .answer(ctx)
+                .map(u64::from)
                 .unwrap_or(0);
         }
         state

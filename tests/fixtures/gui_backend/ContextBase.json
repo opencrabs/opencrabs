@@ -1,0 +1,9 @@
+{
+  "op": "facts.context_base",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": 4210
+  },
+  "response_not_ready": { "Err": { "kind": "not_ready" } }
+}

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{BackendError, Ctx};
+use super::{BackendError, Ctx, Op, Scope};
 
 /// What a surface needs to draw a session's footer and pickers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +60,34 @@ pub fn facts_for(ctx: &Ctx, session: Option<Uuid>) -> Result<Facts, BackendError
     Ok(facts)
 }
 
-ops! {}
+/// What a `/clear` leaves behind: the system prompt and the tool schemas,
+/// in tokens.
+///
+/// Not a field of [`Facts`]: counting it tokenises every tool schema, so the
+/// window asks only while the context rung is lit, and the other rungs never
+/// pay for it. Answers `NotReady` while the crab is still booting, the moment
+/// the window used to find no service and printed 0.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextBase {}
+
+impl ContextBase {
+    /// The count, now. Synchronous, for the frame that draws the hint row.
+    pub fn answer(&self, ctx: &Ctx) -> Result<u32, BackendError> {
+        Ok(ctx.service()?.base_context_tokens_raw())
+    }
+}
+
+impl Op for ContextBase {
+    const NAME: &'static str = "facts.context_base";
+    const SCOPE: Scope = Scope::Read;
+    type Reply = u32;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        self.answer(ctx)
+    }
+}
+
+ops! { ContextBase }
 
 #[cfg(test)]
 mod tests {
@@ -122,6 +149,30 @@ mod tests {
         let ctx = booted_ctx().await;
         let facts = facts_for(&ctx, None).expect("facts");
         assert_eq!(facts.working_directory, crate::utils::cwd::launch_cwd());
+    }
+
+    #[tokio::test]
+    async fn context_base_is_the_services_raw_floor() {
+        let ctx = booted_ctx().await;
+        let service = ctx.service().expect("booted");
+        assert_eq!(
+            ContextBase {}.answer(&ctx),
+            Ok(service.base_context_tokens_raw())
+        );
+        let unbooted = Ctx::new(PathBuf::from("unused.db"));
+        assert_eq!(ContextBase {}.answer(&unbooted), Err(BackendError::NotReady));
+    }
+
+    #[tokio::test]
+    async fn context_base_has_parity() {
+        use crate::backend::parity::{Gateway, forbidden, parity};
+
+        // The gateway crab has no agent service: both doors answer
+        // `NotReady`, the state in which the window prints 0.
+        let gateway = Gateway::start().await;
+        let answer = parity!(gateway, ContextBase {});
+        assert_eq!(answer, serde_json::json!({ "Err": { "kind": "not_ready" } }));
+        forbidden!(gateway, ContextBase {});
     }
 
     #[test]
