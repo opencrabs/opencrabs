@@ -189,6 +189,10 @@ pub enum TurnEvent {
     BrainReady(String),
     /// Brain generation could not finish; carries the reason.
     BrainFailed(String),
+    /// What the window draws from a remote crab's cache moved (its facts or
+    /// its running tasks): paint again. The values are already in the cache;
+    /// the event carries none.
+    Refresh,
 }
 
 /// Everything the UI needs to drive turns. Built by [`bootstrap`], delivered

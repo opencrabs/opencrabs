@@ -1178,6 +1178,10 @@ impl Dashboard {
                     self.turn.live.notices.push(text);
                     cx.notify();
                 }
+                // A remote crab's cache moved: the next frame reads it.
+                agent_bridge::TurnEvent::Refresh => {
+                    cx.notify();
+                }
                 agent_bridge::TurnEvent::EvolveDone(text) => {
                     self.turn.live.notices.push(text);
                     cx.notify();
@@ -2132,12 +2136,7 @@ impl Dashboard {
         &self,
         sessions: Vec<Uuid>,
     ) -> Vec<opencrabs::backend::tasks::SessionTasks> {
-        let Some(ctx) = tasks_ctx(&self.backend) else {
-            return Vec::new();
-        };
-        opencrabs::backend::tasks::TasksSnapshot { sessions }
-            .answer(ctx)
-            .unwrap_or_default()
+        self.backend.tasks_snapshot(sessions)
     }
 
     /// One session's running tasks, oldest first.

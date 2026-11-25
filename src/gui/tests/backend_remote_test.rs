@@ -39,9 +39,12 @@ struct Mock {
     events: Vec<Event>,
     events_status: StatusCode,
     dials: AtomicUsize,
+    /// Every `POST /a2a/v1` it answered: one per round trip.
+    calls: AtomicUsize,
 }
 
 async fn rpc(State(mock): State<Arc<Mock>>, Json(req): Json<Value>) -> Response {
+    mock.calls.fetch_add(1, Ordering::SeqCst);
     let id = req["id"].clone();
     let name = req["params"]["name"]
         .as_str()
@@ -121,6 +124,7 @@ fn mock(ctx: Ctx, granted: &[Scope]) -> Mock {
         events: Vec::new(),
         events_status: StatusCode::OK,
         dials: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
     }
 }
 
@@ -456,4 +460,43 @@ fn a_local_backend_has_no_reader() {
             .expect("no thread")
             .is_none()
     );
+}
+
+/// The acceptance of C4: what the window reads while it renders (the facts
+/// and the running tasks) never reaches the network. A thousand frames of
+/// reads cost no `gui/call`; opening the session's events is what reads the
+/// crab, off the window's thread.
+#[test]
+fn render_reads_cost_zero_network_calls() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let session = Uuid::new_v4();
+
+    for _ in 0..1000 {
+        assert_eq!(backend.facts(Some(session)), None);
+        assert_eq!(backend.facts(None), None);
+        assert!(backend.tasks_snapshot(vec![session]).is_empty());
+    }
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        0,
+        "a read inside a frame went over the wire"
+    );
+
+    // Opening the events reads what the frames asked about, off this thread.
+    let (sink, _rx) = std::sync::mpsc::channel();
+    let watch = backend
+        .watch(session, sink)
+        .expect("reader started")
+        .expect("a remote backend has a reader");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while served.mock.calls.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        served.mock.calls.load(Ordering::SeqCst) > 0,
+        "the cache was never read"
+    );
+
+    drop(watch);
 }

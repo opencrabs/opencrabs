@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
 use opencrabs::backend::{BackendError, Ctx, Facts, Op};
 use opencrabs::remote::instance_store::KnownInstance;
 use uuid::Uuid;
@@ -113,9 +114,20 @@ impl Backend {
         match self {
             Backend::Local(ctx) => opencrabs::backend::facts_for(ctx, session).ok(),
             // The window reads facts every frame and a remote read is a round
-            // trip, so a remote crab answers from a cache (C4). Until that
-            // cache exists it has none, which reads as "still booting".
-            Backend::Remote(_) => None,
+            // trip, so a remote crab answers from its cache. Facts never read
+            // yet read as "still booting".
+            Backend::Remote(crab) => crab.facts(session),
+        }
+    }
+
+    /// What is running in each of `sessions`, for the frame being drawn.
+    /// Synchronous, like [`facts`](Self::facts): a local crab answers from
+    /// its task manager, a remote one from its cache, never over the wire.
+    /// A crab still booting, or one with no task manager, runs nothing.
+    pub fn tasks_snapshot(&self, sessions: Vec<Uuid>) -> Vec<SessionTasks> {
+        match self {
+            Backend::Local(ctx) => TasksSnapshot { sessions }.answer(ctx).unwrap_or_default(),
+            Backend::Remote(crab) => crab.tasks_snapshot(&sessions),
         }
     }
 

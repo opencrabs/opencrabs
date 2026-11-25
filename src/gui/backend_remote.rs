@@ -20,7 +20,9 @@
 //! The cache is read again from the crab when a session's events open
 //! ([`watch`]), when the stream comes back after a drop, and when an event
 //! says the values moved (`RailChanged`, `TranscriptChanged`,
-//! `TasksChanged`).
+//! `TasksChanged`). A read that changed what the window would draw sends it
+//! [`TurnEvent::Refresh`], so the new values show without waiting for a
+//! frame painted for another reason.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -158,7 +160,6 @@ impl RemoteCrab {
     /// Synchronous and local: the window reads it while it renders, so it
     /// never reaches the network. A miss is remembered, and the next refresh
     /// reads it.
-    #[allow(dead_code)] // the window reaches it once `Backend::facts` asks the cache
     pub(crate) fn facts(&self, session: Option<Uuid>) -> Option<Facts> {
         if let Ok(mut wanted) = self.wanted.lock() {
             wanted.facts.insert(session);
@@ -170,7 +171,6 @@ impl RemoteCrab {
     /// shape `TasksSnapshot` answers. Synchronous and local, like
     /// [`facts`](Self::facts); the sessions asked about are read on the next
     /// refresh.
-    #[allow(dead_code)] // the window reaches it once the task doors ask the cache
     pub(crate) fn tasks_snapshot(&self, sessions: &[Uuid]) -> Vec<SessionTasks> {
         if let Ok(mut wanted) = self.wanted.lock() {
             wanted.tasks.extend(sessions.iter().copied());
@@ -331,12 +331,14 @@ pub(crate) fn spawn<O: Op>(
 ///
 /// Returns at once. A refresh asked for while one of the same part runs is
 /// folded into one more read after it, so a burst of events costs two reads,
-/// not one per event. A read that fails keeps what the cache had.
-fn refresh(crab: &Arc<RemoteCrab>, part: Part) {
+/// not one per event. A read that fails keeps what the cache had. A read
+/// that changed the cache tells the window through `sink`.
+fn refresh(crab: &Arc<RemoteCrab>, part: Part, sink: &EventSink) {
     if !crab.lane(part).start() {
         return;
     }
     let reader = crab.clone();
+    let sink = sink.clone();
     let name = match part {
         Part::Facts => "remote-facts",
         Part::Tasks => "remote-tasks",
@@ -345,13 +347,17 @@ fn refresh(crab: &Arc<RemoteCrab>, part: Part) {
         .name(name.into())
         .spawn(move || {
             loop {
-                let _ = instance_client::block_on(async {
-                    match part {
+                let moved = instance_client::block_on(async {
+                    anyhow::Ok(match part {
                         Part::Facts => read_facts(&reader).await,
                         Part::Tasks => read_tasks(&reader).await,
-                    }
-                    anyhow::Ok(())
-                });
+                    })
+                })
+                .unwrap_or(false);
+                // A closed sink is a window gone: the read still ends its lane.
+                if moved {
+                    let _ = sink.send(TurnEvent::Refresh);
+                }
                 if !reader.lane(part).finish() {
                     break;
                 }
@@ -364,36 +370,43 @@ fn refresh(crab: &Arc<RemoteCrab>, part: Part) {
 }
 
 /// Read the facts of every session the window wants into the cache.
-async fn read_facts(crab: &RemoteCrab) {
+/// `true` when one of them changed.
+async fn read_facts(crab: &RemoteCrab) -> bool {
     let sessions: Vec<Option<Uuid>> = crab
         .wanted
         .lock()
         .map(|wanted| wanted.facts.iter().copied().collect())
         .unwrap_or_default();
+    let mut moved = false;
     for session in sessions {
         match call(crab, LoadFacts { session }).await {
-            Ok(facts) => crab.cache.store_facts(session, facts),
+            Ok(facts) => moved |= crab.cache.store_facts(session, facts),
             Err(e) => tracing::debug!("{}: facts.load: {e}", crab.name),
         }
     }
+    moved
 }
 
 /// Read the running tasks of every session the window wants into the cache.
-async fn read_tasks(crab: &RemoteCrab) {
+/// `true` when the rows changed.
+async fn read_tasks(crab: &RemoteCrab) -> bool {
     let sessions: Vec<Uuid> = crab
         .wanted
         .lock()
         .map(|wanted| wanted.tasks.iter().copied().collect())
         .unwrap_or_default();
     if sessions.is_empty() {
-        return;
+        return false;
     }
     let op = TasksSnapshot {
         sessions: sessions.clone(),
     };
     match call(crab, op).await {
         Ok(reply) => crab.cache.store_tasks(&sessions, reply),
-        Err(e) => tracing::debug!("{}: tasks.snapshot: {e}", crab.name),
+        Err(e) => {
+            tracing::debug!("{}: tasks.snapshot: {e}", crab.name);
+            false
+        }
     }
 }
 
@@ -444,8 +457,8 @@ pub(crate) fn watch(
         wanted.facts.insert(Some(session));
         wanted.tasks.insert(session);
     }
-    refresh(&crab, Part::Facts);
-    refresh(&crab, Part::Tasks);
+    refresh(&crab, Part::Facts, &sink);
+    refresh(&crab, Part::Tasks, &sink);
     let stop = CancellationToken::new();
     let reader_stop = stop.clone();
     std::thread::Builder::new()
@@ -547,8 +560,8 @@ async fn stream_once(
     }
     if *down {
         *down = false;
-        refresh(crab, Part::Facts);
-        refresh(crab, Part::Tasks);
+        refresh(crab, Part::Facts, sink);
+        refresh(crab, Part::Tasks, sink);
         if !notice(sink, format!("{}: event stream back", crab.name)) {
             return Ended::SinkGone;
         }
@@ -561,7 +574,7 @@ async fn stream_once(
                 for event in frames.push(&bytes) {
                     delivered = true;
                     for part in moved_by(&event) {
-                        refresh(crab, *part);
+                        refresh(crab, *part, sink);
                     }
                     if let Some(turn_event) = to_turn_event(event)
                         && sink.send(turn_event).is_err()
@@ -610,7 +623,8 @@ pub(crate) fn to_turn_event(event: Event) -> Option<TurnEvent> {
         // stream would close the card twice.
         Event::TurnDone { .. } | Event::TurnFailed { .. } | Event::TurnCancelled { .. } => None,
         // Reload hints: the reader refreshes the remote cache itself
-        // (`moved_by`); the window has no event for them yet.
+        // (`moved_by`) and sends `TurnEvent::Refresh` when the read changed
+        // it, so the hint alone repaints nothing.
         Event::RailChanged | Event::TranscriptChanged { .. } | Event::TasksChanged => None,
         // The window has no approval card for a remote turn yet: the request
         // is not shown, so the crab's own approval timeout denies the tool,
