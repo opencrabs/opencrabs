@@ -549,3 +549,77 @@ fn a_previewed_document_is_read_where_localize_says() {
     assert!(localized < read, "localized before it is read");
     assert!(!body.contains("let load_path = path.clone();"));
 }
+
+#[test]
+fn a_remote_crab_s_mailto_cannot_hide_a_field_behind_a_percent_escape() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, crab) = remote_with_kept(cache.path(), &[]);
+
+    for url in [
+        "mailto:x%3Fattach=/home/u/.ssh/id_rsa",
+        "mailto:x%3fattach=/home/u/.ssh/id_rsa",
+        "mailto:x%26attach=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?subject=hi%26attach=/home/u/.ssh/id_rsa",
+        "mailto:x%253Fattach=/home/u/.ssh/id_rsa",
+        "mailto:x%25253Fattach=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?attach=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?ATTACH=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?body=hello&attach=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?%61ttach=/home/u/.ssh/id_rsa",
+        "mailto:x@example.com?cc=y%40example.com%3Fattach%3D%2Fetc%2Fpasswd",
+        "mailto:x%2Fy@example.com",
+        "mailto:x%5Cy@example.com",
+        "mailto:x%20y@example.com",
+        "mailto:x%0Ay@example.com",
+        "mailto:x@example.com?subject=%zz",
+    ] {
+        assert_eq!(
+            backend.openable_url(url),
+            Err(crate::preview::REMOTE_URL_NOT_OPENED),
+            "{url:?} must not reach the system opener"
+        );
+        let rebuilt = crate::preview::remote_mailto(url)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            !rebuilt.contains("?attach") && !rebuilt.contains("&attach"),
+            "{url:?} rebuilt with an attach field: {rebuilt:?}"
+        );
+    }
+    assert_eq!(crab.blob_fetches(), 0, "a link fetches nothing");
+}
+
+#[test]
+fn a_remote_crab_s_plain_mailto_opens_as_the_draft_rebuilt_from_it() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, _crab) = remote_with_kept(cache.path(), &[]);
+
+    for url in [
+        "mailto:a@b.c?subject=Oi",
+        "mailto:a@b.c",
+        "mailto:a@b.c,d@e.f?cc=g@h.i&subject=Ol%C3%A1%20mundo&body=a%26b",
+        "MAILTO:a@b.c?SUBJECT=Oi",
+    ] {
+        assert_eq!(backend.openable_url(url), Ok(url), "{url}");
+        let rebuilt = crate::preview::remote_mailto(url).expect("rebuilt");
+        assert!(
+            rebuilt.eq_ignore_ascii_case(url),
+            "{url} rebuilt as {rebuilt}"
+        );
+    }
+    assert_eq!(
+        crate::preview::remote_mailto("mailto:a@b.c?SUBJECT=Oi%20there").as_deref(),
+        Some("mailto:a@b.c?subject=Oi%20there"),
+        "field names are rebuilt in lower case"
+    );
+    assert_eq!(
+        crate::preview::remote_mailto("mailto:a@b.c?subject=Ol%c3%a1").as_deref(),
+        Some("mailto:a@b.c?subject=Ol%C3%A1"),
+        "escapes are rebuilt in upper case"
+    );
+    assert_eq!(
+        crate::preview::remote_mailto("mailto:x%253Fattach=/etc/passwd"),
+        None,
+        "an address that decodes to a field is refused, not rebuilt"
+    );
+}

@@ -190,8 +190,13 @@ pub const REMOTE_MAILTO_FIELDS: &[&str] = &["to", "cc", "bcc", "subject", "body"
 /// Whether a link from a remote crab's transcript may reach [`url_command`]:
 /// it starts with one of [`REMOTE_URL_SCHEMES`] in any case, something
 /// follows the scheme, it holds no whitespace or control character, and a
-/// `mailto:` names only [`REMOTE_MAILTO_FIELDS`] (a field name with a
-/// percent escape is refused, so `att%61ch` cannot pass). Pure.
+/// `mailto:` is already the draft [`remote_mailto`] rebuilds from it after
+/// the scheme (ASCII case aside, so a field name or a hex digit may be in
+/// upper case; no delimiter or escape may differ). A mail client reads the
+/// link it is handed with its own parser; only the rebuilt draft is let
+/// through, so what the client parses is what was checked here, never a
+/// field hidden behind a percent escape (`x%3Fattach=`, `%26attach=`,
+/// `%253F`). Pure.
 pub fn remote_url_opens(url: &str) -> bool {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
@@ -206,16 +211,121 @@ pub fn remote_url_opens(url: &str) -> bool {
     if *scheme != "mailto:" {
         return true;
     }
-    let Some((_, query)) = lower.split_once('?') else {
-        return true;
+    remote_mailto(url)
+        .is_some_and(|draft| draft[scheme.len()..].eq_ignore_ascii_case(&url[scheme.len()..]))
+}
+
+/// How many times a `mailto:` part is percent-decoded before it must have
+/// stopped changing. A part still changing after this many rounds is
+/// refused rather than guessed at.
+const MAILTO_DECODE_ROUNDS: usize = 4;
+
+/// The canonical `mailto:` draft rebuilt from a remote crab's link, or
+/// `None` when the link is refused.
+///
+/// The link is parsed here, not by the mail client: each part (address,
+/// field name, field value) is percent-decoded until it stops changing
+/// (at most [`MAILTO_DECODE_ROUNDS`] rounds), an addressee (the address and
+/// `to`, `cc`, `bcc`) holding `?`, `&`, `=`, `/`, `\`, whitespace or a
+/// control character after decoding is refused, every field name must
+/// decode, in lower case, to one of [`REMOTE_MAILTO_FIELDS`], and a field
+/// with no `=` is refused. The draft is then written back with every part
+/// re-encoded and the field names in lower case. Pure.
+pub fn remote_mailto(url: &str) -> Option<String> {
+    let scheme = "mailto:";
+    let rest = match (url.get(..scheme.len()), url.get(scheme.len()..)) {
+        (Some(head), Some(rest)) if head.eq_ignore_ascii_case(scheme) && !rest.is_empty() => rest,
+        _ => return None,
     };
-    query
-        .split('&')
-        .filter(|field| !field.is_empty())
-        .all(|field| {
-            let name = field.split_once('=').map_or(field, |(name, _)| name);
-            REMOTE_MAILTO_FIELDS.contains(&name)
-        })
+    let (address, query) = match rest.split_once('?') {
+        Some((address, query)) => (address, Some(query)),
+        None => (rest, None),
+    };
+    let address = mailto_decoded(address)?;
+    if !mailto_addressee_ok(&address) {
+        return None;
+    }
+    let mut draft = format!("{scheme}{}", mailto_encoded(&address));
+    let Some(query) = query else {
+        return Some(draft);
+    };
+    for (index, field) in query.split('&').enumerate() {
+        let (name, value) = field.split_once('=')?;
+        let name = mailto_decoded(name)?.to_ascii_lowercase();
+        if !REMOTE_MAILTO_FIELDS.contains(&name.as_str()) {
+            return None;
+        }
+        let value = mailto_decoded(value)?;
+        if matches!(name.as_str(), "to" | "cc" | "bcc") && !mailto_addressee_ok(&value) {
+            return None;
+        }
+        draft.push(if index == 0 { '?' } else { '&' });
+        draft.push_str(&name);
+        draft.push('=');
+        draft.push_str(&mailto_encoded(&value));
+    }
+    Some(draft)
+}
+
+/// Whether a decoded addressee names only addresses: no character that
+/// would start a field (`?`, `&`, `=`), a path (`/`, `\`), or split the
+/// link (whitespace, control).
+fn mailto_addressee_ok(addressee: &str) -> bool {
+    !addressee
+        .chars()
+        .any(|c| matches!(c, '?' | '&' | '=' | '/' | '\\') || c.is_whitespace() || c.is_control())
+}
+
+/// `part` percent-decoded until it stops changing, or `None` when it holds a
+/// broken escape, is not UTF-8 once decoded, or still changes after
+/// [`MAILTO_DECODE_ROUNDS`] rounds.
+fn mailto_decoded(part: &str) -> Option<String> {
+    let mut current = part.to_string();
+    for _ in 0..MAILTO_DECODE_ROUNDS {
+        let next = percent_decoded_once(&current)?;
+        if next == current {
+            return Some(current);
+        }
+        current = next;
+    }
+    None
+}
+
+/// One round of percent-decoding, or `None` for a `%` not followed by two
+/// hex digits or bytes that are not UTF-8.
+fn percent_decoded_once(part: &str) -> Option<String> {
+    let bytes = part.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `part` percent-encoded for a `mailto:` draft: letters, digits,
+/// `-._~` and `!$'()*+,;:@` are written as they are, every other byte as an
+/// upper-case `%XX`.
+fn mailto_encoded(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    for byte in part.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~!$'()*+,;:@".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// The command that shows a file in its folder with the file selected.
