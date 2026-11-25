@@ -4,7 +4,7 @@
 //! the row that carries it is the crab's. Operations land here as their GUI
 //! doors move behind the contract.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -48,29 +48,44 @@ impl Op for AttachVoiceReply {
                 scope: Scope::Admin,
             });
         }
-        let shown = path.display().to_string();
-        if shown.contains("<<") || shown.contains(">>") || shown.chars().any(char::is_control) {
-            return Err(BackendError::BadParams(format!(
-                "voice reply: the clip path cannot carry a marker: {shown:?}"
-            )));
-        }
-        let db = ctx
-            .database()
-            .await
-            .map_err(|e| BackendError::Failed(format!("voice reply db connect: {e}")))?;
-        let repo = MessageRepository::new(db.pool().clone());
-        let row = repo
-            .get_last_assistant_message(session_id)
-            .await
-            .map_err(|e| BackendError::Failed(format!("voice reply row lookup: {e}")))?
-            .ok_or_else(|| {
-                BackendError::Failed("voice reply: the answer row is not in the ledger".into())
-            })?;
-        let marker = format!("\n\n<<AUD:{}>>", path.display());
-        repo.append_content(row.id, &marker)
-            .await
-            .map_err(|e| BackendError::Failed(format!("voice reply marker: {e}")))
+        attach_marker(ctx, session_id, &path).await
     }
+}
+
+/// Append the `<<AUD:path>>` marker for `path` to `session_id`'s last
+/// assistant row.
+///
+/// The write behind [`AttachVoiceReply`], shared with `voice::VoiceSpeak`,
+/// which marks the clip the crab itself just saved. The door check is the
+/// caller's: here only the path and the row are checked, each failure worded
+/// as the window logged it.
+pub(crate) async fn attach_marker(
+    ctx: &Ctx,
+    session_id: Uuid,
+    path: &Path,
+) -> Result<(), BackendError> {
+    let shown = path.display().to_string();
+    if shown.contains("<<") || shown.contains(">>") || shown.chars().any(char::is_control) {
+        return Err(BackendError::BadParams(format!(
+            "voice reply: the clip path cannot carry a marker: {shown:?}"
+        )));
+    }
+    let db = ctx
+        .database()
+        .await
+        .map_err(|e| BackendError::Failed(format!("voice reply db connect: {e}")))?;
+    let repo = MessageRepository::new(db.pool().clone());
+    let row = repo
+        .get_last_assistant_message(session_id)
+        .await
+        .map_err(|e| BackendError::Failed(format!("voice reply row lookup: {e}")))?
+        .ok_or_else(|| {
+            BackendError::Failed("voice reply: the answer row is not in the ledger".into())
+        })?;
+    let marker = format!("\n\n<<AUD:{}>>", path.display());
+    repo.append_content(row.id, &marker)
+        .await
+        .map_err(|e| BackendError::Failed(format!("voice reply marker: {e}")))
 }
 
 ops! {
