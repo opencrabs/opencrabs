@@ -236,3 +236,117 @@ async fn cursor_is_resolved_against_the_filtered_view() {
         "with a search active the cursor indexes the matches, not the full list"
     );
 }
+
+// ── Switch-back re-paint of mid-turn rows (#3179) ────────────────────
+
+/// While a session sits in background the agent still persists rows to
+/// the DB: queued-message continuations and the final answer row. When
+/// the user switches back, `load_session` reloads those rows into
+/// `self.messages` and `promote_to_foreground` appends the sidecar's
+/// `pending_messages` on top. The sidecar holds the echo of the SAME
+/// rows, so the extend painted every persisted mid-turn row twice:
+/// the duplicated user bubble and the doubled answer from the report.
+/// The merge must drop pending rows whose role and text the DB reload
+/// already contains, and must keep genuinely new deltas.
+#[tokio::test]
+async fn promotion_does_not_repaint_rows_the_db_reload_already_has() {
+    let mut app = app().await;
+    let sid = Uuid::new_v4();
+
+    // The DB reload already contains the persisted queued-message
+    // continuation and the final answer row.
+    app.messages = vec![
+        msg_at("user", "more critical is this"),
+        msg_at("assistant", "The DB has the review text in one row."),
+    ];
+
+    // The sidecar accumulated the live echo of the SAME rows while the
+    // session was off-screen, plus one delta the DB has never seen.
+    let sidecar =
+        crate::tui::app::background_session::BackgroundSessionState {
+            pending_messages: vec![
+                msg_at("user", "more critical is this"),
+                msg_at("assistant", "The DB has the review text in one row."),
+                msg_at("user", "and the fresh one"),
+            ],
+            ..Default::default()
+        };
+    app.background_sessions.insert(sid, sidecar);
+
+    assert!(app.promote_to_foreground(sid));
+
+    let user_dups = app
+        .messages
+        .iter()
+        .filter(|m| m.role == "user" && m.content == "more critical is this")
+        .count();
+    let answer_dups = app
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant" && m.content == "The DB has the review text in one row.")
+        .count();
+    assert_eq!(
+        user_dups, 1,
+        "the queued-message echo must not re-paint the row the DB reload already has"
+    );
+    assert_eq!(
+        answer_dups, 1,
+        "the answer draft must not re-paint the persisted answer row"
+    );
+    assert!(
+        app.messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "and the fresh one"),
+        "a pending delta the DB has never seen must still merge in"
+    );
+    assert_eq!(
+        app.messages.len(),
+        3,
+        "three DB rows plus one new delta: no fourth row"
+    );
+}
+
+/// Exact-text equality only. A pending draft that merely resembles a
+/// persisted row (streaming partial, different text) is a real delta and
+/// must survive the merge untouched.
+#[tokio::test]
+async fn promotion_keeps_pending_rows_that_only_resemble_persisted_ones() {
+    let mut app = app().await;
+    let sid = Uuid::new_v4();
+
+    app.messages = vec![msg_at("assistant", "the full answer text")];
+    let sidecar =
+        crate::tui::app::background_session::BackgroundSessionState {
+            pending_messages: vec![msg_at(
+                "assistant",
+                "the full answer",
+            )],
+            ..Default::default()
+        };
+    app.background_sessions.insert(sid, sidecar);
+
+    assert!(app.promote_to_foreground(sid));
+    assert_eq!(
+        app.messages.len(),
+        2,
+        "a partial draft is a live row, not a duplicate of the persisted text"
+    );
+}
+
+fn msg_at(role: &str, content: &str) -> crate::tui::app::DisplayMessage {
+    crate::tui::app::DisplayMessage {
+        id: Uuid::new_v4(),
+        role: role.to_string(),
+        content: content.to_string(),
+        timestamp: chrono::Utc::now(),
+        token_count: None,
+        cost: None,
+        approval: None,
+        approve_menu: None,
+        details: None,
+        expanded: false,
+        expanded_full: false,
+        tool_group: None,
+        duration_secs: None,
+    }
+}
