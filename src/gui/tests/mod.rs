@@ -14,6 +14,7 @@ mod dashboard_turns_test;
 mod instances_test;
 mod instances_wiring_test;
 mod layout_guard_test;
+mod localized_paths_test;
 mod main_test;
 mod menu_test;
 mod plan_strip_test;
