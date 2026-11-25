@@ -199,13 +199,16 @@ impl Dashboard {
         }
         // Uppercase L opens the log viewer, because lowercase `l` cycles the
         // panels, exactly as the terminal binds it (#1528).
+        // The viewer reads this machine's log folder, so a remote crab leaves
+        // a note instead of showing these logs as if they were its own.
         if ks.modifiers.shift && ks.key == "l" {
-            let mut viewer = LogViewerState::open();
-            // Land on the newest entries: the thing just reproduced is at the
-            // end of the file, not the start of the window.
-            viewer.scroll_to_end();
-            self.mc_logs = Some(viewer);
-            self.mc_nav.detail = false;
+            match open_logs(&self.backend) {
+                Ok(viewer) => {
+                    self.mc_logs = Some(viewer);
+                    self.mc_nav.detail = false;
+                }
+                Err(notice) => self.mc_notice = Some(notice),
+            }
             cx.notify();
             return;
         }
@@ -1164,4 +1167,25 @@ impl Dashboard {
             .as_ref()
             .is_some_and(|tree| tree.leaves().len() > 1)
     }
+}
+
+/// Shift+L on Mission Control: the log viewer on the newest entries, or the
+/// note that says why this crab has none to show.
+///
+/// The viewer reads this machine's log folder, and logs can hold what the
+/// remote door never hands out, so only a crab on this machine opens it.
+pub(crate) fn open_logs(
+    backend: &crate::backend_glue::Backend,
+) -> Result<LogViewerState, mission_control::Notice> {
+    if let Some(why) = backend.lacks(opencrabs::backend::Cap::Logs) {
+        return Err(mission_control::Notice {
+            text: format!("Logs: {why}"),
+            ok: false,
+        });
+    }
+    let mut viewer = LogViewerState::open();
+    // Land on the newest entries: the thing just reproduced is at the end of
+    // the file, not the start of the window.
+    viewer.scroll_to_end();
+    Ok(viewer)
 }
