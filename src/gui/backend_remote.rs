@@ -13,12 +13,23 @@
 //! - a refusal: every failure is a [`BackendError`]. A typed one rides in the
 //!   JSON-RPC error's `data` and comes back as itself; a failure of the wire
 //!   becomes `Failed` with the crab's name, the text the notices print.
+//!
+//! What the window reads while it renders (the [`Facts`] and the running
+//! tasks) is never a call: [`RemoteCrab::facts`] and
+//! [`RemoteCrab::tasks_snapshot`] answer from a [`FactsCache`] on this side.
+//! The cache is read again from the crab when a session's events open
+//! ([`watch`]), when the stream comes back after a drop, and when an event
+//! says the values moved (`RailChanged`, `TranscriptChanged`,
+//! `TasksChanged`).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use opencrabs::backend::{BackendError, Event, Op, Scope};
+use opencrabs::backend::facts::{FactsCache, LoadFacts};
+use opencrabs::backend::tasks::{SessionTasks, TasksSnapshot};
+use opencrabs::backend::{BackendError, Event, Facts, Op, Scope};
 use opencrabs::remote::instance_client::{self, CALL_TIMEOUT};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -44,6 +55,79 @@ pub struct RemoteCrab {
     /// This window's own ledger, for the bridge callers that still open a
     /// ledger by path (see [`crate::backend_glue::Backend::local_db_path`]).
     window_ledger: PathBuf,
+    /// The per-frame values last read from the crab.
+    cache: FactsCache,
+    /// What the window asked the cache about, so a refresh knows what to read.
+    wanted: Mutex<Wanted>,
+    /// One read of the facts in flight at a time.
+    facts_lane: Lane,
+    /// One read of the running tasks in flight at a time.
+    tasks_lane: Lane,
+}
+
+/// The keys the window read from the cache or opened events for.
+#[derive(Default)]
+struct Wanted {
+    /// Sessions whose facts the window reads; `None` is the crab-wide entry.
+    facts: HashSet<Option<Uuid>>,
+    /// Sessions whose running tasks the window reads.
+    tasks: HashSet<Uuid>,
+}
+
+/// One kind of cache read: at most one in flight, and a refresh asked for
+/// while it runs folds into a single read right after it.
+#[derive(Default)]
+struct Lane(Mutex<LaneState>);
+
+#[derive(Default)]
+struct LaneState {
+    running: bool,
+    again: bool,
+}
+
+impl Lane {
+    /// `true` when the caller starts the read; `false` when one is in flight
+    /// and will read once more when it ends.
+    fn start(&self) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.running {
+            state.again = true;
+            return false;
+        }
+        state.running = true;
+        state.again = false;
+        true
+    }
+
+    /// The read ended: `true` when it has to run once more.
+    fn finish(&self) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.again {
+            state.again = false;
+            return true;
+        }
+        state.running = false;
+        false
+    }
+
+    /// The read never started (its thread did not spawn).
+    fn abandon(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.running = false;
+            state.again = false;
+        }
+    }
+}
+
+/// Which part of the cache a refresh reads.
+#[derive(Clone, Copy)]
+enum Part {
+    Facts,
+    Tasks,
 }
 
 impl RemoteCrab {
@@ -61,6 +145,44 @@ impl RemoteCrab {
             base_url: base_url.into(),
             token,
             window_ledger,
+            cache: FactsCache::default(),
+            wanted: Mutex::new(Wanted::default()),
+            facts_lane: Lane::default(),
+            tasks_lane: Lane::default(),
+        }
+    }
+
+    /// The facts for `session` as last read from the crab, or `None` when
+    /// they were never read, which the window takes as "still booting".
+    ///
+    /// Synchronous and local: the window reads it while it renders, so it
+    /// never reaches the network. A miss is remembered, and the next refresh
+    /// reads it.
+    #[allow(dead_code)] // the window reaches it once `Backend::facts` asks the cache
+    pub(crate) fn facts(&self, session: Option<Uuid>) -> Option<Facts> {
+        if let Ok(mut wanted) = self.wanted.lock() {
+            wanted.facts.insert(session);
+        }
+        self.cache.facts(session)
+    }
+
+    /// The running tasks of `sessions` as last read from the crab, in the
+    /// shape `TasksSnapshot` answers. Synchronous and local, like
+    /// [`facts`](Self::facts); the sessions asked about are read on the next
+    /// refresh.
+    #[allow(dead_code)] // the window reaches it once the task doors ask the cache
+    pub(crate) fn tasks_snapshot(&self, sessions: &[Uuid]) -> Vec<SessionTasks> {
+        if let Ok(mut wanted) = self.wanted.lock() {
+            wanted.tasks.extend(sessions.iter().copied());
+        }
+        self.cache.tasks(sessions)
+    }
+
+    /// The lane that reads `part`.
+    fn lane(&self, part: Part) -> &Lane {
+        match part {
+            Part::Facts => &self.facts_lane,
+            Part::Tasks => &self.tasks_lane,
         }
     }
 
@@ -205,6 +327,90 @@ pub(crate) fn spawn<O: Op>(
         .map_err(|e| format!("{} thread: {e}", O::NAME))
 }
 
+/// Read `part` of `crab`'s cache again, off the window's thread.
+///
+/// Returns at once. A refresh asked for while one of the same part runs is
+/// folded into one more read after it, so a burst of events costs two reads,
+/// not one per event. A read that fails keeps what the cache had.
+fn refresh(crab: &Arc<RemoteCrab>, part: Part) {
+    if !crab.lane(part).start() {
+        return;
+    }
+    let reader = crab.clone();
+    let name = match part {
+        Part::Facts => "remote-facts",
+        Part::Tasks => "remote-tasks",
+    };
+    let spawned = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            loop {
+                let _ = instance_client::block_on(async {
+                    match part {
+                        Part::Facts => read_facts(&reader).await,
+                        Part::Tasks => read_tasks(&reader).await,
+                    }
+                    anyhow::Ok(())
+                });
+                if !reader.lane(part).finish() {
+                    break;
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        crab.lane(part).abandon();
+        tracing::warn!("{}: {name} thread: {e}", crab.name);
+    }
+}
+
+/// Read the facts of every session the window wants into the cache.
+async fn read_facts(crab: &RemoteCrab) {
+    let sessions: Vec<Option<Uuid>> = crab
+        .wanted
+        .lock()
+        .map(|wanted| wanted.facts.iter().copied().collect())
+        .unwrap_or_default();
+    for session in sessions {
+        match call(crab, LoadFacts { session }).await {
+            Ok(facts) => crab.cache.store_facts(session, facts),
+            Err(e) => tracing::debug!("{}: facts.load: {e}", crab.name),
+        }
+    }
+}
+
+/// Read the running tasks of every session the window wants into the cache.
+async fn read_tasks(crab: &RemoteCrab) {
+    let sessions: Vec<Uuid> = crab
+        .wanted
+        .lock()
+        .map(|wanted| wanted.tasks.iter().copied().collect())
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        return;
+    }
+    let op = TasksSnapshot {
+        sessions: sessions.clone(),
+    };
+    match call(crab, op).await {
+        Ok(reply) => crab.cache.store_tasks(&sessions, reply),
+        Err(e) => tracing::debug!("{}: tasks.snapshot: {e}", crab.name),
+    }
+}
+
+/// The parts of the cache `event` says moved.
+fn moved_by(event: &Event) -> &'static [Part] {
+    match event {
+        // A turn's progress and its settle move nothing the cache holds; the
+        // transcript event that follows a turn does.
+        Event::Turn { .. }
+        | Event::TurnDone { .. }
+        | Event::TurnFailed { .. }
+        | Event::TurnCancelled { .. } => &[],
+        Event::RailChanged | Event::TranscriptChanged { .. } => &[Part::Facts],
+        Event::TasksChanged => &[Part::Tasks],
+    }
+}
+
 /// An open event reader. Dropping it stops the reader and closes the stream.
 pub struct Watch {
     stop: CancellationToken,
@@ -224,11 +430,22 @@ impl Drop for Watch {
 /// that it is back, never once per dial. A refused credential ends the
 /// reader with a notice: dialling again would only be refused again. So does
 /// a window that went away (the sink is closed).
+///
+/// Opening it is opening the session: the cache reads the session's facts,
+/// the crab-wide ones and its running tasks now, and again whenever the
+/// stream comes back after a drop, since events may have been missed.
 pub(crate) fn watch(
     crab: Arc<RemoteCrab>,
     session: Uuid,
     sink: EventSink,
 ) -> Result<Watch, String> {
+    if let Ok(mut wanted) = crab.wanted.lock() {
+        wanted.facts.insert(None);
+        wanted.facts.insert(Some(session));
+        wanted.tasks.insert(session);
+    }
+    refresh(&crab, Part::Facts);
+    refresh(&crab, Part::Tasks);
     let stop = CancellationToken::new();
     let reader_stop = stop.clone();
     std::thread::Builder::new()
@@ -255,7 +472,12 @@ enum Ended {
 }
 
 /// The reconnect loop around [`stream_once`].
-async fn read_events(crab: &RemoteCrab, session: Uuid, sink: &EventSink, stop: &CancellationToken) {
+async fn read_events(
+    crab: &Arc<RemoteCrab>,
+    session: Uuid,
+    sink: &EventSink,
+    stop: &CancellationToken,
+) {
     let mut delay = RETRY_FIRST;
     let mut down = false;
     loop {
@@ -293,7 +515,12 @@ async fn read_events(crab: &RemoteCrab, session: Uuid, sink: &EventSink, stop: &
 /// One connection to `GET /gui/events`, read until it ends. `down` says the
 /// notices were told the stream is gone; an open stream tells them it is
 /// back and clears it.
-async fn stream_once(crab: &RemoteCrab, session: Uuid, sink: &EventSink, down: &mut bool) -> Ended {
+async fn stream_once(
+    crab: &Arc<RemoteCrab>,
+    session: Uuid,
+    sink: &EventSink,
+    down: &mut bool,
+) -> Ended {
     let req =
         opencrabs::utils::http::shared().get(crab.url(&format!("/gui/events?session={session}")));
     let mut resp = match crab.authed(req).send().await {
@@ -320,6 +547,8 @@ async fn stream_once(crab: &RemoteCrab, session: Uuid, sink: &EventSink, down: &
     }
     if *down {
         *down = false;
+        refresh(crab, Part::Facts);
+        refresh(crab, Part::Tasks);
         if !notice(sink, format!("{}: event stream back", crab.name)) {
             return Ended::SinkGone;
         }
@@ -331,6 +560,9 @@ async fn stream_once(crab: &RemoteCrab, session: Uuid, sink: &EventSink, down: &
             Ok(Some(bytes)) => {
                 for event in frames.push(&bytes) {
                     delivered = true;
+                    for part in moved_by(&event) {
+                        refresh(crab, *part);
+                    }
                     if let Some(turn_event) = to_turn_event(event)
                         && sink.send(turn_event).is_err()
                     {
@@ -377,8 +609,8 @@ pub(crate) fn to_turn_event(event: Event) -> Option<TurnEvent> {
         // started it, exactly as a local one does; a second settle from the
         // stream would close the card twice.
         Event::TurnDone { .. } | Event::TurnFailed { .. } | Event::TurnCancelled { .. } => None,
-        // Reload hints for the remote cache, which the window has no event
-        // for yet (C4 keeps that cache).
+        // Reload hints: the reader refreshes the remote cache itself
+        // (`moved_by`); the window has no event for them yet.
         Event::RailChanged | Event::TranscriptChanged { .. } | Event::TasksChanged => None,
         // The window has no approval card for a remote turn yet: the request
         // is not shown, so the crab's own approval timeout denies the tool,
