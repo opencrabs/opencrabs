@@ -136,6 +136,10 @@ A turn started by `gui/call` belongs to the caller, not to the window:
   remote turn on that session. Reply `true` when one was running, `false`
   when none was. Only the principal that started the turn stops it.
 - `turn.resume`: local only; the remote door answers `forbidden`.
+- `voice.speak`: the remote door ignores `text` and speaks the session's
+  last assistant answer from the crab's ledger; a session with no answer
+  speaks nothing (`null`). Only the window, at the local door, hands in the
+  words.
 - `speak.attach_voice_reply`: local only; the remote door answers `forbidden`, and a `path` with `<<`, `>>` or a control character is `bad_params`.
 - `mission.decide` with `Apply` installs a tool the crab runs: the remote
   door needs `a2a:admin` for it. `Reject` stays at `a2a:manage`.

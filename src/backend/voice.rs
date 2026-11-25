@@ -25,6 +25,7 @@ use crate::config::Config;
 use crate::services::{FileService, ServiceContext};
 
 use super::blob::{BlobError, BlobRef, MAX_BLOB_BYTES};
+use super::door::{self, Door};
 use super::{BackendError, Ctx, Op, Scope};
 
 /// The fallback folder for a clip, under the profile home, for a session
@@ -176,11 +177,16 @@ impl Op for VoiceTranscribe {
 /// with the path it wrote itself: no caller ever names the path. The reply is
 /// the kept clip, `None` when the crab has no speech engine (the turn
 /// already answered in text) or the answer has no words.
+///
+/// No remote caller names the words either: by the remote door the crab
+/// speaks the answer its own ledger keeps for the session, and `text` is not
+/// read. Only the window, at the local door, hands in the answer as its turn
+/// settled it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceSpeak {
     /// The session whose answer is spoken.
     pub session_id: Uuid,
-    /// The answer as the turn settled it.
+    /// The answer as the turn settled it. Read at the local door only.
     pub text: String,
 }
 
@@ -191,6 +197,7 @@ impl Op for VoiceSpeak {
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
         let VoiceSpeak { session_id, text } = self;
+        let text = words_to_speak(ctx, door::current(), session_id, text).await?;
         if text.trim().is_empty() {
             return Ok(None);
         }
@@ -217,6 +224,30 @@ impl Op for VoiceSpeak {
             .map_err(|e| BackendError::Failed(format!("voice reply synthesis: {e:#}")))?;
         keep_reply(ctx, session_id, &audio).await.map(Some)
     }
+}
+
+/// The answer [`VoiceSpeak`] reads aloud: the window's own at the local door,
+/// the session's last assistant row in the crab's ledger at the remote one,
+/// whatever text the remote caller sent. Empty when the session has no
+/// answer yet, which speaks nothing.
+async fn words_to_speak(
+    ctx: &Ctx,
+    door: Door,
+    session_id: Uuid,
+    text: String,
+) -> Result<String, BackendError> {
+    if door == Door::Local {
+        return Ok(text);
+    }
+    let db = ctx
+        .database()
+        .await
+        .map_err(|e| BackendError::Failed(format!("voice reply db connect: {e}")))?;
+    let row = crate::db::repository::MessageRepository::new(db.pool().clone())
+        .get_last_assistant_message(session_id)
+        .await
+        .map_err(|e| BackendError::Failed(format!("voice reply row lookup: {e}")))?;
+    Ok(row.map(|row| row.content).unwrap_or_default())
 }
 
 /// Keep a synthesized answer in the session's folder and mark the answer row
@@ -384,6 +415,63 @@ mod tests {
             }
         );
         assert_eq!(answer_row(&gateway, &chat).await, "answer");
+    }
+
+    /// The remote door reads aloud the answer the crab's ledger keeps, never
+    /// the words its caller sent; the window's door reads the answer it hands
+    /// in, as before.
+    #[tokio::test]
+    async fn the_remote_door_speaks_the_ledgers_answer_not_the_callers_text() {
+        let gateway = Gateway::start().await;
+        let chat = answered(&gateway, None).await;
+        let remote = gateway
+            .within(words_to_speak(
+                &gateway.ctx,
+                Door::Remote,
+                chat.id,
+                "free words".into(),
+            ))
+            .await
+            .expect("remote words");
+        assert_eq!(remote, "answer", "the remote door speaks the stored answer");
+        let local = gateway
+            .within(words_to_speak(
+                &gateway.ctx,
+                Door::Local,
+                chat.id,
+                "free words".into(),
+            ))
+            .await
+            .expect("local words");
+        assert_eq!(local, "free words", "the window's answer is its own");
+    }
+
+    /// A remote caller that sends words for a session with no answer gets
+    /// nothing spoken and nothing kept: its text is never synthesized.
+    #[tokio::test]
+    async fn a_remote_caller_cannot_have_its_own_text_spoken() {
+        let gateway = Gateway::start().await;
+        let silent = Uuid::new_v4();
+        let caller = Caller {
+            principal: "api_key".to_string(),
+            scopes: vec![Scope::Read, Scope::Send],
+        };
+        let spoken = gateway
+            .within(door::remote_as(
+                caller,
+                VoiceSpeak {
+                    session_id: silent,
+                    text: "words the crab never said".into(),
+                }
+                .run(&gateway.ctx),
+            ))
+            .await
+            .expect("an answer");
+        assert_eq!(spoken, None);
+        assert!(
+            !gateway.home().join(VOICE_DIR).exists(),
+            "no clip was written"
+        );
     }
 
     /// A spoken answer kept for a remote caller is marked with the path the
