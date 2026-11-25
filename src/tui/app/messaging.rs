@@ -1610,6 +1610,33 @@ impl App {
                 }
                 self.onboarding = Some(wizard);
                 self.mode = AppMode::Onboarding;
+                // Opening the model picker is the moment the list has to be
+                // current (#3176). Before this, `/models` rendered whatever
+                // config.toml last wrote and only went live once the user
+                // pressed Enter on the API-key field, so a model Google had
+                // released since the last save was invisible. Start the same
+                // fetch the picker's own keystroke starts.
+                if step == OnboardingStep::ProviderAuth {
+                    use crate::ui_core::model_selector::FetchRequest;
+                    let started = self.onboarding.as_mut().and_then(|wizard| {
+                        let request = FetchRequest::from_selector(&wizard.ps)?;
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        Some((request, provider_index, generation))
+                    });
+                    if let Some((request, provider_index, generation)) = started {
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
+                }
                 true
             }
             "/new" => {

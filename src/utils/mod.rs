@@ -24,6 +24,7 @@ pub mod internal_message;
 pub mod last_session;
 pub mod long_command;
 pub mod model_match;
+pub mod model_order;
 pub mod pdf_vision;
 pub mod plan_files;
 pub mod plan_mode;

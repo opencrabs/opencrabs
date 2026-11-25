@@ -293,7 +293,13 @@ pub async fn fetch_provider_models(
             return crate::ui_core::model_selector::load_default_models("github");
         }
         "gemini" => {
-            // Google Gemini - list models via generativelanguage API
+            // Google Gemini. One shared live catalogue fetch (#3176) so the
+            // TUI picker, the GUI picker and the channels menu all show the
+            // same list: every page of Google's response, chat models only,
+            // newest-first. The old arm here read a bare `/models` URL, which
+            // silently stopped at Google's 50-entry first page, and ordered
+            // the result by reversing a lexicographic sort, which put
+            // `gemini-3.8-flash` above `gemini-3.10-flash`.
             let key = match api_key {
                 Some(k) if !k.is_empty() => k,
                 _ => {
@@ -303,66 +309,13 @@ pub async fn fetch_provider_models(
                     return Vec::new();
                 }
             };
-            tracing::info!("[fetch_provider_models] Gemini: fetching models (key present)");
-            let url = "https://generativelanguage.googleapis.com/v1beta/models";
-            // Gemini uses a different response shape: { models: [{ name: "models/gemini-..." }] }
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct GeminiModel {
-                name: String,
-                #[serde(default)]
-                supported_generation_methods: Vec<String>,
-            }
-            #[derive(serde::Deserialize)]
-            struct GeminiModelsResponse {
-                models: Vec<GeminiModel>,
-            }
-            match models_request(url)
-                .header("x-goog-api-key", key)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<GeminiModelsResponse>().await {
-                        Ok(body) => {
-                            let mut models: Vec<String> = body
-                                .models
-                                .into_iter()
-                                .filter(|m| {
-                                    m.supported_generation_methods
-                                        .iter()
-                                        .any(|g| g == "generateContent")
-                                })
-                                .map(|m| {
-                                    m.name
-                                        .strip_prefix("models/")
-                                        .unwrap_or(&m.name)
-                                        .to_string()
-                                })
-                                .collect();
-                            models.sort();
-                            models.reverse(); // Newest model versions first
-                            tracing::info!(
-                                "[fetch_provider_models] Gemini: fetched {} models",
-                                models.len()
-                            );
-                            return models;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Gemini models parse error: {}", e);
-                            return Vec::new();
-                        }
-                    }
-                }
-                Ok(resp) => {
-                    tracing::warn!("Gemini models API returned {}", resp.status());
-                    return Vec::new();
-                }
-                Err(e) => {
-                    tracing::warn!("Gemini models fetch failed: {}", e);
-                    return Vec::new();
-                }
-            }
+            let models =
+                crate::brain::provider::gemini_models::fetch_live_chat_models(key).await;
+            tracing::info!(
+                "[fetch_provider_models] Gemini: fetched {} live chat models",
+                models.len()
+            );
+            models
         }
         "openrouter" => {
             // OpenRouter - /api/v1/models

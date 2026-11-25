@@ -34,6 +34,7 @@ pub mod deepseek_reasoning;
 pub mod factory;
 pub mod fallback;
 pub mod gemini;
+pub mod gemini_models;
 pub mod glm_reasoning;
 pub mod identity;
 pub mod kimi_plan;

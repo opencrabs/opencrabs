@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use std::sync::Arc;
 
-const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub(crate) const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Google's rolling alias for the newest Flash model.
@@ -65,6 +65,8 @@ const NON_CHAT_MARKERS: &[&str] = &[
     "omni",
     "lyria",
     "transcribe",
+    "translate",
+    "native-audio",
     "robotics",
     "computer-use",
     "deep-research",
@@ -956,54 +958,16 @@ impl Provider for GeminiProvider {
     }
 
     async fn fetch_models(&self) -> Vec<String> {
-        // Fetch live model list from Gemini models API
-        let url = format!("{}/models?pageSize=100", GEMINI_BASE_URL);
-
-        #[derive(serde::Deserialize)]
-        struct ModelEntry {
-            name: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct ModelsResponse {
-            models: Option<Vec<ModelEntry>>,
-        }
-
-        match self
-            .client
-            .get(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<ModelsResponse>().await {
-                    Ok(body) => {
-                        let models: Vec<String> = body
-                            .models
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|m| {
-                                // Strip "models/" prefix from name like "models/gemini-2.0-flash"
-                                m.name
-                                    .strip_prefix("models/")
-                                    .unwrap_or(&m.name)
-                                    .to_string()
-                            })
-                            .filter(|m| {
-                                // Only surfacing generative text/multimodal models
-                                m.contains("gemini") || m.contains("gemma")
-                            })
-                            .collect();
-                        if models.is_empty() {
-                            self.supported_models()
-                        } else {
-                            models
-                        }
-                    }
-                    Err(_) => self.supported_models(),
-                }
-            }
-            _ => self.supported_models(),
+        // One live catalogue fetch for every surface (#3176): the channels
+        // menu here, and the TUI/GUI pickers through
+        // `ui_core::model_selector::fetch`, which delegates to the same
+        // helper. `FALLBACK_MODELS` stays the offline floor for when Google
+        // does not answer.
+        let live = super::gemini_models::fetch_live_chat_models(&self.api_key).await;
+        if live.is_empty() {
+            self.supported_models()
+        } else {
+            live
         }
     }
 

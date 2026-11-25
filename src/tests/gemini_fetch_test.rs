@@ -271,3 +271,92 @@ mod default_resolution {
         assert_eq!(resolved, LATEST_FLASH_MODEL);
     }
 }
+
+/// #3176: one shared catalogue reducer feeds the TUI picker, the GUI picker
+/// and the channels menu. These cover the shape rules that used to differ per
+/// surface: pagination is the fetcher's job, but what counts as a chat model,
+/// how the `models/` prefix is handled, dedupe and order are all decided here.
+#[cfg(test)]
+mod shared_catalogue {
+    use crate::brain::provider::gemini_models::{GeminiModelEntry, chat_models_from_entries};
+
+    fn entry(name: &str, methods: &[&str]) -> GeminiModelEntry {
+        GeminiModelEntry {
+            name: name.to_string(),
+            supported_generation_methods: methods.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    fn chat(name: &str) -> GeminiModelEntry {
+        entry(name, &["generateContent"])
+    }
+
+    #[test]
+    fn keeps_chat_models_and_strips_the_models_prefix() {
+        let models = chat_models_from_entries(vec![
+            chat("models/gemini-3.8-flash"),
+            chat("models/gemini-2.5-pro"),
+        ]);
+        assert_eq!(models, vec!["gemini-3.8-flash", "gemini-2.5-pro"]);
+    }
+
+    #[test]
+    fn drops_entries_without_generate_content() {
+        // An embedding model lists only embedContent; offering it in a chat
+        // picker produced a request the API rejects.
+        let models = chat_models_from_entries(vec![
+            entry("models/gemini-embedding-001", &["embedContent"]),
+            entry("models/gemini-2.5-flash", &["countTokens"]),
+            chat("models/gemini-2.5-flash"),
+        ]);
+        assert_eq!(models, vec!["gemini-2.5-flash"]);
+    }
+
+    #[test]
+    fn drops_generative_families_that_are_not_chat() {
+        let models = chat_models_from_entries(vec![
+            chat("models/gemini-3.1-flash-image-preview"),
+            chat("models/gemini-2.5-flash-preview-tts"),
+            chat("models/gemini-2.5-flash-native-audio-preview-09-2025"),
+            chat("models/gemini-3.5-live-translate-preview"),
+            chat("models/imagen-4"),
+            chat("models/gemini-2.5-pro"),
+        ]);
+        assert_eq!(models, vec!["gemini-2.5-pro"]);
+    }
+
+    #[test]
+    fn dedupes_repeated_ids_across_pages() {
+        let models = chat_models_from_entries(vec![
+            chat("models/gemini-3.8-flash"),
+            chat("gemini-3.8-flash"),
+        ]);
+        assert_eq!(models, vec!["gemini-3.8-flash"]);
+    }
+
+    #[test]
+    fn orders_versions_numerically_not_lexicographically() {
+        // The old picker arm did `sort(); reverse()`, which reads 3.8 as
+        // newer than 3.10 and puts gemini-4 below a 3.x list.
+        let models = chat_models_from_entries(vec![
+            chat("models/gemini-3.8-flash"),
+            chat("models/gemini-3.10-flash"),
+            chat("models/gemini-4-carbon"),
+            chat("models/gemini-2.5-pro"),
+        ]);
+        assert_eq!(
+            models,
+            vec![
+                "gemini-4-carbon",
+                "gemini-3.10-flash",
+                "gemini-3.8-flash",
+                "gemini-2.5-pro"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_catalogue_stays_empty() {
+        assert!(chat_models_from_entries(Vec::new()).is_empty());
+    }
+}
