@@ -2126,25 +2126,16 @@ async fn run_text_command(
             // The terminal's own installer and its own binary, launched the
             // same way: `/whisper` must not grow a second downloader here.
             match opencrabs::tui::app::ensure_whispercrabs().await {
-                Ok(binary) => {
-                    match std::process::Command::new(&binary)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                    {
-                        Ok(_) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: tc::whisper_reply(),
-                        }],
-                        Err(e) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: tc::whisper_failed(&format!(
-                                "Failed to launch WhisperCrabs: {e}"
-                            )),
-                        }],
-                    }
-                }
+                Ok(binary) => match launch_whispercrabs(&binary) {
+                    Ok(()) => vec![TurnEvent::CommandReply {
+                        session: Some(session_id),
+                        text: tc::whisper_reply(),
+                    }],
+                    Err(e) => vec![TurnEvent::CommandReply {
+                        session: Some(session_id),
+                        text: tc::whisper_failed(&format!("Failed to launch WhisperCrabs: {e}")),
+                    }],
+                },
                 Err(e) => vec![TurnEvent::CommandReply {
                     session: Some(session_id),
                     text: tc::whisper_failed(&e.to_string()),
@@ -2160,6 +2151,21 @@ async fn run_text_command(
             }]
         }
     }
+}
+
+/// Start the WhisperCrabs mic, detached from this process.
+///
+/// Local by nature: the mic floats over this machine's screen and types into
+/// whatever has focus here, whichever crab the window holds. It is the
+/// window's tool, like the voice clip recorder, never the crab's, so it is a
+/// `LOCAL_ONLY` entry of the seam check rather than an operation.
+fn launch_whispercrabs(binary: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(binary)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// Run the crab's half of a text command and word its answer the way the
