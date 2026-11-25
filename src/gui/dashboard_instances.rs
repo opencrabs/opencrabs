@@ -25,11 +25,17 @@ use opencrabs::backend::Op;
 use opencrabs::backend::cap;
 use opencrabs::backend::hello::Hello;
 use opencrabs::remote::instance_client::{self, Target};
-use opencrabs::remote::instance_store::{InstanceFile, InstanceStore, now};
+use opencrabs::remote::instance_repoint;
+use opencrabs::remote::instance_store::{InstanceFile, InstanceStore, KnownInstance, now};
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a crab that stays down waits between two sweeps of its stored
+/// routes. A sweep can cost a few timeouts (a LAN address from another
+/// network), so it does not run on every five-second probe.
+const RECOVER_INTERVAL_SECS: u64 = 60;
 
 /// The event stream held open on one remote conversation.
 pub(crate) struct RemoteWatch {
@@ -339,6 +345,29 @@ impl Dashboard {
         Ok(next)
     }
 
+    /// A paired crab was followed to a new address, by the probe loop or by
+    /// the badge's card. The model takes the new record in place; if the
+    /// window is on that crab, its backend is rebuilt at the new address and
+    /// what it shows is read again, without leaving the conversation: it is
+    /// the same crab, only the road to it changed.
+    pub(crate) fn instance_repointed(&mut self, known: &KnownInstance, cx: &mut Context<Self>) {
+        if !self.instances.repoint(known) {
+            return;
+        }
+        logging::info(&format!(
+            "instances: {} re-pointed to {}",
+            known.host_id, known.url
+        ));
+        if self.instances.selected_host_id() == Some(known.host_id.as_str()) {
+            self.backend = Backend::remote(known, &self.home_backend);
+            self.instance_epoch = self.instance_epoch.wrapping_add(1);
+            self.instance_error = None;
+            self.refresh_rail(cx);
+            self.fetch_hello(cx);
+        }
+        cx.notify();
+    }
+
     /// Whether the strip's `+` card is up. While it is, it owns the keyboard.
     pub(crate) fn instance_card_open(&self, cx: &App) -> bool {
         self.instance_strip.read(cx).card_open()
@@ -354,6 +383,10 @@ impl Dashboard {
     /// loop exits when the window dies, like every other loop there.
     pub(crate) fn spawn_instance_probe(cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            // When each crab's stored routes were last swept, so a crab that
+            // stays down is swept once a minute and not on every probe.
+            let mut swept: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
             loop {
                 cx.background_executor().timer(PROBE_INTERVAL).await;
                 // Snapshot the targets on the UI thread: the model is not
@@ -402,27 +435,70 @@ impl Dashboard {
                     .await;
 
                 let at = now();
-                if this
-                    .update(cx, |this, cx| {
-                        let mut changed = false;
-                        for (host_id, latency) in results {
-                            let before = this.instances.get(&host_id).map(|e| e.health);
-                            this.instances.record_probe(&host_id, latency.ok_or(()), at);
-                            let after = this.instances.get(&host_id).map(|e| e.health);
-                            changed |= before != after;
-                            // A crab that answered is a crab whose token still
-                            // works, which is worth remembering across restarts.
-                            if matches!(after, Some(Health::Up { .. })) && before != after {
-                                let store = InstanceStore::new(InstanceStore::default_path());
-                                if let Err(e) = store.record_ok(&host_id, at) {
-                                    logging::info(&format!(
-                                        "instances: could not stamp {host_id}: {e:#}"
-                                    ));
-                                }
+                let followed = match this.update(cx, |this, cx| {
+                    let mut came_up = Vec::new();
+                    let mut down = Vec::new();
+                    let mut changed = false;
+                    for (host_id, latency) in results {
+                        if latency.is_none() {
+                            down.push(host_id.clone());
+                        }
+                        let before = this.instances.get(&host_id).map(|e| e.health);
+                        this.instances.record_probe(&host_id, latency.ok_or(()), at);
+                        let after = this.instances.get(&host_id).map(|e| e.health);
+                        changed |= before != after;
+                        // A crab that answered is a crab whose token still
+                        // works, which is worth remembering across restarts.
+                        if matches!(after, Some(Health::Up { .. })) && before != after {
+                            came_up.push(host_id.clone());
+                            let store = InstanceStore::new(InstanceStore::default_path());
+                            if let Err(e) = store.record_ok(&host_id, at) {
+                                logging::info(&format!(
+                                    "instances: could not stamp {host_id}: {e:#}"
+                                ));
                             }
                         }
-                        if changed {
-                            cx.notify();
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                    (came_up, down)
+                }) {
+                    Ok(followed) => followed,
+                    Err(_) => break,
+                };
+                let (came_up, mut down) = followed;
+                down.retain(|host_id| {
+                    let due = swept
+                        .get(host_id)
+                        .is_none_or(|last| at.saturating_sub(*last) >= RECOVER_INTERVAL_SECS);
+                    if due {
+                        swept.insert(host_id.clone(), at);
+                    }
+                    due
+                });
+                for host_id in &came_up {
+                    swept.remove(host_id);
+                }
+                if came_up.is_empty() && down.is_empty() {
+                    continue;
+                }
+
+                // A crab that came up announces its routes again, so the next
+                // address change has fresh ones to follow; a crab that is down
+                // is looked for on the routes it announced last. Both are the
+                // store and the network, so both run off the UI thread.
+                let moved = cx
+                    .background_executor()
+                    .spawn(async move { follow_addresses(&came_up, &down) })
+                    .await;
+                if moved.is_empty() {
+                    continue;
+                }
+                if this
+                    .update(cx, |this, cx| {
+                        for known in &moved {
+                            this.instance_repointed(known, cx);
                         }
                     })
                     .is_err()
@@ -433,4 +509,30 @@ impl Dashboard {
         })
         .detach();
     }
+}
+
+/// Refresh the routes of the crabs that came up, and sweep the stored routes
+/// of the ones that are down. Returns the crabs that were found at a new
+/// address. Runs on a background thread, on the remote client's runtime.
+fn follow_addresses(came_up: &[String], down: &[String]) -> Vec<KnownInstance> {
+    let store = InstanceStore::new(InstanceStore::default_path());
+    instance_client::block_on(async {
+        for host_id in came_up {
+            if let Err(e) = instance_repoint::refresh_routes(&store, host_id).await {
+                logging::info(&format!(
+                    "instances: routes of {host_id} not refreshed: {e:#}"
+                ));
+            }
+        }
+        let mut moved = Vec::new();
+        for host_id in down {
+            match instance_repoint::recover(&store, host_id).await {
+                Ok(Some(known)) => moved.push(known),
+                Ok(None) => {}
+                Err(e) => logging::info(&format!("instances: could not look for {host_id}: {e:#}")),
+            }
+        }
+        Ok(moved)
+    })
+    .unwrap_or_default()
 }

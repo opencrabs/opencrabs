@@ -125,6 +125,21 @@ impl Instances {
     pub fn clear_selection(&mut self) {
         self.selected = None;
     }
+
+    /// A crab was followed to a new address: take its new record in place.
+    /// Its position, its health and the selection stay; only what the store
+    /// now says about it changes. An id we no longer hold is ignored.
+    pub fn repoint(&mut self, known: &KnownInstance) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.host_id() == known.host_id)
+        else {
+            return false;
+        };
+        entry.known = known.clone();
+        true
+    }
 }
 
 /// Cut a label to what the strip can draw, on a character boundary, with a
