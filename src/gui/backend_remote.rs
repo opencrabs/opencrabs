@@ -421,6 +421,8 @@ fn moved_by(event: &Event) -> &'static [Part] {
         | Event::TurnCancelled { .. } => &[],
         Event::RailChanged | Event::TranscriptChanged { .. } => &[Part::Facts],
         Event::TasksChanged => &[Part::Tasks],
+        // A question to the user, not a value the cache holds.
+        Event::ApprovalRequested { .. } => &[],
     }
 }
 
