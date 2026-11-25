@@ -27,6 +27,7 @@ use gpui::{
 };
 use opencrabs::config::{A2aConfig, Config};
 use opencrabs::remote::instance_client;
+use opencrabs::remote::instance_repoint;
 use opencrabs::remote::instance_store::{self, InstanceFile, InstanceStore, KnownInstance, now};
 use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
 use opencrabs::remote::scopes::BASE_SCOPES;
@@ -369,6 +370,11 @@ pub(crate) struct ManageView {
     pub(crate) title: SharedString,
     /// A forget is in flight; the buttons stop answering until it lands.
     pub(crate) busy: bool,
+    /// A new address for this crab, pasted when its tunnel came back
+    /// somewhere else. No code: the crab's own token confirms the move.
+    pub(crate) address: TextField,
+    /// A move to that address is being confirmed.
+    pub(crate) moving: bool,
 }
 
 impl InstanceStrip {
@@ -408,6 +414,8 @@ impl InstanceStrip {
             label: badge.label.clone(),
             title: badge.title.clone(),
             busy: false,
+            address: TextField::new(),
+            moving: false,
         }));
         self.card_error = None;
         cx.notify();
@@ -430,7 +438,7 @@ impl InstanceStrip {
     fn manage_forget(&mut self, cx: &mut Context<Self>) {
         let epoch = self.card_epoch;
         let host_id = match self.card.as_mut() {
-            Some(StripCard::Manage(view)) if !view.busy => {
+            Some(StripCard::Manage(view)) if !view.busy && !view.moving => {
                 view.busy = true;
                 view.host_id.clone()
             }
@@ -464,6 +472,128 @@ impl InstanceStrip {
                     strip.card_error = Some(SharedString::from(format!("esquecer: {e:#}")));
                     cx.notify();
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn manage_view(&mut self) -> Option<&mut ManageView> {
+        match self.card.as_mut() {
+            Some(StripCard::Manage(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The right-click card's keyboard: its one field takes the typing, Enter
+    /// moves the crab to the address in it, Esc closes.
+    fn manage_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
+        if self
+            .manage_view()
+            .is_some_and(|view| view.busy || view.moving)
+        {
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => self.close_card(cx),
+            "enter" => self.manage_repoint(cx),
+            _ => {
+                if let Some(edit) = text_field::editing_chord(
+                    ks.key.as_str(),
+                    ks.modifiers.control,
+                    ks.modifiers.platform,
+                    ks.modifiers.alt,
+                    ks.modifiers.shift,
+                ) {
+                    let Some(view) = self.manage_view() else {
+                        return;
+                    };
+                    match text_field::apply(&mut view.address, edit) {
+                        Some(text_field::ClipboardRequest::Write(text)) => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                        Some(text_field::ClipboardRequest::Read) => {
+                            if let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                                && let Some(view) = self.manage_view()
+                            {
+                                view.address.insert_text(text.trim());
+                            }
+                        }
+                        None => {}
+                    }
+                    cx.notify();
+                    return;
+                }
+                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    return;
+                }
+                let typed = ks.key_char.as_ref().and_then(|s| s.chars().next());
+                if let Some(ch) = typed
+                    && !ch.is_whitespace()
+                    && let Some(view) = self.manage_view()
+                {
+                    view.address.insert_text(&ch.to_string());
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// The managed crab's "mudar endereço": ask the pasted address who it is
+    /// with this crab's own token, off the UI thread, and move the crab there
+    /// only if it is the same crab. A refusal is printed in the card and
+    /// changes nothing.
+    fn manage_repoint(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.card_epoch;
+        let Some(view) = self.manage_view() else {
+            return;
+        };
+        if view.busy || view.moving {
+            return;
+        }
+        let host_id = view.host_id.clone();
+        let address = view.address.trimmed().to_string();
+        if address.is_empty() {
+            self.card_error = Some(SharedString::from(
+                "endereço: cola primeiro o endereço novo deste crab",
+            ));
+            cx.notify();
+            return;
+        }
+        if let Some(view) = self.manage_view() {
+            view.moving = true;
+        }
+        self.card_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { repoint_instance(&host_id, &address) })
+                .await;
+            this.update(cx, |strip, cx| {
+                match result {
+                    Ok(known) => {
+                        if strip.card_epoch == epoch {
+                            strip.close_card(cx);
+                        }
+                        strip
+                            .dashboard
+                            .update(cx, |dash, cx| dash.instance_repointed(&known, cx))
+                            .ok();
+                    }
+                    Err(e) => {
+                        if strip.card_epoch != epoch {
+                            return;
+                        }
+                        if let Some(view) = strip.manage_view() {
+                            view.moving = false;
+                        }
+                        strip.card_error =
+                            Some(SharedString::from(format!("endereço recusado: {e:#}")));
+                    }
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -515,6 +645,10 @@ impl InstanceStrip {
     /// closes. Every key is the card's while it is up, so a character typed
     /// here can never land in the composer underneath.
     pub(crate) fn card_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
+        if matches!(self.card, Some(StripCard::Manage(_))) {
+            self.manage_key(ks, cx);
+            return;
+        }
         if self.pair_form().is_some_and(|form| form.busy) {
             // A submit in flight owns nothing: the answer comes back into the
             // form, and typing into a request already sent would lie.
@@ -715,7 +849,7 @@ impl InstanceStrip {
                     "instance-manage-modal",
                     "Este crab",
                     "abrir mostra as sessões dele; esquecer apaga o emparelhamento",
-                    "esc fecha",
+                    "enter muda o endereço · esc fecha",
                     body,
                 )
             }
@@ -920,6 +1054,7 @@ impl InstanceStrip {
                 .child(view.title.clone())
                 .into_any_element(),
         ];
+        body.push(self.manage_address_field(view, cx));
         if let Some(err) = self.card_error_line() {
             body.push(err);
         }
@@ -947,6 +1082,78 @@ impl InstanceStrip {
             .flex_col()
             .gap_2()
             .children(body)
+            .into_any_element()
+    }
+
+    /// The new-address field and its button. Clipped at its border the way
+    /// the pairing field is: a tunnel URL is longer than the card is wide.
+    fn manage_address_field(&self, view: &ManageView, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let field = &view.address;
+        let (before, selected, after) = field.render_spans();
+        let repoint = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_repoint(cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(p.text_faint))
+                    .child(SharedString::from(
+                        "mudou de endereço? cola o novo (sem código)",
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(p.panel))
+                    .border_1()
+                    .border_color(rgb(p.accent))
+                    .text_size(rems(0.8125))
+                    .text_color(rgb(if field.is_empty() {
+                        p.text_faint
+                    } else {
+                        p.text
+                    }))
+                    .child(SharedString::from(before.to_string()))
+                    .when(!selected.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .bg(rgb(p.selection))
+                                .child(SharedString::from(selected.to_string())),
+                        )
+                    })
+                    .child(div().flex_none().w(px(1.5)).h(rems(1.0)).bg(rgb(p.accent)))
+                    .child(SharedString::from(after.to_string()))
+                    .when(field.is_empty(), |d| {
+                        d.child(SharedString::from("https://….trycloudflare.com"))
+                    }),
+            )
+            .child(
+                div().flex().flex_row().child(
+                    Self::card_button(
+                        "instance-manage-repoint",
+                        if view.moving {
+                            "a confirmar…"
+                        } else {
+                            "mudar endereço"
+                        },
+                        false,
+                    )
+                    .when(view.moving, |d| d.opacity(0.6))
+                    .on_click(repoint),
+                ),
+            )
             .into_any_element()
     }
 
@@ -1453,4 +1660,13 @@ fn forget_instance(host_id: &str) -> anyhow::Result<InstanceFile> {
     let store = InstanceStore::new(InstanceStore::default_path());
     store.remove(host_id)?;
     store.load()
+}
+
+/// Move one crab to the address the owner pasted, and hand back its row as it
+/// now reads. Runs off the UI thread. The check is
+/// [`instance_repoint::repoint_to`]'s: the address must answer this crab's
+/// own token and announce its host id, or nothing is written.
+fn repoint_instance(host_id: &str, address: &str) -> anyhow::Result<KnownInstance> {
+    let store = InstanceStore::new(InstanceStore::default_path());
+    instance_client::block_on(instance_repoint::repoint_to(&store, host_id, address))
 }

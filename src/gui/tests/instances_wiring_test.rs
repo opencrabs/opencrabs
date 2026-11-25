@@ -439,3 +439,72 @@ fn a_badge_right_click_forgets_its_crab_off_the_ui_thread() {
         "home first, so no screen keeps the dropped token"
     );
 }
+
+/// A crab whose address changed is moved from its badge with no code. The
+/// class pinned here is "a re-point is the backend's check, run off the UI
+/// thread, and its field stays inside the card": the card hands the address
+/// to `instance_repoint::repoint_to` on the background executor, a refusal
+/// lands in the card's error line, and a pasted tunnel URL is clipped at the
+/// field's border like the pairing field's.
+#[test]
+fn a_badge_card_moves_its_crab_to_a_new_address_off_the_ui_thread() {
+    let card = fn_body(STRIP, "manage_body");
+    assert!(
+        card.contains("self.manage_address_field(view, cx)"),
+        "{card}"
+    );
+    assert!(card.contains("self.card_error_line()"), "{card}");
+
+    let field = fn_body(STRIP, "manage_address_field");
+    assert!(
+        field.contains(".overflow_hidden()") && field.contains(".whitespace_nowrap()"),
+        "a pasted address must stay inside its field"
+    );
+    assert!(field.contains("this.manage_repoint(cx)"), "{field}");
+
+    let repoint = fn_body(STRIP, "manage_repoint");
+    assert!(repoint.contains("background_executor()"), "{repoint}");
+    assert!(
+        repoint.contains("repoint_instance(&host_id, &address)"),
+        "{repoint}"
+    );
+    assert!(
+        repoint.contains("dash.instance_repointed(&known, cx)"),
+        "{repoint}"
+    );
+    assert!(repoint.contains("strip.card_error ="), "{repoint}");
+    assert!(STRIP.contains(
+        "instance_client::block_on(instance_repoint::repoint_to(&store, host_id, address))"
+    ));
+}
+
+/// The probe loop follows a crab that moved: a crab that is down is swept on
+/// its stored routes, off the UI thread, and the window takes the new record
+/// without moving the badge.
+#[test]
+fn the_probe_loop_follows_a_crab_that_moved() {
+    let probe = fn_body(WIRING, "spawn_instance_probe");
+    assert!(
+        probe.contains("spawn(async move { follow_addresses(&came_up, &down) })"),
+        "{probe}"
+    );
+    assert!(
+        probe.contains("this.instance_repointed(known, cx);"),
+        "{probe}"
+    );
+    assert!(WIRING.contains("instance_repoint::recover(&store, host_id)"));
+    assert!(WIRING.contains("instance_repoint::refresh_routes(&store, host_id)"));
+
+    let mut model = two();
+    model.select("b:2");
+    let moved = known("b:2", "beta", "https://new.trycloudflare.com");
+    assert!(model.repoint(&moved));
+    let ids: Vec<&str> = model.entries().iter().map(|e| e.host_id()).collect();
+    assert_eq!(ids, ["a:1", "b:2"], "a move never reorders the strip");
+    assert_eq!(model.selected_host_id(), Some("b:2"));
+    assert_eq!(
+        model.get("b:2").map(|e| e.url()),
+        Some("https://new.trycloudflare.com")
+    );
+    assert!(!model.repoint(&known("c:3", "gamma", "http://c:7878")));
+}
