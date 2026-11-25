@@ -66,7 +66,7 @@ impl Op for AttachVoiceReply {
             .ok_or_else(|| {
                 BackendError::Failed("voice reply: the answer row is not in the ledger".into())
             })?;
-        let marker = format!("\n\n<<AUD:{shown}>>");
+        let marker = format!("\n\n<<AUD:{}>>", shown);
         repo.append_content(row.id, &marker)
             .await
             .map_err(|e| BackendError::Failed(format!("voice reply marker: {e}")))
