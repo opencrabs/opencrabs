@@ -450,3 +450,76 @@ fn a_cache_reached_through_a_symlink_still_opens_its_own_copy() {
         .expect("the copy is in the cache, however it is reached");
     assert!(png.starts_with(&cache), "{}", png.display());
 }
+
+#[test]
+fn a_remote_crab_s_link_reaches_the_opener_only_for_web_and_mail() {
+    let cache = tempfile::tempdir().expect("cache");
+    let (backend, crab) = remote_with_kept(cache.path(), &[]);
+
+    for url in [
+        "https://example.com/a?b=c",
+        "http://example.com",
+        "HTTPS://Example.com",
+        "mailto:crab@example.com",
+    ] {
+        assert_eq!(backend.openable_url(url), Ok(url), "{url}");
+    }
+    for url in [
+        "file:///etc/passwd",
+        "FILE:///home/me/x.desktop",
+        "vscode://file/home/me/x",
+        "slack://open",
+        "smb://host/share",
+        "javascript:alert(1)",
+        "/home/me/x.sh",
+        "~/x.desktop",
+        "x.desktop",
+        "https://",
+        "mailto:",
+        "",
+        " https://example.com",
+    ] {
+        assert_eq!(
+            backend.openable_url(url),
+            Err(crate::preview::REMOTE_URL_NOT_OPENED),
+            "{url:?} must not reach the system opener"
+        );
+    }
+    assert_eq!(crab.blob_fetches(), 0, "a link fetches nothing");
+}
+
+#[test]
+fn the_local_crab_s_links_open_as_before_whatever_their_scheme() {
+    let dir = tempfile::tempdir().expect("dir");
+    let backend = Backend::local(dir.path().join("opencrabs.db"));
+    for url in [
+        "https://example.com",
+        "mailto:me@example.com",
+        "vscode://file/x",
+        "slack://open",
+    ] {
+        assert_eq!(backend.openable_url(url), Ok(url), "{url}");
+    }
+}
+
+/// The body of `fn <name>(` in `dashboard_sessions.rs`, up to the next
+/// method.
+fn sessions_fn(name: &str) -> &'static str {
+    const SESSIONS: &str = include_str!("../dashboard_sessions.rs");
+    let (_, body) = SESSIONS
+        .split_once(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("{name}"));
+    body.split("\n    pub(crate) fn ").next().unwrap_or(body)
+}
+
+#[test]
+fn a_transcript_link_reaches_the_opener_only_through_openable_url() {
+    let body = sessions_fn("open_transcript_target");
+    assert!(body.contains("self.backend.openable_url(&url)"));
+    assert_eq!(
+        body.matches("preview::url_command(").count(),
+        1,
+        "one opener call, fed by openable_url"
+    );
+    assert!(!body.contains("url_command(&url)"));
+}

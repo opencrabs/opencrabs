@@ -594,8 +594,24 @@ impl Dashboard {
     ) {
         match target {
             opencrabs::ui_core::links::ClickTarget::File(path) => self.open_preview(path, cx),
+            // A remote crab's transcript is not trusted by this machine: the
+            // opener only gets what `openable_url` answers (any link of the
+            // local crab, as before; a remote crab's http, https or mailto),
+            // and a refused link is said in the reader instead.
             opencrabs::ui_core::links::ClickTarget::Url(url) => {
-                preview::launch(&preview::url_command(&url));
+                match self.backend.openable_url(&url) {
+                    Ok(url) => preview::launch(&preview::url_command(url)),
+                    Err(notice) => {
+                        logging::warn(&format!("transcript link: {notice}: {url}"));
+                        let shown = url.replace('`', "");
+                        self.open_message_preview(
+                            Uuid::nil(),
+                            "link not opened".to_string(),
+                            format!("{notice}\n\n`{shown}`"),
+                            cx,
+                        );
+                    }
+                }
             }
         }
     }

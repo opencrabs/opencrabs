@@ -172,6 +172,26 @@ pub fn url_command(url: &str) -> Vec<String> {
     }
 }
 
+/// The links a remote crab's transcript may hand [`url_command`]: a web page
+/// or a mail draft. The crab is not trusted by this machine, and the system
+/// handler runs whatever a scheme is bound to (`file:` opens a file here, a
+/// custom scheme starts its app), so everything else is refused.
+pub const REMOTE_URL_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
+
+/// What the window says instead of opening a remote crab's link it refuses.
+pub const REMOTE_URL_NOT_OPENED: &str =
+    "a remote crab's link: only http, https and mailto links are opened here";
+
+/// Whether a link from a remote crab's transcript may reach [`url_command`]:
+/// it starts with one of [`REMOTE_URL_SCHEMES`] in any case, and something
+/// follows the scheme. Pure.
+pub fn remote_url_opens(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    REMOTE_URL_SCHEMES
+        .iter()
+        .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len())
+}
+
 /// The command that shows a file in its folder with the file selected.
 pub fn reveal_command(path: &Path) -> Vec<String> {
     let target = path.to_string_lossy().to_string();

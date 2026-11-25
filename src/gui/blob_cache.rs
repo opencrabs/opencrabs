@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend_glue::Backend;
 use crate::blob_cache_store::{NOT_OPENED_HERE, opens_here};
+use crate::preview::{REMOTE_URL_NOT_OPENED, remote_url_opens};
 
 impl Backend {
     /// The path on this machine for `path` on the crab.
@@ -51,6 +52,22 @@ impl Backend {
                 .cached_blob(path)
                 .filter(|copy| opens_here(copy))
                 .ok_or(NOT_OPENED_HERE),
+        }
+    }
+
+    /// The link from the crab's transcript the system opener may be handed,
+    /// or the notice the window shows instead.
+    ///
+    /// The local crab's links open as they always did, whatever their
+    /// scheme. A crab on another machine only gets `http://`, `https://` and
+    /// `mailto:` links to the opener
+    /// ([`REMOTE_URL_SCHEMES`](crate::preview::REMOTE_URL_SCHEMES)): never
+    /// `file:`, a custom scheme, or a path. Pure, no network.
+    pub fn openable_url<'a>(&self, url: &'a str) -> Result<&'a str, &'static str> {
+        match self {
+            Backend::Local(_) => Ok(url),
+            _ if remote_url_opens(url) => Ok(url),
+            _ => Err(REMOTE_URL_NOT_OPENED),
         }
     }
 
