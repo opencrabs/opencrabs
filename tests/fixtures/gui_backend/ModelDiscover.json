@@ -1,0 +1,10 @@
+{
+  "op": "models.discover",
+  "scope": "a2a:admin",
+  "request": {
+    "provider_id": "anthropic"
+  },
+  "response": {
+    "Ok": ["claude-x", "claude-y"]
+  }
+}

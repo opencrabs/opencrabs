@@ -1,0 +1,19 @@
+{
+  "op": "models.catalogue",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": [
+      {
+        "provider": "anthropic",
+        "provider_name": "Anthropic",
+        "models": ["claude-x"]
+      },
+      {
+        "provider": "lab",
+        "provider_name": "lab",
+        "models": ["lab-one"]
+      }
+    ]
+  }
+}
