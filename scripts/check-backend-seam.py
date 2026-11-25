@@ -150,6 +150,16 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/bang.rs", "open_in_terminal"): "local-only capability (Cap::OpenTerminal)",
     ("src/gui/voice_input.rs", "write_clip"): "records locally; the clip goes up as a turn attachment",
     ("src/gui/voice_media.rs", "decode"): "decodes the already localized blob",
+    # janela: P11, what this machine does for itself whichever crab is held
+    ("src/gui/instance_strip.rs", "mint_share"): "shares the crab on this machine: its pairing store and its A2A address",
+    ("src/gui/agent_bridge.rs", "launch_whispercrabs"): "the mic floats over this machine's screen, whichever crab the window holds",
+    # setup: P11, the wizard configures this process; a remote crab never
+    # opens it (Cap::Setup in dashboard_commands::refused)
+    ("src/gui/onboard.rs", "open"): "the wizard reads this machine's config; gated by Cap::Setup",
+    ("src/gui/onboard.rs", "open_at"): "the wizard reads this machine's config; gated by Cap::Setup",
+    ("src/gui/onboard.rs", "seed_session_pair"): "the wizard reads this machine's config; gated by Cap::Setup",
+    ("src/gui/onboard.rs", "select_pair"): "the wizard reads this machine's config; gated by Cap::Setup",
+    ("src/gui/dashboard_models.rs", "reload_local_agent"): "rebuilds this process's agent; reload_agent skips it for a remote crab",
     # boot: F4, builds the local crab before a backend exists
     ("src/gui/agent_bridge.rs", "build"): "builds the local Ctx from the window's service",
     ("src/gui/agent_bridge.rs", "boot_resume"): "boot: rescans the turns this process died inside; a remote crab resumes its own",
