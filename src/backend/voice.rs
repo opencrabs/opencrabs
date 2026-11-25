@@ -69,6 +69,27 @@ fn engine_failure(door: Door, detail: String, generic: &str) -> String {
     }
 }
 
+/// Refuse the crab's voice on `session_id` to a remote caller whose
+/// principal did not open the session's running or last remote turn
+/// ([`super::turn::turn_principal`]): its engines would be paid for and its
+/// clips kept in someone else's conversation. The local door is not
+/// asked, and neither is a take with no session.
+///
+/// `before_any_turn` lets a take through on a session no remote turn has
+/// run on yet: the question is heard before the turn that asks it starts.
+fn own_turn(session_id: Option<Uuid>, before_any_turn: bool) -> Result<(), BackendError> {
+    let (Some(caller), Some(session_id)) = (door::caller(), session_id) else {
+        return Ok(());
+    };
+    match super::turn::turn_principal(session_id) {
+        Some(owner) if owner == caller.principal => Ok(()),
+        None if before_any_turn => Ok(()),
+        _ => Err(BackendError::Forbidden {
+            scope: Scope::Admin,
+        }),
+    }
+}
+
 /// Which voice engines the crab has, so the window promises only what the
 /// crab can do: a microphone where it can hear, a spoken answer where it can
 /// speak.
@@ -153,6 +174,7 @@ impl Op for VoiceTranscribe {
         let ogg = BASE64
             .decode(ogg_base64.as_bytes())
             .map_err(|e| BlobError::BadEncoding(e.to_string()))?;
+        own_turn(session_id, true)?;
         let voice = Config::current().voice_config();
         if !voice.stt_enabled {
             return Err(BackendError::Failed(STT_OFF.to_string()));
@@ -202,6 +224,9 @@ impl Op for VoiceTranscribe {
 /// the kept clip, `None` when the crab has no speech engine (the turn
 /// already answered in text) or the answer has no words.
 ///
+/// By the remote door only the principal that opened the session's running
+/// or last remote turn is spoken to; any other caller is refused.
+///
 /// No remote caller names the words either: by the remote door the crab
 /// speaks the answer its own ledger keeps for the session, and `text` is not
 /// read. Only the window, at the local door, hands in the answer as its turn
@@ -226,6 +251,7 @@ impl Op for VoiceSpeak {
         if text.trim().is_empty() {
             return Ok(None);
         }
+        own_turn(Some(session_id), false)?;
         let voice = Config::current().voice_config();
         if !voice.tts_enabled {
             // A recording is answered in text when speech output is off, the
@@ -503,6 +529,82 @@ mod tests {
             !gateway.home().join(VOICE_DIR).exists(),
             "no clip was written"
         );
+    }
+
+    /// Run `op` by the remote door for `principal`, holding `send`.
+    async fn as_principal<O: Op>(
+        gateway: &Gateway,
+        principal: &str,
+        op: O,
+    ) -> Result<O::Reply, BackendError> {
+        let caller = Caller {
+            principal: principal.to_string(),
+            scopes: vec![Scope::Read, Scope::Send],
+        };
+        gateway
+            .within(door::remote_as(caller, op.run(&gateway.ctx)))
+            .await
+    }
+
+    const NOT_YOURS: BackendError = BackendError::Forbidden {
+        scope: Scope::Admin,
+    };
+
+    /// The principal whose remote turn the session ran is spoken to; another
+    /// principal on the same session, or any principal on a session no
+    /// remote turn ran on, is refused before any engine or clip. The window
+    /// is never asked.
+    #[tokio::test]
+    async fn only_the_principal_of_the_sessions_turn_has_its_answer_spoken() {
+        let gateway = Gateway::start().await;
+        let chat = answered(&gateway, None).await;
+        let speak = || VoiceSpeak {
+            session_id: chat.id,
+            text: "spoken".into(),
+        };
+        assert_eq!(
+            as_principal(&gateway, "alice", speak()).await,
+            Err(NOT_YOURS),
+            "no remote turn ran on the session"
+        );
+        crate::backend::turn::turn_ran_for(chat.id, "alice");
+        assert_eq!(
+            crate::backend::turn::turn_principal(chat.id).as_deref(),
+            Some("alice")
+        );
+        let alice = as_principal(&gateway, "alice", speak()).await;
+        assert_ne!(alice, Err(NOT_YOURS), "alice's own turn: {alice:?}");
+        assert_eq!(as_principal(&gateway, "bob", speak()).await, Err(NOT_YOURS));
+        let local = gateway.local(speak()).await;
+        assert_ne!(local, Err(NOT_YOURS), "the window is not asked: {local:?}");
+    }
+
+    /// A take on a session whose remote turn is another principal's is
+    /// refused before it is heard; the turn's own principal, a session no
+    /// remote turn ran on, a take with no session and the window are heard.
+    #[tokio::test]
+    async fn only_the_principal_of_the_sessions_turn_has_a_take_heard_there() {
+        let gateway = Gateway::start().await;
+        let chat = answered(&gateway, None).await;
+        let take = |session_id| VoiceTranscribe {
+            session_id,
+            ogg_base64: BASE64.encode(b"OggS"),
+            keep: false,
+        };
+        let fresh = as_principal(&gateway, "bob", take(Some(chat.id))).await;
+        assert_ne!(fresh, Err(NOT_YOURS), "before any turn: {fresh:?}");
+        crate::backend::turn::turn_ran_for(chat.id, "alice");
+        assert_eq!(
+            as_principal(&gateway, "bob", take(Some(chat.id))).await,
+            Err(NOT_YOURS)
+        );
+        for answer in [
+            as_principal(&gateway, "alice", take(Some(chat.id))).await,
+            as_principal(&gateway, "bob", take(None)).await,
+            gateway.local(take(Some(chat.id))).await,
+        ] {
+            assert_ne!(answer, Err(NOT_YOURS), "{answer:?}");
+        }
     }
 
     /// An engine failure tells the window the whole chain, as it did, and a

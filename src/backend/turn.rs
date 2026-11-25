@@ -318,6 +318,37 @@ impl Drop for RunningGuard {
     }
 }
 
+/// The principal of each session's running or last remote turn. Unlike
+/// [`RUNNING`] an entry outlives its turn: the voice of an answer is asked
+/// for after the turn settled, by the principal that opened it.
+static TURN_PRINCIPAL: LazyLock<Mutex<HashMap<Uuid, String>>> = LazyLock::new(Mutex::default);
+
+/// The principal map, read through a poisoned lock as [`pending`] is.
+fn turn_principals() -> MutexGuard<'static, HashMap<Uuid, String>> {
+    TURN_PRINCIPAL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The principal that opened the remote turn running on `session_id`, or
+/// the last one that ran there. `None` when no remote turn has run on it in
+/// this process.
+pub(crate) fn turn_principal(session_id: Uuid) -> Option<String> {
+    turn_principals().get(&session_id).cloned()
+}
+
+/// Record `principal` as the one whose remote turn `session_id` runs.
+fn note_turn_principal(session_id: Uuid, principal: &str) {
+    turn_principals().insert(session_id, principal.to_string());
+}
+
+/// A remote turn on `session_id` opened by `principal` and already over, for
+/// the tests of what that turn grants.
+#[cfg(test)]
+pub(crate) fn turn_ran_for(session_id: Uuid, principal: &str) {
+    note_turn_principal(session_id, principal);
+}
+
 /// Register the remote turn on `session_id` that `principal` opened, with
 /// the stop it runs under.
 fn register_running(
@@ -325,6 +356,7 @@ fn register_running(
     principal: &str,
     cancel: &CancellationToken,
 ) -> RunningGuard {
+    note_turn_principal(session_id, principal);
     let turn = Uuid::new_v4();
     running().insert(
         session_id,
@@ -1445,5 +1477,23 @@ mod tests {
     #[test]
     fn a_session_with_no_remote_turn_has_nothing_to_stop() {
         assert_eq!(cancel_running(Uuid::new_v4(), Some("alice")), Ok(false));
+    }
+
+    /// A remote turn leaves its principal on the session after it ends, and
+    /// the next remote turn there replaces it.
+    #[test]
+    fn a_session_keeps_the_principal_of_its_last_remote_turn() {
+        let id = Uuid::new_v4();
+        assert_eq!(turn_principal(id), None, "no remote turn ran here");
+        let guard = register_running(id, "alice", &CancellationToken::new());
+        assert_eq!(turn_principal(id).as_deref(), Some("alice"));
+        drop(guard);
+        assert_eq!(
+            turn_principal(id).as_deref(),
+            Some("alice"),
+            "the turn ended, its principal stays"
+        );
+        drop(register_running(id, "bob", &CancellationToken::new()));
+        assert_eq!(turn_principal(id).as_deref(), Some("bob"));
     }
 }
