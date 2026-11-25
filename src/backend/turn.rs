@@ -83,8 +83,10 @@ impl Op for TurnSend {
             cancel,
         } = self;
         let service = ctx.service()?.clone();
-        // One turn per session: a second one is refused, never interleaved.
-        let _claim = ctx.claim_turn(session_id)?;
+        // One window turn per session: a second one is refused, never
+        // interleaved. A channel turn on the same session does not refuse it,
+        // as before this door existed (see `Ctx::claim_own_turn`).
+        let _claim = ctx.claim_own_turn(session_id)?;
         // Before the turn writes its rows: a resend of the text an
         // unanswered turn left behind must not stack a second copy of
         // it in history (#2697).
@@ -158,7 +160,8 @@ impl Op for TurnResume {
             cancel,
         } = self;
         let service = ctx.service()?.clone();
-        let _claim = ctx.claim_turn(session_id)?;
+        // Only this crab's own turn refuses a resume (`Ctx::claim_own_turn`).
+        let _claim = ctx.claim_own_turn(session_id)?;
         let turn = service.resume_interrupted_turn(
             session_id,
             content,
@@ -409,6 +412,31 @@ mod tests {
             }
         );
         assert_eq!(answer["Err"]["kind"], "busy", "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_channel_mid_turn_does_not_refuse_a_window_send() {
+        use crate::brain::agent::service::session_routes::register_turn_probe;
+
+        let gateway = booted().await;
+        let id = session(&gateway).await;
+        register_turn_probe(id, Arc::new(|| true));
+        let result = gateway.local(send(id)).await;
+        assert!(
+            !matches!(result, Err(BackendError::Busy)),
+            "another owner's turn must not refuse a window send"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_crabs_own_turn_refuses_a_window_send() {
+        let gateway = booted().await;
+        let id = session(&gateway).await;
+        let _held = gateway.ctx.claim_own_turn(id).expect("an idle session");
+        assert!(matches!(
+            gateway.local(send(id)).await,
+            Err(BackendError::Busy)
+        ));
     }
 
     #[tokio::test]
