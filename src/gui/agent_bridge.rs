@@ -2671,18 +2671,39 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("the shipped source before the tests");
+        // The turns themselves run in `backend::turn`: the race is there, and
+        // the settle of a dropped turn stays with the window's runners.
+        let turn_shipped = include_str!("../backend/turn.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped turn source before the tests");
         let mut raced = 0usize;
-        for (runner, end) in [
-            ("fn spawn_turn(", "/// Re-run one interrupted turn"),
-            ("fn spawn_resume(", "/// Resolve the boot accounting"),
+        for (runner, end, op, op_end) in [
+            (
+                "fn spawn_turn(",
+                "/// Re-run one interrupted turn",
+                "impl Op for TurnSend",
+                "impl Op for TurnResume",
+            ),
+            (
+                "fn spawn_resume(",
+                "/// Resolve the boot accounting",
+                "impl Op for TurnResume",
+                "/// Race a turn against its stop token",
+            ),
         ] {
             let body = shipped
                 .split(runner)
                 .nth(1)
                 .expect("the runner is in the shipped source");
             let body = body.split(end).next().expect("the runner has an end");
+            let turn = turn_shipped
+                .split(op)
+                .nth(1)
+                .expect("the runner's turn is in the shipped source");
+            let turn = turn.split(op_end).next().expect("the turn has an end");
             assert!(
-                body.contains("race_turn(turn, &cancel)"),
+                turn.contains("race_turn(turn, &cancel)"),
                 "{runner} must race the turn against its stop token, or the stop \
                  only lands when the provider finishes (#2657)"
             );
@@ -2882,17 +2903,18 @@ mod tests {
     /// The guard is wired into the send path, ahead of the turn's first write.
     #[test]
     fn dedup_runs_before_the_turn_persists() {
-        let src = include_str!("agent_bridge.rs");
+        // The send path's body runs in the backend's `TurnSend`.
+        let src = include_str!("../backend/turn.rs");
         let shipped = src
             .split("#[cfg(test)]")
             .next()
             .expect("the shipped source before the tests");
         let body = shipped
-            .split("pub fn spawn_turn(")
+            .split("impl Op for TurnSend")
             .nth(1)
             .expect("spawn_turn is in the shipped source");
         let body = body
-            .split("/// Re-run one interrupted turn")
+            .split("impl Op for TurnResume")
             .next()
             .expect("spawn_turn has an end");
         let guard = body

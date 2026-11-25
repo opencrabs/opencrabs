@@ -32,6 +32,7 @@ const EDITOR: &str = include_str!("../gui/editor.rs");
 const VOICE_INPUT: &str = include_str!("../gui/voice_input.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+const TURN: &str = include_str!("../backend/turn.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 const IMAGE_UTILS: &str = include_str!("../utils/image.rs");
@@ -636,7 +637,7 @@ fn a_text_turn_never_inherits_a_voice_answer() {
     );
     // A drifting model that writes a spoken block on a text turn is stripped
     // here, before the settle draws the answer.
-    let settle = region_in(AGENT_BRIDGE, "match outcome {", "Err(e) =>");
+    let settle = region_in(TURN, "match outcome {", "Err(e) =>");
     assert!(
         settle.contains("spoken::visible(&response.content)"),
         "a reply on a text turn is drawn without its spoken block"

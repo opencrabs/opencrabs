@@ -762,7 +762,7 @@ fn a_pane_send_stays_in_its_own_leaf() {
     // The call is reflowed across lines by rustfmt, so the argument list is
     // matched as text rather than as one unbroken line.
     assert!(
-        send.contains("spawn_turn(") && send.contains("bridge.service.clone(), session,"),
+        send.contains("spawn_turn(") && send.contains("self.backend.clone(), session,"),
         "the turn runs against the pane's session, not the window's"
     );
 }
