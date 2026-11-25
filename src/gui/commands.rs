@@ -192,7 +192,6 @@ const OPEN_TASKS: &[Need] = &[Need::Op(<tasks::TasksSnapshot as Op>::NAME)];
 ///
 /// Named by the op types themselves, so a renamed operation fails to compile
 /// here instead of greying an action out for a name nobody declares.
-#[allow(dead_code)] // read through `unavailable`, which has no window caller yet
 pub fn needs(action: GuiAction) -> &'static [Need] {
     match action {
         GuiAction::NewSession => NEW_SESSION,
@@ -205,7 +204,6 @@ pub fn needs(action: GuiAction) -> &'static [Need] {
 /// Why `action` is greyed out on the crab that answered `hello`, or `None`
 /// when it can run. With no handshake yet nothing is greyed out: the window
 /// behaves as it always has and a refusal still arrives as a notice.
-#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
 pub fn unavailable(action: GuiAction, hello: Option<&HelloReply>) -> Option<String> {
     let hello = hello?;
     cap::check(hello, needs(action))

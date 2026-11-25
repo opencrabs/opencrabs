@@ -496,6 +496,7 @@ pub(crate) fn run() {
                         window_frame_seen: saved_window,
                         window_frame_saved: saved_window,
                         backend: backend.clone(),
+                        hello: None,
                         hint_dismissed,
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),

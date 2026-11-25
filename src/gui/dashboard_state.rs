@@ -711,6 +711,10 @@ pub(crate) struct Dashboard {
     /// The rail itself, drawn as a cached view so a repaint it has no stake in
     /// replays its last prepaint instead of rebuilding every row (#2933).
     pub(crate) rail_view: Entity<rail_view::RailView>,
+    /// What the crab in `backend` answered to the handshake: the scopes this
+    /// window holds there and the operations it declares. `None` until it
+    /// answers, which greys nothing out.
+    pub(crate) hello: Option<opencrabs::backend::hello::HelloReply>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one

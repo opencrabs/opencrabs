@@ -76,10 +76,18 @@ impl Dashboard {
         let favorite = self.sessions.is_favorite(id);
         let topics_on = self.sessions.is_topic_enabled(id);
         let is_topic = self.sessions.parents.contains_key(&id);
+        let hello = self.hello.as_ref();
         let items = sessions::rail_menu_entries(favorite, topics_on, is_topic)
             .into_iter()
             .map(|entry| {
                 let kind = entry.kind;
+                // An action the crab will not run stays on the card, greyed
+                // out with its reason, and takes no click: the card keeps its
+                // shape and the refusal is read before it is asked for.
+                let unavailable = kind.unavailable(hello);
+                if unavailable.is_some() {
+                    return crate::menu::menu_item_gated(entry.label, unavailable);
+                }
                 let pick = cx.listener(move |this, _ev, _window, cx| {
                     cx.stop_propagation();
                     this.sessions.rail_menu = None;
@@ -109,7 +117,7 @@ impl Dashboard {
                         sessions::MenuKind::Delete => this.request_delete(id, cx),
                     }
                 });
-                sessions::menu_item(entry.label).on_click(pick)
+                crate::menu::menu_item_gated(entry.label, None).on_click(pick)
             })
             .collect::<Vec<_>>();
         // The press point is the anchor: the card opens under the pointer

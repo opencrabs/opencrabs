@@ -48,7 +48,6 @@ const GROUP_TOPICS: &[Need] = &[Need::Op(<sessions::AttachTopic as Op>::NAME)];
 impl MenuKind {
     /// The operations the row action runs on the crab. The splits are the
     /// window's own layout and ask the crab for nothing.
-    #[allow(dead_code)] // read through `unavailable`, which has no window caller yet
     pub fn needs(&self) -> &'static [Need] {
         match self {
             MenuKind::Pin => PIN,
@@ -65,7 +64,6 @@ impl MenuKind {
 
     /// Why the action is greyed out on the crab that answered `hello`, or
     /// `None` when it can run. No handshake yet greys nothing out.
-    #[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
     pub fn unavailable(&self, hello: Option<&HelloReply>) -> Option<String> {
         cap::check(hello?, self.needs())
             .err()
@@ -113,7 +111,6 @@ pub fn menu_item_disabled(label: &'static str) -> Stateful<Div> {
 /// scope, an older crab, or an action that only works on this machine. Drawn
 /// like [`menu_item_disabled`], so the menu keeps its shape, and the reason
 /// says why instead of leaving the user to guess.
-#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
 pub fn menu_item_unavailable(label: &'static str, reason: String) -> Stateful<Div> {
     menu_item_disabled(label).flex().flex_col().child(
         div()
@@ -124,7 +121,6 @@ pub fn menu_item_unavailable(label: &'static str, reason: String) -> Stateful<Di
 }
 
 /// The row for `label`: pickable, or greyed out with its reason.
-#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
 pub fn menu_item_gated(label: &'static str, unavailable: Option<String>) -> Stateful<Div> {
     match unavailable {
         Some(reason) => menu_item_unavailable(label, reason),

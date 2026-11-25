@@ -3580,6 +3580,7 @@ impl Render for Dashboard {
                     view: cx.entity().downgrade(),
                     paint: self.finder_paint.clone(),
                     voice: self.seeker_voice_view(cx),
+                    hello: self.hello.as_ref(),
                 },
                 handlers,
                 chip,

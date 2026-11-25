@@ -91,7 +91,6 @@ pub fn rows(state: &PaletteState) -> Vec<RowView> {
 
 /// [`rows`], with every command row the crab that answered `hello` will not
 /// run marked with its reason. With no handshake yet this is [`rows`].
-#[allow(dead_code)] // no window caller yet: the handshake is not kept by the window
 pub fn rows_gated(state: &PaletteState, hello: Option<&HelloReply>) -> Vec<RowView> {
     let mut printed = rows(state);
     for row in &mut printed {
@@ -695,6 +694,9 @@ pub(super) struct FinderOverlayState<'a> {
     pub paint: Entity<FinderPaint>,
     /// The card's own take, or `None` while the microphone is idle (#3044).
     pub voice: Option<SeekerVoice>,
+    /// The handshake of the crab the window holds, so a command it will not
+    /// run is drawn greyed out with its reason. `None` greys nothing out.
+    pub hello: Option<&'a HelloReply>,
 }
 
 pub(super) fn overlay(
@@ -712,9 +714,10 @@ pub(super) fn overlay(
         view,
         paint,
         voice,
+        hello,
     } = frame;
     let theme = palette::current();
-    let printed = rows(state);
+    let printed = rows_gated(state, hello);
     let idle = state.query().trim().is_empty();
     let pick_armed = state.pick().is_some();
     // The reveal gate: picker rows and typed results print at once, the
