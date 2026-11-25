@@ -13,6 +13,7 @@
 //! rewitten plan redraws on the next frame.
 
 use super::icon::disclosure_icon;
+use crate::backend_glue::Backend;
 use crate::palette;
 use crate::transcript::{
     ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
@@ -64,6 +65,14 @@ impl PlanStripState {
         self.mtime = None;
         self.doc = None;
         self.refresh();
+    }
+
+    /// Point the strip at the plan file a crab answered (`PlanPath`), or at
+    /// nothing. The path names a file on the crab's disk, so it goes through
+    /// [`Backend::localize`] first: `refresh` then only ever stats a file on
+    /// this machine. For the local crab that is the same path.
+    pub fn set_crab_path(&mut self, backend: &Backend, path: Option<PathBuf>) {
+        self.set_path(path.map(|path| backend.localize(&path)));
     }
 
     /// Re-read the plan when its file moved. Called from the render path,

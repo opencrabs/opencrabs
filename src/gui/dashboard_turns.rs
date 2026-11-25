@@ -1244,14 +1244,15 @@ impl Dashboard {
                     // DB read ran) are dropped, not painted. A pane's own
                     // lookup lands on that pane's strip (#2530).
                     if self.plan_for == Some(session) {
-                        self.plan.set_path(path);
+                        self.plan.set_crab_path(&self.backend, path);
                         cx.notify();
                     } else if let Some(pane) = self.pane_view(session) {
                         // The path belongs to the session the pane was opened
                         // for, so a leaf for another conversation ignores it.
                         if pane.read(cx).plan_for == Some(session) {
+                            let backend = self.backend.clone();
                             pane.update(cx, |pane, cx| {
-                                pane.plan.set_path(path);
+                                pane.plan.set_crab_path(&backend, path);
                                 cx.notify();
                             });
                         }
