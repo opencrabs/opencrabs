@@ -201,6 +201,7 @@ fn the_window_never_names_the_pool() {
 #[test]
 fn no_window_thread_opens_the_database_without_a_reactor() {
     let mut offenders = Vec::new();
+    let mut openers = Vec::new();
     let mut checked = 0;
     for path in window_sources() {
         let text =
@@ -220,6 +221,12 @@ fn no_window_thread_opens_the_database_without_a_reactor() {
                 continue;
             }
             checked += 1;
+            openers.push(format!(
+                "{}:{} fn {}",
+                path.display(),
+                span.start + 1,
+                span.name
+            ));
             if !carries_a_reactor(lines_of_fn) && !hands_work_to_a_lane(lines_of_fn) {
                 offenders.push(format!(
                     "{}:{} fn {}",
@@ -230,9 +237,17 @@ fn no_window_thread_opens_the_database_without_a_reactor() {
             }
         }
     }
-    assert!(
-        checked > 0,
-        "no synchronous function opens the database, so this guard checked nothing"
+    // After L10 no synchronous window function opens the database by path any
+    // more: every read and write goes through the backend seam. The guard used to
+    // demand at least one opener so it never checked nothing; now it forbids the
+    // window from opening the database again, and the reactor check below stays
+    // as the second line should a reviewer let one back in.
+    assert_eq!(
+        checked,
+        0,
+        "a synchronous window function opens the database again; the GUI no longer \
+         opens it by path, go through the backend seam instead:\n{}",
+        openers.join("\n")
     );
     assert!(
         offenders.is_empty(),
