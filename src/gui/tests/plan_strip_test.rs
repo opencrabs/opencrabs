@@ -436,8 +436,14 @@ fn a_pane_keeps_the_whole_task_title() {
     assert_eq!(lines[1].0, LineKind::Running);
     assert_eq!(lines[1].1, format!("▸ {}", "x".repeat(120)));
     assert_eq!(lines[2].1, format!("· {}", "y".repeat(120)));
-    // The bar keeps its count whatever the titles do.
-    assert!(lines[0].1.ends_with("33%"), "{:?}", lines[0]);
+    // The collapsed bar carries the count; the percentage is the view's own
+    // job now (#3131), so the pane line stops at "1/3".
+    assert_eq!(
+        lines[0],
+        (LineKind::Bar, "1/3".to_string()),
+        "{:?}",
+        lines[0]
+    );
 }
 
 #[test]

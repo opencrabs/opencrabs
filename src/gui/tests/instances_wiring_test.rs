@@ -537,7 +537,7 @@ fn a_remote_send_carries_the_conversation_on_screen() {
     // the host opens a brand new session (#3133).
     let source = include_str!("../dashboard_instances.rs");
     let body =
-        fn_body(source, "pub(crate) fn send_remote").expect("send_remote is the window's send");
+        fn_body(source, "pub(crate) fn send_remote_text").expect("send_remote is the window's send");
     assert!(
         body.contains(".context_id.clone()"),
         "the send must read the context off the transcript it is showing"
@@ -561,7 +561,7 @@ fn a_remote_send_carries_the_conversation_on_screen() {
 fn a_remote_send_follows_the_task_to_its_answer() {
     let source = include_str!("../dashboard_instances.rs");
     let body =
-        fn_body(source, "pub(crate) fn send_remote").expect("send_remote is the window's send");
+        fn_body(source, "pub(crate) fn send_remote_text").expect("send_remote is the window's send");
     assert!(
         body.contains("transcript.following = Some(task.id.clone())"),
         "the send claims the follow slot with the id the host handed back"
