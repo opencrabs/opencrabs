@@ -26,7 +26,7 @@ fn crab_with_cache(cache: &Path) -> Arc<RemoteCrab> {
     Arc::new(
         RemoteCrab::new(
             "localized",
-            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9",
             None,
             PathBuf::from("unused.db"),
         )
