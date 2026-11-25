@@ -1,0 +1,16 @@
+{
+  "op": "projects.delete",
+  "scope": "a2a:admin",
+  "request": {
+    "id": "3c1d2e4f-0000-4000-8000-000000000001"
+  },
+  "response": {
+    "Ok": {
+      "rows": [],
+      "detail": null,
+      "unassigned": [],
+      "assignable": [],
+      "notice": "Project deleted; its sessions are now unassigned"
+    }
+  }
+}

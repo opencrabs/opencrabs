@@ -188,12 +188,17 @@ pub async fn run(
     backend: crate::backend_glue::Backend,
     action: ProjectAction,
 ) -> Result<ProjectsData, String> {
-    // A refresh only reads, so it asks with the read scope; every other
-    // action writes and is a command.
+    // A refresh only reads, so it asks with the read scope; a delete needs
+    // the admin scope; every other action writes and is a command.
     let result = match action {
         ProjectAction::Refresh { detail } => {
             backend
                 .call(opencrabs::backend::projects::ProjectList { detail })
+                .await
+        }
+        ProjectAction::Delete { id } => {
+            backend
+                .call(opencrabs::backend::projects::ProjectDelete { id })
                 .await
         }
         action => {

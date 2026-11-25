@@ -195,8 +195,12 @@ impl Op for ProjectList {
     }
 }
 
-/// Run one project command (create, delete, assign, clear, archive) and
-/// answer the snapshot after it. A failure is its `{e:#}` text.
+/// Run one project command (create, assign, clear, archive) and answer the
+/// snapshot after it. A failure is its `{e:#}` text.
+///
+/// A delete is not one of them: deletes need the admin scope, so a project
+/// delete is [`ProjectDelete`], and this operation refuses one as bad params
+/// rather than let a manage caller through.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCommand {
     pub action: ProjectAction,
@@ -208,13 +212,39 @@ impl Op for ProjectCommand {
     type Reply = ProjectsData;
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        if matches!(self.action, ProjectAction::Delete { .. }) {
+            return Err(BackendError::BadParams(format!(
+                "{}: a delete is {}",
+                Self::NAME,
+                ProjectDelete::NAME
+            )));
+        }
         execute(ctx, self.action)
             .await
             .map_err(|e| BackendError::Failed(format!("{e:#}")))
     }
 }
 
-ops! { ProjectList, ProjectCommand }
+/// Delete one project and answer the snapshot after it. Its sessions stay,
+/// unassigned. Admin, like every delete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDelete {
+    pub id: Uuid,
+}
+
+impl Op for ProjectDelete {
+    const NAME: &'static str = "projects.delete";
+    const SCOPE: Scope = Scope::Admin;
+    type Reply = ProjectsData;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        execute(ctx, ProjectAction::Delete { id: self.id })
+            .await
+            .map_err(|e| BackendError::Failed(format!("{e:#}")))
+    }
+}
+
+ops! { ProjectList, ProjectCommand, ProjectDelete }
 
 #[cfg(test)]
 mod tests {
@@ -270,14 +300,49 @@ mod tests {
         forbidden!(
             gateway,
             ProjectCommand {
+                action: ProjectAction::ClearMany {
+                    project_id: project.id,
+                    session_ids: Vec::new(),
+                },
+            }
+        );
+        // A delete through the manage door is refused before it runs.
+        let answer = parity!(
+            gateway,
+            ProjectCommand {
                 action: ProjectAction::Delete { id: project.id },
             }
         );
+        assert_eq!(answer["Err"]["kind"], serde_json::json!("bad_params"));
         let answer = parity!(gateway, ProjectList { detail: None });
         assert_eq!(
             answer["Ok"]["rows"].as_array().map(Vec::len),
             Some(1),
             "a refused delete removed nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_delete_has_parity() {
+        let gateway = Gateway::start().await;
+        let project = seed(&gateway).await;
+        forbidden!(gateway, ProjectDelete { id: project.id });
+        let answer = parity!(gateway, ProjectList { detail: None });
+        assert_eq!(
+            answer["Ok"]["rows"].as_array().map(Vec::len),
+            Some(1),
+            "a refused delete removed nothing"
+        );
+        // A project nobody has: both doors answer the same, whatever it is.
+        parity!(gateway, ProjectDelete { id: Uuid::new_v4() });
+        let local = ProjectDelete { id: project.id }
+            .run(&gateway.ctx)
+            .await
+            .expect("the delete runs");
+        assert!(local.rows.is_empty(), "the project is gone");
+        assert_eq!(
+            local.notice.as_deref(),
+            Some("Project deleted; its sessions are now unassigned")
         );
     }
 
