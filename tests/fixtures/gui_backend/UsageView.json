@@ -1,0 +1,41 @@
+{
+  "op": "usage.view",
+  "scope": "a2a:read",
+  "request": {
+    "period": "Week"
+  },
+  "response": {
+    "Ok": {
+      "summary": {
+        "total_tokens": 1200,
+        "total_cost": 0.5,
+        "session_count": 2,
+        "call_count": 7,
+        "unpriced_tokens": 0
+      },
+      "daily": [{ "date": "2026-11-24", "tokens": 1200, "cost": 0.5, "calls": 7 }],
+      "projects": [{ "project": "crab", "cost": 0.5, "tokens": 1200, "sessions": 2 }],
+      "models": [
+        {
+          "model": "claude-x",
+          "tokens": 1200,
+          "cost": 0.5,
+          "calls": 7,
+          "estimated": false,
+          "cache_read_tokens": 300,
+          "cache_split_tokens": 900,
+          "variants": []
+        }
+      ],
+      "tools": [{ "tool_name": "bash", "call_count": 4 }],
+      "activities": [{ "category": "Development", "cost": 0.5, "turns": 3, "one_shot_pct": 66.7 }],
+      "cache": null
+    }
+  },
+  "response_no_ledger": {
+    "Err": {
+      "kind": "failed",
+      "detail": "failed to open the usage database at /home/crab/.opencrabs/opencrabs.db: unable to open database file"
+    }
+  }
+}
