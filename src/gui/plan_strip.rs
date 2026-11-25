@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui::{
-    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, rgb, rgba,
+    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, relative, rgb,
+    rgba,
 };
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
@@ -698,7 +699,7 @@ pub(crate) fn progress_bar_view(percent: usize, colour: u32) -> Div {
 /// the percentage at the trailing edge (#2496). The title takes the slack and
 /// cuts, so a long plan name never pushes the metrics out of the card.
 fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
-    let (_, _, percent, _) = progress(plan);
+    let (_, _, percent) = progress(plan);
     div()
         .flex()
         .flex_row()

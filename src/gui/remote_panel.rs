@@ -185,6 +185,9 @@ fn read_only_hooks(
         // looking. Claiming `false` here left every remote answer below the
         // fold, and the panel read as one that had stopped updating.
         following,
+        // The read-only remote transcript carries no composer strips of its
+        // own, so nothing is handed over to scroll with the turns.
+        trailing: Vec::new(),
     }
 }
 

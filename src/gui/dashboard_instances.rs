@@ -1596,6 +1596,11 @@ impl Dashboard {
         let Some(entry) = self.instances.get(&host_id) else {
             return;
         };
+        // Copy the connection details while `entry` holds the immutable
+        // borrow: the resets below take `&mut self`, so reading through
+        // `entry` after them no longer compiles.
+        let url = entry.url().to_string();
+        let token = entry.known.token.clone();
         // Every way into a crab lands here: the badge, the pairing form, and
         // the Ctrl+Alt+Up/Down switch. The draft is per crab, so it is dropped
         // at the one door they all use.
@@ -1609,8 +1614,6 @@ impl Dashboard {
         self.remote_editor.update(cx, |editor, _| {
             editor.focus_pending = true;
         });
-        let url = entry.url().to_string();
-        let token = entry.known.token.clone();
         self.instance_remote = Some(RemoteView::loading(host_id.clone()));
 
         cx.spawn(async move |this, cx| {
