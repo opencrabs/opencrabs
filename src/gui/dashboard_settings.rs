@@ -65,6 +65,38 @@ impl Dashboard {
         .detach();
     }
 
+    /// A config reload while the modal is open: re-read the rows from the
+    /// crab. Unlike opening, the status line (a "saved ..." just printed) is
+    /// kept; only a failed read replaces it, and the rows stay as they were.
+    pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let reply = settings_view::load(&backend).await;
+            this.update(cx, |this, cx| {
+                if !this.settings_open || this.instance_epoch != epoch {
+                    return;
+                }
+                match reply {
+                    Ok((values, creds)) => {
+                        this.settings_values = values;
+                        this.settings_creds = creds;
+                    }
+                    Err(e) => {
+                        this.settings_status = Some(settings_view::failure_line(
+                            settings_view::LOAD_OP,
+                            "config load failed",
+                            e,
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
         self.settings_secret = None;

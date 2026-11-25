@@ -85,11 +85,12 @@ impl Dashboard {
             self.finder_channels = configured_channels_from(config);
         }
         // A hand edit or an agent write while the modal is open: re-read the
-        // rows. The cursor, the open section and any credential being typed are
-        // left alone, so a reload never moves the reader's place.
+        // rows from the crab the window holds, not from this machine's file.
+        // The cursor, the open section, the status line and any credential
+        // being typed are left alone, so a reload never moves the reader's
+        // place.
         if self.settings_open {
-            self.settings_values = settings_view::current_values(config);
-            self.settings_creds = settings_view::credential_rows(config);
+            self.reload_settings(cx);
         }
         cx.notify();
     }
