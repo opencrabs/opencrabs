@@ -536,8 +536,8 @@ fn a_remote_send_carries_the_conversation_on_screen() {
     // a context still returns a task id and still looks like it worked while
     // the host opens a brand new session (#3133).
     let source = include_str!("../dashboard_instances.rs");
-    let body =
-        fn_body(source, "pub(crate) fn send_remote_text").expect("send_remote is the window's send");
+    let body = fn_body(source, "pub(crate) fn send_remote_text")
+        .expect("send_remote is the window's send");
     assert!(
         body.contains(".context_id.clone()"),
         "the send must read the context off the transcript it is showing"
@@ -560,8 +560,8 @@ fn a_remote_send_carries_the_conversation_on_screen() {
 #[test]
 fn a_remote_send_follows_the_task_to_its_answer() {
     let source = include_str!("../dashboard_instances.rs");
-    let body =
-        fn_body(source, "pub(crate) fn send_remote_text").expect("send_remote is the window's send");
+    let body = fn_body(source, "pub(crate) fn send_remote_text")
+        .expect("send_remote is the window's send");
     assert!(
         body.contains("transcript.following = Some(task.id.clone())"),
         "the send claims the follow slot with the id the host handed back"
@@ -642,31 +642,21 @@ fn the_remote_composer_takes_the_local_ones_measurements() {
     // guard reads both and compares them.
     let panel = include_str!("../remote_panel.rs");
     let composer = fn_body(panel, "pub(crate) fn view(").expect("the panel has a view");
-    let editor = include_str!("../editor.rs");
 
-    for measurement in [
-        ".line_height(px(22.))",
-        ".text_size(px(14.))",
-        ".min_h(px(44.))",
-        "transcript::card_inset()",
-    ] {
-        assert!(
-            composer.contains(measurement),
-            "the remote composer must carry {measurement}, which is what the \
-             local field uses; without it the two fields are different sizes"
-        );
-        assert!(
-            editor.contains(measurement),
-            "{measurement} is no longer the local composer's, so this guard is \
-             comparing the remote field against nothing: update both together"
-        );
-    }
-
-    // The placeholder is the local field's own constant. A second copy of the
-    // string is how the two drift into saying different things.
+    // Since #3133 the remote composer is not a copy of the local field with
+    // matching numbers: it IS the chat's own editor entity, so typing, chords,
+    // history, the emoji list and Enter behave identically here and in the
+    // chat because it is the same code. A hand-built field re-decided the
+    // spans, caret and placeholder and drifted; the guard now insists on the
+    // entity mount itself.
     assert!(
-        composer.contains("crate::editor::PLACEHOLDER"),
-        "the remote placeholder must be the local constant, not a literal"
+        composer.contains("editor.into_any_element()"),
+        "the remote composer must mount the chat's own editor entity, not a \
+         hand-built field: a second field is how the two drifted apart"
+    );
+    assert!(
+        composer.contains("transcript::surface_fill(p.bg)"),
+        "the remote panel stands on the chat's own ground surface"
     );
 }
 
