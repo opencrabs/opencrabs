@@ -1,0 +1,19 @@
+{
+  "op": "turn.send",
+  "scope": "a2a:send",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "content": "what changed in the build?",
+    "display": null,
+    "voice": false
+  },
+  "response": {
+    "Ok": {
+      "content": "Two files changed: the lockfile and the CI workflow.",
+      "context_tokens": 1834,
+      "tokens_per_second": 42.5,
+      "voice": false,
+      "completed_plan": null
+    }
+  }
+}
