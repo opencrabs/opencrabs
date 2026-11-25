@@ -2708,34 +2708,12 @@ impl Dashboard {
 ///
 /// `None` for a remote crab: its tasks are not on this machine, and a frame
 /// never waits on the network, so the window shows it running nothing.
-fn tasks_ctx(backend: &crate::backend_glue::Backend) -> Option<&opencrabs::backend::Ctx> {
+pub(crate) fn tasks_ctx(
+    backend: &crate::backend_glue::Backend,
+) -> Option<&opencrabs::backend::Ctx> {
     match backend {
         crate::backend_glue::Backend::Local(ctx) => Some(ctx),
         // The remote variant is named only in the glue (seam rule R5).
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use crate::backend_glue::{Backend, RemoteCrab};
-
-    #[test]
-    fn a_remote_crab_has_no_tasks_ctx() {
-        let crab = RemoteCrab::new(
-            "elsewhere",
-            "http://127.0.0.1:9",
-            None,
-            PathBuf::from("unused.db"),
-        );
-        assert!(super::tasks_ctx(&Backend::Remote(Arc::new(crab))).is_none());
-    }
-
-    #[test]
-    fn a_local_crab_reads_its_own_tasks_ctx() {
-        assert!(super::tasks_ctx(&Backend::local(PathBuf::from("unused.db"))).is_some());
     }
 }

@@ -13,10 +13,7 @@ use uuid::Uuid;
 
 use crate::agent_bridge::EventSink;
 
-#[path = "backend_remote.rs"]
-mod remote;
-
-pub use remote::{RemoteCrab, Watch};
+pub use crate::backend_remote::{RemoteCrab, Watch};
 
 /// Which crab the window talks to.
 #[derive(Clone)]
@@ -87,7 +84,7 @@ impl Backend {
                     done(runtime.block_on(op.run(&ctx)));
                 })
             }
-            Backend::Remote(crab) => remote::spawn(crab.clone(), op, done),
+            Backend::Remote(crab) => crate::backend_remote::spawn(crab.clone(), op, done),
         }
     }
 
@@ -112,7 +109,9 @@ impl Backend {
     pub fn watch(&self, session: Uuid, sink: EventSink) -> Result<Option<Watch>, String> {
         match self {
             Backend::Local(_) => Ok(None),
-            Backend::Remote(crab) => remote::watch(crab.clone(), session, sink).map(Some),
+            Backend::Remote(crab) => {
+                crate::backend_remote::watch(crab.clone(), session, sink).map(Some)
+            }
         }
     }
 }

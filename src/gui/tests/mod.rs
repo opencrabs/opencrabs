@@ -5,7 +5,9 @@
 //! live here rather than in `src/tests/` because that tree belongs to the
 //! library, which cannot see the window at all.
 
+mod backend_remote_test;
 mod composer_orb_test;
+mod dashboard_turns_test;
 mod layout_guard_test;
 mod main_test;
 mod menu_test;
