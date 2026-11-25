@@ -141,52 +141,6 @@ pub(crate) fn credential_scopes(state: &A2aState, presented: Option<&str>) -> Op
         _ => None,
     }
 }
-
-#[cfg(test)]
-mod credential_posture_tests {
-    use super::*;
-    use crate::remote::scopes::{ELEVATED_SCOPES, SCOPE_MANAGE};
-
-    async fn state_with(api_key: Option<&str>, dir: &std::path::Path) -> A2aState {
-        use crate::a2a::test_helpers::helpers;
-        A2aState {
-            task_store: handler::new_task_store(),
-            cancel_store: handler::new_cancel_store(),
-            host: "127.0.0.1".to_string(),
-            port: 18790,
-            agent_service: helpers::placeholder_agent_service().await,
-            service_context: helpers::placeholder_service_context().await,
-            api_key: api_key.map(str::to_string),
-            pairing: PairingStore::new(dir.join("pairing")),
-            pair_hits: pairing_http::new_pair_hits(),
-            remote_state_dir: dir.join("remote"),
-        }
-    }
-
-    #[tokio::test]
-    async fn the_open_loopback_posture_carries_no_elevated_scope() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state = state_with(None, dir.path()).await;
-        for presented in [None, Some("anything"), Some("ocpair_whatever")] {
-            let scopes = credential_scopes(&state, presented).expect("open posture admits");
-            for elevated in ELEVATED_SCOPES {
-                assert!(
-                    !scopes.iter().any(|s| s == elevated),
-                    "open posture leaked {elevated} for {presented:?}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn the_api_key_carries_manage() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state = state_with(Some("owner-key"), dir.path()).await;
-        let scopes = credential_scopes(&state, Some("owner-key")).expect("api_key admits");
-        assert!(scopes.iter().any(|s| s == SCOPE_MANAGE));
-    }
-}
-
 fn unauthorized_response() -> axum::response::Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -511,4 +465,49 @@ async fn health_check(
         }
     }
     Json(body)
+}
+
+#[cfg(test)]
+mod credential_posture_tests {
+    use super::*;
+    use crate::remote::scopes::{ELEVATED_SCOPES, SCOPE_MANAGE};
+
+    async fn state_with(api_key: Option<&str>, dir: &std::path::Path) -> A2aState {
+        use crate::a2a::test_helpers::helpers;
+        A2aState {
+            task_store: handler::new_task_store(),
+            cancel_store: handler::new_cancel_store(),
+            host: "127.0.0.1".to_string(),
+            port: 18790,
+            agent_service: helpers::placeholder_agent_service().await,
+            service_context: helpers::placeholder_service_context().await,
+            api_key: api_key.map(str::to_string),
+            pairing: PairingStore::new(dir.join("pairing")),
+            pair_hits: pairing_http::new_pair_hits(),
+            remote_state_dir: dir.join("remote"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_open_loopback_posture_carries_no_elevated_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state_with(None, dir.path()).await;
+        for presented in [None, Some("anything"), Some("ocpair_whatever")] {
+            let scopes = credential_scopes(&state, presented).expect("open posture admits");
+            for elevated in ELEVATED_SCOPES {
+                assert!(
+                    !scopes.iter().any(|s| s == elevated),
+                    "open posture leaked {elevated} for {presented:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_api_key_carries_manage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state_with(Some("owner-key"), dir.path()).await;
+        let scopes = credential_scopes(&state, Some("owner-key")).expect("api_key admits");
+        assert!(scopes.iter().any(|s| s == SCOPE_MANAGE));
+    }
 }
