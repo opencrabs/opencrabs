@@ -35,6 +35,14 @@ pub(crate) fn ask_catalogue(backend: &crate::backend_glue::Backend) -> Catalogue
     rx
 }
 
+/// Whether a saved setup rebuilds the agent in this process.
+///
+/// The question is the one the wizard asks (`Cap::Setup`): a backend that
+/// cannot set up this machine is a crab elsewhere, and its stack is its own.
+pub(crate) fn reloads_here(backend: &crate::backend_glue::Backend) -> bool {
+    backend.lacks(cap::Cap::Setup).is_none()
+}
+
 impl Dashboard {
     /// Standalone provider selection filters both pointer and keyboard rows.
     /// Onboarding keeps its wizard-wide catalogue.
@@ -819,7 +827,25 @@ impl Dashboard {
     /// the placeholder provider, and the brain files are the system prompt, so
     /// the stack has to be rebuilt on the settings that were just written. The
     /// terminal does the same thing with `rebuild_agent_service`.
+    ///
+    /// Only for a crab on this machine. A crab elsewhere already holds what
+    /// was written (its brain files are generated on it) and runs its own
+    /// stack; rebuilding this machine's service from this machine's config
+    /// would answer nothing the window asks. The note still lands.
     pub(crate) fn reload_agent(&mut self, cx: &mut Context<Self>, saved: Option<&str>) {
+        if !reloads_here(&self.backend) {
+            if let Some(line) = saved {
+                self.turn.live.notices.push(line.to_string());
+            }
+            cx.notify();
+            return;
+        }
+        self.reload_local_agent(cx, saved);
+    }
+
+    /// The local half of [`Self::reload_agent`]: the config on this disk, the
+    /// service in this process.
+    fn reload_local_agent(&mut self, cx: &mut Context<Self>, saved: Option<&str>) {
         let config = match Config::load() {
             Ok(config) => config,
             Err(e) => {
