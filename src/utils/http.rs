@@ -94,9 +94,9 @@ fn build_shared() -> reqwest::Client {
 /// need different policies get different clients, and each one still pays the
 /// root-store load a single time.
 ///
-/// ```
+/// ```no_run
 /// static GUARDED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-/// let client = crate::utils::http::cached_client(&GUARDED, |b| {
+/// let client = utils::http::cached_client(&GUARDED, |b| {
 ///     b.redirect(reqwest::redirect::Policy::none())
 /// });
 /// ```
