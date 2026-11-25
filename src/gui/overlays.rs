@@ -766,10 +766,17 @@ pub(crate) fn confirm_disable_topics_overlay(
 /// sorted by name. A free function so the tests can exercise the real
 /// listing without a live window, the same shape the terminal's dialog
 /// builds in `open_directory_picker`.
+///
+/// This is the `ListDir` a crab on this machine answers, run in place. The
+/// picker never calls it: it asks the crab the window holds (`cd_list`), so
+/// a remote crab lists its own disk and this one is never read for it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn cd_entries_for(dir: &std::path::Path, show_hidden: bool) -> Vec<std::path::PathBuf> {
-    crate::status::ask_crab(opencrabs::backend::fs_list::ListDir {
+    use opencrabs::backend::Op as _;
+    let here = opencrabs::backend::Ctx::new(std::path::PathBuf::new());
+    let op = opencrabs::backend::fs_list::ListDir {
         dir: dir.to_path_buf(),
         show_hidden,
-    })
-    .unwrap_or_default()
+    };
+    futures::executor::block_on(op.run(&here)).unwrap_or_default()
 }

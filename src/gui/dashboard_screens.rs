@@ -900,17 +900,28 @@ impl Dashboard {
             cx.notify();
             return;
         };
-        let here = self
+        // The folder is the crab's, so the picker opens where the crab says
+        // the session works. Before the crab answers its first facts there is
+        // no such folder to name, and this machine's own would be a guess.
+        let Some(here) = self
             .backend
             .facts(Some(session))
             .map(|facts| facts.working_directory)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        else {
+            self.push_session_notice(
+                session,
+                "/cd: the crab is still starting; try again in a moment".to_string(),
+                cx,
+            );
+            cx.notify();
+            return;
+        };
         self.cd_dir = here;
         self.cd_show_hidden = false;
         self.cd_selected = 0;
         self.cd_session = Some(session);
-        self.cd_entries = cd_entries_for(&self.cd_dir, false);
         self.screen = Screen::DirectoryPicker;
+        self.cd_list(cx);
         // The screen takes the keyboard, the same rule as Themes: on this
         // screen the arrows walk the list, so a stale editor focus would
         // send a message instead.
@@ -966,15 +977,15 @@ impl Dashboard {
     }
 
     /// Enter on a row: descend into it. `..` climbs back up one level.
-    /// Reads are synchronous and local, the way the terminal's dialog does
-    /// them, so the row list can never drift from what the screen shows.
+    /// The rows are the crab's: they are cleared at once and come back from
+    /// its `ListDir`, so a row of the folder just left can never be opened.
     pub(crate) fn cd_descend(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(next) = self.cd_entries.get(index) else {
             return;
         };
         self.cd_dir = next.clone();
         self.cd_selected = 0;
-        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        self.cd_list(cx);
         cx.notify();
     }
 
@@ -983,8 +994,66 @@ impl Dashboard {
     pub(crate) fn cd_toggle_hidden(&mut self, cx: &mut Context<Self>) {
         self.cd_show_hidden = !self.cd_show_hidden;
         self.cd_selected = 0;
-        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        self.cd_list(cx);
         cx.notify();
+    }
+
+    /// Ask the crab the window holds for the rows of `cd_dir`, off the
+    /// window's thread, and show them when they land.
+    ///
+    /// The rows are cleared first, so nothing of the folder just left stays
+    /// clickable. An answer is shown only while it is still the question:
+    /// the same crab (`instance_epoch`), the picker still open on the same
+    /// session, folder and hidden toggle. Anything else is an answer to a
+    /// screen the reader has left, and is dropped. A refusal (a token without
+    /// admin, a crab older than the window) lists nothing: the picker closes
+    /// and the conversation says why, in the words of `cap::notice`.
+    fn cd_list(&mut self, cx: &mut Context<Self>) {
+        use opencrabs::backend::fs_list::ListDir;
+
+        self.cd_entries = Vec::new();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        let session = self.cd_session;
+        let dir = self.cd_dir.clone();
+        let show_hidden = self.cd_show_hidden;
+        let op = ListDir {
+            dir: dir.clone(),
+            show_hidden,
+        };
+        cx.spawn(async move |this, cx| {
+            let reply = backend.call(op).await;
+            this.update(cx, |this, cx| {
+                let asked = this.instance_epoch == epoch
+                    && this.screen == Screen::DirectoryPicker
+                    && this.cd_session == session
+                    && this.cd_dir == dir
+                    && this.cd_show_hidden == show_hidden;
+                if !asked {
+                    return;
+                }
+                match reply {
+                    Ok(rows) => {
+                        this.cd_entries = rows;
+                        this.cd_selected = 0;
+                    }
+                    Err(e) => {
+                        let notice = opencrabs::backend::cap::notice(
+                            <ListDir as opencrabs::backend::Op>::NAME,
+                            &e,
+                        );
+                        this.close_cd_picker(cx);
+                        match session {
+                            Some(id) => this.push_session_notice(id, notice, cx),
+                            None => this.turn.live.notices.push(notice),
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ctrl+h, or Cmd+? on a Mac: the key reference, the window's door to the
