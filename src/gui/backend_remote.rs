@@ -87,8 +87,11 @@ pub struct RemoteCrab {
     /// How many `blob.get` fetches started.
     blob_fetches: AtomicUsize,
     /// Where a fetched blob tells the window to paint again: the sink of
-    /// the last event reader opened ([`watch`]).
-    blob_sink: Mutex<Option<EventSink>>,
+    /// the last event reader opened ([`watch`]), numbered, held only while
+    /// that reader runs so the crab never keeps a window's channel open.
+    blob_sink: Mutex<Option<(usize, EventSink)>>,
+    /// The number of the last event reader that lent its sink.
+    blob_readers: AtomicUsize,
 }
 
 /// The keys the window read from the cache or opened events for.
@@ -184,6 +187,7 @@ impl RemoteCrab {
             blobs_asked: Mutex::new(HashSet::new()),
             blob_fetches: AtomicUsize::new(0),
             blob_sink: Mutex::new(None),
+            blob_readers: AtomicUsize::new(0),
         }
     }
 
@@ -223,7 +227,7 @@ impl RemoteCrab {
     #[cfg(test)]
     pub(crate) fn set_blob_sink(&self, sink: EventSink) {
         if let Ok(mut blob_sink) = self.blob_sink.lock() {
-            *blob_sink = Some(sink);
+            *blob_sink = Some((0, sink));
         }
     }
 
@@ -436,7 +440,11 @@ pub(crate) fn request_blob(crab: &Arc<RemoteCrab>, path: &Path) -> PathBuf {
             .unwrap_or_else(|e| Err(format!("{e:#}")));
             match got {
                 Ok(()) => {
-                    let sink = fetcher.blob_sink.lock().ok().and_then(|sink| sink.clone());
+                    let sink = fetcher
+                        .blob_sink
+                        .lock()
+                        .ok()
+                        .and_then(|lent| lent.as_ref().map(|(_, sink)| sink.clone()));
                     // A closed sink is a window gone: the copy is kept anyway.
                     if let Some(sink) = sink {
                         let _ = sink.send(TurnEvent::Refresh);
@@ -616,23 +624,40 @@ pub(crate) fn watch(
         wanted.facts.insert(Some(session));
         wanted.tasks.insert(session);
     }
+    let reader = crab.blob_readers.fetch_add(1, Ordering::SeqCst) + 1;
     if let Ok(mut blob_sink) = crab.blob_sink.lock() {
-        *blob_sink = Some(sink.clone());
+        *blob_sink = Some((reader, sink.clone()));
     }
     refresh(&crab, Part::Facts, &sink);
     refresh(&crab, Part::Tasks, &sink);
     let stop = CancellationToken::new();
     let reader_stop = stop.clone();
+    let lender = crab.clone();
     std::thread::Builder::new()
         .name("remote-events".into())
         .spawn(move || {
-            let _ = instance_client::block_on(async move {
+            let _ = instance_client::block_on(async {
                 read_events(&crab, session, &sink, &reader_stop).await;
                 anyhow::Ok(())
             });
+            // The reader is gone: its sink goes with it, unless a newer
+            // reader already lent its own.
+            take_blob_sink(&crab, reader);
         })
-        .map_err(|e| format!("event reader thread: {e}"))?;
+        .map_err(|e| {
+            take_blob_sink(&lender, reader);
+            format!("event reader thread: {e}")
+        })?;
     Ok(Watch { stop })
+}
+
+/// Give back the sink event reader `reader` lent for landed blobs.
+fn take_blob_sink(crab: &RemoteCrab, reader: usize) {
+    if let Ok(mut blob_sink) = crab.blob_sink.lock()
+        && blob_sink.as_ref().is_some_and(|(lent, _)| *lent == reader)
+    {
+        *blob_sink = None;
+    }
 }
 
 /// How one connection of the event reader ended.
