@@ -41,7 +41,9 @@ impl Backend {
     /// another machine only ever opens its kept copy, and only when that copy
     /// is of a kind in [`OPENS_HERE`](crate::blob_cache_store::OPENS_HERE):
     /// never the crab's path on this disk, never a copy not fetched yet,
-    /// never a `.bin`. Synchronous, one `stat`, no network.
+    /// never a `.bin`, never a slot that resolves out of the crab's cache
+    /// directory (`BlobStore::cached` checks that on the disk, by
+    /// components, after following symlinks). Synchronous, no network.
     pub fn openable(&self, path: &Path) -> Result<PathBuf, &'static str> {
         match self {
             Backend::Local(_) => Ok(path.to_path_buf()),

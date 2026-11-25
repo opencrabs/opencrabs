@@ -371,3 +371,82 @@ fn the_preview_hands_the_opener_only_what_openable_answers() {
     assert!(!body.contains("open_command(&open.path)"));
     assert!(!body.contains("reveal_command(&open.path)"));
 }
+
+/// The directory `BlobStore::for_crab(id)` keeps its copies in. Pure: a
+/// slot is built, nothing is written.
+fn crab_dir(id: &str) -> PathBuf {
+    BlobStore::for_crab(id)
+        .slot(Path::new("/home/crab/a.png"))
+        .parent()
+        .expect("a slot has a directory")
+        .to_path_buf()
+}
+
+#[test]
+fn a_crab_id_of_64_hex_never_shares_another_crab_s_cache_dir() {
+    use sha2::{Digest, Sha256};
+
+    let long = "x".repeat(80);
+    for id in ["home crab", "lab/box", "", "plain-id_1", long.as_str()] {
+        let hex = |text: String| format!("{:x}", Sha256::digest(text.as_bytes()));
+        // The directory names an id could be hashed into, each tried as a
+        // second crab's own (64 hex digits) id.
+        for twin in [hex(id.to_string()), hex(format!("crab:{id}"))] {
+            assert_eq!(twin.len(), 64);
+            assert_ne!(
+                crab_dir(id),
+                crab_dir(&twin),
+                "{id:?} and the 64-hex id {twin} share a directory"
+            );
+        }
+    }
+    assert_ne!(crab_dir("a"), crab_dir("b"));
+    assert_eq!(crab_dir("a"), crab_dir("a"), "one id, one directory");
+    for id in ["plain-id_1", "..", "../../etc", "a/b"] {
+        let name = crab_dir(id);
+        let name = name.file_name().and_then(|n| n.to_str()).expect("a name");
+        assert_ne!(name, id, "an id is never the directory's name");
+        assert_eq!(name.len(), 64, "{name}");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_slot_that_resolves_out_of_the_cache_is_neither_opened_nor_answered() {
+    let cache = tempfile::tempdir().expect("cache");
+    let outside = tempfile::tempdir().expect("outside");
+    let elsewhere = outside.path().join("secret.png");
+    std::fs::write(&elsewhere, b"png").expect("a file outside the cache");
+    let on_crab = Path::new("/home/crab/x.png");
+    let slot = BlobStore::at(cache.path().to_path_buf()).slot(on_crab);
+    std::os::unix::fs::symlink(&elsewhere, &slot).expect("symlink in the cache");
+    let (backend, crab) = remote_with_kept(cache.path(), &[]);
+
+    assert_eq!(
+        backend.cached_blob(on_crab),
+        None,
+        "not a copy in the cache"
+    );
+    assert_eq!(
+        backend.openable(on_crab),
+        Err(crate::blob_cache_store::NOT_OPENED_HERE),
+        "a file outside the crab's cache never reaches the opener"
+    );
+    assert_eq!(crab.blob_fetches(), 0, "asking to open fetches nothing");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cache_reached_through_a_symlink_still_opens_its_own_copy() {
+    let real = tempfile::tempdir().expect("cache");
+    let links = tempfile::tempdir().expect("links");
+    let cache = links.path().join("cache");
+    std::os::unix::fs::symlink(real.path(), &cache).expect("symlinked cache");
+    let (backend, _crab) = remote_with_kept(&cache, &["x.png"]);
+
+    let png = backend
+        .openable(Path::new("/home/crab/x.png"))
+        .expect("the copy is in the cache, however it is reached");
+    assert!(png.starts_with(&cache), "{}", png.display());
+}
