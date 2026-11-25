@@ -102,6 +102,7 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/preview.rs", "is_usable"): "local preview cache",
     ("src/gui/preview.rs", "extract_poster"): "local ffmpeg on the localized path",
     ("src/gui/preview.rs", "duration_secs"): "local ffprobe on the localized path",
+    ("src/gui/preview.rs", "mtime_secs"): "stats the path VideoFacts::probe localized",
     ("src/gui/preview.rs", "launch"): "opens the localized file on this machine",
     ("src/gui/thumbs.rs", "write_square"): "local thumbnail cache",
     ("src/gui/thumbs.rs", "is_usable"): "local thumbnail cache",
