@@ -10,21 +10,25 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::remote::pairing::{GUEST_TTL_SECS, PairingStore, TOKEN_TTL_SECS, parse_ttl};
-use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
+use crate::remote::scopes::{SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND};
 use crate::remote::tunnel::{self, TunnelSpec};
 
-/// Parse the `--scopes` flag: "read", "send", "read,send" (order-free).
+/// Parse the `--scopes` flag: "read", "send", "manage" in any combination
+/// (order-free). `manage` is elevated: it is never in the default, so a code
+/// carries it only when the operator types it here. Without it a paired GUI
+/// cannot create a session on the remote crab.
 fn parse_scopes(raw: &str) -> Result<Vec<String>> {
     let mut scopes = Vec::new();
     for part in raw.split(',') {
         match part.trim().to_ascii_lowercase().as_str() {
             "read" | "a2a:read" => push_unique(&mut scopes, SCOPE_READ),
             "send" | "a2a:send" => push_unique(&mut scopes, SCOPE_SEND),
-            other => anyhow::bail!("unknown scope {other:?} (expected: read, send)"),
+            "manage" | "a2a:manage" => push_unique(&mut scopes, SCOPE_MANAGE),
+            other => anyhow::bail!("unknown scope {other:?} (expected: read, send, manage)"),
         }
     }
     if scopes.is_empty() {
-        anyhow::bail!("--scopes needs at least one of: read, send");
+        anyhow::bail!("--scopes needs at least one of: read, send, manage");
     }
     Ok(scopes)
 }
@@ -252,6 +256,25 @@ mod tests {
         // order-free, dedup, whitespace, full names, case-insensitive
         assert_eq!(parse_scopes(" SEND , a2a:read ").unwrap().len(), 2);
         assert_eq!(parse_scopes("read,read").unwrap(), vec![SCOPE_READ]);
+    }
+
+    #[test]
+    fn parse_scopes_names_every_mintable_scope() {
+        // Every scope the pairing store accepts must be nameable here, or
+        // an op gated on it is unreachable over a paired link.
+        for scope in crate::remote::scopes::ALL_SCOPES {
+            let short = scope.trim_start_matches("a2a:");
+            assert_eq!(parse_scopes(short).unwrap(), vec![scope.to_string()]);
+            assert_eq!(parse_scopes(scope).unwrap(), vec![scope.to_string()]);
+        }
+    }
+
+    #[test]
+    fn parse_scopes_default_stays_unelevated() {
+        let default = parse_scopes("read,send").unwrap();
+        for elevated in crate::remote::scopes::ELEVATED_SCOPES {
+            assert!(!default.iter().any(|s| s == elevated));
+        }
     }
 
     #[test]

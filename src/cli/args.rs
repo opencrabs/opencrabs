@@ -172,7 +172,8 @@ pub enum Commands {
         #[arg(long)]
         port: Option<u16>,
 
-        /// Scopes for the pairing code: "read", "send", or "read,send"
+        /// Scopes for the pairing code: "read", "send", "manage", comma
+        /// separated. "manage" is elevated and never on by default.
         #[arg(long, default_value = "read,send")]
         scopes: String,
 
