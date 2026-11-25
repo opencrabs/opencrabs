@@ -79,7 +79,7 @@ fn the_editor_dialog_owns_the_keyboard_while_it_is_up() {
         .find("self.editor_focus.is_some()")
         .expect("the window never checks whether an editor is focused");
     let settings = DASHBOARD
-        .find("if self.settings_open")
+        .find("self.settings_modal_key(ks, cx)")
         .expect("the settings modal's key branch is gone");
     // In the key dispatcher the editor is answered ahead of the settings
     // modal, so a keystroke typed into the buffer cannot fall through to a
