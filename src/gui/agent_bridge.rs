@@ -848,20 +848,21 @@ impl Drop for VoiceReplyGuard {
 /// Speak one answer back, for the turn that began as a recording (#3044).
 ///
 /// The window's half of what every channel already does: a voice note is
-/// answered with a voice note. `channels::voice::synthesize` is the same call
+/// answered with a voice note. The crab the window holds speaks it
+/// (`voice.speak`) through `channels::voice::synthesize`, the same call
 /// Telegram makes, so the reply sounds like a channel reply rather than a
-/// second implementation of one, and it already returns OGG/Opus.
+/// second implementation of one, with the crab's engine and the crab's keys.
 ///
 /// Off the UI thread for two reasons. Synthesis is a network round trip per
 /// chunk and the window must not stall on it while the answer is already on
-/// screen. And the marker has to reach the ROW, not just the card: the audio is
-/// appended to the assistant message in the ledger, so every later read of the
-/// conversation draws the clip and the row keeps it across restarts, exactly as
-/// a channel reply does.
+/// screen. And the marker has to reach the ROW, not just the card: the crab
+/// appends the audio to the assistant message in its ledger, so every later
+/// read of the conversation draws the clip and the row keeps it across
+/// restarts, exactly as a channel reply does.
 ///
-/// Silence is the normal failure: no TTS provider configured, or synthesis
-/// failed. The turn already answered in text, so nothing here is allowed to
-/// turn a spoken reply into an error the user has to read.
+/// Silence is the normal failure: no TTS provider configured on the crab, or
+/// synthesis failed. The turn already answered in text, so nothing here is
+/// allowed to turn a spoken reply into an error the user has to read.
 pub fn spawn_speak_reply(
     backend: crate::backend_glue::Backend,
     sink: EventSink,
@@ -875,26 +876,22 @@ pub fn spawn_speak_reply(
     // the arm where the job never reached a worker (#3092).
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-voice-reply", move |runtime| {
-        let voice = Config::current().voice_config();
-        if !voice.tts_enabled {
-            // A recording is answered in text when speech output is off.
-            // The mic works either way; this is the same switch that
-            // decides whether a Telegram voice note gets a voice back.
+        // The crab speaks, so its config decides: a recording is answered in
+        // text when speech output is off there. The mic works either way;
+        // this is the same switch that decides whether a Telegram voice note
+        // gets a voice back.
+        let ready = match runtime.block_on(backend.call(opencrabs::backend::voice::VoiceStatus {}))
+        {
+            Ok(ready) => ready,
+            Err(e) => {
+                crate::logging::error(&format!("voice reply: {}", e.into_message()));
+                return;
+            }
+        };
+        if !ready.tts_enabled {
             crate::logging::info("voice reply: tts disabled, answering in text only");
             return;
         }
-        // The card already carries the whole report, so only the spoken
-        // half is needed here. A model that skipped the block is still
-        // read aloud, from the paragraph it led with: a voice turn gets a
-        // voice back either way (#3092).
-        let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
-        let speech = match spoken {
-            Some(spoken) => spoken,
-            None => {
-                crate::logging::warn("voice reply: no spoken block, reading the first paragraph");
-                opencrabs::channels::voice::spoken::first_paragraph(&answer)
-            }
-        };
         // The card is told the clip is coming before the first chunk goes
         // out (#3092). Synthesis is a network round trip per chunk, and the
         // window has nothing else to paint in the meantime.
@@ -905,44 +902,30 @@ pub fn spawn_speak_reply(
             sink: thread_sink.clone(),
             session: session_id,
         };
-        let audio = match runtime
-            .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
+        // The crab reads the spoken half (or the paragraph the answer led
+        // with), synthesizes it, keeps the clip on its own disk and marks the
+        // answer row with the path it wrote, so the row never names a path
+        // only this machine has. Each failure is the line this thread used to
+        // log.
+        let clip = match runtime
+            .block_on(backend.call(opencrabs::backend::voice::VoiceSpeak { session_id, text }))
         {
-            Ok(bytes) => bytes,
+            Ok(Some(clip)) => clip,
+            Ok(None) => return,
             Err(e) => {
-                crate::logging::error(&format!("voice reply synthesis: {e:#}"));
+                crate::logging::error(&e.into_message());
                 return;
             }
         };
-        let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
-            Ok(path) => path,
-            Err(e) => {
-                crate::logging::error(&format!("voice reply save: {e}"));
-                return;
-            }
-        };
-        // The row is the crab's: the marker goes on through the backend, so
-        // a remote crab's ledger carries the clip, not this machine's. The
-        // op words each failure as the line this thread used to log.
-        let attach = opencrabs::backend::speak::AttachVoiceReply {
-            session_id,
-            path: path.clone(),
-        };
-        if let Err(e) = runtime.block_on(backend.call(attach)) {
-            crate::logging::error(&e.into_message());
-            return;
-        }
         crate::logging::info(&format!(
             "voice reply: {} bytes spoken into {}",
-            audio.len(),
-            path.display()
+            clip.size.unwrap_or(0),
+            clip.path
         ));
         let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
             session: session_id,
-            // The thread is done with it: the log line above is the last
-            // read of the path, so the event takes ownership instead of
-            // leaving a clone to be dropped (#3092).
-            path,
+            // The crab's path: the settle localizes it before it plays.
+            path: PathBuf::from(clip.path),
         });
     });
     if let Err(e) = spawned {
