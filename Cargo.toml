@@ -35,6 +35,11 @@ exclude = [
     "src/assets/onboard*.png",
     "src/assets/sessions_screen.png",
     "src/assets/usage_screen.png",
+    # README embed (see below) now points at the raw GitHub URL, so the
+    # 677 KiB full-res screenshot is docs art, not compiled bytes. Same
+    # class as onboard*.png above: kept in the repository, out of the
+    # published crate.
+    "src/assets/split-panes.png",
     "src/assets/splash.png",
     "src/assets/opencrabs-xiaomi-mimo-collab.png",
     "src/assets/opencrabs-logo.jpg",

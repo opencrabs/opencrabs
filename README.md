@@ -263,7 +263,7 @@ https://github.com/user-attachments/assets/7f45c5f8-acdf-48d5-b6a4-0e4811a9ee23
 
 ## 🖥️ Split Panes
 
-![Split Panes](src/assets/split-panes.png)
+![Split Panes](https://raw.githubusercontent.com/opencrabs/opencrabs/main/src/assets/split-panes.png)
 
 ---
 
