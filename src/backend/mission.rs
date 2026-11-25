@@ -513,13 +513,7 @@ impl MissionSnapshot {
     /// given a pool: the inbox and the activity from this crab's files, the
     /// schedule and the analytics from its ledger.
     pub async fn read(pool: Pool, window: TimeWindow) -> Self {
-        Self {
-            inbox: into_all(inbox_service::list()),
-            activity: into_all(activity_service::recent(ACTIVITY_LIMIT)),
-            schedule: into_all(schedule_service::list(pool.clone()).await),
-            analytics: analytics_service::summary(pool, window).await.into(),
-            window,
-        }
+        MissionParts::read(pool, window).await.into()
     }
 
     /// The panels' own types back.
@@ -542,6 +536,31 @@ pub struct MissionParts {
     pub schedule: Vec<McScheduleItem>,
     pub analytics: McAnalytics,
     pub window: TimeWindow,
+}
+
+impl MissionParts {
+    /// The four reads, in the panels' own types.
+    pub async fn read(pool: Pool, window: TimeWindow) -> Self {
+        Self {
+            inbox: inbox_service::list(),
+            activity: activity_service::recent(ACTIVITY_LIMIT),
+            schedule: schedule_service::list(pool.clone()).await,
+            analytics: analytics_service::summary(pool, window).await,
+            window,
+        }
+    }
+}
+
+impl From<MissionParts> for MissionSnapshot {
+    fn from(p: MissionParts) -> Self {
+        Self {
+            inbox: into_all(p.inbox),
+            activity: into_all(p.activity),
+            schedule: into_all(p.schedule),
+            analytics: p.analytics.into(),
+            window: p.window,
+        }
+    }
 }
 
 /// Read the Mission Control snapshot for `window`.

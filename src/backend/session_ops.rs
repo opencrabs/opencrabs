@@ -384,13 +384,13 @@ impl Op for RecordTurnStopped {
     type Reply = Vec<String>;
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
-        let session_id = self.session_id;
+        let RecordTurnStopped { session_id, answer } = self;
         let db = ctx.db().await?;
         let mut errors = Vec::new();
         let messages = MessageService::new(ServiceContext::new(db.pool().clone()));
         // What the card streamed goes in first (#2851), so the turn reads
         // question, answer, verdict, the order the user saw.
-        if let Err(e) = messages.record_stopped_turn(session_id, self.answer).await {
+        if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
             errors.push(format!("turn stopped row: {e}"));
         }
         // The recovery ticket goes with it (#2850): the turn is over because
