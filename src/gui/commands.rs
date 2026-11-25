@@ -17,7 +17,7 @@
 //! the window cannot run must not be answered by a model that will happily
 //! invent an answer.
 
-use opencrabs::backend::cap::{self, Need};
+use opencrabs::backend::cap::{self, Cap, Need};
 use opencrabs::backend::hello::HelloReply;
 use opencrabs::backend::{Op, session_ops, sessions, tasks};
 use opencrabs::ui_core::commands::{self, Support};
@@ -187,6 +187,9 @@ const NO_NEEDS: &[Need] = &[];
 const NEW_SESSION: &[Need] = &[Need::Op(<session_ops::CreateSession as Op>::NAME)];
 const OPEN_SESSIONS: &[Need] = &[Need::Op(<sessions::RailSnapshot as Op>::NAME)];
 const OPEN_TASKS: &[Need] = &[Need::Op(<tasks::TasksSnapshot as Op>::NAME)];
+/// The wizard writes this machine's config, keys and services.
+const OPEN_ONBOARD: &[Need] = &[Need::Cap(Cap::Setup)];
+const CD: &[Need] = &[Need::Op(<session_ops::ApplyCd as Op>::NAME)];
 
 /// The operations and capabilities `action` needs before it can be picked.
 ///
@@ -197,6 +200,8 @@ pub fn needs(action: GuiAction) -> &'static [Need] {
         GuiAction::NewSession => NEW_SESSION,
         GuiAction::OpenSessions => OPEN_SESSIONS,
         GuiAction::OpenTasks => OPEN_TASKS,
+        GuiAction::OpenOnboard(_) => OPEN_ONBOARD,
+        GuiAction::Text(TextCommand::Cd) => CD,
         _ => NO_NEEDS,
     }
 }
