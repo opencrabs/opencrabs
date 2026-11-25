@@ -6,9 +6,34 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use opencrabs::backend::BackendError;
 use opencrabs::backend::Op;
 use opencrabs::backend::cap;
-use opencrabs::backend::models::{ModelCatalogue, ModelDiscover};
+use opencrabs::backend::models::{CatalogueProvider, ModelCatalogue, ModelDiscover};
+
+/// The identity the catalogue read holds in `models_fetch_lifecycle` while
+/// it is in flight. No discovery request carries it: a provider's index is
+/// its place in the selector or the catalogue, far below this.
+const CATALOGUE_SLOT: usize = usize::MAX;
+
+/// The crab's catalogue, as it will arrive.
+pub(crate) type CatalogueReply =
+    futures::channel::oneshot::Receiver<Result<Vec<CatalogueProvider>, BackendError>>;
+
+/// Ask the crab the window holds for its model catalogue and return at once.
+///
+/// The read runs on the backend's own lane (a worker locally, a thread of
+/// its own remotely) and its reply lands on the receiver. A job that never
+/// reached a worker drops the sender, which the caller reads as a failure.
+pub(crate) fn ask_catalogue(backend: &crate::backend_glue::Backend) -> CatalogueReply {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    if let Err(e) = backend.spawn(ModelCatalogue {}, move |reply| {
+        let _ = tx.send(reply);
+    }) {
+        logging::error(&format!("models: catalogue: {e}"));
+    }
+    rx
+}
 
 impl Dashboard {
     /// Standalone provider selection filters both pointer and keyboard rows.
@@ -26,6 +51,12 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
+    ///
+    /// The crab's catalogue is asked here and lands later
+    /// (`land_catalogue`): a remote crab can take up to the transport's
+    /// deadline to answer, and the window never waits on it. The picker opens
+    /// at once on a loading state, and a typed id is resolved when the rows
+    /// arrive, off the frame.
     pub(crate) fn open_models(
         &mut self,
         arg: Option<String>,
@@ -38,22 +69,142 @@ impl Dashboard {
         // explicit act each time, never a setting that survives the picker.
         self.models_scope_all = false;
         self.models_apply_confirm = None;
-        // The catalogue is read once, here, so a frame never walks it. A pane
-        // carries its own pair, so the picker marks that pair rather than the
-        // window's when the command came from a split.
-        let current = self
-            .backend
-            .facts(target)
-            .map(|facts| (facts.provider, facts.model));
-        self.reset_model_picker(current, None);
-        if let Some(arg) = arg {
-            self.switch_model(arg, cx);
+        let switching = arg.is_some();
+        let generation = self.begin_catalogue();
+        let reply = ask_catalogue(&self.backend);
+        cx.spawn(async move |this, cx| {
+            let reply = reply.await.unwrap_or_else(|_| {
+                Err(BackendError::Failed(format!(
+                    "{} worker dropped its result",
+                    <ModelCatalogue as Op>::NAME
+                )))
+            });
+            this.update(cx, |this, cx| {
+                this.land_catalogue(generation, target, arg, reply, cx)
+            })
+            .ok();
+        })
+        .detach();
+        if switching {
             return;
         }
         self.models_query.clear();
         self.screen = Screen::Models;
+        // No row is marked until the catalogue lands; `land_catalogue` puts
+        // the list on the provider answering right now.
+        self.models_provider = None;
+        self.models_index = 0;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Put the standalone picker on its loading state and claim the slot its
+    /// catalogue read answers to. Any later reset (another opening, the
+    /// wizard) moves the lifecycle on, so a read that lands after one is
+    /// known stale.
+    fn begin_catalogue(&mut self) -> u64 {
+        self.models_rows.clear();
+        self.models_pending.clear();
+        self.clear_model_fetch();
+        self.models_index = 0;
+        // Fetching with nothing pending is the loading state the picker
+        // draws: discovery always has its own request still pending.
+        self.models_fetching = true;
+        self.models_fetch_lifecycle.begin(&FetchRequest {
+            provider_index: CATALOGUE_SLOT,
+            ..Default::default()
+        })
+    }
+
+    /// The crab's catalogue arrived. The standalone picker switches the crab
+    /// the window holds, so its rows are the crab's own (`ModelCatalogue`)
+    /// and each provider is discovered on the crab (`ModelDiscover`, see
+    /// `start_models_fetch`).
+    ///
+    /// A read that a later reset superseded never touches the picker. A typed
+    /// id is still answered: it is resolved against the rows this read
+    /// brought, the same rows the switch would have read had it waited.
+    fn land_catalogue(
+        &mut self,
+        generation: u64,
+        target: Option<Uuid>,
+        arg: Option<String>,
+        reply: Result<Vec<CatalogueProvider>, BackendError>,
+        cx: &mut Context<Self>,
+    ) {
+        let fresh = self
+            .models_fetch_lifecycle
+            .finish(
+                generation,
+                CATALOGUE_SLOT,
+                model_fetch::FetchOutcome {
+                    provider_index: CATALOGUE_SLOT,
+                    ..Default::default()
+                },
+            )
+            .is_some();
+        if !fresh && arg.is_none() {
+            logging::debug("stale model catalogue ignored");
+            return;
+        }
+        let catalogue = reply.unwrap_or_else(|e| {
+            logging::info(&format!(
+                "models: catalogue: {}",
+                cap::notice(<ModelCatalogue as Op>::NAME, &e)
+            ));
+            Vec::new()
+        });
+        // A pane carries its own pair, so the picker marks that pair rather
+        // than the window's when the command came from a split.
+        let current = self
+            .backend
+            .facts(target)
+            .map(|facts| (facts.provider, facts.model));
+        let pair = current
+            .as_ref()
+            .map(|(provider, model)| (provider.as_str(), model.as_str()));
+        let rows = models::rows_from_catalogue(&catalogue, pair);
+        if fresh {
+            self.models_fetching = false;
+            self.models_index = rows.iter().position(|row| row.current).unwrap_or(0);
+            // A crab whose handshake already withholds discovery is not asked
+            // provider by provider only to refuse each one: its static
+            // catalogue is the list. Before the handshake lands, the crab's
+            // own refusal says the same, in the log (`model_fetch::discover`).
+            let discover = self.hello.as_ref().is_none_or(|hello| {
+                cap::check(hello, &[cap::Need::Op(<ModelDiscover as Op>::NAME)]).is_ok()
+            });
+            let active_provider = pair.map(|(provider, _)| provider).unwrap_or_default();
+            self.models_pending = if discover {
+                models::discovery_queue(&catalogue, active_provider)
+            } else {
+                Vec::new()
+            };
+        }
+        if let Some(arg) = arg {
+            // A bare model id resolves against these rows, the ones the
+            // switch would have read had it waited for them in place.
+            let pair = match models::find(&rows, &arg) {
+                Some(row) => row.pair(),
+                None => arg,
+            };
+            if fresh {
+                self.models_rows = rows;
+            }
+            // The switch goes to the session that typed it. A picker opened
+            // since keeps the session it is about.
+            let open = self.models_session;
+            self.models_session = target;
+            self.switch_model(pair, cx);
+            if !fresh {
+                self.models_session = open;
+            }
+            return;
+        }
+        self.models_rows = rows;
         // The list opens on the provider answering right now, so the marked
-        // row and the picker's cursor agree from the first frame.
+        // row and the picker's cursor agree from the first frame they show.
         self.models_provider = self
             .models_rows
             .iter()
@@ -64,25 +215,17 @@ impl Dashboard {
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
-        self.sessions.rail_menu = None;
         self.start_models_fetch();
-        self.refocus_screen();
         cx.notify();
     }
 
-    /// Reset the one picker catalogue used by `/models` and Brain Fuel. The
-    /// optional wizard selector contributes its unsaved provider settings.
-    ///
-    /// Two catalogues, by who the picker serves. The wizard edits this
-    /// machine, so with a selector the rows and the discovery queue are this
-    /// machine's, as they always were. The standalone picker switches the
-    /// crab the window holds, so without one the rows are the crab's own
-    /// (`ModelCatalogue`) and each provider is discovered on the crab
-    /// (`ModelDiscover`, see `start_models_fetch`).
+    /// Reset the wizard's picker catalogue (Brain Fuel). The wizard edits
+    /// this machine, so the rows and the discovery queue are this machine's,
+    /// with the selector's unsaved provider settings in them.
     pub(crate) fn reset_model_picker(
         &mut self,
         current: Option<(String, String)>,
-        edited: Option<&ProviderSelectorState>,
+        edited: &ProviderSelectorState,
     ) {
         let pair = current
             .as_ref()
@@ -90,52 +233,29 @@ impl Dashboard {
         let active_provider = current
             .as_ref()
             .map(|(provider, _)| provider.as_str())
-            .or_else(|| edited.map(|selector| selector.current_provider().id))
-            .unwrap_or_default();
-        if let Some(edited) = edited {
-            self.models_rows = models::rows_for_picker(pair, Some(edited));
-            let mut catalogue = ProviderSelectorState::default();
-            catalogue.load_custom_names();
-            self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
-                &catalogue,
-                active_provider,
-                Some(edited),
-            );
-        } else {
-            // Read in place, like the config this replaced: the caller marks
-            // the current row and resolves a typed id against these rows in
-            // the same tick. A read is bounded by the transport's deadline.
-            let catalogue = futures::executor::block_on(self.backend.call(ModelCatalogue {}))
-                .unwrap_or_else(|e| {
-                    logging::info(&format!(
-                        "models: catalogue: {}",
-                        cap::notice(<ModelCatalogue as Op>::NAME, &e)
-                    ));
-                    Vec::new()
-                });
-            self.models_rows = models::rows_from_catalogue(&catalogue, pair);
-            // A crab whose handshake already withholds discovery is not asked
-            // provider by provider only to refuse each one: its static
-            // catalogue is the list. Before the handshake lands, the crab's
-            // own refusal says the same, in the log (`model_fetch::discover`).
-            let discover = self.hello.as_ref().is_none_or(|hello| {
-                cap::check(hello, &[cap::Need::Op(<ModelDiscover as Op>::NAME)]).is_ok()
-            });
-            self.models_pending = if discover {
-                models::discovery_queue(&catalogue, active_provider)
-            } else {
-                Vec::new()
-            };
-        }
-        self.models_fetch = None;
-        self.models_fetch_lifecycle.invalidate();
-        self.models_fetch_error = None;
-        self.models_fetching = false;
+            .unwrap_or_else(|| edited.current_provider().id);
+        self.models_rows = models::rows_for_picker(pair, Some(edited));
+        let mut catalogue = ProviderSelectorState::default();
+        catalogue.load_custom_names();
+        self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
+            &catalogue,
+            active_provider,
+            Some(edited),
+        );
+        self.clear_model_fetch();
         self.models_index = self
             .models_rows
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
+    }
+
+    /// Drop any discovery in flight and its outcome so far.
+    fn clear_model_fetch(&mut self) {
+        self.models_fetch = None;
+        self.models_fetch_lifecycle.invalidate();
+        self.models_fetch_error = None;
+        self.models_fetching = false;
     }
 
     /// Restart discovery after an onboarding provider or credential edit.
@@ -154,7 +274,7 @@ impl Dashboard {
             edited.current_provider().id.to_string()
         };
         let current = Some((provider, ob.model()));
-        self.reset_model_picker(current, Some(&edited));
+        self.reset_model_picker(current, &edited);
         self.start_models_fetch();
     }
 

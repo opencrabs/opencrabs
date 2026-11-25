@@ -222,6 +222,9 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
             }
         }
     }
+    // Fetching with nothing pending is the standalone picker waiting for the
+    // crab's catalogue: discovery always has its own request still pending.
+    let loading = view.fetching && view.pending == 0;
     if matched == 0 {
         let active = if onboarding {
             view.active_provider.to_string()
@@ -246,6 +249,12 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                         this.activate_model_pair(pair.clone(), onboarding, cx);
                     })),
             );
+        } else if loading {
+            list = list.child(div().px_3().py_2().child(text(
+                "loading the crab's models\u{2026}",
+                Size::Sm,
+                shown.text_muted,
+            )));
         } else {
             list = list.child(div().px_3().py_2().child(text(
                 format!("no models match \"{}\"", view.query),
@@ -297,7 +306,15 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
             .whitespace_normal()
             .child(SharedString::from(counted)),
     );
-    if view.fetching {
+    if loading {
+        footer = footer.child(
+            div()
+                .text_xs()
+                .text_color(rgb(shown.text_muted))
+                .whitespace_normal()
+                .child(SharedString::from("loading the crab's catalogue")),
+        );
+    } else if view.fetching {
         footer = footer.child(
             div()
                 .text_xs()
