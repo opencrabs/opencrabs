@@ -251,8 +251,13 @@ impl Dashboard {
     /// Refetch the rail from the ledger. The pinned set rides along: pins come
     /// from a sidecar the TUI also writes, so a list refresh that skipped it
     /// would draw a row in the wrong slot until the next pin click.
+    ///
+    /// The rows are the crab's the request went to. A swap while the read was
+    /// out drops them, so a slow refetch of the crab the window left never
+    /// lands its rows, nor the layout they would bring back, on the new one.
     pub(crate) fn refresh_rail(&mut self, cx: &mut Context<Self>) {
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             let result = sessions::load_sessions(backend.clone()).await;
             // One batched lookup per refresh pass, never per row per frame
@@ -263,6 +268,9 @@ impl Dashboard {
                 Err(_) => Ok(HashMap::new()),
             };
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match titles {
                     Ok(pairs) => this.sessions.topic_titles = pairs,
                     Err(e) => logging::error(&format!("topic titles refresh: {e}")),
