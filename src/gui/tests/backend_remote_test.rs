@@ -500,3 +500,145 @@ fn render_reads_cost_zero_network_calls() {
 
     drop(watch);
 }
+
+/// The first `BangOutput` the sink receives, or a failure naming what came.
+fn bang_output(rx: &std::sync::mpsc::Receiver<TurnEvent>) -> String {
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(TurnEvent::BangOutput(text)) => text,
+        Ok(_) => panic!("the sink got another event first"),
+        Err(e) => panic!("no bang output: {e}"),
+    }
+}
+
+/// `!ls` with a remote crab is the crab's to run. A token without admin is
+/// refused at its gateway: the sink gets the 403 in `cap::notice` words,
+/// which a run on this machine could never produce.
+#[test]
+fn a_bang_command_goes_to_the_remote_crab_and_its_refusal_comes_back() {
+    let served = serve(mock(
+        Ctx::new(PathBuf::from("unused.db")),
+        &[Scope::Read, Scope::Send, Scope::Manage],
+    ));
+    let backend = Backend::Remote(served.crab.clone());
+    let (sink, rx) = std::sync::mpsc::channel();
+    crate::bang::spawn(&backend, "ls".to_string(), sink);
+    let text = bang_output(&rx);
+    assert_eq!(
+        text,
+        "$ ls\nshell.run: needs a2a:admin: this crab's token does not grant it"
+    );
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        1,
+        "the command crossed the wire once"
+    );
+}
+
+/// An editor needs a terminal on this machine: with a remote crab the sink
+/// gets the reason, and nothing is asked of the crab or opened here.
+#[test]
+fn an_editor_with_a_remote_crab_answers_with_the_reason() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let (sink, rx) = std::sync::mpsc::channel();
+    crate::bang::spawn(&backend, "vim notes.txt".to_string(), sink);
+    assert_eq!(
+        bang_output(&rx),
+        "$ vim notes.txt\nonly on a crab on this machine"
+    );
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 0);
+}
+
+/// The /cd picker's rows come from the crab's `ListDir`. A folder that does
+/// exist on this machine is refused by a remote crab without admin: the
+/// answer is the crab's 403, never this disk's listing.
+#[test]
+fn the_cd_listing_is_asked_of_the_remote_crab() {
+    use opencrabs::backend::fs_list::ListDir;
+
+    let here = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(here.path().join("only-here")).expect("mkdir");
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), &[Scope::Read]));
+    let backend = Backend::Remote(served.crab.clone());
+    let reply = futures::executor::block_on(backend.call(ListDir {
+        dir: here.path().to_path_buf(),
+        show_hidden: false,
+    }));
+    let err = reply.expect_err("the crab refuses a reader");
+    assert_eq!(
+        err,
+        BackendError::Forbidden {
+            scope: Scope::Admin
+        }
+    );
+    assert_eq!(
+        opencrabs::backend::cap::notice("fs_list.list_dir", &err),
+        "fs_list.list_dir: needs a2a:admin: this crab's token does not grant it"
+    );
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 1);
+}
+
+/// `/cd /nao/existe` is checked on the crab: the remote door answers the
+/// line the window used to print after looking at its own disk.
+#[test]
+fn a_cd_to_a_missing_folder_is_refused_by_the_crab_in_the_windows_words() {
+    use opencrabs::backend::session_ops::ApplyCd;
+
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let reply = futures::executor::block_on(backend.call(ApplyCd {
+        session_id: Uuid::new_v4(),
+        dir: PathBuf::from("/nao/existe"),
+    }));
+    assert_eq!(
+        reply,
+        Err(BackendError::Failed(
+            crate::text_commands::cd_not_a_directory("/nao/existe")
+        ))
+    );
+}
+
+/// The window's halves of the three doors, read off the source: `/cd` with
+/// a path never asks this disk, the picker never lists it or falls back to
+/// this process's folder, and the footer's branch is never read through the
+/// synchronous local door.
+#[test]
+fn the_cd_and_footer_doors_never_read_this_machine() {
+    let src = crate::dashboard_source::DASHBOARD;
+    let cd = src
+        .split("C::Cd => {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n            other => {").next())
+        .expect("the /cd arm");
+    assert!(
+        !cd.contains(".is_dir()"),
+        "the /cd arm probes no folder here"
+    );
+
+    let picker = src
+        .split("pub(crate) fn open_cd_picker(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub(crate) fn toggle_help(").next())
+        .expect("the picker's functions");
+    for local in ["cd_entries_for(", "current_dir(", "ask_crab("] {
+        assert!(!picker.contains(local), "the picker calls {local}");
+    }
+    assert!(
+        picker.contains("backend.call(op)"),
+        "the picker asks the crab the window holds"
+    );
+
+    let footer = src
+        .split("fn footer_place(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    pub(crate) fn ").next())
+        .expect("the footer's place");
+    assert!(!footer.contains("ask_crab("));
+    let status = include_str!("../status.rs");
+    let branch = status
+        .split("pub(crate) fn git_branch(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("git_branch");
+    assert!(!branch.contains("ask_crab("), "git_branch waits on no crab");
+}
