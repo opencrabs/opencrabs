@@ -48,6 +48,27 @@ const STT_OFF: &str = "no speech-to-text provider is configured yet: add one in 
 const HEARD_NOTHING: &str =
     "the transcription came back empty: check the microphone level and try again";
 
+/// What a remote caller reads when the speech-to-text engine failed. The
+/// engine's own error can name the crab's endpoint, its files or the
+/// provider's answer, so it stays in the crab's log.
+const TRANSCRIBE_FAILED: &str = "the crab could not transcribe this take; see the crab's log";
+
+/// What a remote caller reads when the text-to-speech engine failed.
+const SPEAK_FAILED: &str = "the crab could not speak this reply; see the crab's log";
+
+/// The text an engine failure answers with: the whole chain at the local
+/// door, as before, and `generic` at the remote one, with the chain logged
+/// on the crab instead.
+fn engine_failure(door: Door, detail: String, generic: &str) -> String {
+    match door {
+        Door::Local => detail,
+        Door::Remote => {
+            tracing::warn!("{generic} (remote caller): {detail}");
+            generic.to_string()
+        }
+    }
+}
+
 /// Which voice engines the crab has, so the window promises only what the
 /// crab can do: a microphone where it can hear, a spoken answer where it can
 /// speak.
@@ -119,6 +140,7 @@ impl Op for VoiceTranscribe {
             ogg_base64,
             keep,
         } = self;
+        let door = door::current();
         // Refuse an oversized take before decoding it, as `blob.put` does:
         // base64 is four characters per three bytes.
         let encoded = ogg_base64.len() as u64;
@@ -138,7 +160,9 @@ impl Op for VoiceTranscribe {
         let kept = keep.then(|| ogg.clone());
         let (text, language) = crate::channels::voice::transcribe_with_language(ogg, &voice)
             .await
-            .map_err(|e| BackendError::Failed(format!("{e:#}")))?;
+            .map_err(|e| {
+                BackendError::Failed(engine_failure(door, format!("{e:#}"), TRANSCRIBE_FAILED))
+            })?;
         let text = text.trim().to_string();
         if text.is_empty() {
             return Err(BackendError::Failed(HEARD_NOTHING.to_string()));
@@ -197,7 +221,8 @@ impl Op for VoiceSpeak {
 
     async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
         let VoiceSpeak { session_id, text } = self;
-        let text = words_to_speak(ctx, door::current(), session_id, text).await?;
+        let door = door::current();
+        let text = words_to_speak(ctx, door, session_id, text).await?;
         if text.trim().is_empty() {
             return Ok(None);
         }
@@ -221,7 +246,13 @@ impl Op for VoiceSpeak {
         };
         let audio = crate::channels::voice::synthesize(&speech, &voice)
             .await
-            .map_err(|e| BackendError::Failed(format!("voice reply synthesis: {e:#}")))?;
+            .map_err(|e| {
+                BackendError::Failed(engine_failure(
+                    door,
+                    format!("voice reply synthesis: {e:#}"),
+                    SPEAK_FAILED,
+                ))
+            })?;
         keep_reply(ctx, session_id, &audio).await.map(Some)
     }
 }
@@ -472,6 +503,22 @@ mod tests {
             !gateway.home().join(VOICE_DIR).exists(),
             "no clip was written"
         );
+    }
+
+    /// An engine failure tells the window the whole chain, as it did, and a
+    /// remote caller only that the crab could not hear or speak.
+    #[test]
+    fn an_engine_failure_is_generic_by_the_remote_door_only() {
+        let detail = "voice reply synthesis: POST http://10.0.0.5:8000/tts: 401 sk-...";
+        assert_eq!(
+            engine_failure(Door::Local, detail.to_string(), SPEAK_FAILED),
+            detail
+        );
+        for generic in [TRANSCRIBE_FAILED, SPEAK_FAILED] {
+            let remote = engine_failure(Door::Remote, detail.to_string(), generic);
+            assert_eq!(remote, generic);
+            assert!(!remote.contains("10.0.0.5") && !remote.contains("sk-"));
+        }
     }
 
     /// A spoken answer kept for a remote caller is marked with the path the
