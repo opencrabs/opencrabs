@@ -15,9 +15,10 @@
 //! change and still loads.
 
 use crate::logging;
+use opencrabs::ui_core::composer::DraftStore;
 use opencrabs::ui_core::pane_tree::PaneTree;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -83,6 +84,74 @@ pub struct WindowState {
 /// Where the window keeps its layout.
 pub fn path() -> PathBuf {
     opencrabs::config::opencrabs_home().join(FILE)
+}
+
+/// Where the window keeps the layout it showed for one crab.
+///
+/// `None` is the window's own crab, and it keeps the file it always had, so a
+/// window that never picks a remote reads and writes exactly what it did
+/// before. A remote crab gets a file of its own beside it: its sessions are
+/// not this crab's, and one file for both would let a pick overwrite the
+/// split the owner left on their own crab.
+pub fn path_for(crab: Option<&str>) -> PathBuf {
+    match crab {
+        None => path(),
+        Some(id) => opencrabs::config::opencrabs_home().join(file_for(id)),
+    }
+}
+
+/// The file name for a remote crab's layout. The id is the remote's own and
+/// may hold a colon or a slash, so every byte outside `[A-Za-z0-9._-]` is
+/// written as `~` and two hex digits. `~` itself is escaped too, so two ids
+/// never share a file.
+pub fn file_for(crab: &str) -> String {
+    use std::fmt::Write;
+    let mut slug = String::with_capacity(crab.len());
+    for byte in crab.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            slug.push(char::from(byte));
+        } else {
+            let _ = write!(slug, "~{byte:02x}");
+        }
+    }
+    format!("gui_layout.{slug}.json")
+}
+
+/// What the window leaves behind when it moves to another crab: the layout it
+/// was showing there and the half-typed text of that crab's conversations.
+#[derive(Clone, Debug, Default)]
+pub struct ParkedCrab {
+    pub layout: Option<SavedLayout>,
+    pub drafts: DraftStore,
+}
+
+/// The window state of every crab the window has left in this run, keyed by
+/// crab. `None` is the window's own crab.
+///
+/// Held in memory so a pick and a pick back cost no disk read: the file is
+/// only read the first time a crab is visited in a run.
+#[derive(Debug, Default)]
+pub struct CrabWindows {
+    parked: HashMap<Option<String>, ParkedCrab>,
+}
+
+impl CrabWindows {
+    /// Keep what the window held for `crab` while it looks at another one.
+    pub fn park(&mut self, crab: Option<String>, parked: ParkedCrab) {
+        self.parked.insert(crab, parked);
+    }
+
+    /// Take back what was parked for `crab`. A crab the window has not left in
+    /// this run reads its layout file at `path`, and starts with no drafts.
+    pub fn unpark_or_load(&mut self, crab: Option<&str>, path: &Path) -> ParkedCrab {
+        match self.parked.remove(&crab.map(str::to_owned)) {
+            Some(parked) => parked,
+            None => ParkedCrab {
+                layout: load(path),
+                drafts: DraftStore::new(),
+            },
+        }
+    }
 }
 
 /// Whether a snapshot holds anything worth restoring. A tree, a frame and a
