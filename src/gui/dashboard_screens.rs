@@ -90,12 +90,18 @@ impl Dashboard {
         self.pending += 1;
         let pending = self.pending;
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             // The fetch runs on its own big-stack thread (see `load_view`):
             // gpui's background workers are dispatch-queue threads with tiny
             // stacks. The previous view stays visible until the result lands.
             let state = load_view(backend, period).await;
             this.update(cx, |this, cx| {
+                // The view is the ledger of the crab the read went to: a swap
+                // while it was out drops it, whatever the counter says.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 if pending == this.pending {
                     this.state = state;
                     logging::info("period fetch applied");
@@ -133,6 +139,10 @@ impl Dashboard {
     /// Read the Mission Control snapshot on the bridge's DB thread and apply
     /// it only if the screen is still asking for that same window; a stale
     /// read paints nothing.
+    ///
+    /// A read of a crab the window has since left touches nothing, not even
+    /// `mc_loading`: the swap already cleared it and may have a read of the
+    /// new crab out, which this answer must neither overwrite nor unlock.
     pub(crate) fn fetch_mission_control(&mut self, cx: &mut Context<Self>) {
         if self.mc_loading {
             return;
@@ -141,9 +151,13 @@ impl Dashboard {
         self.mc_err = None;
         let backend = self.backend.clone();
         let window = self.mc_window;
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             let result = mission_control::load(backend, window).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 this.mc_loading = false;
                 if this.mc_window == window {
                     match result {
@@ -306,9 +320,15 @@ impl Dashboard {
             return;
         }
         let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             let result = mission_control::decide(backend, item.id, item.kind, decision).await;
             this.update(cx, |this, cx| {
+                // The decision was the crab's the window left: its notice and
+                // its reread would land on the one that replaced it.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 this.mc_notice = Some(match result {
                     Ok(text) => mission_control::Notice { text, ok: true },
                     Err(e) => mission_control::Notice {
