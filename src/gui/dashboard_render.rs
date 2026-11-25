@@ -3319,8 +3319,13 @@ impl Render for Dashboard {
             let viewport = (f32::from(window_size.width), f32::from(window_size.height));
             let document_height = (viewport.1 - 300.0).clamp(120.0, 620.0);
             let body = self.preview_body(&open, document_height, cx);
-            let detail =
-                preview::detail_line(&open, self.preview_zoom, self.preview_video.as_ref());
+            // The header states facts about the file on this machine: the
+            // crab's path goes through `localize` before anything stats it.
+            let detail = preview::detail_line(
+                &open.localized(&self.backend),
+                self.preview_zoom,
+                self.preview_video.as_ref(),
+            );
             let document_open = self.preview_document.is_some();
             root = root.child(preview::overlay(
                 &open,
