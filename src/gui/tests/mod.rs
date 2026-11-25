@@ -8,6 +8,8 @@
 mod backend_remote_test;
 mod composer_orb_test;
 mod dashboard_turns_test;
+mod instances_test;
+mod instances_wiring_test;
 mod layout_guard_test;
 mod main_test;
 mod menu_test;

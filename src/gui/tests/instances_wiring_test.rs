@@ -1,0 +1,206 @@
+//! Tests for the instance rail's wiring (`crate::dashboard_instances`,
+//! `crate::instance_strip`, `Backend::remote`).
+//!
+//! What a pick does is asserted on the values the window holds: the backend
+//! it builds, the frame the strip paints. Where the rule is about where the
+//! work runs (off the UI thread, on the remote client's runtime), the source
+//! is pinned, the way the other window guards pin theirs.
+
+use std::path::PathBuf;
+
+use opencrabs::backend::hello::Hello;
+use opencrabs::backend::{BackendError, Op, cap};
+use opencrabs::remote::instance_store::{InstanceFile, KnownInstance};
+
+use crate::backend_glue::Backend;
+use crate::instance_strip::StripFrame;
+use crate::instances::{Health, Instances};
+
+const WIRING: &str = include_str!("../dashboard_instances.rs");
+const STRIP: &str = include_str!("../instance_strip.rs");
+const APP: &str = include_str!("../app.rs");
+const RENDER: &str = include_str!("../dashboard_render.rs");
+const RAIL: &str = include_str!("../dashboard_rail.rs");
+const PALETTE: &str = include_str!("../command_palette.rs");
+
+fn known(id: &str, label: &str, url: &str) -> KnownInstance {
+    KnownInstance {
+        host_id: id.to_string(),
+        label: label.to_string(),
+        url: url.to_string(),
+        token: "ocpair_test".to_string(),
+        added_at: 100,
+        last_ok: 0,
+        glyph: None,
+    }
+}
+
+fn two() -> Instances {
+    Instances::from_file(&InstanceFile {
+        version: 1,
+        instances: vec![
+            known("a:1", "alpha", "http://a:7878"),
+            known("b:2", "beta", "http://b:7878"),
+        ],
+    })
+}
+
+/// The text of `fn name` in `src`, from its signature to the next method of
+/// the same impl. Enough to pin what one function calls. Split on lines, not
+/// sliced at byte offsets.
+fn fn_body(src: &str, name: &str) -> String {
+    let head = format!("fn {name}(");
+    let (_, rest) = src
+        .split_once(head.as_str())
+        .unwrap_or_else(|| panic!("no fn {name} in the source"));
+    let mut body = String::new();
+    for line in rest.lines() {
+        let next_method = line.starts_with("    pub(crate) fn ") || line.starts_with("    fn ");
+        if !body.is_empty() && next_method {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    body
+}
+
+#[test]
+fn a_remote_backend_keeps_the_window_ledger_of_home() {
+    let ledger = PathBuf::from("/tmp/window-ledger.db");
+    let home = Backend::local(ledger.clone());
+    let remote = Backend::remote(&known("a:1", "alpha", "http://a:7878"), &home);
+    assert!(matches!(remote, Backend::Remote(_)));
+    // What belongs to the window (dismissed hints) stays on this machine's
+    // ledger whichever crab the window looks at, and a second hop keeps it.
+    assert_eq!(remote.local_db_path(), ledger);
+    let again = Backend::remote(&known("b:2", "beta", "http://b:7878"), &remote);
+    assert_eq!(again.local_db_path(), ledger);
+}
+
+#[test]
+fn a_picked_crab_that_is_not_there_answers_the_handshake_with_its_name() {
+    // Port 9 on loopback: nothing listens, the connect is refused. The pick
+    // must not hang the window on it, and the notice names the crab.
+    let home = Backend::local(PathBuf::from("unused.db"));
+    let remote = Backend::remote(&known("g:9", "gone", "http://127.0.0.1:9"), &home);
+    let err = futures::executor::block_on(remote.call(Hello {})).expect_err("nothing listens");
+    assert!(matches!(err, BackendError::Failed(_)), "{err:?}");
+    let notice = cap::notice(<Hello as Op>::NAME, &err);
+    assert!(notice.starts_with("gone: hello.handshake: "), "{notice}");
+}
+
+#[test]
+fn the_frame_follows_the_model_in_store_order() {
+    let mut set = two();
+    set.record_probe("b:2", Ok(4), 10);
+    assert!(set.select("b:2"));
+    let frame = StripFrame::from_model(&set, 10, None);
+    let ids: Vec<&str> = frame.badges.iter().map(|b| b.host_id.as_str()).collect();
+    assert_eq!(ids, ["a:1", "b:2"]);
+    assert_eq!(frame.selected.as_deref(), Some("b:2"));
+    assert_eq!(frame.badges[1].health, Health::Up { latency_ms: 4 });
+    assert!(frame.badges[1].title.contains("4 ms"));
+    assert_eq!(frame.error, None);
+}
+
+#[test]
+fn an_unchanged_model_hands_the_strip_an_equal_frame() {
+    // The cached view replays on an equal frame: a keystroke elsewhere must
+    // not rebuild the badges.
+    let set = two();
+    assert_eq!(
+        StripFrame::from_model(&set, 10, None),
+        StripFrame::from_model(&set, 10, None)
+    );
+    assert_ne!(
+        StripFrame::from_model(&set, 10, None),
+        StripFrame::from_model(&set, 10, Some("x".into()))
+    );
+}
+
+#[test]
+fn a_pick_swaps_the_backend_and_reloads_off_the_ui_thread() {
+    let picked = fn_body(WIRING, "instance_picked");
+    assert!(picked.contains("Backend::remote(&entry.known, &self.home_backend)"));
+    assert!(picked.contains("self.instance_switch(backend, cx)"));
+    assert!(
+        picked.contains("self.instance_clear(cx)"),
+        "a second click goes home"
+    );
+
+    let home = fn_body(WIRING, "instance_clear");
+    assert!(home.contains("self.home_backend.clone()"));
+
+    let switch = fn_body(WIRING, "instance_switch");
+    assert!(switch.contains("self.backend = backend;"));
+    assert!(switch.contains("self.hello = None;"));
+    assert!(switch.contains("self.instance_epoch"));
+    assert!(switch.contains("self.refresh_rail(cx);"));
+    assert!(switch.contains("self.fetch_hello(cx);"));
+    // The reload is the rail's own refetch, which awaits the backend in a
+    // spawned task: nothing in the swap itself touches the network.
+    assert!(!switch.contains(".call("));
+    assert!(!switch.contains("block_on"));
+    let refetch = fn_body(RAIL, "refresh_rail");
+    assert!(refetch.contains("cx.spawn("));
+    assert!(refetch.contains("self.backend.clone()"));
+}
+
+#[test]
+fn the_handshake_runs_off_the_ui_thread_and_drops_a_stale_answer() {
+    let hello = fn_body(WIRING, "fetch_hello");
+    assert!(hello.contains("cx.spawn("));
+    assert!(hello.contains("backend.call(Hello {}).await"));
+    assert!(hello.contains("this.instance_epoch != epoch"));
+    assert!(hello.contains("cap::notice("));
+}
+
+#[test]
+fn the_probes_run_on_the_remote_runtime_in_the_background() {
+    // gpui's executor is not a Tokio runtime and `reqwest` panics outside
+    // one, so the probes go through the remote client's shared runtime, on a
+    // background thread.
+    let probe = fn_body(WIRING, "spawn_instance_probe");
+    assert!(probe.contains("background_executor()"));
+    assert!(probe.contains("instance_client::block_on("));
+    assert!(probe.contains("instance_client::probe(&target)"));
+}
+
+#[test]
+fn the_window_mounts_and_starts_the_strip() {
+    assert!(RENDER.contains("self.instance_strip_element(cx)"));
+    assert!(APP.contains("this.load_instances(cx);"));
+    assert!(APP.contains("this.fetch_hello(cx);"));
+    assert!(APP.contains("Dashboard::spawn_instance_probe(cx);"));
+    assert!(APP.contains("home_backend: backend.clone(),"));
+    assert!(STRIP.contains("dash.instance_picked("));
+    assert!(STRIP.contains("dash.instance_clear(cx)"));
+}
+
+#[test]
+fn the_rail_follows_the_backend_and_not_a_panel_of_its_own() {
+    // The retired design drew a second rail and a panel for the picked crab.
+    // The names are assembled so this guard does not count as a site itself.
+    for gone in [
+        ["remote", "_panel"].concat(),
+        ["remote", "_rail_rows"].concat(),
+        ["tasks", "/get"].concat(),
+    ] {
+        for (file, src) in [
+            ("dashboard_instances.rs", WIRING),
+            ("instance_strip.rs", STRIP),
+        ] {
+            assert!(!src.contains(&gone), "{file} names {gone}");
+        }
+    }
+}
+
+#[test]
+fn the_menus_read_the_handshake_of_the_crab_the_window_holds() {
+    assert!(PALETTE.contains("let printed = rows_gated(state, hello);"));
+    assert!(RENDER.contains("hello: self.hello.as_ref(),"));
+    let menu = fn_body(RAIL, "rail_menu_popover_for");
+    assert!(menu.contains("kind.unavailable(hello)"));
+    assert!(menu.contains("crate::menu::menu_item_gated("));
+}

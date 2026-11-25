@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use opencrabs::backend::{BackendError, Ctx, Facts, Op};
+use opencrabs::remote::instance_store::KnownInstance;
 use uuid::Uuid;
 
 use crate::agent_bridge::EventSink;
@@ -21,7 +22,6 @@ pub enum Backend {
     /// This process's own crab.
     Local(Arc<Ctx>),
     /// Another crab, reached through its gateway.
-    #[allow(dead_code)] // the instance rail (C3) builds it when a crab is picked
     Remote(Arc<RemoteCrab>),
 }
 
@@ -31,6 +31,24 @@ impl Backend {
     #[cfg(test)]
     pub fn local(db_path: PathBuf) -> Self {
         Backend::Local(Arc::new(Ctx::new(db_path)))
+    }
+
+    /// Another crab, from the record its pairing left in the instance store.
+    ///
+    /// `home` is the backend the window started with: the new one keeps that
+    /// crab's ledger as the window's own, so what belongs to the window
+    /// (dismissed hints) does not change with the crab it looks at.
+    pub fn remote(known: &KnownInstance, home: &Backend) -> Self {
+        let window_ledger = match home {
+            Backend::Local(ctx) => ctx.db_path().to_path_buf(),
+            Backend::Remote(crab) => crab.window_ledger().to_path_buf(),
+        };
+        Backend::Remote(Arc::new(RemoteCrab::new(
+            known.label.clone(),
+            known.url.clone(),
+            Some(known.token.clone()),
+            window_ledger,
+        )))
     }
 
     /// The ledger file of a local crab.

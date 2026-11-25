@@ -449,6 +449,12 @@ pub(crate) fn run() {
                         let rail_scroll = rail_scroll.clone();
                         move |_| rail_view::RailView::new(rail_owner, rail_scroll)
                     });
+                    // The instance strip is a cached view too, and it holds a
+                    // weak handle back so a strip that outlives the window
+                    // simply stops asking.
+                    let strip_owner = cx.entity().downgrade();
+                    let instance_strip =
+                        cx.new(move |_| instance_strip::InstanceStrip::new(strip_owner));
                     Dashboard {
                         screen: Screen::Chat,
                         last_screen: Screen::Chat,
@@ -496,6 +502,7 @@ pub(crate) fn run() {
                         window_frame_seen: saved_window,
                         window_frame_saved: saved_window,
                         backend: backend.clone(),
+                        home_backend: backend.clone(),
                         hello: None,
                         hint_dismissed,
                         sessions: sessions_state,
@@ -676,6 +683,10 @@ pub(crate) fn run() {
                         ctrl_c_interceptor: None,
                         rail_scroll,
                         rail_view,
+                        instances: instances::Instances::default(),
+                        instance_strip,
+                        instance_error: None,
+                        instance_epoch: 0,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,
@@ -777,6 +788,16 @@ pub(crate) fn run() {
                 if let Some(id) = initial_session {
                     view.update(cx, |this, cx| this.open_session(id, cx));
                 }
+                // The crabs this window knows, read once here on the UI
+                // thread, the probe loop that keeps their dots honest, and the
+                // handshake with the crab the window starts on. A missing
+                // store is an empty strip: a fresh install has no remotes and
+                // must not open with a warning.
+                view.update(cx, |this, cx| {
+                    this.load_instances(cx);
+                    this.fetch_hello(cx);
+                    Dashboard::spawn_instance_probe(cx);
+                });
                 // Then the panes the last run left behind, in the same slots
                 // at the same sizes, with the caret on the same pane (#2675).
                 // The TUI has always done this from its own file; the window

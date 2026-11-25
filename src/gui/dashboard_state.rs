@@ -711,6 +711,23 @@ pub(crate) struct Dashboard {
     /// The rail itself, drawn as a cached view so a repaint it has no stake in
     /// replays its last prepaint instead of rebuilding every row (#2933).
     pub(crate) rail_view: Entity<rail_view::RailView>,
+    /// The instance strip: the crabs this window can look at, and which one it
+    /// is looking at. Read once when the window opens; the health of each one
+    /// is the probe loop's business, not the render's.
+    pub(crate) instances: instances::Instances,
+    /// The strip drawn as a cached view, the same way the rail is (#2933): a
+    /// keystroke in the composer replays its last prepaint instead of
+    /// rebuilding every badge.
+    pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
+    /// The last instance error, drawn as one mark at the bottom of the strip.
+    /// `None` is the normal state.
+    pub(crate) instance_error: Option<SharedString>,
+    /// Moves on every swap of `backend`, so an answer that comes back for a
+    /// crab the window has left is dropped instead of painted.
+    pub(crate) instance_epoch: u64,
+    /// This process's own crab, the one the window started with. A pick on
+    /// the strip replaces `backend`; going home puts this one back.
+    pub(crate) home_backend: crate::backend_glue::Backend,
     /// What the crab in `backend` answered to the handshake: the scopes this
     /// window holds there and the operations it declares. `None` until it
     /// answers, which greys nothing out.
