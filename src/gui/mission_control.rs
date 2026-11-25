@@ -368,7 +368,9 @@ pub struct Notice {
 /// nowhere else. The writes (tools.toml, commands.toml, SKILL.md, the archive)
 /// run on the backend's worker lane, off the gpui worker, which has a small
 /// stack and no reactor. The registry is the one the window's crab holds,
-/// the same service the window boots.
+/// the same service the window boots. A refusal about access (a 403, an
+/// older crab) reads as the reason `cap` gives; any other failure keeps its
+/// text.
 pub async fn decide(
     backend: crate::backend_glue::Backend,
     id: String,
@@ -378,14 +380,17 @@ pub async fn decide(
     backend
         .call(opencrabs::backend::mission::MissionDecide { id, kind, decision })
         .await
-        .map_err(opencrabs::backend::BackendError::into_message)
+        .map_err(|e| {
+            use opencrabs::backend::Op;
+            opencrabs::backend::cap::notice(opencrabs::backend::mission::MissionDecide::NAME, &e)
+        })
 }
 
 /// Read the snapshot for `window` through the crab (`MissionLoad`).
 ///
 /// The four reads run on the backend's 4 MB worker lane with its own
 /// reactor, because the caller waits on it from a gpui task; the snapshot
-/// comes back in the panels' own types.
+/// comes back in the panels' own types. A refusal reads as `decide`'s does.
 pub async fn load(
     backend: crate::backend_glue::Backend,
     window: TimeWindow,
@@ -394,7 +399,10 @@ pub async fn load(
         .call(opencrabs::backend::mission::MissionLoad { window })
         .await
         .map(Snapshot::from)
-        .map_err(opencrabs::backend::BackendError::into_message)
+        .map_err(|e| {
+            use opencrabs::backend::Op;
+            opencrabs::backend::cap::notice(opencrabs::backend::mission::MissionLoad::NAME, &e)
+        })
 }
 
 impl From<opencrabs::backend::mission::MissionSnapshot> for Snapshot {
