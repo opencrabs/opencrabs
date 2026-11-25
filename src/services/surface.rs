@@ -741,6 +741,48 @@ mod tests {
         );
     }
 
+    /// Every process that starts the gateway records its primary crab first.
+    /// The TUI and the daemon spawn the gateway from `cmd_chat_inner`, apart
+    /// from this file; a spawner that skips the adoption leaves
+    /// `backend::primary()` empty and every `gui/call` answers `NotReady`.
+    #[test]
+    fn every_gateway_spawner_records_the_primary_first() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut spawners = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n != "tests") {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                let shipped = text.split("#[cfg(test)]").next().unwrap_or_default();
+                let lines: Vec<&str> = shipped.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if !line.contains("a2a::server::start_server(") {
+                        continue;
+                    }
+                    spawners += 1;
+                    let window = &lines[i.saturating_sub(15)..i];
+                    assert!(
+                        window.iter().any(|l| l.contains("adopt_gateway_service(")),
+                        "{}:{} starts the gateway without adopt_gateway_service",
+                        path.display(),
+                        i + 1
+                    );
+                }
+            }
+        }
+        assert!(spawners >= 2, "found {spawners} gateway spawners");
+    }
+
     fn inst(pid: u32, channels: &[&str], stopped: bool) -> PreemptedInstance {
         PreemptedInstance {
             pid,
