@@ -53,7 +53,11 @@ pub(crate) async fn handle_call(
         };
         return error_response(id, refused);
     };
-    match backend::dispatch_as(ctx, &granted, &call.name, call.params).await {
+    // Marked as the remote door: a turn it starts asks this surface before
+    // a gated tool runs, where the window's own turn never asks.
+    let dispatched =
+        backend::door::remote(backend::dispatch_as(ctx, &granted, &call.name, call.params)).await;
+    match dispatched {
         Ok(reply) => (StatusCode::OK, JsonRpcResponse::success(id, reply)),
         Err(e) => error_response(id, e),
     }

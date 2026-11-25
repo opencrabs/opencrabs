@@ -11,9 +11,9 @@
 //!
 //! A tool that needs approval asks a remote surface the way a channel asks
 //! its chat: the turn publishes [`Event::ApprovalRequested`] on its session
-//! and waits for [`ApprovalAnswer`]. Only a session somebody watches over
-//! `gui/events` is asked; any other turn runs with no approval callback, as
-//! the window's turn always has.
+//! and waits for [`ApprovalAnswer`]. Only a turn that came in by the remote
+//! door (`gui/call`, see [`super::door`]) asks. The window's turn runs with
+//! no approval callback, as it always has, whoever watches the session.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -28,6 +28,7 @@ use crate::a2a::server::gui_stream;
 use crate::brain::agent::{AgentError, AgentService, ApprovalCallback, ToolApprovalInfo};
 use crate::db::models::Message;
 
+use super::door::{self, Door};
 use super::{BackendError, Ctx, Event, Op, Scope};
 
 ops! { TurnSend, TurnResume, ApprovalAnswer }
@@ -114,7 +115,7 @@ impl Op for TurnSend {
             display,
             None,
             Some(cancel.clone()),
-            remote_approval(&service, session_id),
+            remote_approval(&service, crate::utils::check_approval_policy),
             None,
             "tui",
             None,
@@ -180,7 +181,7 @@ impl Op for TurnResume {
             content,
             None,
             Some(cancel.clone()),
-            remote_approval(&service, session_id),
+            remote_approval(&service, crate::utils::check_approval_policy),
             None,
             "tui",
             None,
@@ -373,22 +374,38 @@ impl Drop for PendingGuard {
     }
 }
 
-/// The approval callback a turn on `session_id` runs with.
+/// A read of the configured approval policy: `Some` grants the tool with
+/// that answer and asks nobody, `None` leaves the call to a human.
+type PolicyGrant = fn() -> Option<(bool, bool)>;
+
+/// The approval callback a turn runs with.
 ///
-/// `None`, the window's turn as it always was, unless a remote surface is
-/// watching the session and the service's policy does not already approve
-/// every tool. A per-call callback makes the tool loop ask even under an
-/// auto policy, so an auto policy keeps the turn without one.
-fn remote_approval(service: &AgentService, session_id: Uuid) -> Option<ApprovalCallback> {
-    if service.auto_approves_tools() || !gui_stream::hub().is_watched(session_id) {
+/// `None`, the window's turn as it always was, unless the turn came in by
+/// the remote door. A remote turn under a service that already approves
+/// every tool keeps `None` too: a per-call callback makes the tool loop ask
+/// even then.
+///
+/// `policy` is the read a channel's callback makes before it asks its chat
+/// (`check_approval_policy`, so an `auto-session` written after boot grants
+/// here as it grants there). Only a policy that grants nothing asks.
+fn remote_approval(service: &AgentService, policy: PolicyGrant) -> Option<ApprovalCallback> {
+    if door::current() != Door::Remote || service.auto_approves_tools() {
         return None;
     }
-    Some(approval_callback(APPROVAL_TIMEOUT))
+    Some(approval_callback(APPROVAL_TIMEOUT, policy))
 }
 
-/// A callback that asks the session's remote surfaces and waits `timeout`.
-fn approval_callback(timeout: Duration) -> ApprovalCallback {
-    Arc::new(move |info| Box::pin(ask_remote(info, timeout)))
+/// A callback that grants what `policy` grants, and asks the session's
+/// remote surfaces, waiting `timeout`, for the rest.
+fn approval_callback(timeout: Duration, policy: PolicyGrant) -> ApprovalCallback {
+    Arc::new(move |info| {
+        Box::pin(async move {
+            match policy() {
+                Some(granted) => Ok(granted),
+                None => ask_remote(info, timeout).await,
+            }
+        })
+    })
 }
 
 /// Publish the request on the tool's session and wait for its answer.
@@ -710,7 +727,22 @@ mod tests {
     async fn gated(
         provider: Arc<dyn crate::brain::provider::Provider>,
     ) -> (Gateway, Arc<std::sync::atomic::AtomicUsize>) {
+        gated_with(provider, "ask").await
+    }
+
+    /// [`gated`], with `policy` written to the crab's `config.toml`, where a
+    /// channel's callback reads it. The service itself still gates: the
+    /// written policy is only what the callback finds on disk.
+    async fn gated_with(
+        provider: Arc<dyn crate::brain::provider::Provider>,
+        policy: &str,
+    ) -> (Gateway, Arc<std::sync::atomic::AtomicUsize>) {
         let gateway = Gateway::start().await;
+        std::fs::write(
+            gateway.home().join("config.toml"),
+            format!("[agent]\napproval_policy = \"{policy}\"\n"),
+        )
+        .expect("write the crab's config");
         let db = gateway.ctx.db().await.expect("db");
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let registry = crate::brain::tools::ToolRegistry::new();
@@ -742,9 +774,10 @@ mod tests {
         }
     }
 
-    /// Watch `id`, run one turn on it, and answer its first approval request
-    /// by the remote door with `approved` and `always`. Returns the turn's
-    /// result and the subscription, which saw that one request.
+    /// Watch `id`, run one turn on it by the remote door, and answer its
+    /// first approval request by the remote door with `approved` and
+    /// `always`. Returns the turn's result and the subscription, which saw
+    /// that one request.
     async fn turn_answered(
         gateway: &Gateway,
         id: Uuid,
@@ -772,12 +805,13 @@ mod tests {
                 .await;
             assert_eq!(took, Ok(true), "the waiting tool took the answer");
         };
-        let (result, ()) = tokio::join!(gateway.local(send(id)), answer);
+        let turn = door::remote(gateway.local(send(id)));
+        let (result, ()) = tokio::join!(turn, answer);
         (result, sub)
     }
 
     #[tokio::test]
-    async fn a_watched_turn_asks_and_a_no_denies_the_tool() {
+    async fn a_remote_turn_asks_and_a_no_denies_the_tool() {
         use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
 
         let (gateway, ran) = gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
@@ -788,7 +822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_watched_turn_asks_and_a_yes_runs_the_tool() {
+    async fn a_remote_turn_asks_and_a_yes_runs_the_tool() {
         use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
 
         let (gateway, ran) = gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
@@ -812,17 +846,58 @@ mod tests {
         assert!(more.is_err(), "a second request reached the subscriber: {more:?}");
     }
 
+    /// The window's turn, with a remote surface watching its session: no
+    /// request goes out and the tool is denied, exactly the path it always
+    /// took. Watching a session is not a say in its local turns.
     #[tokio::test]
-    async fn an_unwatched_turn_gets_no_approval_callback() {
+    async fn a_local_turn_never_asks_a_remote_watcher() {
         use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
 
         let (gateway, ran) = gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
         let id = session(&gateway).await;
+        let mut sub = gui_stream::hub().subscribe(id);
         let service = gateway.ctx.service().expect("service");
-        assert!(remote_approval(service, id).is_none());
+        assert!(remote_approval(service, || None).is_none());
         let result = gateway.local(send(id)).await;
         assert!(matches!(result, Ok(Some(_))), "{result:?}");
         assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0, "denied, as before");
+        let asked = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
+        assert!(asked.is_err(), "a local turn reached the watcher: {asked:?}");
+    }
+
+    /// Only the remote door gets the callback, and only while the policy
+    /// leaves the call to a human.
+    #[tokio::test]
+    async fn only_a_remote_turn_gets_the_approval_callback() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let (gateway, _ran) =
+            gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
+        let service = gateway.ctx.service().expect("service");
+        assert_eq!(door::current(), Door::Local);
+        assert!(remote_approval(service, || None).is_none(), "local door");
+        let remote = door::remote(async { remote_approval(service, || None).is_some() }).await;
+        assert!(remote, "remote door with a gating service");
+        service.set_auto_approve_tools(true);
+        let granted = door::remote(async { remote_approval(service, || None).is_none() }).await;
+        assert!(granted, "a service that approves every tool needs no callback");
+    }
+
+    /// `auto-session` written to config grants a remote turn's tool as it
+    /// grants a channel's: the tool runs and nobody is asked.
+    #[tokio::test]
+    async fn a_remote_turn_under_an_auto_policy_runs_without_asking() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let provider = Arc::new(MockProviderWithNamedTool::new("approval_tool"));
+        let (gateway, ran) = gated_with(provider, "auto-session").await;
+        let id = session(&gateway).await;
+        let mut sub = gui_stream::hub().subscribe(id);
+        let result = door::remote(gateway.local(send(id))).await;
+        assert!(matches!(result, Ok(Some(_))), "{result:?}");
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1, "the policy granted it");
+        let asked = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
+        assert!(asked.is_err(), "an auto policy still asked: {asked:?}");
     }
 
     fn info(session_id: Uuid) -> ToolApprovalInfo {

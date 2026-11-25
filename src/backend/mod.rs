@@ -106,6 +106,7 @@ macro_rules! domains {
 
 pub mod cap;
 pub mod ctx;
+pub mod door;
 pub mod error;
 pub mod event;
 pub mod op;
