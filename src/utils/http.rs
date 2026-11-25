@@ -96,7 +96,7 @@ fn build_shared() -> reqwest::Client {
 ///
 /// ```no_run
 /// static GUARDED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-/// let client = utils::http::cached_client(&GUARDED, |b| {
+/// let client = opencrabs::utils::http::cached_client(&GUARDED, |b| {
 ///     b.redirect(reqwest::redirect::Policy::none())
 /// });
 /// ```
