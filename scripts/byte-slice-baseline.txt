@@ -813,3 +813,8 @@
 1	src/utils/string.rs	s[1..]
 1	src/utils/string.rs	s[s.ceil_char_boundary(s.len() - max_bytes)..]
 1	src/utils/string.rs	s[tail_start..]
+1	src/tests/compaction_notice_test.rs	COMPACTION[branch..branch + 1600]
+1	src/tests/compaction_notice_test.rs	src[cursor..]
+1	src/tests/compaction_notice_test.rs	src[start..start + 500]
+2	src/tests/compaction_summary_budget_test.rs	src[fn_start..]
+1	src/tests/compaction_summary_budget_test.rs	src[fn_start + cut_check..fn_start + extraction]
