@@ -124,6 +124,38 @@ impl Ctx {
         })
     }
 
+    /// Take `session` for one window turn, refusing only this crab's own.
+    ///
+    /// The same claim as [`Ctx::claim_turn`] without its read of another
+    /// owner's turn probe: a channel turn mid-flight on `session` does not
+    /// refuse it. `Busy` here means this crab already holds a turn on the
+    /// session, and nothing else.
+    ///
+    /// It exists to keep the behaviour the window had before its turns moved
+    /// into the crab: a window send ran alongside a channel turn on the same
+    /// session. That collision is older than this door and is tracked on its
+    /// own issue; until it is settled there, the window's turns must not start
+    /// refusing what they used to run. The probe is registered exactly as
+    /// `claim_turn` registers it, so the notify gate still reads the claim.
+    pub fn claim_own_turn(&self, session: Uuid) -> Result<TurnClaim, BackendError> {
+        use crate::brain::agent::service::session_routes::{register_turn_probe, turn_probe};
+
+        if !lock_turns(&self.turns).insert(session) {
+            return Err(BackendError::Busy);
+        }
+        if turn_probe(session).is_none() {
+            let turns = Arc::clone(&self.turns);
+            register_turn_probe(
+                session,
+                Arc::new(move || lock_turns(&turns).contains(&session)),
+            );
+        }
+        Ok(TurnClaim {
+            turns: Arc::clone(&self.turns),
+            session,
+        })
+    }
+
     /// Whether this crab holds a turn on `session` right now.
     pub fn turn_in_flight(&self, session: Uuid) -> bool {
         lock_turns(&self.turns).contains(&session)
