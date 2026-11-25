@@ -143,11 +143,13 @@ impl FactsCache {
             .and_then(|cached| cached.facts.get(&session).cloned())
     }
 
-    /// Keep `facts` as the answer for `session`.
-    pub fn store_facts(&self, session: Option<Uuid>, facts: Facts) {
-        if let Ok(mut cached) = self.inner.lock() {
-            cached.facts.insert(session, facts);
-        }
+    /// Keep `facts` as the answer for `session`. `true` when the answer a
+    /// reader gets changed, so the surface knows to draw again.
+    pub fn store_facts(&self, session: Option<Uuid>, facts: Facts) -> bool {
+        let Ok(mut cached) = self.inner.lock() else {
+            return false;
+        };
+        cached.facts.insert(session, facts.clone()) != Some(facts)
     }
 
     /// The sessions whose facts are cached, the crab-wide entry included.
@@ -178,17 +180,28 @@ impl FactsCache {
     }
 
     /// Keep the answer of a `TasksSnapshot` over `asked`. A session asked
-    /// about and missing from `reply` is idle now.
-    pub fn store_tasks(&self, asked: &[Uuid], reply: Vec<SessionTasks>) {
+    /// about and missing from `reply` is idle now. `true` when the rows a
+    /// reader gets changed: a session read for the first time and found
+    /// idle reads as nothing running before and after, so it is no change.
+    pub fn store_tasks(&self, asked: &[Uuid], reply: Vec<SessionTasks>) -> bool {
         let Ok(mut cached) = self.inner.lock() else {
-            return;
+            return false;
         };
+        let mut touched: Vec<Uuid> = asked.to_vec();
+        touched.extend(reply.iter().map(|row| row.session));
+        let before: Vec<Option<Vec<super::tasks::TaskRow>>> = touched
+            .iter()
+            .map(|session| cached.tasks.get(session).filter(|t| !t.is_empty()).cloned())
+            .collect();
         for session in asked {
             cached.tasks.insert(*session, Vec::new());
         }
         for row in reply {
             cached.tasks.insert(row.session, row.tasks);
         }
+        touched.iter().zip(before).any(|(session, was)| {
+            cached.tasks.get(session).filter(|t| !t.is_empty()).cloned() != was
+        })
     }
 
     /// The sessions whose tasks are cached, idle ones included.
@@ -276,7 +289,10 @@ mod tests {
             Ok(service.base_context_tokens_raw())
         );
         let unbooted = Ctx::new(PathBuf::from("unused.db"));
-        assert_eq!(ContextBase {}.answer(&unbooted), Err(BackendError::NotReady));
+        assert_eq!(
+            ContextBase {}.answer(&unbooted),
+            Err(BackendError::NotReady)
+        );
     }
 
     #[tokio::test]
@@ -287,7 +303,10 @@ mod tests {
         // `NotReady`, the state in which the window prints 0.
         let gateway = Gateway::start().await;
         let answer = parity!(gateway, ContextBase {});
-        assert_eq!(answer, serde_json::json!({ "Err": { "kind": "not_ready" } }));
+        assert_eq!(
+            answer,
+            serde_json::json!({ "Err": { "kind": "not_ready" } })
+        );
         forbidden!(gateway, ContextBase {});
     }
 
@@ -396,5 +415,33 @@ mod tests {
         let mut expected = vec![busy, idle];
         expected.sort();
         assert_eq!(known, expected);
+    }
+
+    /// A store says whether the surface has anything new to draw: the
+    /// window repaints on that, and only on that.
+    #[test]
+    fn a_store_says_whether_the_answer_moved() {
+        let cache = FactsCache::default();
+        let session = Uuid::new_v4();
+        assert!(cache.store_facts(Some(session), sample("first")));
+        assert!(!cache.store_facts(Some(session), sample("first")));
+        assert!(cache.store_facts(Some(session), sample("moved")));
+
+        let row = TaskRow {
+            task_id: Uuid::new_v4(),
+            label: "cargo test".into(),
+            kind: TaskKind::Detached,
+            secs: 3,
+            ours: true,
+        };
+        // Read for the first time and idle: nothing ran, nothing runs.
+        assert!(!cache.store_tasks(&[session], Vec::new()));
+        let busy = vec![SessionTasks {
+            session,
+            tasks: vec![row],
+        }];
+        assert!(cache.store_tasks(&[session], busy.clone()));
+        assert!(!cache.store_tasks(&[session], busy));
+        assert!(cache.store_tasks(&[session], Vec::new()));
     }
 }
