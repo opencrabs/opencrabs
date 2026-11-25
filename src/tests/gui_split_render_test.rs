@@ -706,8 +706,9 @@ fn the_keyboard_follows_the_caret_between_panes() {
             .expect("the root arm follows the composer arm"),
     );
     assert!(
-        composer_target.contains("self.composer_entity(cx)"),
-        "the composer target resolves the focused pane's own field"
+        composer_target.contains("self.keyboard_field(cx)"),
+        "the composer target resolves the focused pane's own field (#3133: \
+         while a remote is open the field drawn is the remote's)"
     );
 }
 

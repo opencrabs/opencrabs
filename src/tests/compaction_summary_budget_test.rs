@@ -807,7 +807,7 @@ fn the_cut_check_fails_the_attempt_before_extraction() {
         .find("pub(super) async fn compute_compaction_summary(")
         .expect("compute_compaction_summary must exist");
     let cut_check = src[fn_start..]
-        .find("if Self::summary_stop_is_cut(response.stop_reason)")
+        .find("if Self::summary_stop_is_cut(response.stop_reason.clone())")
         .expect("compute_compaction_summary must gate on the cut predicate (#3172)");
     let extraction = src[fn_start..]
         .find("let summary = Self::extract_text_from_response(&response);")
