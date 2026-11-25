@@ -1,0 +1,10 @@
+{
+  "op": "turn.cancel",
+  "scope": "a2a:send",
+  "params": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77"
+  },
+  "reply": { "Ok": true },
+  "reply_idle": { "Ok": false },
+  "reply_not_the_owner": { "Err": { "kind": "forbidden", "detail": { "scope": "admin" } } }
+}

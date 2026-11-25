@@ -12,8 +12,15 @@
 //! A tool that needs approval asks a remote surface the way a channel asks
 //! its chat: the turn publishes [`Event::ApprovalRequested`] on its session
 //! and waits for [`ApprovalAnswer`]. Only a turn that came in by the remote
-//! door (`gui/call`, see [`super::door`]) asks. The window's turn runs with
-//! no approval callback, as it always has, whoever watches the session.
+//! door (`gui/call`, see [`super::door`]) from a caller holding
+//! `a2a:manage` asks, and only that caller's principal answers. The
+//! window's turn runs with no approval callback, as it always has, whoever
+//! watches the session.
+//!
+//! A remote turn is the remote caller's, not the window's: the server picks
+//! its history line, its voice and its channel, it waits for any turn on the
+//! session, and only the principal that opened it stops it ([`TurnCancel`]).
+//! A resume is the crab's own recovery and only the local door runs it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -28,10 +35,10 @@ use crate::a2a::server::gui_stream;
 use crate::brain::agent::{AgentError, AgentService, ApprovalCallback, ToolApprovalInfo};
 use crate::db::models::Message;
 
-use super::door::{self, Door};
+use super::door::{self, Caller, Door};
 use super::{BackendError, Ctx, Event, Op, Scope};
 
-ops! { TurnSend, TurnResume, ApprovalAnswer }
+ops! { TurnSend, TurnResume, ApprovalAnswer, TurnCancel }
 
 /// A turn that finished with an answer.
 ///
@@ -60,8 +67,9 @@ pub struct TurnSend {
     pub content: String,
     pub display: Option<String>,
     pub voice: bool,
-    /// The stop. Only the local door can fire it; a remote caller gets a
-    /// token nobody holds and stops its turn another way.
+    /// The stop. Only the local door hands one in; a remote caller gets a
+    /// fresh token, registered for its session, and fires it by
+    /// [`TurnCancel`].
     #[serde(skip)]
     pub cancel: CancellationToken,
 }
@@ -96,11 +104,21 @@ impl Op for TurnSend {
             voice,
             cancel,
         } = self;
+        let caller = door::caller();
+        let (display, voice, channel) = at_door(caller.as_ref(), display, voice);
         let service = ctx.service()?.clone();
         // One window turn per session: a second one is refused, never
         // interleaved. A channel turn on the same session does not refuse it,
-        // as before this door existed (see `Ctx::claim_own_turn`).
-        let _claim = ctx.claim_own_turn(session_id)?;
+        // as before this door existed (see `Ctx::claim_own_turn`). A remote
+        // turn keeps no such privilege: any turn mid-way refuses it.
+        let _claim = match &caller {
+            Some(_) => ctx.claim_turn(session_id)?,
+            None => ctx.claim_own_turn(session_id)?,
+        };
+        // Only the principal that opened a remote turn stops it.
+        let _running = caller
+            .as_ref()
+            .map(|caller| register_running(session_id, &caller.principal, &cancel));
         // Before the turn writes its rows: a resend of the text an
         // unanswered turn left behind must not stack a second copy of
         // it in history (#2697).
@@ -117,7 +135,7 @@ impl Op for TurnSend {
             Some(cancel.clone()),
             remote_approval(&service, crate::utils::check_approval_policy),
             None,
-            "tui",
+            channel,
             None,
             None,
         );
@@ -173,6 +191,14 @@ impl Op for TurnResume {
             content,
             cancel,
         } = self;
+        // A resume re-runs a prompt a dead process of this crab parked: the
+        // crab's own recovery, never a remote caller's to start. No wire
+        // scope carries `a2a:admin`, so the refusal names it.
+        if door::current() == Door::Remote {
+            return Err(BackendError::Forbidden {
+                scope: Scope::Admin,
+            });
+        }
         let service = ctx.service()?.clone();
         // Only this crab's own turn refuses a resume (`Ctx::claim_own_turn`).
         let _claim = ctx.claim_own_turn(session_id)?;
@@ -210,6 +236,121 @@ impl Op for TurnResume {
             }
         }
     }
+}
+
+/// A turn's `display`, `voice` and channel as its door decides them.
+///
+/// The window's turn keeps what it asked for and runs as `tui`. A remote
+/// turn does not choose them: history keeps the words the model read, the
+/// answer is text, and the turn runs as `a2a`, so nothing a channel policy
+/// grants the window reaches it.
+fn at_door(
+    caller: Option<&Caller>,
+    display: Option<String>,
+    voice: bool,
+) -> (Option<String>, bool, &'static str) {
+    match caller {
+        Some(_) => (None, false, "a2a"),
+        None => (display, voice, "tui"),
+    }
+}
+
+/// Stop the remote turn running on `session_id`.
+///
+/// Scope `send`, like starting one. Only the principal that opened the turn
+/// stops it: another caller is refused and the turn goes on. At the local
+/// door the crab stops any of its sessions' remote turns. The reply is
+/// `true` when a turn was running and its stop fired, `false` when the
+/// session had no remote turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnCancel {
+    pub session_id: Uuid,
+}
+
+impl Op for TurnCancel {
+    const NAME: &'static str = "turn.cancel";
+    const SCOPE: Scope = Scope::Send;
+    type Reply = bool;
+
+    async fn run(self, _ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let from = door::caller().map(|caller| caller.principal);
+        cancel_running(self.session_id, from.as_deref())
+    }
+}
+
+/// One remote turn running, with the principal that opened it.
+struct Running {
+    turn: Uuid,
+    principal: String,
+    cancel: CancellationToken,
+}
+
+/// Every remote turn of this process still running, by session. Global for
+/// the reason [`PENDING`] is: the stop arrives on a `gui/call` that holds
+/// nothing of the turn it stops.
+static RUNNING: LazyLock<Mutex<HashMap<Uuid, Running>>> = LazyLock::new(Mutex::default);
+
+/// The running map, read through a poisoned lock as [`pending`] is.
+fn running() -> MutexGuard<'static, HashMap<Uuid, Running>> {
+    RUNNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Removes its turn from [`RUNNING`] however the turn ends.
+struct RunningGuard {
+    session_id: Uuid,
+    turn: Uuid,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        let mut running = running();
+        if running
+            .get(&self.session_id)
+            .is_some_and(|entry| entry.turn == self.turn)
+        {
+            running.remove(&self.session_id);
+        }
+    }
+}
+
+/// Register the remote turn on `session_id` that `principal` opened, with
+/// the stop it runs under.
+fn register_running(
+    session_id: Uuid,
+    principal: &str,
+    cancel: &CancellationToken,
+) -> RunningGuard {
+    let turn = Uuid::new_v4();
+    running().insert(
+        session_id,
+        Running {
+            turn,
+            principal: principal.to_string(),
+            cancel: cancel.clone(),
+        },
+    );
+    RunningGuard { session_id, turn }
+}
+
+/// Fire the stop of the remote turn on `session_id` for `from`, the asking
+/// principal (`None` at the local door, which stops any).
+fn cancel_running(session_id: Uuid, from: Option<&str>) -> Result<bool, BackendError> {
+    let cancel = {
+        let running = running();
+        let Some(turn) = running.get(&session_id) else {
+            return Ok(false);
+        };
+        if let Some(from) = from
+            && from != turn.principal
+        {
+            return Err(BackendError::Forbidden {
+                scope: Scope::Admin,
+            });
+        }
+        turn.cancel.clone()
+    };
+    cancel.cancel();
+    Ok(true)
 }
 
 /// Race a turn against its stop token (#2657).
@@ -309,6 +450,10 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// named: an answer for a request that is not pending on that session reaches
 /// nothing. `always` approves this call and every later tool of the same
 /// turn, the "always" of the window's own prompt.
+///
+/// Scope `manage`: approving runs a tool on the crab, more than sending a
+/// turn does. A remote answer counts only from the principal whose turn
+/// asked; any other is refused and the request keeps waiting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalAnswer {
     pub session_id: Uuid,
@@ -321,7 +466,7 @@ pub struct ApprovalAnswer {
 /// already been answered, ran out of time, or never existed.
 impl Op for ApprovalAnswer {
     const NAME: &'static str = "turn.approval_answer";
-    const SCOPE: Scope = Scope::Send;
+    const SCOPE: Scope = Scope::Manage;
     type Reply = bool;
 
     async fn run(self, _ctx: &Ctx) -> Result<Self::Reply, BackendError> {
@@ -331,13 +476,16 @@ impl Op for ApprovalAnswer {
             approved,
             always,
         } = self;
-        Ok(answer_approval(session_id, request_id, (approved, always)))
+        let from = door::caller().map(|caller| caller.principal);
+        answer_from(session_id, request_id, (approved, always), from.as_deref())
     }
 }
 
 /// One approval request waiting for its answer.
 struct Pending {
     session_id: Uuid,
+    /// The principal whose remote turn asked. `None` answers to anyone.
+    principal: Option<String>,
     answer: oneshot::Sender<(bool, bool)>,
 }
 
@@ -352,15 +500,42 @@ fn pending() -> MutexGuard<'static, HashMap<Uuid, Pending>> {
     PENDING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Hand `answer` to the request `request_id` of `session_id`, if it waits.
+/// Hand `answer` to the request `request_id` of `session_id` at the local
+/// door, if it waits.
+#[cfg(test)]
 fn answer_approval(session_id: Uuid, request_id: Uuid, answer: (bool, bool)) -> bool {
+    answer_from(session_id, request_id, answer, None).unwrap_or(false)
+}
+
+/// Hand `answer` from `from` (the remote principal, `None` at the local
+/// door) to the request `request_id` of `session_id`, if it waits.
+///
+/// A remote principal that is not the one whose turn asked is refused, and
+/// the request stays pending for the right one.
+fn answer_from(
+    session_id: Uuid,
+    request_id: Uuid,
+    answer: (bool, bool),
+    from: Option<&str>,
+) -> Result<bool, BackendError> {
     use std::collections::hash_map::Entry;
 
     match pending().entry(request_id) {
         Entry::Occupied(entry) if entry.get().session_id == session_id => {
-            entry.remove().answer.send(answer).is_ok()
+            if let Some(from) = from
+                && entry
+                    .get()
+                    .principal
+                    .as_deref()
+                    .is_some_and(|owner| owner != from)
+            {
+                return Err(BackendError::Forbidden {
+                    scope: Scope::Admin,
+                });
+            }
+            Ok(entry.remove().answer.send(answer).is_ok())
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
@@ -381,41 +556,60 @@ type PolicyGrant = fn() -> Option<(bool, bool)>;
 /// The approval callback a turn runs with.
 ///
 /// `None`, the window's turn as it always was, unless the turn came in by
-/// the remote door. A remote turn under a service that already approves
-/// every tool keeps `None` too: a per-call callback makes the tool loop ask
-/// even then.
+/// the remote door from a caller holding `a2a:manage`. A remote caller with
+/// `send` alone keeps `None`, the window's path: a gated tool is denied. A
+/// remote turn under a service that already approves every tool keeps
+/// `None` too: a per-call callback makes the tool loop ask even then.
 ///
 /// `policy` is the read a channel's callback makes before it asks its chat
 /// (`check_approval_policy`, so an `auto-session` written after boot grants
 /// here as it grants there). Only a policy that grants nothing asks.
 fn remote_approval(service: &AgentService, policy: PolicyGrant) -> Option<ApprovalCallback> {
-    if door::current() != Door::Remote || service.auto_approves_tools() {
+    let caller = door::caller()?;
+    if !caller.holds(Scope::Manage) || service.auto_approves_tools() {
         return None;
     }
-    Some(approval_callback(APPROVAL_TIMEOUT, policy))
+    Some(approval_callback(APPROVAL_TIMEOUT, policy, caller.principal))
 }
 
 /// A callback that grants what `policy` grants, and asks the session's
-/// remote surfaces, waiting `timeout`, for the rest.
-fn approval_callback(timeout: Duration, policy: PolicyGrant) -> ApprovalCallback {
+/// remote surfaces, waiting `timeout`, for the rest. Only `principal`
+/// answers what it asks.
+fn approval_callback(
+    timeout: Duration,
+    policy: PolicyGrant,
+    principal: String,
+) -> ApprovalCallback {
     Arc::new(move |info| {
+        let principal = principal.clone();
         Box::pin(async move {
             match policy() {
                 Some(granted) => Ok(granted),
-                None => ask_remote(info, timeout).await,
+                None => ask_for(info, timeout, Some(principal)).await,
             }
         })
     })
 }
 
-/// Publish the request on the tool's session and wait for its answer.
+/// [`ask_for`] a request any door may answer.
+#[cfg(test)]
+async fn ask_remote(
+    info: ToolApprovalInfo,
+    timeout: Duration,
+) -> crate::brain::agent::Result<(bool, bool)> {
+    ask_for(info, timeout, None).await
+}
+
+/// Publish the request on the tool's session and wait for its answer from
+/// `principal` (or the local door).
 ///
 /// Nobody watching, or no answer within `timeout`, is an error the tool loop
 /// turns into a denied tool result. Its text names the policy and the two
 /// ways out, as the denial of a surface with no approval at all does.
-async fn ask_remote(
+async fn ask_for(
     info: ToolApprovalInfo,
     timeout: Duration,
+    principal: Option<String>,
 ) -> crate::brain::agent::Result<(bool, bool)> {
     let ToolApprovalInfo {
         session_id,
@@ -430,6 +624,7 @@ async fn ask_remote(
         request_id,
         Pending {
             session_id,
+            principal,
             answer: tx,
         },
     );
@@ -975,5 +1170,268 @@ mod tests {
         assert_eq!(back.context_tokens, 12);
         assert_eq!(back.tokens_per_second, Some(3.5));
         assert!(back.voice);
+    }
+
+    /// A remote caller named `principal` carrying `scopes`.
+    fn as_caller(principal: &str, scopes: &[Scope]) -> Caller {
+        Caller {
+            principal: principal.to_string(),
+            scopes: scopes.to_vec(),
+        }
+    }
+
+    /// Every scope a credential carries over the wire: the owner's api_key.
+    const WIRE: &[Scope] = &[Scope::Read, Scope::Send, Scope::Manage];
+
+    /// The open loopback posture: read and send, nothing elevated.
+    const LOOPBACK: &[Scope] = &[Scope::Read, Scope::Send];
+
+    #[test]
+    fn approving_a_tool_needs_manage() {
+        assert_eq!(ApprovalAnswer::SCOPE, Scope::Manage);
+    }
+
+    #[tokio::test]
+    async fn the_open_loopback_cannot_answer_an_approval() {
+        let gateway = Gateway::start().await;
+        let answer = gateway
+            .remote(
+                ApprovalAnswer {
+                    session_id: Uuid::new_v4(),
+                    request_id: Uuid::new_v4(),
+                    approved: true,
+                    always: true,
+                },
+                LOOPBACK,
+            )
+            .await;
+        assert_eq!(
+            answer,
+            Err(BackendError::Forbidden {
+                scope: Scope::Manage
+            })
+        );
+    }
+
+    /// A remote caller with `send` alone gets the window's path: no callback,
+    /// no request, the gated tool denied.
+    #[tokio::test]
+    async fn a_send_only_remote_turn_never_asks_and_the_tool_is_denied() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let (gateway, ran) = gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
+        let id = session(&gateway).await;
+        let mut sub = gui_stream::hub().subscribe(id);
+        let loopback = as_caller("loopback-open", LOOPBACK);
+        let service = gateway.ctx.service().expect("service");
+        let asks = door::remote_as(loopback.clone(), async {
+            remote_approval(service, || None).is_some()
+        })
+        .await;
+        assert!(!asks, "send alone got an approval callback");
+        let result = door::remote_as(loopback, gateway.local(send(id))).await;
+        assert!(matches!(result, Ok(Some(_))), "{result:?}");
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0, "denied, as before");
+        let asked = tokio::time::timeout(Duration::from_millis(200), sub.next()).await;
+        assert!(asked.is_err(), "a send-only turn reached the watcher: {asked:?}");
+    }
+
+    /// With `manage` the remote turn asks, as the turns above show; without
+    /// the remote door no caller gets the callback at all.
+    #[tokio::test]
+    async fn only_a_remote_caller_with_manage_gets_the_approval_callback() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let (gateway, _ran) =
+            gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
+        let service = gateway.ctx.service().expect("service");
+        assert!(remote_approval(service, || None).is_none(), "local door");
+        let manage = door::remote_as(as_caller("api_key", WIRE), async {
+            remote_approval(service, || None).is_some()
+        })
+        .await;
+        assert!(manage, "a caller holding manage is asked");
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_another_principal_is_refused_and_the_request_waits() {
+        let gateway = Gateway::start().await;
+        let id = Uuid::new_v4();
+        let mut sub = gui_stream::hub().subscribe(id);
+        let ask = ask_for(info(id), Duration::from_secs(30), Some("alice".to_string()));
+        let answer = async {
+            let (_, request_id, _) = next_request(&mut sub).await;
+            let op = |approved| ApprovalAnswer {
+                session_id: id,
+                request_id,
+                approved,
+                always: false,
+            };
+            let refused =
+                door::remote_as(as_caller("bob", WIRE), gateway.local(op(true))).await;
+            assert_eq!(
+                refused,
+                Err(BackendError::Forbidden {
+                    scope: Scope::Admin
+                })
+            );
+            let took = door::remote_as(as_caller("alice", WIRE), gateway.local(op(false))).await;
+            assert_eq!(took, Ok(true), "the refused answer left the request waiting");
+        };
+        let (asked, ()) = tokio::join!(ask, answer);
+        assert_eq!(asked.expect("answered"), (false, false));
+    }
+
+    /// The local door answers a request whoever's turn asked, as before.
+    #[tokio::test]
+    async fn the_local_door_answers_any_principals_request() {
+        let gateway = Gateway::start().await;
+        let id = Uuid::new_v4();
+        let mut sub = gui_stream::hub().subscribe(id);
+        let ask = ask_for(info(id), Duration::from_secs(30), Some("alice".to_string()));
+        let answer = async {
+            let (_, request_id, _) = next_request(&mut sub).await;
+            let took = gateway
+                .local(ApprovalAnswer {
+                    session_id: id,
+                    request_id,
+                    approved: true,
+                    always: false,
+                })
+                .await;
+            assert_eq!(took, Ok(true));
+        };
+        let (asked, ()) = tokio::join!(ask, answer);
+        assert_eq!(asked.expect("answered"), (true, false));
+    }
+
+    #[test]
+    fn the_server_picks_a_remote_turns_display_voice_and_channel() {
+        let remote = as_caller("api_key", WIRE);
+        assert_eq!(
+            at_door(Some(&remote), Some("shown".into()), true),
+            (None, false, "a2a")
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_its_display_voice_and_channel() {
+        assert_eq!(
+            at_door(None, Some("shown".into()), true),
+            (Some("shown".to_string()), true, "tui")
+        );
+        assert_eq!(at_door(None, None, false), (None, false, "tui"));
+    }
+
+    /// A remote send waits for a channel's turn on the session; the window's
+    /// does not (`a_channel_mid_turn_does_not_refuse_a_window_send`).
+    #[tokio::test]
+    async fn a_channel_mid_turn_refuses_a_remote_send() {
+        use crate::brain::agent::service::session_routes::register_turn_probe;
+
+        let gateway = booted().await;
+        let id = session(&gateway).await;
+        register_turn_probe(id, Arc::new(|| true));
+        let result = door::remote_as(as_caller("api_key", WIRE), gateway.local(send(id))).await;
+        assert!(matches!(result, Err(BackendError::Busy)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_local_door_resumes_a_turn() {
+        let gateway = booted().await;
+        let id = session(&gateway).await;
+        let remote = door::remote_as(as_caller("api_key", WIRE), gateway.local(resume(id))).await;
+        assert!(
+            matches!(
+                remote,
+                Err(BackendError::Forbidden {
+                    scope: Scope::Admin
+                })
+            ),
+            "{remote:?}"
+        );
+        let local = gateway.local(resume(id)).await;
+        assert!(
+            !matches!(local, Err(BackendError::Forbidden { .. })),
+            "{local:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_cancel_has_parity() {
+        let gateway = booted().await;
+        let id = session(&gateway).await;
+        let answer = parity!(gateway, TurnCancel { session_id: id });
+        assert_eq!(answer, serde_json::json!({ "Ok": false }), "{answer}");
+        forbidden!(gateway, TurnCancel { session_id: id });
+    }
+
+    #[test]
+    fn the_turn_cancel_fixture_decodes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/gui_backend/TurnCancel.json"
+        ))
+        .expect("fixture is JSON");
+        assert_eq!(fixture["op"], TurnCancel::NAME);
+        assert_eq!(fixture["scope"], TurnCancel::SCOPE.as_str());
+        let _: TurnCancel =
+            serde_json::from_value(fixture["params"].clone()).expect("params decode");
+        let _: Result<bool, BackendError> =
+            serde_json::from_value(fixture["reply"].clone()).expect("reply decodes");
+    }
+
+    /// A remote turn waiting on its approval request is running. Another
+    /// principal's stop is refused and the turn goes on; its own principal's
+    /// stop drops it, and the session has no remote turn left to stop.
+    #[tokio::test]
+    async fn only_the_principal_that_opened_a_remote_turn_stops_it() {
+        use crate::tests::agent_service_mocks::MockProviderWithNamedTool;
+
+        let (gateway, ran) = gated(Arc::new(MockProviderWithNamedTool::new("approval_tool"))).await;
+        let id = session(&gateway).await;
+        let mut sub = gui_stream::hub().subscribe(id);
+        let alice = as_caller("alice", WIRE);
+        let stop = async {
+            let _ = next_request(&mut sub).await;
+            let refused = door::remote_as(
+                as_caller("bob", WIRE),
+                gateway.local(TurnCancel { session_id: id }),
+            )
+            .await;
+            assert_eq!(
+                refused,
+                Err(BackendError::Forbidden {
+                    scope: Scope::Admin
+                })
+            );
+            let stopped =
+                door::remote_as(alice.clone(), gateway.local(TurnCancel { session_id: id })).await;
+            assert_eq!(stopped, Ok(true));
+        };
+        let turn = door::remote_as(alice.clone(), gateway.local(send(id)));
+        let (result, ()) = tokio::join!(turn, stop);
+        assert!(matches!(result, Ok(None)), "{result:?}");
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let after = gateway.local(TurnCancel { session_id: id }).await;
+        assert_eq!(after, Ok(false), "the stopped turn left the register");
+    }
+
+    /// The local door stops a remote turn whoever opened it: the crab's own
+    /// stop, as the window's token always was.
+    #[test]
+    fn the_local_door_stops_any_remote_turn() {
+        let id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        let guard = register_running(id, "alice", &cancel);
+        assert_eq!(cancel_running(id, None), Ok(true));
+        assert!(cancel.is_cancelled());
+        drop(guard);
+        assert_eq!(cancel_running(id, None), Ok(false));
+    }
+
+    /// A window turn registers nothing: `turn.cancel` finds no remote turn.
+    #[test]
+    fn a_session_with_no_remote_turn_has_nothing_to_stop() {
+        assert_eq!(cancel_running(Uuid::new_v4(), Some("alice")), Ok(false));
     }
 }

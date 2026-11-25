@@ -14,7 +14,16 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use crate::a2a::types::{JsonRpcError, JsonRpcResponse, error_codes};
+use crate::backend::door::Caller;
 use crate::backend::{self, BackendError, Ctx, Scope};
+
+/// The principal of every `gui/call` caller.
+///
+/// The gate hands this door the credential's scopes only, not which
+/// credential it was, so every remote caller is the same principal here:
+/// a turn answers to whoever holds the scopes it needs, as before. Telling
+/// one pairing from another needs the gate to pass the credential's id.
+const UNATTRIBUTED: &str = "unattributed";
 
 /// The params of a `gui/call` request.
 #[derive(Debug, Deserialize)]
@@ -53,10 +62,18 @@ pub(crate) async fn handle_call(
         };
         return error_response(id, refused);
     };
-    // Marked as the remote door: a turn it starts asks this surface before
-    // a gated tool runs, where the window's own turn never asks.
-    let dispatched =
-        backend::door::remote(backend::dispatch_as(ctx, &granted, &call.name, call.params)).await;
+    // Marked as the remote door, with the caller's principal and every
+    // scope it carries: a turn it starts asks this surface before a gated
+    // tool runs only when the caller may approve, and answers to it alone.
+    let caller = Caller {
+        principal: UNATTRIBUTED.to_string(),
+        scopes: granted.clone(),
+    };
+    let dispatched = backend::door::remote_as(
+        caller,
+        backend::dispatch_as(ctx, &granted, &call.name, call.params),
+    )
+    .await;
     match dispatched {
         Ok(reply) => (StatusCode::OK, JsonRpcResponse::success(id, reply)),
         Err(e) => error_response(id, e),
@@ -301,5 +318,34 @@ mod tests {
             };
             assert_eq!(resp.status(), expected, "{name} needs {scope}");
         }
+    }
+
+    /// The dispatch opens the remote door: `turn.resume`, which only the
+    /// local door may run, is refused with a 403 to the owner's credential
+    /// (every wire scope), before the crab is even asked for its service.
+    #[tokio::test]
+    async fn a_gui_call_runs_by_the_remote_door() {
+        let granted: Vec<String> = crate::remote::scopes::ALL_SCOPES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let params = serde_json::json!({
+            "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+            "content": "continue",
+        });
+        let (status, response) = handle_call(
+            Some(&ctx()),
+            &granted,
+            serde_json::json!(1),
+            call("turn.resume", params),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            backend_error(&response),
+            BackendError::Forbidden {
+                scope: Scope::Admin
+            }
+        );
     }
 }
