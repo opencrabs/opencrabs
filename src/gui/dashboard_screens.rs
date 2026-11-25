@@ -286,17 +286,17 @@ impl Dashboard {
             mission_control::Decision::Apply => "Apply",
             mission_control::Decision::Reject => "Reject",
         };
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             self.mc_notice = Some(mission_control::Notice {
                 text: format!("{verb} failed: the agent is not running"),
                 ok: false,
             });
             cx.notify();
             return;
-        };
-        let service = bridge.service.clone();
+        }
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = mission_control::decide(service, item.id, item.kind, decision).await;
+            let result = mission_control::decide(backend, item.id, item.kind, decision).await;
             this.update(cx, |this, cx| {
                 this.mc_notice = Some(match result {
                     Ok(text) => mission_control::Notice { text, ok: true },
@@ -939,8 +939,8 @@ impl Dashboard {
         self.refocus_screen();
         cx.notify();
         match agent_bridge::bridge() {
-            Some(b) => agent_bridge::spawn_apply_operator_cd(
-                b.service.clone(),
+            Some(_) => agent_bridge::spawn_apply_operator_cd(
+                self.backend.clone(),
                 session,
                 dir,
                 self.sink.clone(),

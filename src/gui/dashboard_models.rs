@@ -553,14 +553,14 @@ impl Dashboard {
         let Some((prompt, workspace)) = picked else {
             return;
         };
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // No service to write with: the step still finishes, its prose is
             // handed to the writer on save instead of silently dropped.
             if let Some(ob) = self.onboard.as_mut() {
                 ob.mark_brain_failed("the agent is offline".to_string());
             }
             return;
-        };
+        }
         if let Some(ob) = self.onboard.as_mut() {
             ob.mark_brain_generating();
         }
@@ -569,7 +569,7 @@ impl Dashboard {
             .notices
             .push("writing your brain files".to_string());
         agent_bridge::spawn_brain_generation(
-            bridge.service.clone(),
+            self.backend.clone(),
             prompt,
             workspace,
             self.sink.clone(),
@@ -603,9 +603,9 @@ impl Dashboard {
                         .live
                         .notices
                         .push("generating personalized brain files".to_string());
-                    if let Some(bridge) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         agent_bridge::spawn_brain_generation(
-                            bridge.service.clone(),
+                            self.backend.clone(),
                             prompt,
                             workspace,
                             self.sink.clone(),
@@ -798,7 +798,7 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
@@ -806,9 +806,9 @@ impl Dashboard {
             );
             cx.notify();
             return;
-        };
+        }
         self.models_switching = Some(session);
-        agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
+        agent_bridge::spawn_switch_model(self.backend.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
 
@@ -844,7 +844,7 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
@@ -852,9 +852,9 @@ impl Dashboard {
             );
             cx.notify();
             return;
-        };
+        }
         self.models_switching = Some(session);
-        agent_bridge::spawn_scope_count(bridge.service.clone(), session, pair, self.sink.clone());
+        agent_bridge::spawn_scope_count(self.backend.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
 

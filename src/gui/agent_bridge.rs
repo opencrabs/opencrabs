@@ -1725,13 +1725,13 @@ pub type PendingMessage = QueuedUserMessage;
 /// network work (a handshake per candidate), which is why it never runs on the
 /// UI thread and never on a gpui worker (tiny stacks, #2299).
 pub fn spawn_switch_model(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     pair: String,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = service_backend(service).spawn(
+    let spawned = backend.spawn(
         opencrabs::backend::session_ops::SwitchModel { session_id, pair },
         move |result| {
             let event = match result {
@@ -1758,10 +1758,9 @@ pub fn spawn_switch_model(
 /// A backend on the crab the window already holds: `service` and the pool it
 /// was built on.
 ///
-/// The `spawn_*` doors that take the service keep that signature for their
-/// call sites, and still run their work as an operation. The ledger is the
-/// service's own pool, never a second connection, so the operation reads and
-/// writes exactly what the service did when it ran the work inline.
+/// The boot resume's fallback when no primary crab was recorded: the ledger
+/// is the service's own pool, never a second connection, so the operation
+/// reads and writes exactly what the service did when it ran the work inline.
 fn service_backend(service: Arc<AgentService>) -> crate::backend_glue::Backend {
     let db_path = opencrabs::backend::primary()
         .map(|ctx| ctx.db_path().to_path_buf())
@@ -1779,13 +1778,13 @@ fn service_backend(service: Arc<AgentService>) -> crate::backend_glue::Backend {
 /// event sink. Nothing is written here; the switch itself still goes through
 /// `direct_model_switch`, which owns the bulk write and its receipt.
 pub fn spawn_scope_count(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     pair: String,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = service_backend(service).spawn(
+    let spawned = backend.spawn(
         opencrabs::backend::session_ops::ScopeCount { pair: pair.clone() },
         move |result| {
             let event = match result {
@@ -1818,9 +1817,13 @@ pub fn spawn_scope_count(
 /// would redraw the bubble the user just took back on the next reload. The
 /// trailing pair is cut only when it is the pair the turn opened: a finished
 /// turn, or anything a tool wrote, stops the walk.
-pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: EventSink) {
+pub fn spawn_undo_last_turn(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
     let done_sink = sink.clone();
-    let spawned = service_backend(service).spawn(
+    let spawned = backend.spawn(
         opencrabs::backend::session_ops::UndoLastTurn { session_id },
         move |result| match result {
             Ok(reply) => {
@@ -1897,13 +1900,13 @@ pub fn spawn_record_turn_stopped(
 /// workspace. The terminal runs it in the background after setup so nobody
 /// waits on it; the window does the same and reports the outcome as a notice.
 pub fn spawn_brain_generation(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     prompt: String,
     workspace: PathBuf,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = service_backend(service).spawn(
+    let spawned = backend.spawn(
         opencrabs::backend::session_ops::BrainGenerate { prompt, workspace },
         move |result| {
             let _ = match result {
@@ -1936,13 +1939,13 @@ pub fn spawn_brain_generation(
 /// this file uses, and the receipt comes back as a `CommandReply` on the
 /// session that asked, which the notice strip already knows how to paint.
 pub fn spawn_apply_operator_cd(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     dir: PathBuf,
     sink: EventSink,
 ) {
     let done_sink = sink.clone();
-    let spawned = service_backend(service).spawn(
+    let spawned = backend.spawn(
         opencrabs::backend::session_ops::ApplyCd { session_id, dir },
         move |result| {
             let text = match result {

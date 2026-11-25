@@ -743,9 +743,9 @@ impl Dashboard {
                         editor.restore_draft(text, cx);
                         editor.show_returned(cx);
                     });
-                    if let Some(bridge) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         agent_bridge::spawn_undo_last_turn(
-                            bridge.service.clone(),
+                            self.backend.clone(),
                             sid,
                             self.sink.clone(),
                         );

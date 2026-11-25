@@ -10,7 +10,6 @@
 //! `Config` is never loaded from a gpui worker. gpui's threads are dispatch
 //! queue threads with small stacks and no reactor, and sqlx panics there.
 
-use opencrabs::brain::agent::AgentService;
 /// The analytics window is part of the snapshot's own interface (the panels
 /// label their numbers with it, and the keys move it), so the window
 /// re-exports it rather than making every caller reach into the crate.
@@ -21,7 +20,8 @@ use opencrabs::brain::mission_control::{
 };
 use opencrabs::db::{Database, Pool};
 use opencrabs::tui::app::mission_control::log_viewer::{self, LogViewerState};
-use std::path::PathBuf;
+// The tests below build a tool registry to decide against.
+#[cfg(test)]
 use std::sync::Arc;
 
 /// How many activity rows a card shows before its window follows the
@@ -367,17 +367,15 @@ pub struct Notice {
 /// resolves, so an applied proposal lands in this instance's own files and
 /// nowhere else. The writes (tools.toml, commands.toml, SKILL.md, the archive)
 /// run on the backend's worker lane, off the gpui worker, which has a small
-/// stack and no reactor. The crab it runs on carries the `service` the caller
-/// holds, so the registry is the one it passed.
+/// stack and no reactor. The registry is the one the window's crab holds,
+/// the same service the window boots.
 pub async fn decide(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     id: String,
     kind: McInboxKind,
     decision: Decision,
 ) -> Result<String, String> {
-    let ctx = opencrabs::backend::Ctx::new(PathBuf::new());
-    ctx.set_service(service);
-    crate::backend_glue::Backend::Local(Arc::new(ctx))
+    backend
         .call(opencrabs::backend::mission::MissionDecide { id, kind, decision })
         .await
         .map_err(opencrabs::backend::BackendError::into_message)

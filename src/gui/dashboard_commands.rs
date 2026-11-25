@@ -191,8 +191,8 @@ impl Dashboard {
                     // reactor, and gpui's executor is not one. Awaiting it
                     // here aborted the window instead.
                     match agent_bridge::bridge() {
-                        Some(b) => agent_bridge::spawn_apply_operator_cd(
-                            b.service.clone(),
+                        Some(_) => agent_bridge::spawn_apply_operator_cd(
+                            self.backend.clone(),
                             session,
                             expanded,
                             self.sink.clone(),
