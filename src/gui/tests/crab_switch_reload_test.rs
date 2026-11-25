@@ -352,3 +352,34 @@ fn every_arrival_pinned_here_reads_the_epoch_the_swap_moves() {
         );
     }
 }
+
+/// A swap closes the conversation on screen before the new crab comes in:
+/// the transcript, the selection and the composer's session all belonged to
+/// the crab being left, and a send from a window still holding them named a
+/// session the new crab never had.
+#[test]
+fn a_swap_leaves_the_open_conversation_before_taking_the_new_crab() {
+    let switch = fn_body(WIRING, "instance_switch");
+    let left = switch
+        .find("self.leave_conversation_for_swap(cx);")
+        .expect("a swap leaves the conversation on screen");
+    let swapped = switch.find("self.backend = backend;").expect("swap");
+    assert!(
+        left < swapped,
+        "the conversation is left while the window still holds its crab"
+    );
+    let leave = fn_body(WIRING, "leave_conversation_for_swap");
+    for cleared in [
+        "self.set_chat_session(None);",
+        "self.sessions.selected = None;",
+        "self.sync_composer_session(cx);",
+        "self.chat_state.transcript.rows = Vec::new();",
+        "self.chat_state.transcript.turns = Vec::new();",
+    ] {
+        assert!(leave.contains(cleared), "a swap must run `{cleared}`");
+    }
+    assert!(
+        leave.contains("self.stashed.insert(from"),
+        "a turn still running on the crab being left is parked, not dropped"
+    );
+}

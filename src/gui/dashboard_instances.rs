@@ -99,6 +99,7 @@ impl Dashboard {
     /// usage view for the period on screen, the mission control snapshot and
     /// the channel chip. None of them is left showing the crab it left.
     fn instance_switch(&mut self, backend: Backend, cx: &mut Context<Self>) {
+        self.leave_conversation_for_swap(cx);
         self.backend = backend;
         self.hello = None;
         self.instance_error = None;
@@ -116,6 +117,48 @@ impl Dashboard {
         self.chip_channel_names.clear();
         self.refresh_chip_names(cx);
         cx.notify();
+    }
+
+    /// Close the conversation on screen before the window takes another crab.
+    ///
+    /// The transcript, the turn card and the draft all belong to the crab
+    /// being left: keeping them up drew this machine's chat under a remote
+    /// crab's badge, and a send from that composer named a session the new
+    /// crab has never seen. A turn still running is parked under its session,
+    /// the way a conversation switch parks it, and the draft is filed under
+    /// it too, so going back to that crab and that row returns both.
+    fn leave_conversation_for_swap(&mut self, cx: &mut Context<Self>) {
+        self.edit_row = None;
+        let Some(from) = self.chat_state.session() else {
+            return;
+        };
+        if self.turn.busy || !self.turn.live.is_empty() {
+            self.stashed.insert(from, std::mem::take(&mut self.turn));
+        } else {
+            self.turn = Default::default();
+        }
+        self.metrics.pending.remove(&from);
+        let draft = self.composer.editor.update(cx, |ed, cx| ed.take_draft(cx));
+        self.composer.drafts.store(from, draft);
+        self.composer
+            .editor
+            .update(cx, |ed, cx| ed.begin_conversation(cx));
+        self.set_chat_session(None);
+        self.sessions.selected = None;
+        self.sync_composer_session(cx);
+        self.chat_state.transcript.error = None;
+        self.chat_state.transcript.turns = Vec::new();
+        self.chat_state.transcript.rows = Vec::new();
+        self.chat_state.transcript.hidden = 0;
+        self.msg_menu = None;
+        self.msg_menu_row = None;
+        self.msg_menu_leaf = None;
+        self.msg_select.cancel();
+        self.forward_pick = None;
+        self.forward_leaf = None;
+        self.forward_query.clear();
+        self.forward_cursor = None;
+        logging::info(&format!("instances: left session {from} on a crab swap"));
     }
 
     /// Ask the crab the window holds what it speaks, and keep the answer.
