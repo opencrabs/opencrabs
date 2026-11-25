@@ -42,7 +42,8 @@ The crab's existing A2A gateway, default port `18790`.
 - `Authorization: Bearer <token>`. The token is either the crab's
   `[a2a].api_key` (every scope) or an `ocpair_...` token from pairing (the
   scopes its pairing code carried). With no api_key configured the gateway
-  only binds loopback and grants every scope.
+  only binds loopback and grants `a2a:read` and `a2a:send`, never an
+  elevated scope.
 - A missing or wrong token answers HTTP 401 with JSON-RPC error `-32001`.
 
 ### Calling an operation: `gui/call`
@@ -69,7 +70,7 @@ On failure, a JSON-RPC `error` whose `data` is the `BackendError` body below.
 | kind | detail | meaning |
 |---|---|---|
 | `unknown_op` | the name asked | no domain declares it; an older crab answers this for a newer op |
-| `forbidden` | `{"scope": "a2a:admin"}` | the token lacks the operation's scope; checked before params are read |
+| `forbidden` | `{"scope": "a2a:admin"}` | the token lacks the operation's scope; checked before params are read. Also the answer of the remote door to what only the crab itself does (`turn.resume`, `mission.decide` with `Apply`) and to a principal acting on another's turn (`turn.approval_answer`, `turn.cancel`): those name `admin`, which no wire credential carries |
 | `bad_params` | text | `params.params` did not decode as the operation |
 | `not_ready` | absent | the crab is still booting |
 | `busy` | absent | the crab cannot take this now; retry later |
@@ -113,9 +114,30 @@ is not the request's.
   300 s, the tool is denied and the turn goes on with that denial.
 - The policy is the one a channel reads: `auto-session` and `auto-always`
   grant without asking, and no event is sent.
-- Only a turn that came in by `gui/call` asks. A turn the crab's own window
-  started never sends `approval_requested`, even while a client watches its
-  session.
+- Only a turn that came in by `gui/call` from a caller holding `a2a:manage`
+  asks. With `a2a:send` alone (the open loopback posture included) the tool
+  is denied, as for the window. A turn the crab's own window started never
+  sends `approval_requested`, even while a client watches its session.
+- Answering needs `a2a:manage`, and only the principal that started the
+  turn answers it: another principal gets `forbidden` and the request keeps
+  waiting. Today the gateway hands `gui/call` the credential's scopes but
+  not which credential it was, so every remote caller is one principal.
+
+### The remote door
+
+A turn started by `gui/call` belongs to the caller, not to the window:
+
+- `turn.send`: the server ignores `display` and `voice` (history keeps
+  `content`, the answer is text) and runs the turn as the `a2a` channel. Any
+  turn already on the session, a channel's included, answers `busy`.
+- `turn.cancel`, params `{"session_id"}`, scope `a2a:send`: stops the
+  remote turn on that session. Reply `true` when one was running, `false`
+  when none was. Only the principal that started the turn stops it.
+- `turn.resume`: local only; the remote door answers `forbidden`.
+- `mission.decide` with `Apply` installs a tool the crab runs: the remote
+  door needs `a2a:admin` for it. `Reject` stays at `a2a:manage`.
+- `session_ops.track_files`: a path the blob door would not serve is not
+  tracked and comes back as an untracked line.
 
 ### Capabilities
 
@@ -132,7 +154,7 @@ Flat and exact: `a2a:admin` does not imply `a2a:read`.
 |---|---|---|
 | `a2a:read` | rail, transcript, facts, tasks, allowed files, usage | yes |
 | `a2a:send` | send or cancel a turn, attach | yes |
-| `a2a:manage` | rename, close, favourites, topics, create session, clear, undo | no |
+| `a2a:manage` | rename, close, favourites, topics, create session, clear, undo, answer a tool approval | no |
 | `a2a:admin` | model, working directory, settings, secrets (write only), shell, delete | no |
 
 ## Operations
@@ -147,7 +169,8 @@ output.
 | `sessions.load` | `LoadSessions` | `a2a:read` | the rail's sessions, newest first, at most 200 rows; params `{}`, reply a list of session rows |
 | `sessions.rename` | `RenameSession` | `a2a:manage` | rename a session or topic; params `{"id", "title"}`, reply `null` |
 | `session_ops.clear_messages` | `ClearMessages` | `a2a:manage` | delete one session's messages, keep the session; params `{"session_id"}`, reply `null` |
-| `turn.approval_answer` | `ApprovalAnswer` | `a2a:send` | answer one `approval_requested`; params `{"session_id", "request_id", "approved", "always"}`, reply `true` if a waiting tool took it |
+| `turn.approval_answer` | `ApprovalAnswer` | `a2a:manage` | answer one `approval_requested`; params `{"session_id", "request_id", "approved", "always"}`, reply `true` if a waiting tool took it |
+| `turn.cancel` | `TurnCancel` | `a2a:send` | stop the remote turn on a session; params `{"session_id"}`, reply `true` if one was running |
 
 ### Fixture shape
 
