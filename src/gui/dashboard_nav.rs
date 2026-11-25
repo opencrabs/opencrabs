@@ -665,6 +665,13 @@ impl Dashboard {
             return Vec::new();
         }
         let mut open = Vec::new();
+        // A remote crab draws the only composer on screen, so it owns the
+        // keyboard before the local one does. It sits below the rail on
+        // purpose: Tab still arms the rail, and the rail's arrows keep
+        // answering while it holds the keys.
+        if self.instance_remote.is_some() {
+            open.push(OverlayId::RemoteCrab);
+        }
         if self.rail_open && self.rail_focused {
             open.push(OverlayId::Rail);
         }
@@ -705,6 +712,17 @@ impl Dashboard {
         }
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
+        }
+        // The two instance forms are fields the owner types into, and each is
+        // drawn over the panel it was opened from: they sit at the modal tier,
+        // above the rail that opened them. `on_key` already routes to them
+        // first; this is what moves focus to the root so the hidden local
+        // editor cannot take the characters instead (#3133).
+        if self.instance_pairing.is_some() {
+            open.push(OverlayId::InstancePair);
+        }
+        if self.instance_glyph.is_some() {
+            open.push(OverlayId::InstanceGlyph);
         }
         if self.group_target.is_some() {
             open.push(OverlayId::GroupPick);
@@ -770,7 +788,11 @@ impl Dashboard {
     /// being built, after that press is done. `refocus_screen` stays the one
     /// decision point, so the two can never disagree about who owns the keys.
     pub(crate) fn request_composer_caret(&mut self, cx: &mut Context<Self>) {
-        let composer = self.composer_entity(cx);
+        // The field on screen, which with a remote open is the remote's
+        // (#3133): asking the local composer to re-assert a caret nobody can
+        // see is what the remote panel's hand-written keyboard was working
+        // around.
+        let composer = self.keyboard_field(cx);
         composer.update(cx, |editor, cx| {
             editor.focus_pending = true;
             cx.notify();

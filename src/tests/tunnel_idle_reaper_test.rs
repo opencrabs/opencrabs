@@ -16,6 +16,7 @@ fn state(started_at: u64) -> TunnelState {
         pid: 4242,
         url: "https://example.trycloudflare.com".to_string(),
         port: 8787,
+        origin_host: "127.0.0.1".to_string(),
         binary: "/tmp/cloudflared".to_string(),
         started_at,
     }

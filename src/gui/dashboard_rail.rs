@@ -73,6 +73,15 @@ impl Dashboard {
         if self.sessions.rail_menu != Some(id) {
             return None;
         }
+        // A remote rail is not this window's rail. Its rows are the other
+        // crab's sessions, so every verb below (pin, rename, topics, split,
+        // delete) is a writer aimed at a database this window does not own:
+        // pressed on a remote row they wrote a remote id into local tables and
+        // changed nothing (#3133). The remote's menu is built where the remote's
+        // state lives, and offers only what the host answers.
+        if self.instance_remote_open() {
+            return self.remote_rail_menu(id, cx);
+        }
         let favorite = self.sessions.is_favorite(id);
         let topics_on = self.sessions.is_topic_enabled(id);
         let is_topic = self.sessions.parents.contains_key(&id);
@@ -118,6 +127,68 @@ impl Dashboard {
             .rail_menu_at
             .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         Some(sessions::menu_popover("rail-context-menu", items, at))
+    }
+
+    /// The menu a remote rail row offers, and nothing else.
+    ///
+    /// A remote row is the other crab's session, and the rail's own menu is a
+    /// list of verbs that write to *this* window's database: pin, rename,
+    /// enable topics, delete. Pressed on a remote row they carried a remote id
+    /// into writers that had never heard of it, so the menu answered, the card
+    /// closed, and the session was exactly as it had been. That is the owner's
+    /// report: "as opcoes de enable topics etc nao funcionam".
+    ///
+    /// The honest menu offers what the host actually answers over A2A: open the
+    /// conversation, and take its id. Anything else would be a verb this window
+    /// cannot perform on that machine, and a menu row that does nothing is
+    /// worse than a menu row that is not there.
+    pub(crate) fn remote_rail_menu(
+        &self,
+        id: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.sessions.rail_menu != Some(id) {
+            return None;
+        }
+        let session_id = id.to_string();
+        // The title the row is already showing, so opening from the menu lands
+        // on the same conversation the row names.
+        let title = self
+            .instance_remote
+            .as_ref()
+            .and_then(|remote| match &remote.state {
+                dashboard_instances::RemoteState::Ready(sessions) => sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .map(|s| s.title.clone())
+                    .filter(|t| !t.is_empty()),
+                _ => None,
+            })
+            .unwrap_or_else(|| session_id.clone());
+        let open_id = session_id.clone();
+        let open = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.sessions.rail_menu = None;
+            this.open_remote_session(open_id.clone(), title.clone(), cx);
+        });
+        let copy_id = session_id.clone();
+        let copy = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            this.sessions.rail_menu = None;
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+            cx.notify();
+        });
+        let at = self
+            .rail_menu_at
+            .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
+        Some(menu::menu_popover(
+            "remote-rail-context-menu",
+            vec![
+                menu::menu_item("abrir a conversa").on_click(open),
+                menu::menu_item("copiar o id da sessão").on_click(copy),
+            ],
+            at,
+        ))
     }
 
     /// Drop every composer's context menu: a press outside the card is the
@@ -786,6 +857,13 @@ impl Dashboard {
                 chips,
             });
         }
+        // A selected remote replaces the local list: the strip picked which
+        // crab, so the rail's job is that crab's sessions. The local rows are
+        // still resolved above and then dropped, one wasted pass while a
+        // remote is open, which keeps the two sources out of one loop.
+        if let Some(remote_rows) = self.remote_rail_rows() {
+            rows = remote_rows;
+        }
         // The channel chip (#2452): quiet notice plus the one action, drawn at
         // the end of the rail only while a configured channel has no live owner.
         // `Start daemon` runs the onboarding installer once; the probe loop
@@ -911,6 +989,24 @@ impl Dashboard {
         // The find field is a jump aid: picking a row is its exit, and the
         // keyboard goes back to the conversation.
         self.close_rail_filter(cx);
+        // While a remote is open the row names a session on THAT crab, so the
+        // pick is a fetch, not a local open: the same id would be a session
+        // this window has never seen.
+        if self.instance_remote_open() {
+            let title = self
+                .instance_remote
+                .as_ref()
+                .and_then(|r| match &r.state {
+                    dashboard_instances::RemoteState::Ready(list) => list
+                        .iter()
+                        .find(|s| uuid::Uuid::parse_str(&s.id).ok() == Some(id))
+                        .map(|s| s.title.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.open_remote_session(id.to_string(), title, cx);
+            return;
+        }
         // The pane holding the caret takes the pick (#2819).
         self.open_picked_in_focused_pane(id, true, cx);
     }

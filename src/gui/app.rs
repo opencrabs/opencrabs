@@ -295,6 +295,18 @@ pub(crate) fn run() {
                     let history_path = history_path.clone();
                     move |cx| editor::Editor::new_with_history(history, history_path, cx)
                 });
+                // The remote panel's field, built here beside the chat's so
+                // both walk the same history: a message typed to another crab
+                // is recalled the way one typed to this one is. It is a real
+                // `Editor`, not a `TextField`, because the panel used to paint
+                // its own spans and a fake caret, and a remote question could
+                // not be edited, selected or multi-lined the way a local one
+                // can (#3133).
+                let remote_editor = cx.new({
+                    let history = history.clone();
+                    let history_path = history_path.clone();
+                    move |cx| editor::Editor::new_with_history(history, history_path, cx)
+                });
                 // A drag-copied range lands on the clipboard inside the
                 // transcript, which cannot see the composer. The dashboard owns
                 // both halves, so it is the one that turns a landed copy into
@@ -334,6 +346,16 @@ pub(crate) fn run() {
                             if let Some(session) = this.chat_session {
                                 this.focus_options(session, cx);
                             }
+                        }
+                    })
+                    .detach();
+                    // Enter in the remote field is a send to the other crab,
+                    // the same event the chat's own field emits. One path for
+                    // the key and the "enviar" button, so the two cannot
+                    // disagree about what is being sent.
+                    cx.subscribe(&remote_editor, |this, _editor, event, cx| {
+                        if let editor::EditorEvent::Sent(text) = event {
+                            this.send_remote_text(text.clone(), cx);
                         }
                     })
                     .detach();
@@ -444,6 +466,12 @@ pub(crate) fn run() {
                         let rail_scroll = rail_scroll.clone();
                         move |_| rail_view::RailView::new(rail_owner, rail_scroll)
                     });
+                    // The instance strip is a cached view too, and it holds a
+                    // weak handle back so a strip that outlives the window
+                    // simply stops asking.
+                    let strip_owner = cx.entity().downgrade();
+                    let instance_strip =
+                        cx.new(move |cx| instance_strip::InstanceStrip::new(strip_owner, cx));
                     Dashboard {
                         screen: Screen::Chat,
                         last_screen: Screen::Chat,
@@ -673,6 +701,18 @@ pub(crate) fn run() {
                         ctrl_c_interceptor: None,
                         rail_scroll,
                         rail_view,
+                        instances: instances::Instances::default(),
+                        instance_strip,
+                        instance_pairing: None,
+                        instance_menu_at: None,
+                        instance_menu_for: None,
+                        instance_share: None,
+                        instance_glyph: None,
+                        instance_remote: None,
+                        instance_error: None,
+                        remote_transcript: None,
+                        remote_editor,
+                        remote_new: false,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,
@@ -774,6 +814,14 @@ pub(crate) fn run() {
                 if let Some(id) = initial_session {
                     view.update(cx, |this, cx| this.open_session(id, cx));
                 }
+                // The crabs this window knows, read once here on the UI
+                // thread, and the probe loop that keeps their dots honest. A
+                // missing store is an empty strip: a fresh install has no
+                // remotes and must not open with a banner.
+                view.update(cx, |this, cx| {
+                    this.load_instances(cx);
+                    Dashboard::spawn_instance_probe(cx);
+                });
                 // Then the panes the last run left behind, in the same slots
                 // at the same sizes, with the caret on the same pane (#2675).
                 // The TUI has always done this from its own file; the window

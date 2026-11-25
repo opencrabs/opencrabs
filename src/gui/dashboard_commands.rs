@@ -59,7 +59,10 @@ impl Dashboard {
                 }
             }
             commands::GuiAction::ToggleHelp => self.toggle_help(cx),
-            commands::GuiAction::NewSession => self.new_session(cx),
+            // `/new` follows the crab on screen: with a remote open it opens
+            // the conversation there, not a local session the panel is not
+            // drawing (#3133).
+            commands::GuiAction::NewSession => self.new_conversation(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
             commands::GuiAction::OpenModels => self.open_models(arg, session, cx),

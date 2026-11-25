@@ -69,6 +69,19 @@ impl Dashboard {
             self.editor_key(ev, window, cx);
             return;
         }
+        // The pairing modal owns every key while it is open: three fields and
+        // a submit, so nothing it does not use may reach the composer under it.
+        if self.instance_pairing.is_some() {
+            self.pair_key(&ev.keystroke, cx);
+            return;
+        }
+        // The badge's mark editor is one field, and it owns the keyboard for
+        // the same reason: a character typed into it must not also land in the
+        // composer underneath.
+        if self.instance_glyph.is_some() {
+            self.glyph_key(&ev.keystroke, cx);
+            return;
+        }
         // The settings modal owns every key while it is open, on every screen
         // (#2878): an armed credential edit must not leak a typed character
         // into the composer, and the rows' arrows belong to the modal alone.
@@ -300,9 +313,10 @@ impl Dashboard {
         }
         // ctrl+n opens a new conversation, the terminal's own chord. The row
         // is created in the ledger first, so the rail and the transcript agree
-        // on which session the next turn is written to.
+        // on which session the next turn is written to. With a crab open the
+        // conversation on screen is that crab's, so the new one is too (#3133).
         if ev.keystroke.modifiers.control && ev.keystroke.key == "n" {
-            self.new_session(cx);
+            self.new_conversation(cx);
             return;
         }
         // ctrl+s shows or hides the rail: the sidebar is the window's own
@@ -697,6 +711,15 @@ impl Dashboard {
                 cx.notify();
                 return;
             }
+            // An open remote crab is the nearest surface under the menus, and
+            // Esc is the way back to this window's own crab. It has to answer
+            // before the turn gate below: that gate cancels the *local* turn,
+            // which while a remote is on screen is work the user cannot see
+            // and did not ask to stop (#3133).
+            if self.instance_remote_open() {
+                self.remote_key(&ev.keystroke, cx);
+                return;
+            }
             // The command list lives inside the composer, so with it open Esc
             // closes the list and keeps the draft: the terminal's behaviour,
             // and the nearest thing answers first.
@@ -959,6 +982,51 @@ impl Dashboard {
             // holds the keyboard, the composer once it hands back.
             self.refocus_screen();
             cx.notify();
+            return;
+        }
+        // The strip is the outermost column and holds no focus of its own, so
+        // its step chord is global: Ctrl+Alt+Up/Down walks the crabs and
+        // fetches the one it lands on, the same fetch a click on the badge
+        // does. Without it the strip is mouse-only, which for a column that
+        // picks "who am I talking to" is a hole.
+        if self.screen == Screen::Chat
+            && ev.keystroke.modifiers.control
+            && ev.keystroke.modifiers.alt
+            && !ev.keystroke.modifiers.platform
+            && matches!(ev.keystroke.key.as_str(), "up" | "down")
+        {
+            let delta = if ev.keystroke.key == "up" { -1 } else { 1 };
+            if let Some(host_id) = self.instances.select_step(delta).map(str::to_string) {
+                self.remote_transcript = None;
+                self.instance_fetch_remote(host_id, cx);
+                cx.notify();
+            }
+            return;
+        }
+        // A remote crab owns the composer while it is open, and its field is
+        // the chat's own `Editor` (#3133), so the keyboard is that field's the
+        // way it is the local one's: the keymap binds the editing chords, Enter
+        // sends, and this handler only keeps what the field has no opinion
+        // about (Esc). It sits ahead of the local editor gate, which is what
+        // this handler used to be *instead of*, and ahead of the Ctrl+C quit
+        // ladder, because with the caret in the remote field Ctrl+C is copy,
+        // not a request to close the window.
+        if self.screen == Screen::Chat && self.instance_remote_open() {
+            if self.remote_key(&ev.keystroke, cx) {
+                return;
+            }
+            if self.remote_editor.read(cx).focus_handle.is_focused(window) {
+                // Focused field: the binding already ran, and raw keys reaching
+                // this handler would double-handle Enter and friends, exactly
+                // as they would with the local composer focused.
+                return;
+            }
+            // On screen but not focused yet (the frame before the field takes
+            // the keyboard): the keys are still the remote's, so they are not
+            // dropped into the rail behind it.
+            self.remote_editor.update(cx, |editor, _| {
+                editor.focus_pending = true;
+            });
             return;
         }
         // Ctrl+C is the terminal's own ladder (#2308): scrolled up it gives

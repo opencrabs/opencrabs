@@ -8,11 +8,17 @@
 mod composer_orb_test;
 // The bang operator's built-in editor (#3163), read as source text.
 mod editor_dialog_test;
+mod instance_glyph_test;
+mod instances_test;
+mod instances_wiring_test;
 mod layout_guard_test;
 mod main_test;
 mod plan_strip_test;
 mod pool_door_test;
 mod prompt_files_test;
+mod remote_panel_test;
+mod share_address_test;
 mod sidebar_action_test;
 mod voice_note_row_test;
 mod window_test;
+mod work_line_test;

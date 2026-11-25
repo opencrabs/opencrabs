@@ -68,8 +68,12 @@ pub fn cmd_connect(
             Some(st) => {
                 let age = crate::remote::now_secs().saturating_sub(st.started_at);
                 println!("Tunnel:  {}", st.url);
+                // The recorded host, not a literal: printing `127.0.0.1` here
+                // claimed loopback for a gateway bound to a tailnet address,
+                // which is how a 502 stayed unexplained (2026-11-21).
                 println!(
-                    "Target:  127.0.0.1:{} (pid {}, up {}m{}s)",
+                    "Target:  {}:{} (pid {}, up {}m{}s)",
+                    st.origin_host,
                     st.port,
                     st.pid,
                     age / 60,
@@ -168,8 +172,9 @@ pub fn cmd_connect(
             st
         }
         None => {
-            println!("Starting cloudflared quick tunnel → 127.0.0.1:{port} …");
-            match tunnel::start(&TunnelSpec::new(port)) {
+            let spec = TunnelSpec::on(port, &config.a2a.bind);
+            println!("Starting cloudflared quick tunnel → {} …", spec.origin());
+            match tunnel::start(&spec) {
                 Ok(st) => st,
                 Err(e) => {
                     eprintln!("Tunnel failed: {e:#}");
@@ -184,7 +189,10 @@ pub fn cmd_connect(
     let url = state.url.trim_end_matches('/');
     println!();
     println!("✔ Tunnel up (pid {})", state.pid);
-    println!("  URL:   {url}  →  127.0.0.1:{port}");
+    // The recorded host, like `--status`: the arrow says where cloudflared
+    // dials, and a literal here named loopback for a tunnel pointed at a
+    // tailnet address (2026-11-21).
+    println!("  URL:   {url}  →  {}:{port}", state.origin_host);
     println!();
     println!("Pairing code (single use, 5 min):  {code}");
     println!("Scopes granted: {}", scope_list.join(" "));

@@ -721,6 +721,51 @@ pub(crate) struct Dashboard {
     /// The rail itself, drawn as a cached view so a repaint it has no stake in
     /// replays its last prepaint instead of rebuilding every row (#2933).
     pub(crate) rail_view: Entity<rail_view::RailView>,
+    /// The instance strip: the crabs this window can look at, and which one it
+    /// is looking at. Read once when the window opens and after a pairing; the
+    /// health of each one is the probe loop's business, not the render's.
+    pub(crate) instances: instances::Instances,
+    /// The strip drawn as a cached view, the same way the rail is (#2933): a
+    /// keystroke in the composer replays its last prepaint instead of
+    /// rebuilding every badge.
+    pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
+    /// The pairing form, and with it whether the form is open at all.
+    pub(crate) instance_pairing: Option<dashboard_instances::PairingForm>,
+    /// What the selected remote answered, or why it did not.
+    pub(crate) instance_remote: Option<dashboard_instances::RemoteView>,
+    /// The remote session being read, when one was opened. Its own field
+    /// rather than a variant of the view above, because the list and the
+    /// transcript arrive from two different calls.
+    pub(crate) remote_transcript: Option<dashboard_instances::RemoteTranscript>,
+    /// The remote composer's field. Kept apart from the local draft: the two go
+    /// to different machines and must not leak into each other. A real
+    /// `Editor`, built beside the chat's own, because the panel used to paint
+    /// spans and a fake caret and a remote question could not be edited,
+    /// selected or wrapped the way a local one can (#3133).
+    pub(crate) remote_editor: Entity<editor::Editor>,
+    /// Whether the remote panel is showing a conversation that has not started
+    /// yet (`/new` on an open crab). Nothing exists on the host until the first
+    /// message goes out, so the panel says so rather than asking for a pick
+    /// that has already been made (#3133).
+    pub(crate) remote_new: bool,
+    /// The last instance error, said in one line at the bottom of the strip's
+    /// column. `None` is the normal state.
+    pub(crate) instance_error: Option<SharedString>,
+    /// Where the workspace mark's context menu was asked for, in window
+    /// coordinates. `None` is the normal state.
+    pub(crate) instance_menu_at: Option<gpui::Point<gpui::Pixels>>,
+    /// Which crab the open menu belongs to. `None` means the workspace mark's
+    /// menu (share / pair / settings); `Some(host_id)` is that badge's own,
+    /// which today holds the one row that forgets it. Same card, same press
+    /// point, so the two never need two overlays.
+    pub(crate) instance_menu_for: Option<String>,
+    /// The sharing card: a fresh single-use code and the QR that carries it,
+    /// minted when the mark's menu asked for one and dropped when it closes.
+    pub(crate) instance_share: Option<dashboard_instances::ShareView>,
+    /// The badge's mark editor: which crab, and the one field. `None` is the
+    /// normal state. Kept beside the pairing form because it is the same kind
+    /// of surface (a modal that owns the keyboard) for a one-character job.
+    pub(crate) instance_glyph: Option<dashboard_instances::GlyphForm>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one

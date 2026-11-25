@@ -138,6 +138,15 @@ pub enum OverlayId {
     RailMenu,
     /// Waiting for a second session while a split is set up.
     SplitPick,
+    /// A remote crab's panel. It draws the only composer on screen, so the
+    /// keyboard is its own: without this the owner stayed `Composer`, the
+    /// caret went to the local editor that is not drawn, and every character
+    /// (IME included) landed in a draft nobody could see.
+    RemoteCrab,
+    /// The pairing form: three fields and a submit.
+    InstancePair,
+    /// The badge's mark editor: one field.
+    InstanceGlyph,
     /// Seeker.
     CommandPalette,
     /// The theme modal, which owns the window while it is open (#2619).
@@ -372,5 +381,49 @@ mod tests {
             assert_eq!(focus_target(owner), FocusTarget::Root, "{owner:?}");
         }
         assert_eq!(focus_target(KeyboardOwner::Composer), FocusTarget::Composer);
+    }
+
+    /// A remote crab's panel draws the only composer on screen. Left out of
+    /// the stack it left the owner on `Composer`, so the caret went to the
+    /// local editor that is not drawn and the characters landed there: the
+    /// remote field stayed empty and Enter submitted an empty draft.
+    #[test]
+    fn a_remote_crab_takes_the_keyboard_from_the_local_composer() {
+        assert_eq!(
+            keyboard_owner(&[OverlayId::RemoteCrab], Screen::Chat),
+            KeyboardOwner::Overlay(OverlayId::RemoteCrab)
+        );
+        assert_eq!(
+            focus_target(KeyboardOwner::Overlay(OverlayId::RemoteCrab)),
+            FocusTarget::Root
+        );
+    }
+
+    /// The same hole for the two instance forms: a character typed into the
+    /// pairing form or the mark editor reached the hidden editor, so the field
+    /// looked dead and "guardar" wrote an empty mark.
+    #[test]
+    fn the_instance_forms_take_the_keyboard_too() {
+        for overlay in [OverlayId::InstancePair, OverlayId::InstanceGlyph] {
+            assert_eq!(
+                keyboard_owner(&[overlay], Screen::Chat),
+                KeyboardOwner::Overlay(overlay),
+                "{overlay:?}"
+            );
+            assert_eq!(
+                focus_target(KeyboardOwner::Overlay(overlay)),
+                FocusTarget::Root
+            );
+        }
+    }
+
+    /// Tab still arms the rail over a remote crab: the rail sits higher in the
+    /// stack because a key put it there, and its arrows must keep answering.
+    #[test]
+    fn the_rail_outranks_a_remote_crab() {
+        assert_eq!(
+            keyboard_owner(&[OverlayId::RemoteCrab, OverlayId::Rail], Screen::Chat),
+            KeyboardOwner::Overlay(OverlayId::Rail)
+        );
     }
 }

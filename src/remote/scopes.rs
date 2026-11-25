@@ -5,7 +5,7 @@
 //!
 //! | Scope      | Grants                                                  |
 //! |------------|---------------------------------------------------------|
-//! | `a2a:read` | `tasks/get`, `session/notify-status`                     |
+//! | `a2a:read` | `tasks/get`, `tasks/list`, `session/list`, `session/transcript`, `session/notify-status` |
 //! | `a2a:send` | `message/send`, `message/stream`, `tasks/cancel`, `session/notify` |
 //!
 //! Rules:
@@ -35,7 +35,11 @@ pub const ALL_SCOPES: &[&str] = &[SCOPE_READ, SCOPE_SEND];
 /// is the guard.
 pub fn scope_for_method(method: &str) -> Option<&'static str> {
     match method {
-        "tasks/get" | "session/notify-status" => Some(SCOPE_READ),
+        "tasks/get"
+        | "tasks/list"
+        | "session/list"
+        | "session/transcript"
+        | "session/notify-status" => Some(SCOPE_READ),
         "message/send" | "message/stream" | "tasks/cancel" | "session/notify" => Some(SCOPE_SEND),
         _ => None,
     }

@@ -60,8 +60,10 @@ impl Render for Dashboard {
                 FocusTarget::Composer => {
                     // The keyboard follows the pane, not the window (#2610):
                     // a rotated caret that left focus on the chat leaf typed
-                    // into a field the split was not drawing.
-                    let composer = self.composer_entity(cx);
+                    // into a field the split was not drawing. And it follows
+                    // the crab: while a remote is open the field drawn is the
+                    // remote's (#3133).
+                    let composer = self.keyboard_field(cx);
                     let handle = composer.read(cx).focus_handle.clone();
                     // `before` is true when gpui turned the request into a
                     // no-op, because it returns early on the handle that is
@@ -92,7 +94,7 @@ impl Render for Dashboard {
         // composer. The transition above cannot see that, so the drift is read
         // off the window instead and repaired before the user types (#2741).
         if owner == KeyboardOwner::Composer {
-            let composer = self.composer_entity(cx);
+            let composer = self.keyboard_field(cx);
             let drifted = !composer.read(cx).focus_handle.is_focused(window)
                 && window.focused(cx).is_none_or(|handle| handle == self.focus);
             if drifted {
@@ -108,8 +110,9 @@ impl Render for Dashboard {
             // (#2767): an overlay or a screen took the keys while the composer
             // kept the caret, so everything typed into the prompt also landed
             // in the message field and Enter submitted it. A field the overlay
-            // owns is not this drift; only the composer is.
-            let composer = self.composer_entity(cx);
+            // owns is not this drift; only the composer is, and with a remote
+            // open the field on screen is the remote's (#3133).
+            let composer = self.keyboard_field(cx);
             let leaked = composer.read(cx).focus_handle.is_focused(window);
             if leaked {
                 window.focus(&self.focus);
@@ -2526,6 +2529,16 @@ impl Render for Dashboard {
                     if let Some(bar) = topic_top {
                         session = session.child(central(bar, centred_chat, chat_measure_px));
                     }
+                    // "Is it still going?" at the top of the conversation, where
+                    // a long scroll cannot hide it. The chat screen gave up its
+                    // title row in #2596, and the plan strip sits under the
+                    // transcript, so neither answers the question while the work
+                    // is running. An idle session draws nothing at all, so the
+                    // card keeps its shape until there is something to say.
+                    if !split_draws_its_own && let Some(line) = self.work_line() {
+                        session =
+                            session.child(central(work_bar(line), centred_chat, chat_measure_px));
+                    }
                     session = session.child(middle);
                     // The hint, the offers and the live plan card are
                     // rows of the conversation now (#3139): they are built
@@ -2903,6 +2916,11 @@ impl Render for Dashboard {
             .capture_any_mouse_up(cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
                 this.rail_swipe = None;
             }));
+        // The instance strip is the outermost of the three columns: it picks
+        // the crab, the rail lists that crab's sessions, the panel shows one of
+        // them. Added first so it sits on the far left, and drawn on every
+        // screen, because which crab you are talking to is not a chat-only fact.
+        root = root.child(self.instance_strip_element(cx));
         if self.rail_open {
             let width = self.rail_width;
             let grab = cx.listener(move |this, _ev: &MouseDownEvent, window, _cx| {
@@ -2923,6 +2941,14 @@ impl Render for Dashboard {
         // and the whole centring slack opened between the two. The strip and
         // the column are centred as one block instead, so the topics sit beside
         // the conversation they belong to and the slack falls outside both.
+        // A selected remote replaces the conversation column: same slot, same
+        // measure, different source. The strip picked the crab, so what sits
+        // here is that crab's transcript, not this window's.
+        let right = if self.instance_remote_open() && self.screen == Screen::Chat {
+            self.remote_panel_element(chat_measure_px, centred_chat, cx)
+        } else {
+            right.into_any_element()
+        };
         match topic_side {
             Some((edge, strip)) => {
                 // The column pads itself with `px_4` on each side, so its own
@@ -3715,6 +3741,43 @@ impl Render for Dashboard {
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
+        // The pairing form is a modal for the same reason every other one is:
+        // it takes a code and a URL, and a half-typed code must not fall into
+        // whatever composer is underneath it.
+        if self.instance_pairing.is_some() {
+            root = root.child(self.instance_pair_modal(cx));
+        }
+        // The mark's menu is a window-level card, at the press point, for the
+        // reason #2690 gives: a child of the strip would have its coordinates
+        // translated by the strip's own frame and land far from the pointer.
+        if self.instance_menu_at.is_some() {
+            let at = self.instance_menu_at.unwrap_or_default();
+            let items = self.instance_mark_menu_items(cx);
+            let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                this.instance_menu_at = None;
+                this.instance_menu_for = None;
+                cx.notify();
+            });
+            root = root.child(
+                gpui::deferred(menu::dismissible_menu_popover(
+                    "instance-mark-menu",
+                    items,
+                    at,
+                    dismiss,
+                ))
+                .with_priority(2),
+            );
+        }
+        // The badge's mark editor, above the strip it changes.
+        if self.instance_glyph.is_some() {
+            root = root.child(self.instance_glyph_modal(cx));
+        }
+        // The sharing card is the mirror of the pairing form: it hands a code
+        // out instead of taking one in, and it must sit above the strip that
+        // opened it.
+        if self.instance_share.is_some() {
+            root = root.child(self.instance_share_modal(cx));
+        }
         // The settings modal follows the same rule (#2878).
         if self.settings_open {
             root = root.child(self.settings_modal(cx));
@@ -3749,6 +3812,41 @@ impl Render for Dashboard {
         self.schedule_middle_scroll_frame(window, cx);
         root
     }
+}
+
+impl Dashboard {
+    /// One line saying where the open session's work stands, or `None` when it
+    /// has nothing to report.
+    ///
+    /// It reads the same `PlanStripState` the strip above the composer reads,
+    /// refreshed once per frame at the top of the render, so the bar and the
+    /// strip can never disagree about the same plan. No second lookup, no
+    /// second clock.
+    fn work_line(&self) -> Option<SharedString> {
+        self.plan.progress_label().map(SharedString::from)
+    }
+}
+
+/// The work bar: one slim line at the top of the chat column.
+///
+/// `flex_none` so it never takes room from the conversation, and the same
+/// panel colour the rail's chips use, so "work in flight" reads the same
+/// wherever it is drawn. It is only ever built when there is a line to show.
+fn work_bar(line: SharedString) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .w_full()
+        .px_3()
+        .py_1()
+        .rounded(px(8.0))
+        .bg(rgb(palette::current().panel))
+        .text_xs()
+        .text_color(rgb(palette::current().teal))
+        .child(line)
+        .into_any_element()
 }
 
 /// The facts the hint row is decided from, read off state the app already

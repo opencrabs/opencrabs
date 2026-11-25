@@ -2,7 +2,7 @@
 //! `METHOD_NOT_FOUND`.
 
 use super::stores::{CancelStore, TaskStore};
-use super::{notify, send, tasks};
+use super::{notify, send, sessions, tasks};
 use crate::a2a::types::*;
 use crate::brain::agent::service::AgentService;
 use crate::services::ServiceContext;
@@ -37,6 +37,11 @@ pub async fn dispatch(
             notify::handle_session_notify(req.id, req.params, service_context, enabled).await
         }
         "session/notify-status" => notify::handle_notify_status(req.id, req.params),
+        "session/list" => sessions::handle_list_sessions(req.id, req.params, service_context).await,
+        "session/transcript" => {
+            sessions::handle_transcript(req.id, req.params, service_context).await
+        }
+        "tasks/list" => sessions::handle_list_tasks(req.id, req.params, store).await,
         "tasks/get" => tasks::handle_get_task(req.id, req.params, store).await,
         "tasks/cancel" => {
             tasks::handle_cancel_task(
