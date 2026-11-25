@@ -3226,11 +3226,11 @@ struct Tiles<'a> {
     localize: &'a dyn Fn(&std::path::Path) -> std::path::PathBuf,
 }
 
-fn history_attachments(
-    paths: &[std::path::PathBuf],
-    content_width: f32,
-    handlers: Tiles<'_>,
-) -> Div {
+fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: Tiles<'_>) -> Div {
+    let Tiles {
+        clicks: handlers,
+        localize,
+    } = tiles;
     if paths.is_empty() {
         return div();
     }
@@ -3266,7 +3266,7 @@ fn history_attachments(
                 .gap_1()
                 .child(crate::composer_orb::player_plain(
                     &format!("history-{key}-{index}"),
-                    &(handlers.localize)(path),
+                    &localize(path),
                     None,
                     &[],
                     content_width,
@@ -3300,8 +3300,8 @@ fn history_attachments(
                 let key = path.to_string_lossy().to_string();
                 // Cloned, not taken: the same file can appear in more than one
                 // message, and every tile of it must open it.
-                let local = (handlers.localize)(path);
-                match handlers.clicks.get(&key).cloned() {
+                let local = localize(path);
+                match handlers.get(&key).cloned() {
                     Some(handler) => attachment_cell(path, &local, side)
                         .id(SharedString::from(format!("attachment-{key}")))
                         .cursor_pointer()

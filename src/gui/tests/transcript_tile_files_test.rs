@@ -28,9 +28,9 @@ fn the_tile_reads_the_localized_file_and_keys_the_crab_path() {
     assert!(!cell.contains("crate::thumbs::picture(path,"));
 
     let strip = body(TRANSCRIPT, "history_attachments");
-    assert!(strip.contains("let local = (handlers.localize)(path);"));
-    assert!(strip.contains("handlers.clicks.get(&key)"));
-    assert!(strip.contains("&(handlers.localize)(path),"));
+    assert!(strip.contains("let local = localize(path);"));
+    assert!(strip.contains("handlers.get(&key)"));
+    assert!(strip.contains("&localize(path),"));
 }
 
 #[test]
