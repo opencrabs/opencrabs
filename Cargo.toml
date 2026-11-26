@@ -35,6 +35,11 @@ exclude = [
     "src/assets/onboard*.png",
     "src/assets/sessions_screen.png",
     "src/assets/usage_screen.png",
+    # README embed (see below) now points at the raw GitHub URL, so the
+    # 677 KiB full-res screenshot is docs art, not compiled bytes. Same
+    # class as onboard*.png above: kept in the repository, out of the
+    # published crate.
+    "src/assets/split-panes.png",
     "src/assets/splash.png",
     "src/assets/opencrabs-xiaomi-mimo-collab.png",
     "src/assets/opencrabs-logo.jpg",
@@ -60,7 +65,10 @@ clap = { version = "4.5", features = ["derive", "env", "cargo"] }
 clap_complete = "4.6"
 
 # TUI
-ratatui = { version = "0.30", features = ["all-widgets"] }
+# `unstable-rendered-line-info` gives the terminal the wrapped line count of a
+# paragraph, so the hint row can reserve exactly the rows its sentence needs
+# instead of cutting the sentence at the edge of the terminal (#3161).
+ratatui = { version = "0.30", features = ["all-widgets", "unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Native desktop app. Zed's GPU-accelerated UI framework. Optional on purpose:
@@ -372,8 +380,8 @@ code-graph = ["tree-sitter", "tree-sitter-rust"]
 # build with those features pays nothing extra.
 gui = [
     "dep:gpui",
-    # The strip's share card draws a QR of the pairing link, so another crab
-    # can be paired without typing an address.
+    # The sharing card prints a QR of the pairing link, so the crab next to you
+    # can be paired from a phone or a second machine without typing a URL.
     "dep:qrcode",
     "dep:objc2",
     "dep:objc2-foundation",
@@ -422,46 +430,6 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
-
-# Cheap profile for the test slices that do not exist to prove release
-# behaviour. `[profile.ci]` is release with thin LTO, which is right for a
-# shipped binary and wrong for 250k lines of test code that run once and
-# take 166 s: 43 of the 46 minutes that leg costs are rustc, not tests.
-#
-# The macOS leg keeps `ci` so every push still proves release-mode
-# correctness. This profile is only for the Linux leg. It is deliberately
-# NOT used by the Windows module slices: `citest` cannot link on Windows at
-# all (LNK2038, esaxx-rs /MT against llama /MD, and no LTO to dead-strip
-# the mismatch), so that step stays on `--profile ci`, the profile its build
-# step in the same job already used.
-#
-# debug-assertions and overflow-checks are pinned off deliberately.
-# `inherits = "dev"` turns both ON, which would make this leg assert a
-# different program than the macOS leg and turn any divergence into a
-# phantom platform bug.
-#
-# Do NOT raise CARGO_BUILD_JOBS on a job using this profile.
-# `[profile.dev.package."*"]` sets opt-level 2, so dependencies still build
-# at opt-level 2 and a dependency unit is as large as a release one: two
-# concurrent units evicted the 16 GB runner at 15.8 GB in run 43676233062.
-[profile.citest]
-inherits = "dev"
-opt-level = 1
-# `debug` is pinned to 0 rather than inheriting `dev`'s `true`. It was `1`,
-# which is the same value, and it is the one line in this profile that nobody
-# documented. It also drags `split-debuginfo = "unpacked"` in from
-# `[profile.dev]`, so every codegen unit wrote its own `.dwo` beside it.
-#
-# Measured over the 11 runs of this leg after it landed, the median is 60m29s
-# against 48m21s for the `ci` profile on the same job, and none of the 11 beat
-# that baseline (min 50m52s, max 111m43s). A leg that compiles 250k lines of
-# test code once, to run a suite that finishes in under three minutes, should
-# not pay for line tables nothing reads (#2934).
-debug = 0
-codegen-units = 256
-lto = false
-debug-assertions = false
-overflow-checks = false
 
 [[bin]]
 name = "opencrabs"

@@ -472,8 +472,11 @@ pub(crate) fn run() {
                     // weak handle back so a strip that outlives the window
                     // simply stops asking.
                     let strip_owner = cx.entity().downgrade();
-                    let instance_strip =
-                        cx.new(move |_| instance_strip::InstanceStrip::new(strip_owner));
+                    let instance_card = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let instance_strip = cx.new({
+                        let instance_card = instance_card.clone();
+                        move |_| instance_strip::InstanceStrip::new(strip_owner, instance_card)
+                    });
                     Dashboard {
                         screen: Screen::Chat,
                         last_screen: Screen::Chat,
@@ -612,6 +615,9 @@ pub(crate) fn run() {
                         preview_video: None,
                         preview_document: None,
                         preview_document_generation: 0,
+                        editor_dialogs: HashMap::new(),
+                        editor_focus: None,
+                        editor_generation: 0,
                         help_open: false,
                         topic_menu: None,
                         topic_menu_at: None,
@@ -708,6 +714,7 @@ pub(crate) fn run() {
                         rail_view,
                         instances: instances::Instances::default(),
                         instance_strip,
+                        instance_card,
                         remote_crabs: Config::current().gui.remote_crabs,
                         instance_error: None,
                         instance_epoch: 0,

@@ -112,12 +112,11 @@ pub(crate) async fn refresh_menus_if_skills_changed(bot: &Bot, telegram_state: &
     let solo_chats = telegram_state.solo_registered_chats().await;
     if !solo_chats.is_empty() {
         match crate::config::Config::load() {
-            Ok(cfg) => match cfg
-                .channels
-                .telegram
-                .allowed_users
-                .first()
-                .and_then(|s| s.parse::<i64>().ok())
+            Ok(cfg) => match super::menu_scope::owner_user_id(
+                &cfg.channels.telegram.allowed_users,
+                &cfg.channels.telegram.bot_owner,
+            )
+            .map(|id| id as i64)
             {
                 Some(owner_id) => {
                     let commands = super::agent::collect_command_catalog();

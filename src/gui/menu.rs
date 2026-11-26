@@ -80,8 +80,16 @@ pub struct MenuEntry {
 
 /// One row of the context menu: a label and a full-height hit target.
 pub fn menu_item(label: &'static str) -> Stateful<Div> {
+    menu_item_owned(SharedString::from(label))
+}
+
+/// The same row, for a label that is only known at paint time (a crab's own
+/// name, say). `menu_item` keeps the `&'static str` shape every existing menu
+/// uses; this is the door for the ones that cannot.
+pub fn menu_item_owned(label: SharedString) -> Stateful<Div> {
+    let id = SharedString::from(format!("menu-item-{label}"));
     div()
-        .id(SharedString::from(format!("menu-item-{label}")))
+        .id(id)
         .px_2()
         .py_1()
         .rounded_sm()
@@ -89,7 +97,7 @@ pub fn menu_item(label: &'static str) -> Stateful<Div> {
         .text_sm()
         .text_color(rgb(palette::current().text))
         .hover(|d| d.bg(rgb(palette::current().selection)))
-        .child(SharedString::from(label))
+        .child(label)
 }
 
 /// A row that is on the menu but cannot be picked yet: same geometry, faint

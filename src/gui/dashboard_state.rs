@@ -476,6 +476,17 @@ pub(crate) struct Dashboard {
     /// scroll position. A generation rejects a response for an older file.
     pub(crate) preview_document: Option<preview_document::DocumentState>,
     pub(crate) preview_document_generation: u64,
+    /// The built-in editors the bang operator opened, one per conversation
+    /// (#3163). Keyed by the session that asked, so a split keeps every
+    /// pane's buffer, cwd and focus apart: pane A's `!vi` must never hand
+    /// pane B's text to the dialog, and each session resolves its file
+    /// against its own working directory.
+    pub(crate) editor_dialogs: HashMap<Uuid, editor_dialog::EditorDialog>,
+    /// Which conversation's editor is on top and holds the keyboard (#3163).
+    pub(crate) editor_focus: Option<Uuid>,
+    /// Bumps on every open and close, so a file read that lands late lands
+    /// on the dialog that actually asked for it (#2395).
+    pub(crate) editor_generation: u64,
     /// The chat's `...` menu, as the session it acts on (#2480).
     ///
     /// It carries the id, never a bare flag: a right press on a topic tab
@@ -719,6 +730,9 @@ pub(crate) struct Dashboard {
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.
     pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
+    /// Whether one of the strip's cards is up. The strip writes it, the
+    /// overlay stack reads it, so the card owns the keyboard (#3133).
+    pub(crate) instance_card: std::rc::Rc<std::cell::Cell<bool>>,
     /// `[gui] remote_crabs`: whether the strip is drawn and its crabs probed.
     /// Read from this machine's config when the window opens and on every
     /// reload, because it is a window preference, never the held crab's.

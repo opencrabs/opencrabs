@@ -134,6 +134,77 @@ required_tools:
     assert!(out.contains("## 2. Files Modified"));
 }
 
+// #3167: the summariser sometimes writes the directive without its
+// `## 0. IMMEDIATE TASK` heading. A heading-anchored strip sails straight past
+// the preamble, so the obligation and the CONTINUE order reached the shared
+// daily file and live replay for every session in the profile.
+
+#[test]
+fn an_unheaded_directive_preamble_does_not_survive_the_strip() {
+    let summary = "\
+**Obligation status: OPEN**
+
+CONTINUE THIS TASK: finish the audit. Do NOT deviate to any other topic.
+
+## 1. Chronological Analysis
+- the user asked for an audit
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(
+        !out.contains("Obligation status"),
+        "the unheaded preamble's obligation survived"
+    );
+    assert!(
+        !out.contains("CONTINUE THIS TASK"),
+        "the unheaded preamble's directive survived"
+    );
+    assert!(
+        out.contains("## 1. Chronological Analysis"),
+        "durable half lost"
+    );
+}
+
+#[test]
+fn an_obligation_line_inside_a_durable_section_goes_too() {
+    // A summariser that loses the heading mid-document drops the obligation
+    // line into durable prose. It is section-0 text wherever it lands.
+    let summary = "\
+## 1. Chronological Analysis
+**Obligation status: OPEN**
+- the work
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(!out.contains("Obligation status"));
+    assert!(out.contains("- the work"), "durable rows lost");
+}
+
+#[test]
+fn a_fenced_heading_in_the_preamble_does_not_end_the_skip() {
+    // The preamble often quotes the document shape, so a durable heading can
+    // appear inside a fence before the real one. Only a heading outside a
+    // fence ends the skip.
+    let summary = "\
+CONTINUE THIS TASK: keep going.
+
+```
+## 1. Chronological Analysis
+```
+
+## 2. Files Modified
+- src/foo.rs
+";
+    let out = strip_session_local_sections(summary);
+
+    assert!(!out.contains("CONTINUE THIS TASK"), "preamble survived");
+    assert!(
+        !out.contains("## 1. Chronological Analysis"),
+        "a quoted heading inside a preamble fence must not flip the strip to keeping"
+    );
+    assert!(out.contains("## 2. Files Modified"), "durable half lost");
+}
+
 #[test]
 fn one_entry_is_capped_and_says_it_was_cut() {
     let huge = "a".repeat(20_000);
@@ -274,4 +345,40 @@ fn a_message_that_is_not_a_summary_is_left_alone() {
     let plain = "## 0. IMMEDIATE TASK\nnot a compaction marker at all";
 
     assert_eq!(reinjectable_summary(plain, then, now), plain);
+}
+
+// #3170: the `/clear` marker shares the compaction prefix, so a reload sends
+// it through the same rewrite. Its body carries no `## ` heading, and the
+// #3167 rule ("nothing before the first durable heading is trusted") therefore
+// deleted every line of it: the quoted exchanges and the session_search
+// pointer both vanished, leaving a marker that said it had carried nothing but
+// instructions.
+#[test]
+fn a_clear_marker_keeps_the_exchanges_it_quoted() {
+    let cleared = format!(
+        "{}\n\n\
+         The user cleared this session's context at this point. Only the last \
+         exchanges quoted below carry over; everything older is out of your \
+         context. The full history is still stored in this session, titled \
+         'GH Issues'. If you need something from before, use the session_search \
+         tool. Continue from the user's next message.\n\n\
+         The last exchanges before the clear, quoted as context only:\n\n\
+         **user**\nfix the gate\n\n**assistant**\nrun the ratchet first",
+        crate::brain::agent::service::clear::CLEAR_MARKER_PREFIX
+    );
+    let (then, now) = then_and_now();
+    let out = reinjectable_summary(&cleared, then, now);
+
+    assert!(
+        out.contains("fix the gate"),
+        "the quoted exchange was dropped on replay: {out}"
+    );
+    assert!(
+        out.contains("session_search"),
+        "the pointer back to the stored history was dropped: {out}"
+    );
+    assert!(
+        !out.contains("dropped when it was replayed"),
+        "the marker was mistaken for a summary of nothing but instructions: {out}"
+    );
 }

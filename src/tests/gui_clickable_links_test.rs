@@ -9,8 +9,8 @@
 //! opening only after a copy found nothing) is read from source.
 
 use crate::ui_core::links::{
-    ClickTarget, target_at_byte_with, target_at_roots, target_at_with, target_for_click,
-    target_for_click_roots, target_for_click_with,
+    ClickTarget, click_names_target, target_at_byte_with, target_at_roots, target_at_with,
+    target_for_click, target_for_click_roots, target_for_click_with, token_at_byte,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -368,9 +368,14 @@ fn open_target_survives_a_split_and_routes_through_the_dashboard() {
         open.contains("transcript link: open {}"),
         "a hit writes a line naming what opened"
     );
+    let miss = body_of(TRANSCRIPT, "fn note_miss(");
     assert!(
-        open.contains("transcript link: nothing to open at"),
+        miss.contains("transcript link: nothing to open at"),
         "a miss writes a line too, so a click that found nothing can be told from one that never arrived"
+    );
+    assert!(
+        open.contains("self.note_miss(&pending)"),
+        "the click handler routes a miss to the function that writes the line"
     );
 }
 
@@ -503,5 +508,147 @@ fn both_surfaces_pass_the_session_directory() {
     assert!(
         terminal.contains("links::target_at_roots"),
         "the terminal must resolve through the roots form too"
+    );
+}
+
+/// A click miss logs the token the resolver tried, not the text trailing the
+/// pointer (#3085).
+///
+/// `PendingClick::word` started at the click offset and ran to the next break,
+/// so a press in the middle of `brain-audit-2026-11-17.md` logged
+/// `26-11-17.md`, a string that never existed as a candidate. The log now asks
+/// the resolver's own span walker.
+#[test]
+fn a_miss_names_the_whole_token_the_pointer_sat_inside() {
+    let text = "see brain-audit-2026-11-17.md for the details";
+    let middle = text.find("2026").expect("fixture year") + 2;
+
+    assert_eq!(
+        token_at_byte(text, middle),
+        Some("brain-audit-2026-11-17.md"),
+        "the logged name must be the token, not the tail from the pointer"
+    );
+    assert_eq!(
+        token_at_byte(text, text.find("brain").expect("fixture name")),
+        Some("brain-audit-2026-11-17.md"),
+        "a press on the first character is the same token"
+    );
+    assert_eq!(
+        token_at_byte(text, text.len()),
+        None,
+        "a press past the end names nothing rather than inventing a token"
+    );
+    assert_eq!(
+        token_at_byte("a row   with  gaps", 7),
+        None,
+        "a press on whitespace names nothing"
+    );
+}
+
+/// The byte offset a shaped layout reports can land inside a multibyte
+/// character; the log must not slice it apart (#2271).
+#[test]
+fn the_miss_log_survives_a_multibyte_offset() {
+    let text = "the report is café-notes.md today";
+    let token = "café-notes.md";
+    let start = text.find(token).expect("fixture token");
+    let inside_e_acute = start + "caf".len() + 1;
+
+    assert_eq!(
+        token_at_byte(text, inside_e_acute),
+        Some(token),
+        "an offset inside a character rounds down to that character's start"
+    );
+}
+
+/// The window's miss arm writes the token and the offset, and never calls the
+/// old tail-only helper (#3085).
+///
+/// The source is flattened before the scan, so every pattern below is written
+/// without whitespace. The earlier form of this test asserted a spaced string
+/// against the flattened text, which no source can ever contain.
+#[test]
+fn the_miss_line_reports_the_token_and_the_offset() {
+    let open = flat(TRANSCRIPT);
+    assert!(
+        open.contains("transcriptlink:nothingtoopenat{token:?}(offset{})"),
+        "the miss line must carry the offset so a log can be matched to a row"
+    );
+    assert!(
+        open.contains("pending.token()"),
+        "the miss line must name what the resolver tried"
+    );
+    assert!(
+        !open.contains("pending.word()") && !open.contains("fnword(&self)"),
+        "the tail-only helper must be gone, not left beside the fix"
+    );
+}
+
+/// A click on ordinary prose named no file and no url, so the log must stay
+/// silent for it. A token the resolver would have probed still reaches the
+/// log, so a real miss is never hidden by the gate (#3085).
+#[test]
+fn prose_clicks_name_nothing_and_stay_out_of_the_log() {
+    for word in ["bisa", "etap", "the", "today", "and"] {
+        assert!(
+            !click_names_target(word, 1),
+            "{word} is prose: the resolver would never probe it, so it is not a miss"
+        );
+    }
+    assert!(
+        !click_names_target("a row   with  gaps", 7),
+        "a press on whitespace names nothing"
+    );
+    assert!(
+        !click_names_target("", 0),
+        "an empty row names nothing and must not panic"
+    );
+    for named in [
+        "src/gui/transcript.rs",
+        "README.md",
+        "café-notes.md",
+        "https://example.com/docs",
+        "/usr/local/bin",
+        "~/srv/rs/opencrabs",
+    ] {
+        assert!(
+            click_names_target(named, 2),
+            "{named} names a target the resolver would probe, so a failed open must log"
+        );
+    }
+}
+
+/// The miss arm asks the gate before it writes anything, and the gate is the
+/// resolver's own candidate test rather than a second copy of the rules
+/// (#3085).
+#[test]
+fn the_miss_arm_asks_the_gate_before_it_writes() {
+    let open = flat(TRANSCRIPT);
+    assert!(
+        open.contains("self.note_miss(&pending)"),
+        "the miss arm must route through note_miss"
+    );
+    assert!(
+        open.contains("links::click_names_target(&pending.text,pending.offset)"),
+        "note_miss must ask the shared candidate test"
+    );
+}
+
+/// One gesture reaches several elements, so the same token at the same offset
+/// twice inside the window is one line, not two (#3085).
+#[test]
+fn one_gesture_writes_one_miss_line() {
+    let open = flat(TRANSCRIPT);
+    assert!(
+        open.contains("Duration::from_millis(500)"),
+        "the repeat window must be short enough to collapse one gesture"
+    );
+    assert!(
+        open.contains("*last_token==token") && open.contains("*last_offset==pending.offset"),
+        "a repeat is the same token at the same offset, not just any second miss"
+    );
+    assert!(
+        open.contains("last_miss"),
+        "the window needs the last miss it wrote"
     );
 }

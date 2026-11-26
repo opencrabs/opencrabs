@@ -1217,7 +1217,7 @@ async fn handle_message(
                 return;
             }
         };
-        let http = reqwest::Client::new();
+        let http = crate::utils::http::shared();
         for file in &files {
             let mime = file.mimetype.as_ref().map(|m| m.0.as_str()).unwrap_or("");
             let fname = file.name.as_deref().unwrap_or("file");

@@ -26,23 +26,30 @@ const JS_SHELL_TEXT_THRESHOLD: usize = 200;
 /// Fetch raw HTML over HTTP with a browser UA and a bounded timeout. Returns the
 /// response body on 2xx, an error string otherwise.
 pub async fn fetch_static(url: &str, timeout_secs: u64) -> Result<String, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(BROWSER_UA)
+    // The redirect policy is a client-level setting, so it gets its own slot
+    // and the root store is parsed once rather than once per scrape. The
+    // deadline and the browser UA ride on the request.
+    static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    let client = crate::utils::http::cached_client(&CLIENT, |b| {
         // Re-validate every redirect hop against the SSRF guard (OC-04).
-        .redirect(crate::brain::tools::ssrf::redirect_policy(10))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        b.redirect(crate::brain::tools::ssrf::redirect_policy(10))
+    });
 
-    let resp = client.get(url).send().await.map_err(|e| {
-        if e.is_timeout() {
-            format!("Request timed out after {timeout_secs}s")
-        } else if e.is_connect() {
-            format!("Connection failed: {e}")
-        } else {
-            format!("Request failed: {e}")
-        }
-    })?;
+    let resp = client
+        .get(url)
+        .timeout(Duration::from_secs(timeout_secs))
+        .header(reqwest::header::USER_AGENT, BROWSER_UA)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("Request timed out after {timeout_secs}s")
+            } else if e.is_connect() {
+                format!("Connection failed: {e}")
+            } else {
+                format!("Request failed: {e}")
+            }
+        })?;
 
     let status = resp.status();
     if !status.is_success() {

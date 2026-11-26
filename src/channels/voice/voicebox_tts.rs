@@ -53,7 +53,7 @@ impl VoiceboxTts {
     /// Create a new Voicebox TTS client.
     pub fn new(base_url: &str, profile_id: &str, engine: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::utils::http::shared().clone(),
             base_url: base_url.to_string(),
             profile_id: profile_id.to_string(),
             engine: engine.to_string(),

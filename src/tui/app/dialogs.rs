@@ -1791,11 +1791,13 @@ pub async fn ensure_whispercrabs() -> Result<PathBuf> {
         return Ok(binary_path);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(WHISPERCRABS_LOOKUP_TIMEOUT)
-        .build()?;
+    // The lookup and the download share this client, and the ceiling is a
+    // client-level setting, so the slot builds it once.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client =
+        crate::utils::http::cached_client(&CLIENT, |b| b.timeout(WHISPERCRABS_LOOKUP_TIMEOUT));
 
-    let release = match fetch_latest_whispercrabs_release(&client).await {
+    let release = match fetch_latest_whispercrabs_release(client).await {
         Ok(release) => release,
         Err(e) => {
             // Offline is not an install failure: a usable cache still works.
@@ -2014,7 +2016,7 @@ async fn test_telegram_connection(
     _token: &str,
     _user_id_str: &str,
     _agent: std::sync::Arc<crate::brain::agent::AgentService>,
-) -> Result<(), String> {
+) -> Result<TelegramTestResult, String> {
     Err("Telegram feature not enabled".to_string())
 }
 

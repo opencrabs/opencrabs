@@ -38,16 +38,15 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
         return Ok(install);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        // The proxy recognises an install by this header (#3138). Without it
-        // the handshake reaches the endpoint as an anonymous HTTP client.
-        .user_agent(crate::brain::provider::identity::user_agent())
-        .build()
-        .map_err(|e| {
-            tracing::error!("Could not build the HTTP client for the built-in provider: {e}");
-            InstallError::Unreachable
-        })?;
+    // Every call below shares this client, and the identity header and the
+    // ceiling are client-level settings, so the slot builds it once.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = crate::utils::http::cached_client(&CLIENT, |b| {
+        b.timeout(TIMEOUT)
+            // The proxy recognises an install by this header (#3138). Without
+            // it the handshake reaches the endpoint as an anonymous client.
+            .user_agent(crate::brain::provider::identity::user_agent())
+    });
     let url = format!("{}{}", base_url.trim_end_matches('/'), INSTALL_PATH);
 
     // One identity per acquire, on disk before the first request. Every path
@@ -57,7 +56,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
         None => mint_and_persist_id()?,
     };
 
-    match post_install(&client, &url, &install_id, false).await {
+    match post_install(client, &url, &install_id, false).await {
         Ok(issued) => return store_install(install_id, issued),
         Err(InstallError::AlreadyIssued) => {}
         Err(other) => return Err(other),
@@ -66,7 +65,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
     // The proxy knows this ID and this machine does not hold its token, so ask
     // for the token to be reissued against the same ID. The matching proxy
     // change is tracked separately; a proxy without it answers 409 again.
-    match post_install(&client, &url, &install_id, true).await {
+    match post_install(client, &url, &install_id, true).await {
         Ok(issued) => return store_install(install_id, issued),
         Err(InstallError::AlreadyIssued) => {}
         Err(other) => return Err(other),
@@ -95,7 +94,7 @@ pub async fn ensure_install_at(base_url: &str) -> Result<StoredInstall, InstallE
         "The built-in provider would not reissue a token for install {install_id}; \
          minting a new install identity {fresh}"
     );
-    let issued = post_install(&client, &url, &fresh, false).await?;
+    let issued = post_install(client, &url, &fresh, false).await?;
     store_install(fresh, issued)
 }
 

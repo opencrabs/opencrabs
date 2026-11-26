@@ -65,8 +65,9 @@ pub(crate) async fn handle_member_event(
             // Notify the owner when a bot joins so they can grab the ID
             if is_bot {
                 let tg_cfg = &cfg.channels.telegram;
-                if let Some(owner_id_str) = tg_cfg.allowed_users.first()
-                    && let Ok(owner_id) = owner_id_str.parse::<i64>()
+                if let Some(owner_id) =
+                    super::menu_scope::owner_user_id(&tg_cfg.allowed_users, &tg_cfg.bot_owner)
+                        .map(|id| id as i64)
                 {
                     // Being added somewhere and watching another bot arrive
                     // are different events needing different advice, so the
@@ -142,8 +143,9 @@ pub(crate) async fn handle_member_event(
                         }
                     };
                     let tg_cfg = &cfg.channels.telegram;
-                    if let Some(owner_id_str) = tg_cfg.allowed_users.first()
-                        && let Ok(owner_id) = owner_id_str.parse::<i64>()
+                    if let Some(owner_id) =
+                        super::menu_scope::owner_user_id(&tg_cfg.allowed_users, &tg_cfg.bot_owner)
+                            .map(|id| id as i64)
                     {
                         let notify = format_unauthorized_add_notification(
                             chat_title,
@@ -259,8 +261,11 @@ pub(crate) async fn handle_member_event(
                             name,
                             chat_id
                         );
-                        if let Some(owner_id_str) = cfg.channels.telegram.allowed_users.first()
-                            && let Ok(owner_id) = owner_id_str.parse::<i64>()
+                        if let Some(owner_id) = super::menu_scope::owner_user_id(
+                            &cfg.channels.telegram.allowed_users,
+                            &cfg.channels.telegram.bot_owner,
+                        )
+                        .map(|id| id as i64)
                         {
                             let join_note =
                                 format!("✅ New member joined workspace: {} ({})", name, uid);

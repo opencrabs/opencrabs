@@ -30,11 +30,14 @@ async fn post_api(
     body: serde_json::Value,
 ) -> Option<serde_json::Value> {
     let url = format!("{}/bot{token}/{method}", api_base(api_url));
-    let client = reqwest::Client::builder()
+    let client = crate::utils::http::shared();
+    let resp = client
+        .post(url)
         .timeout(Duration::from_secs(5))
-        .build()
+        .json(&body)
+        .send()
+        .await
         .ok()?;
-    let resp = client.post(url).json(&body).send().await.ok()?;
     let parsed: serde_json::Value = resp.json().await.ok()?;
     if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         parsed.get("result").cloned()

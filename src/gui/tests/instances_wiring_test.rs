@@ -508,3 +508,224 @@ fn the_probe_loop_follows_a_crab_that_moved() {
     );
     assert!(!model.repoint(&known("c:3", "gamma", "http://c:7878")));
 }
+
+// ── Upstream rail tests (origin/main, 9a4c94994 and after) that pin code
+// this branch kept or ported. The rest of that file tested the remote panel,
+// the mark editor and the share modal on the window, which the backend swap
+// replaces; the merge report lists them by name.
+
+#[test]
+fn a_pair_link_survives_the_round_trip() {
+    // The link is the wire format between two machines: it is built here and
+    // read there, so the only thing worth asserting is that what goes in comes
+    // back out. The address carries a scheme, a port and a host, all of which
+    // need escaping, and the label is the owner's own words.
+    use crate::instance_strip::{parse_pair_link, percent_encode};
+    let url = "http://192.168.1.114:18790";
+    let code = "K7F2MQ9P";
+    let label = "portátil do norte";
+    let link = format!(
+        "opencrabs://pair?url={}&code={}&label={}",
+        percent_encode(url),
+        percent_encode(code),
+        percent_encode(label),
+    );
+    let (got_url, got_code, got_label) = parse_pair_link(&link).expect("the link parses");
+    assert_eq!(got_url, url);
+    assert_eq!(got_code, code);
+    assert_eq!(got_label.as_deref(), Some(label));
+}
+
+#[test]
+fn a_link_without_a_code_is_not_a_link() {
+    // Half a link is worse than none: it would fill the form with an address
+    // and leave the code empty, and the submit would fail with a message about
+    // the code rather than about what was pasted.
+    use crate::instance_strip::parse_pair_link;
+    assert!(parse_pair_link("opencrabs://pair?url=http%3A%2F%2Fa").is_none());
+    assert!(parse_pair_link("https://example.com").is_none());
+    assert!(parse_pair_link("").is_none());
+}
+
+#[test]
+fn the_workspace_mark_is_the_way_home() {
+    // The owner's report: clicking the mark did nothing, and the only way back
+    // to his own crab was toggling a badge off (#3133). The wiring is a gpui
+    // listener, and what can regress is the listener going away while the
+    // element still paints.
+    let source = include_str!("../instance_strip.rs");
+    let body = fn_body(source, "workspace_mark");
+    assert!(
+        body.contains(".on_click(click)") && body.contains("this.home(cx)"),
+        "the mark must answer a left click: it is the only way home from a \
+         remote crab, and a right-click menu cannot be discovered"
+    );
+}
+
+#[test]
+fn clearing_the_remote_keeps_the_pairing() {
+    // Two different acts share a neighbourhood here and must never share a
+    // control: going home closes the view, forgetting drops the crab (and costs
+    // a fresh code to get back). The mark is the first one only.
+    let source = include_str!("../instance_strip.rs");
+    let body = fn_body(source, "home");
+    assert!(
+        body.contains("instance_clear"),
+        "going home must go through instance_clear, which keeps the pairing: \
+         forgetting lives in the badge's right-click card"
+    );
+    assert!(
+        !body.contains("forget"),
+        "the way home must never forget the crab: a code is a fresh round trip \
+         to the other machine"
+    );
+}
+
+#[test]
+fn the_mark_and_the_badges_are_rounded_squares() {
+    // A circle in a column of squares read as a different widget from the rail
+    // it sits in. The badge's own box is the square; the health dot and the
+    // selection bar inside it stay round, because they are a dot and a bar.
+    let source = include_str!("../instance_strip.rs");
+    let mark = fn_body(source, "workspace_mark");
+    assert!(
+        mark.contains(".rounded_md()") && !mark.contains("rounded_full"),
+        "the mark is a rounded square, the shape of the session marks and the \
+         topic tabs"
+    );
+    let badge = fn_body(source, "badge");
+    let square_at = badge
+        .find(".rounded_md()")
+        .expect("the badge's box is a rounded square");
+    let first_round = badge.find("rounded_full()").unwrap_or(usize::MAX);
+    assert!(
+        square_at < first_round,
+        "the badge's box must take its radius before the dot inside it does, \
+         or the box itself is being drawn as a circle"
+    );
+}
+
+#[test]
+fn each_badge_wears_the_hue_of_its_host_id() {
+    // Upstream 6472af7b5: the column is recognisable before any label is read.
+    // The slot is pinned in `instances_test`; this pins that the paint reads it.
+    let source = include_str!("../instance_strip.rs");
+    let badge = fn_body(source, "badge");
+    assert!(
+        badge.contains("tint_hue(badge_tint(&badge.host_id), &p)"),
+        "the badge must take its wash from its own host id"
+    );
+}
+
+#[test]
+fn a_badge_draws_the_mark_and_a_card_names_the_crab() {
+    // Upstream 277c5bbca/124522964: the badge draws one initial or a picture,
+    // while the right-click card still names the crab in full.
+    let source = include_str!("../instance_strip.rs");
+    assert!(source.contains("tab_icon(&badge.glyph, BADGE_REM * 0.62)"));
+    assert!(source.contains("glyph: SharedString::from(entry.glyph())"));
+    assert!(source.contains("label: badge.label.clone()"));
+}
+
+#[test]
+fn the_step_chord_walks_the_crabs_only_behind_the_flag() {
+    // Upstream's Ctrl+Alt+Up/Down, ported onto the backend swap. The walk is
+    // pinned on the model in `instances_test`; this pins the gate and the pick.
+    let keys = include_str!("../dashboard_keys.rs");
+    let at = keys
+        .find("self.instance_step(delta, cx)")
+        .expect("the chord reaches instance_step");
+    let gate = keys.get(at.saturating_sub(600)..at).unwrap_or("");
+    assert!(
+        gate.contains("self.remote_crabs"),
+        "with [gui] remote_crabs off the chord must not be taken"
+    );
+    let dash = include_str!("../dashboard_instances.rs");
+    let step = fn_body(dash, "instance_step");
+    assert!(step.contains("self.instance_picked(&host_id, cx)"));
+}
+
+#[test]
+fn a_working_config_gets_no_snippet() {
+    // A card on a machine that is already reachable must not carry a config
+    // block: showing one would suggest something is broken when nothing is, and
+    // the owner would go edit a file that is already right.
+    use crate::instance_strip::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: true,
+        bind: "0.0.0.0".to_string(),
+        port: 18790,
+        advertise_url: Some("https://crab.example".to_string()),
+        api_key: Some("uma-chave-longa".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(share_config_snippet(&a2a), None);
+}
+
+#[test]
+fn a_loopback_crab_gets_the_block_that_opens_it() {
+    // The common case on this machine: enabled, bound to loopback, no key. The
+    // snippet has to carry all three fixes, because fixing one and not the
+    // others leaves the card warning about the next one and the owner looping.
+    use crate::instance_strip::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: false,
+        bind: "127.0.0.1".to_string(),
+        port: 18790,
+        advertise_url: None,
+        api_key: None,
+        ..Default::default()
+    };
+    let snippet = share_config_snippet(&a2a).expect("a loopback crab needs the block");
+    assert!(
+        snippet.starts_with("[a2a]"),
+        "section header first: {snippet}"
+    );
+    assert!(
+        snippet.contains("enabled = true"),
+        "turn the gateway on: {snippet}"
+    );
+    assert!(
+        snippet.contains("bind = \"0.0.0.0\""),
+        "open the bind: {snippet}"
+    );
+    assert!(
+        snippet.contains("advertise_url = \"http://"),
+        "name the address: {snippet}"
+    );
+    assert!(
+        snippet.contains(":18790"),
+        "the port comes from the config: {snippet}"
+    );
+    assert!(
+        snippet.contains("api_key ="),
+        "no key means no auth: {snippet}"
+    );
+}
+
+#[test]
+fn the_snippet_leaves_what_is_already_right_alone() {
+    // A machine that is open to the network but has no key needs one line, not
+    // a rewritten block. Rewriting keys the owner already set is how a snippet
+    // becomes a footgun: pasting it would silently reset their address.
+    use crate::instance_strip::share_config_snippet;
+    let a2a = A2aConfig {
+        enabled: true,
+        bind: "0.0.0.0".to_string(),
+        port: 9000,
+        advertise_url: Some("https://crab.example".to_string()),
+        api_key: None,
+        ..Default::default()
+    };
+    let snippet = share_config_snippet(&a2a).expect("no key is still a problem");
+    assert!(!snippet.contains("enabled = true"), "already on: {snippet}");
+    assert!(!snippet.contains("bind ="), "already open: {snippet}");
+    assert!(
+        !snippet.contains("advertise_url"),
+        "already named: {snippet}"
+    );
+    assert!(
+        snippet.contains("api_key ="),
+        "the one missing key: {snippet}"
+    );
+}

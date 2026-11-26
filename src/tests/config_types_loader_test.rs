@@ -442,7 +442,9 @@ fn every_compaction_surface_reads_the_flag() {
             "{name} has exactly two gated surfaces"
         );
         assert_eq!(src.matches(SET).count(), 1, "{name} sets the pin once");
-        assert_eq!(src.matches(LIFT).count(), 1, "{name} lifts the pin once");
+        // Two lifts (#3173): the success lift AND the self-heal-alert lift,
+        // both unconditional so a failed compaction can never strand a pin.
+        assert_eq!(src.matches(LIFT).count(), 2, "{name} lifts the pin twice");
 
         let set = src.find(SET).expect("pin set");
         let set_block = src[..set].rfind(LOCK).expect("enclosing lock");

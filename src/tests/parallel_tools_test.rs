@@ -205,13 +205,13 @@ async fn same_path_writers_stay_sequential() {
 async fn parallel_batch_preserves_order_and_overlaps() {
     let service = service_with_tools().await;
     let ctx = ToolExecutionContext::new(Uuid::new_v4());
-    // Slowest FIRST: with sequential execution this takes ~150+100+50=300ms;
+    // Slowest FIRST: with sequential execution this takes ~300+200+100=600ms;
     // ordered results despite the first finishing last proves buffered
     // in-order yielding, and the wall clock proves real overlap.
     let uses = batch(&[
-        ("sleep_tool", json!({"ms": 150, "tag": "a"})),
-        ("sleep_tool", json!({"ms": 100, "tag": "b"})),
-        ("sleep_tool", json!({"ms": 50, "tag": "c"})),
+        ("sleep_tool", json!({"ms": 300, "tag": "a"})),
+        ("sleep_tool", json!({"ms": 200, "tag": "b"})),
+        ("sleep_tool", json!({"ms": 100, "tag": "c"})),
     ]);
     let started = std::time::Instant::now();
     let out = service
@@ -234,9 +234,16 @@ async fn parallel_batch_preserves_order_and_overlaps() {
         })
         .collect();
     assert_eq!(texts, vec!["done:a", "done:b", "done:c"]);
-    // Overlap: well under the 300ms sequential total.
+    // Overlap: sequential execution costs 600ms. Three concurrent sleeps cost
+    // the longest one plus scheduling slack, so the ceiling sits well above
+    // the 300ms floor instead of 40ms under it, which flaked on a loaded box.
+    // The floor also proves the longest tool really ran (#2287).
     assert!(
-        elapsed < std::time::Duration::from_millis(260),
+        elapsed >= std::time::Duration::from_millis(300),
+        "the longest tool returned early, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(480),
         "expected concurrent execution, took {elapsed:?}"
     );
 }

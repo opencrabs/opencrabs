@@ -263,7 +263,7 @@ https://github.com/user-attachments/assets/7f45c5f8-acdf-48d5-b6a4-0e4811a9ee23
 
 ## 🖥️ Split Panes
 
-![Split Panes](src/assets/split-panes.png)
+![Split Panes](https://raw.githubusercontent.com/opencrabs/opencrabs/main/src/assets/split-panes.png)
 
 ---
 
@@ -642,7 +642,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | **Abort Processing** | Escape×2 within 3 seconds to cancel any in-progress request |
 | **Clipboard Image Paste** | Copy an image from a browser, screenshot tool, or any app and paste it directly into the input. Raw image bytes are read from the OS clipboard (macOS: osascript, Linux: wl-paste/xclip), written to a temp file, and attached through the existing image pipeline. No need to save to disk first. `Ctrl+V` in the chat input reads the clipboard directly and works in every terminal, including a screenshot copied to the clipboard (image data, no text). `Cmd+V` works where the terminal pastes or passes the key through; iTerm2 and Terminal.app swallow `Cmd+V` for an image-only clipboard, so use `Ctrl+V` there. While the chat input is focused on macOS, an unpasted screenshot in the clipboard also shows a vanishing `Image in clipboard - Ctrl+V to paste` hint inside the input area, like the other notices, until you paste or the clipboard changes |
 | **File Drag & Drop** | Drag a file onto the TUI and the terminal inserts its path; OpenCrabs unescapes it and takes it from there. Images attach as vision content, text files (`.txt`, `.md`, `.json`, source code) are read from disk and inlined into the message, and PDFs surface a hint pointing the agent at `pdf_to_images` + `analyze_image`. Over SSH the dropped path names a file on the wrong machine; see [Dropping files into a TUI running on a VPS](#dropping-files-into-a-tui-running-on-a-vps) |
-| **Bang Operator (`!cmd`)** | Run any shell command directly from the input — no LLM round-trip. Output is shown as a system message in the working directory context. Full-screen editors (`!vi`, `!vim`, `!nano`, `!emacs`) are the exception on Unix terminals: the TUI hands the real terminal to the editor, so you edit in place and return to the chat when it exits (a mid-edit Ctrl+Z ends the editor instead of hanging the TUI); on Windows, editors are pipe-captured like any other command |
+| **Bang Operator (`!cmd`)** | Run any shell command directly from the input — no LLM round-trip. Output is shown as a system message in the working directory context, in the conversation that ran the command (a split pane keeps its own output, and a command that answers after you switch conversations is waiting in the one that asked). Full-screen editors (`!vi`, `!vim`, `!nano`, `!emacs`) are the exception on Unix terminals: the TUI hands the real terminal to the editor, so you edit in place and return to the chat when it exits (a mid-edit Ctrl+Z ends the editor instead of hanging the TUI); on Windows, editors are pipe-captured like any other command. The GUI has its own built-in editor instead: `!vi notes.md` (also `!vim`, `!nvim`, `!nano`, `!emacs`, `!helix`, `!micro`) opens the file in an editable dialog inside the window, with `+N` jumping to a line, `-R` opening read-only, `cmd-s` saving, and Esc closing (a second Esc discards unsaved text). Bare `!vi` opens an empty buffer and asks for a name on first save; a file that is not valid UTF-8 opens read-only so nothing corrupts it; a relative path resolves against the conversation's own working directory, and a split pane opens the editor in the pane that ran the command. No terminal app is involved
 | **Auto-Update** | Checks GitHub for new releases on startup and once every 24h in the background. When a new version is found it silently installs and hot-restarts. Disable via `[agent] auto_update = false` in `config.toml` to be prompted instead |
 
 ### Agent Capabilities
@@ -2309,6 +2309,17 @@ curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/la
 # macOS (Intel): the same, for x86_64
 curl -sL "$(curl -s https://api.github.com/repos/opencrabs/opencrabs/releases/latest | sed -n 's/.*"\(https:\/\/[^"]*macos-amd64\.tar\.gz\)".*/\1/p')" | tar xz && sudo cp -R OpenCrabs.app /Applications/ && sudo cp -R "OpenCrabs Desktop.app" /Applications/ && sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/OpenCrabs.app/Contents/MacOS/opencrabs /usr/local/bin/opencrabs && command -v opencrabs
 ```
+
+> **macOS first launch: the bundles are unsigned.** A copy downloaded with a browser carries the quarantine flag, so the first launch fails with "'OpenCrabs Desktop' is damaged and can't be opened. You should move it to the Bin." That dialog offers only Cancel and Move to Bin, with no Open Anyway button. Two ways past it:
+>
+> - Install with the one-line installer instead: `curl -fsSL https://opencrabs.com/install.sh | bash -s -- --client desktop`. Files fetched by curl carry no quarantine flag, so the app opens straight away.
+> - Keep the browser download, move the app into `/Applications`, then clear the flag once:
+
+```bash
+xattr -cr "/Applications/OpenCrabs Desktop.app"
+```
+
+Double-click the app after that and it opens.
 
 ```powershell
 # Windows (PowerShell): installs to %LOCALAPPDATA%\OpenCrabs\bin and adds it to your user PATH

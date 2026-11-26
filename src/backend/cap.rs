@@ -15,8 +15,10 @@ use super::{BackendError, Scope};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cap {
-    /// Open a terminal in the session's folder (`bang.rs::open_in_terminal`).
-    /// Only local: a remote crab's folder is not on this machine.
+    /// Edit a file in the session's folder: the bang operator's built-in
+    /// editor (`editor_dialog.rs`, #3163), which reads and writes this
+    /// machine's disk. Only local: a remote crab's folder is not on this
+    /// machine. The name is the one the wire already carries.
     OpenTerminal,
     /// Open a file in an external app. Remote does it on the cached copy.
     OpenExternal,

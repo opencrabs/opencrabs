@@ -25,7 +25,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -34,6 +34,58 @@ use super::theme::{self, Role};
 
 /// One row, always reserved.
 pub(crate) const HINT_ROW: u16 = 1;
+
+/// The most rows the hint may take.
+///
+/// The hints are one long sentence each, so two or three rows cover every
+/// column a real terminal has. The cap is what stops a pathological width (a
+/// 20 column terminal holding a 116 character hint) from eating the
+/// transcript: past the cap the tail is cut, which is the one case a wrap
+/// cannot save (#3161).
+const MAX_HINT_ROWS: u16 = 5;
+
+/// The gap between the sentence and the chord, so the two never touch.
+const GAP: u16 = 3;
+
+/// The chord that hides the line, or nothing when the line may not be hidden.
+///
+/// Only advice carries the chord: a warning cannot be hidden, so printing a
+/// key that would do nothing is worse than printing nothing.
+fn dismiss_chord(hint: &Hint) -> &'static str {
+    if dismissible(hint.id) {
+        "alt+h hides"
+    } else {
+        ""
+    }
+}
+
+/// The width the sentence has, once the chord and its gap are taken out.
+///
+/// The chord lives in its own cell at the right edge, so the text stops
+/// before it instead of running under it.
+fn text_width_for(hint: &Hint, width: u16) -> u16 {
+    let chord_width = UnicodeWidthStr::width(dismiss_chord(hint)) as u16;
+    if chord_width == 0 {
+        width.max(1)
+    } else {
+        width.saturating_sub(chord_width + GAP).max(1)
+    }
+}
+
+/// The rows the hint takes at this width, wrapped and counted the same way it
+/// is drawn.
+///
+/// The row used to be exactly one row tall and the sentence was cut at the
+/// edge, so a narrow terminal lost the tail of every hint, and the tail is
+/// where the second command and the joke live (#3161). The count comes from
+/// the widget that does the wrapping, so the rows reserved and the rows
+/// painted can never disagree.
+pub(crate) fn rows_for(hint: &Hint, width: u16) -> u16 {
+    let rows = Paragraph::new(Line::from(Span::raw(hint.text.clone())))
+        .wrap(Wrap { trim: false })
+        .line_count(text_width_for(hint, width));
+    (rows.min(usize::from(MAX_HINT_ROWS)) as u16).max(1)
+}
 
 /// The live facts the row is decided from.
 ///
@@ -112,33 +164,28 @@ pub(crate) fn current(app: &App) -> Option<Hint> {
 /// then falls off the right edge and the reader is left with a key nobody told
 /// them about. In its own cell it survives any width, and the tip clips under
 /// it the way it always clipped at the edge of the row.
-pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
-    let Some(hint) = current(app) else {
+///
+/// The sentence itself is never cut (#3161). It is painted with wrapping on,
+/// over as many rows as it needs, and the rows it needs were reserved before
+/// the layout was solved, so a narrow terminal shows the whole sentence
+/// instead of its first line.
+pub(crate) fn render_hint(f: &mut Frame, hint: Option<&Hint>, area: Rect) {
+    let Some(hint) = hint else {
         return;
     };
-    // Only advice carries the chord: a warning cannot be hidden, so printing a
-    // key that would do nothing is worse than printing nothing.
-    let chord = if dismissible(hint.id) {
-        "alt+h hides"
-    } else {
-        ""
-    };
+    let chord = dismiss_chord(hint);
     let background = Style::default().bg(theme::background().unwrap_or_default());
-    // The gap between the sentence and the chord, so the two never touch.
-    const GAP: u16 = 3;
     let chord_width = UnicodeWidthStr::width(chord) as u16;
-    let text_width = if chord_width == 0 {
-        area.width
-    } else {
-        area.width.saturating_sub(chord_width + GAP)
-    };
+    let text_width = text_width_for(hint, area.width);
     // The whole line is the accent, not the muted chrome the status bar uses.
     // The row exists to be noticed by someone who does not yet know the keys,
     // and the quiet ink that makes the footer recede is exactly the wrong
     // colour for that (#3102). The accent comes from the theme, so it follows
     // whichever palette the reader picked.
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint.text, accent()))).style(background),
+        Paragraph::new(Line::from(Span::styled(hint.text.clone(), accent())))
+            .wrap(Wrap { trim: false })
+            .style(background),
         Rect {
             width: text_width,
             ..area
@@ -154,6 +201,9 @@ pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
             Rect {
                 x: area.x + area.width.saturating_sub(chord_width),
                 width: chord_width,
+                // The chord belongs to the first row, the one the reader reads
+                // first, and the sentence breaks under it.
+                height: 1,
                 ..area
             },
         );
@@ -163,4 +213,100 @@ pub(crate) fn render_hint(f: &mut Frame, app: &mut App, area: Rect) {
 /// The theme's accent: present, and impossible to mistake for the transcript.
 fn accent() -> Style {
     Style::default().fg(theme::role(Role::Accent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// The longest line the shared ladder prints, taken from the fresh-start
+    /// rung (`src/ui_core/hints.rs`).
+    const LONG: &str = "/new when the job changes · /clear when the model starts making things up · one drops the baggage, keeps the history";
+
+    fn hint_with(text: &str) -> Hint {
+        Hint {
+            id: "fresh-start",
+            text: text.to_string(),
+            command: "/new",
+        }
+    }
+
+    /// Paint the hint into a terminal of the given size and give back the
+    /// rows, each one joined by a space so a sentence that broke across a row
+    /// still reads as one sentence.
+    fn painted(hint: &Hint, width: u16, rows: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, rows)).unwrap();
+        terminal
+            .draw(|f| render_hint(f, Some(hint), Rect::new(0, 0, width, rows)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..rows)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A long hint in a narrow terminal used to be cut at the edge of the row:
+    /// the tail was simply gone, and the tail is where the promise lives
+    /// (#3161). It breaks onto a second row now, and the whole sentence is on
+    /// screen.
+    #[test]
+    fn a_narrow_hint_keeps_its_tail() {
+        let hint = hint_with(LONG);
+        let width = 60;
+        let rows = rows_for(&hint, width);
+        assert!(
+            rows >= 2,
+            "a {} character hint does not fit in one {} column row",
+            LONG.chars().count(),
+            width
+        );
+        let rows_painted = painted(&hint, width, rows);
+        let joined = rows_painted.join(" ");
+        assert!(
+            joined.contains("keeps the history"),
+            "the tail of the hint is missing: {joined:?}"
+        );
+    }
+
+    /// The chord that hides the line stays in its own cell at the right edge
+    /// of the FIRST row, and the sentence breaks under it (#3122, #3161).
+    #[test]
+    fn the_chord_stays_on_the_first_row() {
+        let hint = hint_with(LONG);
+        let width = 60;
+        let rows = rows_for(&hint, width);
+        let painted = painted(&hint, width, rows);
+        assert!(
+            painted[0].contains("alt+h hides"),
+            "the chord is not on the first row: {painted:?}"
+        );
+        assert!(
+            painted[1..].iter().all(|row| !row.contains("alt+h")),
+            "the chord was painted twice: {painted:?}"
+        );
+    }
+
+    /// A hint that fits the row it has takes exactly one row, so the wide
+    /// terminal keeps the layout it always had.
+    #[test]
+    fn a_wide_hint_takes_one_row() {
+        let hint = hint_with(LONG);
+        assert_eq!(rows_for(&hint, 200), 1);
+    }
+
+    /// A hint that cannot fit in any sane number of rows is capped, so it can
+    /// never eat the transcript.
+    #[test]
+    fn a_pathological_width_is_capped() {
+        let hint = hint_with(LONG);
+        assert_eq!(rows_for(&hint, 8), MAX_HINT_ROWS);
+    }
 }

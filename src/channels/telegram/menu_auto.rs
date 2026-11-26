@@ -90,29 +90,40 @@ pub(crate) async fn maybe_auto_register(
     if telegram_state.solo_evaluated(chat_id).await.is_some() {
         return;
     }
-    let Some(owner_id) = tg.allowed_users.first().and_then(|s| s.parse::<i64>().ok()) else {
+    let Some(owner_id) =
+        super::menu_scope::owner_user_id(&tg.allowed_users, &tg.bot_owner).map(|id| id as i64)
+    else {
         return;
     };
 
     let members = collect_members(bot, chat_id, tg.allowed_users.as_slice()).await;
     let eval = evaluate_solo_group(&members, owner_id);
+    let commands = super::agent::collect_command_catalog();
 
     match eval {
         SoloEval::Eligible => {
             telegram_state.set_solo_evaluated(chat_id, true).await;
-            let commands = super::agent::collect_command_catalog();
             publish_owner_menu(bot, chat_id, owner_id, &commands).await;
         }
+        // Other humans present. The catalog is published under a `ChatMember`
+        // scope keyed to the owner's user_id, so it is invisible to every other
+        // account in the chat: gating on "solo" was stricter than the security
+        // model needs, and it left the owner staring at the bare `/start` floor
+        // in any group they happen to share with a colleague. Cached as
+        // registered so `menu_refresh` re-publishes it on skills changes.
         SoloEval::OtherHumans(humans) => {
             tracing::debug!(
-                "Telegram: group {chat_id} not solo-owner (other humans present: {humans:?}) — \
-                 keeping default menu floor"
+                "Telegram: group {chat_id} has other humans ({humans:?})  -  publishing the \
+                 owner catalog under a per-user scope they cannot see"
             );
+            telegram_state.set_solo_evaluated(chat_id, true).await;
+            publish_owner_menu(bot, chat_id, owner_id, &commands).await;
         }
         SoloEval::OwnerAbsent => {
             tracing::debug!(
                 "Telegram: group {chat_id} has no owner among members — nothing to register"
             );
+            telegram_state.set_solo_evaluated(chat_id, false).await;
         }
     }
 }
@@ -201,7 +212,9 @@ pub(crate) async fn handle_membership_change(
         return;
     }
 
-    let Some(owner_id) = tg.allowed_users.first().and_then(|s| s.parse::<i64>().ok()) else {
+    let Some(owner_id) =
+        super::menu_scope::owner_user_id(&tg.allowed_users, &tg.bot_owner).map(|id| id as i64)
+    else {
         return;
     };
 

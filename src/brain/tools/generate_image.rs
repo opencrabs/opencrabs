@@ -388,16 +388,14 @@ impl GenerateImageTool {
             }
         });
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        let client = crate::utils::http::shared();
 
         let response = client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", api_key)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
             .send()
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
@@ -476,18 +474,19 @@ impl GenerateImageTool {
             "response_format": "b64_json",
         });
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            // Same identity the chat path sends (#3138): image generation is
-            // another route into the built-in endpoint, and it builds its own
-            // headers, so it never inherited the chat client's.
-            .user_agent(crate::brain::provider::identity::user_agent())
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        let client = crate::utils::http::shared();
 
         let request = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key));
+            .header("Authorization", format!("Bearer {}", api_key))
+            // Same identity the chat path sends (#3138): image generation is
+            // another route into the built-in endpoint, and it builds its own
+            // headers, so it never inherited the chat client's.
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::brain::provider::identity::user_agent(),
+            )
+            .timeout(std::time::Duration::from_secs(120));
         let request = if images.is_empty() {
             request
                 .header("Content-Type", "application/json")
@@ -614,14 +613,16 @@ async fn fetch_image_bytes(src: &str) -> super::error::Result<(Vec<u8>, String, 
     use super::analyze_image::detect_mime_type;
 
     if src.starts_with("http://") || src.starts_with("https://") {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        let client = crate::utils::http::shared();
 
-        let resp = client.get(src).send().await.map_err(|e| {
-            super::error::ToolError::Execution(format!("Failed to fetch image URL: {}", e))
-        })?;
+        let resp = client
+            .get(src)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| {
+                super::error::ToolError::Execution(format!("Failed to fetch image URL: {}", e))
+            })?;
 
         if !resp.status().is_success() {
             return Err(super::error::ToolError::Execution(format!(

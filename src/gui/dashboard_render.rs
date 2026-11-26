@@ -788,6 +788,13 @@ impl Render for Dashboard {
                             // label here bought nothing. The Usage and Files
                             // footers keep their labels: neither has a Seeker
                             // pill or a rail of its own to click.
+                            //
+                            // The pill rests on the row's own ink, not the
+                            // brighter muted token (#3146). It shares this row
+                            // with live state, and a chord label is advice: at
+                            // `text_muted` it was the loudest thing in a footer
+                            // of faint chrome, so the eye landed on the chord
+                            // before the session it was describing.
                             .child(
                                 div()
                                     .id("seeker-hint")
@@ -799,7 +806,7 @@ impl Render for Dashboard {
                                     .rounded_sm()
                                     .px(transcript::hover_pill_inset())
                                     .text_xs()
-                                    .text_color(rgb(palette::current().text_muted))
+                                    .text_color(rgb(palette::current().text_faint))
                                     .cursor_pointer()
                                     .hover(|d| d.bg(rgb(palette::current().panel_hi)))
                                     .on_click(cx.listener(
@@ -2519,6 +2526,16 @@ impl Render for Dashboard {
                     if let Some(bar) = topic_top {
                         session = session.child(central(bar, centred_chat, chat_measure_px));
                     }
+                    // "Is it still going?" at the top of the conversation, where
+                    // a long scroll cannot hide it. The chat screen gave up its
+                    // title row in #2596, and the plan strip sits under the
+                    // transcript, so neither answers the question while the work
+                    // is running. An idle session draws nothing at all, so the
+                    // card keeps its shape until there is something to say.
+                    if !split_draws_its_own && let Some(line) = self.work_line() {
+                        session =
+                            session.child(central(work_bar(line), centred_chat, chat_measure_px));
+                    }
                     session = session.child(middle);
                     // The hint, the offers and the live plan card are
                     // rows of the conversation now (#3139): they are built
@@ -2923,6 +2940,9 @@ impl Render for Dashboard {
         // and the whole centring slack opened between the two. The strip and
         // the column are centred as one block instead, so the topics sit beside
         // the conversation they belong to and the slack falls outside both.
+        // A picked crab does not replace this column: the window's backend is
+        // that crab's, so the conversation drawn here is already its own.
+        let right = right.into_any_element();
         match topic_side {
             Some((edge, strip)) => {
                 // The column pads itself with `px_4` on each side, so its own
@@ -3682,6 +3702,42 @@ impl Render for Dashboard {
         // The theme modal is attached last, so it paints over every other
         // surface: while it is open it is what the user is looking at, and the
         // scrim is what the pointer meets (#2619).
+        // The built-in editor, over the panes and the other overlays but
+        // under the settings and theme modals: it is where the user went to
+        // write, so a keystroke or a click meant for the buffer must not
+        // reach the panes behind it (#3163). Only the focused conversation's
+        // dialog draws; the other conversations' editors wait their turn,
+        // exactly like every other session state in this window.
+        if let Some(id) = self.editor_focus
+            && let Some(dialog) = self.editor_dialogs.get_mut(&id)
+        {
+            // The window's answers to the editor's gestures travel as one
+            // value, so the draw call stays three arguments deep instead of
+            // eight (#3163).
+            let handlers = editor_dialog::EditorHandlers {
+                dismiss: Box::new(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.close_editor(cx);
+                })),
+                toggle_mode: Box::new(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.toggle_editor_mode(cx);
+                })),
+                mouse_down: Box::new(cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
+                    this.editor_mouse_down(ev, cx);
+                })),
+                mouse_move: Box::new(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
+                    this.editor_mouse_move(ev, cx);
+                })),
+                mouse_up: Box::new(cx.listener(|this, ev: &MouseUpEvent, _window, cx| {
+                    this.editor_mouse_up(ev, cx);
+                })),
+                wheel: Box::new(cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
+                    this.editor_wheel(ev, cx);
+                })),
+            };
+            // The window is only read here: the card is measured from the
+            // viewport size it carries (#3163).
+            root = root.child(editor_dialog::overlay(dialog, window, handlers));
+        }
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
@@ -3719,6 +3775,41 @@ impl Render for Dashboard {
         self.schedule_middle_scroll_frame(window, cx);
         root
     }
+}
+
+impl Dashboard {
+    /// One line saying where the open session's work stands, or `None` when it
+    /// has nothing to report.
+    ///
+    /// It reads the same `PlanStripState` the strip above the composer reads,
+    /// refreshed once per frame at the top of the render, so the bar and the
+    /// strip can never disagree about the same plan. No second lookup, no
+    /// second clock.
+    fn work_line(&self) -> Option<SharedString> {
+        self.plan.progress_label().map(SharedString::from)
+    }
+}
+
+/// The work bar: one slim line at the top of the chat column.
+///
+/// `flex_none` so it never takes room from the conversation, and the same
+/// panel colour the rail's chips use, so "work in flight" reads the same
+/// wherever it is drawn. It is only ever built when there is a line to show.
+fn work_bar(line: SharedString) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .w_full()
+        .px_3()
+        .py_1()
+        .rounded(px(8.0))
+        .bg(rgb(palette::current().panel))
+        .text_xs()
+        .text_color(rgb(palette::current().teal))
+        .child(line)
+        .into_any_element()
 }
 
 /// The facts the hint row is decided from, read off state the app already
@@ -3903,7 +3994,11 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
         .id("hint-line")
         .flex()
         .flex_row()
-        .items_center()
+        // The sentence breaks onto a second or third row in a narrow pane
+        // (#3162), so the row's children sit at the top of it: centred, the
+        // label and the dismiss control would drift down the middle of a
+        // three-row sentence.
+        .items_start()
         .justify_between()
         .gap_2()
         .w_full()
@@ -3925,8 +4020,16 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_row()
-                .items_center()
+                // The sentence may take more than one row now (#3162), so the
+                // label stays on the first row of it instead of floating in
+                // the middle of the block.
+                .items_start()
                 .gap_2()
+                // The row takes the width the line has left, so the sentence
+                // has a width to break against. Without a bounded width the
+                // text would take its natural size and the pane would scroll
+                // instead of wrapping.
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .child(
@@ -3942,8 +4045,15 @@ fn hint_line(hint: &Hint, cx: &mut Context<Dashboard>) -> impl IntoElement {
                 )
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
-                        .truncate()
+                        // The sentence is never cut (#3162): it breaks onto a
+                        // second or third row in a narrow pane, and the whole
+                        // line stays readable. The old truncate put an
+                        // ellipsis where the tail of the hint used to be, and
+                        // the tail is where the second command and the joke
+                        // live.
+                        .whitespace_normal()
                         .text_xs()
                         // The theme's accent at full strength shouted for a
                         // line that is advice, not a warning (#3124). It is

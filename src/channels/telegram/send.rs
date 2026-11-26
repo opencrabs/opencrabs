@@ -777,7 +777,7 @@ pub(crate) async fn send_buttons_raw(
         );
     }
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut attempt = 0u32;
     loop {
         let resp = client

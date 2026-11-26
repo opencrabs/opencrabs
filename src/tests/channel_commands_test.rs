@@ -183,6 +183,9 @@ fn variant_name(cmd: &ChannelCommand) -> &'static str {
         ChannelCommand::ShowPlan(_) => "ShowPlan",
         ChannelCommand::ExecutePlan => "ExecutePlan",
         ChannelCommand::DiscardPlan => "DiscardPlan",
+        ChannelCommand::Approve(_) => "Approve",
+        ChannelCommand::Skills(_) => "Skills",
+        ChannelCommand::TuiOnly(_) => "TuiOnly",
     }
 }
 

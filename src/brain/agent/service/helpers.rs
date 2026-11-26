@@ -27,6 +27,19 @@ pub(crate) fn is_mimo_model(model: &str) -> bool {
     model.to_ascii_lowercase().contains("mimo")
 }
 
+/// Provider name to attribute a failure to.
+///
+/// A fallback chain's `name()` is its configured primary, kept stable for
+/// persistence and config display. Recording failures under it put a
+/// fallback's DNS error on the primary's health record, so every later
+/// "is the primary healthy?" decision read the wrong signal (#3081). Ask the
+/// chain which entry is serving first, and fall back to the plain name.
+pub(crate) fn failure_attribution_name(provider: &dyn crate::brain::provider::Provider) -> String {
+    provider
+        .active_subprovider_name()
+        .unwrap_or_else(|| provider.name().to_string())
+}
+
 /// The system nudge injected when a model produced a reasoning-only turn (#692
 /// follow-up). CRITICAL: when `no_tools_yet` (no tool has executed this turn),
 /// the model reasoned but never acted, so it most likely still needs to CALL a
@@ -473,7 +486,10 @@ impl AgentService {
                 s
             }
             Ok(Err(e)) => {
-                crate::config::health::record_failure(provider.name(), &e.to_string());
+                crate::config::health::record_failure(
+                    &failure_attribution_name(provider.as_ref()),
+                    &e.to_string(),
+                );
                 return Err(e);
             }
             Err(_elapsed) => {
@@ -487,7 +503,7 @@ impl AgentService {
                     provider.base_url().unwrap_or("<no-base-url>"),
                 );
                 crate::config::health::record_failure(
-                    provider.name(),
+                    &failure_attribution_name(provider.as_ref()),
                     &format!("handshake timeout after {}s", secs),
                 );
                 return Err(crate::brain::provider::ProviderError::Timeout(secs));
@@ -1227,7 +1243,10 @@ impl AgentService {
                     }
                 }
                 StreamEvent::Error { error } => {
-                    crate::config::health::record_failure(provider.name(), &error);
+                    crate::config::health::record_failure(
+                        &failure_attribution_name(provider.as_ref()),
+                        &error,
+                    );
                     return Err(crate::brain::provider::ProviderError::StreamError(error));
                 }
             }

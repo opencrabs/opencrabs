@@ -72,6 +72,17 @@ impl CompactionOutcome {
     }
 }
 
+/// The honest alert for the terminal cut (#3173). Pure, so the wording is
+/// testable on its own. This path never emits the success receipt, so the
+/// line is the only user-visible record that messages were dropped without
+/// a summary.
+pub(crate) fn truncated_alert_message() -> String {
+    "Compaction produced no summary: every summariser attempt was cut or failed, \
+     so the oldest messages were dropped to fit the window. Nothing before the \
+     marker survives."
+        .to_string()
+}
+
 /// A summariser running against a snapshot of a session's context while that
 /// session keeps taking turns.
 ///
@@ -456,6 +467,18 @@ impl AgentService {
                 context.hard_truncate_to(safety_target);
                 context.trim_to_fit(0);
                 truncated |= context.messages.len() < before_len;
+                // #3173: the success receipt never fires on this path, so
+                // this alert is the only user-visible record that messages
+                // were dropped without a summary. Every surface already
+                // renders SelfHealingAlert.
+                if truncated && let Some(cb) = progress_callback {
+                    cb(
+                        session_id,
+                        ProgressEvent::SelfHealingAlert {
+                            message: truncated_alert_message(),
+                        },
+                    );
+                }
             }
         }
 

@@ -583,7 +583,7 @@ pub(crate) fn raw_polling_listener(
 ) -> impl teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible> {
     let (stop_token, flag) = mk_stop_token();
     let state = RawPollState {
-        http: reqwest::Client::new(),
+        http: crate::utils::http::shared().clone(),
         token,
         offset: 0,
         pending: VecDeque::new(),

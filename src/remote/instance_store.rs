@@ -39,6 +39,15 @@ pub const INSTANCES_VERSION: u32 = 1;
 /// in seconds, not hang the modal.
 pub const PAIR_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// One process-wide client for the pair/announce exchanges. Building a client
+/// per call reloads the whole CA bundle (#REPT): the shared-slot helper keeps
+/// the pool and the store load at one per process.
+static PAIR_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn pair_client() -> &'static reqwest::Client {
+    crate::utils::http::cached_client(&PAIR_CLIENT, |b| b)
+}
+
 fn default_version() -> u32 {
     INSTANCES_VERSION
 }
@@ -437,7 +446,7 @@ pub async fn pair(base_url: &str, code: &str, label: &str) -> Result<Paired> {
     if base.is_empty() {
         anyhow::bail!("the remote URL is empty");
     }
-    let client = reqwest::Client::new();
+    let client = pair_client();
     let resp = client
         .post(format!("{base}/a2a/pair"))
         .timeout(PAIR_TIMEOUT)
@@ -489,7 +498,7 @@ pub async fn pair(base_url: &str, code: &str, label: &str) -> Result<Paired> {
 /// to the URL host, which is stable enough to key a credential on and honest
 /// about being derived rather than announced.
 async fn announce(base: &str, token: &str) -> Result<(String, Vec<(String, String)>, String)> {
-    let client = reqwest::Client::new();
+    let client = pair_client();
     let mut host_id = String::new();
     let mut routes: Vec<(String, String)> = Vec::new();
     if let Ok(resp) = client

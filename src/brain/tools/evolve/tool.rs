@@ -133,7 +133,7 @@ impl Tool for EvolveTool {
         }
 
         // Fetch latest release info from GitHub
-        let client = reqwest::Client::new();
+        let client = crate::utils::http::shared();
         tracing::info!(
             target: "evolve",
             url = GITHUB_API,
@@ -278,7 +278,7 @@ impl Tool for EvolveTool {
                 return self
                     .evolve_via_binary_download(
                         sid,
-                        &client,
+                        client,
                         &release,
                         current_version,
                         latest_tag,

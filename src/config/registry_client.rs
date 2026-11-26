@@ -94,7 +94,7 @@ impl RegistryClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http: crate::utils::http::shared().clone(),
         }
     }
 

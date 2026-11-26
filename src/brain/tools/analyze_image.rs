@@ -82,13 +82,11 @@ impl Tool for AnalyzeImageTool {
         // Build the image part — either base64 from file or URL
         let image_part = if image_src.starts_with("http://") || image_src.starts_with("https://") {
             // Fetch URL and convert to base64
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+            let client = crate::utils::http::shared();
 
             let resp = client
                 .get(&image_src)
+                .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await
                 .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
@@ -158,10 +156,7 @@ impl Tool for AnalyzeImageTool {
             }]
         });
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        let client = crate::utils::http::shared();
 
         tracing::info!(
             "analyze_image: calling Gemini model={} url={} key_prefix={}",
@@ -175,6 +170,7 @@ impl Tool for AnalyzeImageTool {
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", &self.api_key)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
             .send()
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;

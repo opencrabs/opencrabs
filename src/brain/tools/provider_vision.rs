@@ -223,10 +223,12 @@ impl Tool for ProviderVisionTool {
             format!("data:{};base64,{}", mime, b64)
         };
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        // Every candidate in the chain uses this one client, and the ceiling is
+        // a client-level setting, so the slot builds it once.
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = crate::utils::http::cached_client(&CLIENT, |b| {
+            b.timeout(std::time::Duration::from_secs(120))
+        });
 
         // Roll through candidates in order (#430): a failure logs and tries
         // the next; Gemini runs only after every candidate failed. #1792: every
@@ -246,7 +248,7 @@ impl Tool for ProviderVisionTool {
         }
         for candidate in &candidates {
             match try_vision_candidate(
-                &client,
+                client,
                 candidate,
                 &question,
                 &image_url,

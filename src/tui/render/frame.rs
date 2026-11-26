@@ -4,6 +4,7 @@
 use super::super::app::App;
 use super::super::events::AppMode;
 use super::super::onboarding_render;
+use crate::ui_core::hints::Hint;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -198,7 +199,26 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // The hint row (#2279, #3102) follows the status bar's rule: in split view
     // each pane already carries its own footer, so a window-level hint row
     // would be a dead line under two sessions.
-    let hint_height = u16::from(!app.pane_manager.is_split()) * tips::HINT_ROW;
+    //
+    // The row is as tall as the sentence needs at this width (#3161): a hint
+    // is one long line, and cutting it at the edge lost the tail of every one
+    // of them in a narrow terminal. The hint is resolved ONCE, here, before
+    // the layout is solved, and the same one is painted below, so the rows
+    // reserved and the sentence on screen can never be two different hints.
+    let hint = match (app.pane_manager.is_split(), app.mode) {
+        (true, _) => None,
+        (false, AppMode::Chat | AppMode::RestartPending | AppMode::UpdatePrompt) => {
+            tips::current(app)
+        }
+        (false, _) => None,
+    };
+    let hint_height = if app.pane_manager.is_split() {
+        0
+    } else {
+        hint.as_ref()
+            .map(|hint| tips::rows_for(hint, f.area().width))
+            .unwrap_or(tips::HINT_ROW)
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -233,7 +253,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
             // Handled by early return above
         }
         AppMode::Chat => {
-            let input_rect = render_chat_surface(f, app, &chunks, plan_height, queue_height);
+            let input_rect =
+                render_chat_surface(f, app, &chunks, plan_height, queue_height, hint.as_ref());
             if app.slash_suggestions_active {
                 render_slash_autocomplete(f, app, input_rect);
             } else if app.emoji_picker_active {
@@ -324,11 +345,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
             }
         }
         AppMode::RestartPending => {
-            render_chat_surface(f, app, &chunks, plan_height, queue_height);
+            render_chat_surface(f, app, &chunks, plan_height, queue_height, hint.as_ref());
             render_restart_dialog(f, f.area());
         }
         AppMode::UpdatePrompt => {
-            render_chat_surface(f, app, &chunks, plan_height, queue_height);
+            render_chat_surface(f, app, &chunks, plan_height, queue_height, hint.as_ref());
             render_update_dialog(f, app, f.area());
         }
     }
@@ -378,6 +399,7 @@ fn render_chat_surface(
     chunks: &[Rect],
     plan_height: u16,
     queue_height: u16,
+    hint: Option<&Hint>,
 ) -> Rect {
     let (input_rect, scroll_y) = if app.pane_manager.is_split() {
         render_split_panes(f, app, chunks[0])
@@ -392,7 +414,7 @@ fn render_chat_surface(
         // The hint sits above the field it describes, under the conversation
         // (#3102): below the input it read as part of the status bar.
         if chunks[3].height > 0 {
-            tips::render_hint(f, app, chunks[3]);
+            tips::render_hint(f, hint, chunks[3]);
         }
         (chunks[4], render_input(f, app, chunks[4]))
     };

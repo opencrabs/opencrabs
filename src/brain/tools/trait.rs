@@ -32,11 +32,22 @@ impl OriginTarget {
     /// topics bake WITHOUT the `:1` — the General topic key never becomes a
     /// wire address.
     pub fn deliver_to(&self) -> String {
-        match self.thread {
-            Some(t) if t != crate::channels::telegram::session_resolve::GENERAL_TOPIC_ID => {
-                format!("{}:{}:{}", self.channel, self.chat_id, t)
+        #[cfg(feature = "telegram")]
+        {
+            let general = crate::channels::telegram::session_resolve::GENERAL_TOPIC_ID;
+            match self.thread {
+                Some(t) if t != general => {
+                    format!("{}:{}:{}", self.channel, self.chat_id, t)
+                }
+                _ => format!("{}:{}", self.channel, self.chat_id),
             }
-            _ => format!("{}:{}", self.channel, self.chat_id),
+        }
+        #[cfg(not(feature = "telegram"))]
+        {
+            match self.thread {
+                Some(t) => format!("{}:{}:{}", self.channel, self.chat_id, t),
+                None => format!("{}:{}", self.channel, self.chat_id),
+            }
         }
     }
 }

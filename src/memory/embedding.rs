@@ -519,17 +519,16 @@ pub async fn embed_via_api(text: &str) -> Result<Vec<f32>, String> {
         body["dimensions"] = serde_json::json!(dims);
     }
 
-    // #1062: this used to be `reqwest::Client::new()`, whose default is NO
+    // #1062: this used to build a bare client, whose default is NO
     // timeout at all. A blackholed embedding endpoint wedged the `.await`
     // forever, and write_opencrabs_file awaits indexing inline, so the tool
-    // call never returned. House pattern (local_engine.rs, exa_search.rs,
-    // a2a_send.rs): connect fast, cap the whole call.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
+    // call never returned. The shared client bounds the handshake; the total
+    // cap rides on the request, so a slow embed never has to own a client.
+    let client = crate::utils::http::shared();
+    let mut request = client
+        .post(&endpoint)
         .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("Failed to build embedding client: {e}"))?;
-    let mut request = client.post(&endpoint).json(&body);
+        .json(&body);
 
     if let Some(ref key) = cfg.api_key {
         request = request.header("Authorization", format!("Bearer {key}"));

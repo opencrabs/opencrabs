@@ -62,7 +62,7 @@ pub(crate) fn diagnose_releases_latest_status(
 /// `None` if already on latest, no asset ready, or on error.
 pub async fn check_for_update() -> Option<String> {
     let current_version = crate::VERSION;
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = match client
         .get(GITHUB_API)
         .header("User-Agent", format!("opencrabs/{}", current_version))

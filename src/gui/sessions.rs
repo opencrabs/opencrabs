@@ -307,6 +307,35 @@ impl SessionsState {
         self.ordered().position(|s| s.id == id)
     }
 
+    /// The sessions that paint as chips on their parent's card instead of as
+    /// their own rows (#2303): a visible child of a visible parent. A live
+    /// search paints every match flat, so no hit ever hides inside a chip.
+    /// One source of truth for the paint and the numbered jump, so the two
+    /// can never count different rows (#3166).
+    pub fn chip_children(&self) -> HashSet<uuid::Uuid> {
+        if !self.filter.trim().is_empty() {
+            return HashSet::new();
+        }
+        let visible: HashSet<uuid::Uuid> = self.visible().map(|s| s.id).collect();
+        self.parents
+            .iter()
+            .filter(|(_, parent)| visible.contains(*parent))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The rows the rail paints, in painted order (#3166): `ordered()`
+    /// without the children that hang off their parent as chips. The
+    /// numbered jump counts painted rows only, so digit n never opens a
+    /// session the rail does not show.
+    pub fn painted_row_ids(&self) -> Vec<uuid::Uuid> {
+        let chips = self.chip_children();
+        self.ordered()
+            .map(|s| s.id)
+            .filter(|id| !chips.contains(id))
+            .collect()
+    }
+
     /// Whether the cursor points at a row the rail still shows. A deleted,
     /// filtered-out or refetched-away row must never stay armed.
     pub fn cursor_visible(&self) -> bool {
@@ -1771,11 +1800,13 @@ fn badge_cell(glyph: &str) -> Div {
         .child(SharedString::from(glyph.to_string()))
 }
 
-/// The plan's checklist as one slim line on the card: the same ten-cell bar
-/// the composer strip draws, plus the done/total count. The bar math lives in
+/// The plan's checklist as one slim line on the card: the same drawn bar the
+/// composer strip draws, plus the done/total count. The bar shape lives in
 /// `plan_strip`, so a row and the strip can never disagree about one plan.
 fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
-    let (_, bar) = crate::plan_strip::progress_bar(done, total);
+    // The glyph bar is gone (#3131); progress_bar still carries the exact
+    // percentage the strip and this card share.
+    let (percent, _) = crate::plan_strip::progress_bar(done, total);
     // The theme's own accent is the orange: it stays legible on both the dark
     // and the paper palette, where a hardcoded orange would wash out.
     let bar_colour = if flash {
@@ -1789,12 +1820,7 @@ fn plan_progress_cell(done: usize, total: usize, flash: bool) -> Div {
         .items_center()
         .gap_1()
         .text_xs()
-        .child(
-            div()
-                .flex_none()
-                .text_color(rgb(bar_colour))
-                .child(SharedString::from(bar)),
-        )
+        .child(crate::plan_strip::progress_bar_view(percent, bar_colour))
         .child(
             div()
                 .flex_none()
@@ -3648,6 +3674,10 @@ mod tests {
         assert!(
             cell_source.contains("crate::plan_strip::progress_bar(done, total)"),
             "the bar reuses the composer strip's math, not a second copy"
+        );
+        assert!(
+            cell_source.contains("crate::plan_strip::progress_bar_view(percent, bar_colour)"),
+            "the drawn track paints the bar (#3131), never a glyph string"
         );
         assert!(
             cell_source.contains("{done}/{total}"),

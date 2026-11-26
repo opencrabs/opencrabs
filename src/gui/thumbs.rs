@@ -18,7 +18,7 @@
 //! like every other picture; only the one-time crop runs on ours.
 
 use gpui::prelude::*;
-use gpui::{Img, ObjectFit, Pixels, img};
+use gpui::{AnyElement, ObjectFit, Pixels, SharedString, div, img, rems, rgb};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -50,17 +50,48 @@ static FAILED: OnceLock<Mutex<HashSet<(PathBuf, u64)>>> = OnceLock::new();
 /// `Contain` on the original, which also never paints outside the box: it
 /// letterboxes instead of bleeding. Both branches pin both sides, which is what
 /// keeps gpui from deriving a height from the aspect ratio (#2395).
-pub fn picture(path: &Path, radius: Pixels) -> Img {
+///
+/// A path whose file is gone never reaches the loader. `square_for` already
+/// answers `None` for it, and handing that dead path to `img(..)` makes gpui
+/// log `Failed to load asset: IO error` on the paint that touches it: a
+/// deleted attachment then reads like a product fault in the log. The tile
+/// says it instead (#3133).
+pub fn picture(path: &Path, radius: Pixels) -> AnyElement {
+    if !path.is_file() {
+        return missing_tile(radius);
+    }
     match square_from_home(path) {
         Some(square) => img(square)
             .size_full()
             .rounded(radius)
-            .object_fit(ObjectFit::Fill),
+            .object_fit(ObjectFit::Fill)
+            .into_any_element(),
         None => img(path.to_path_buf())
             .size_full()
             .rounded(radius)
-            .object_fit(ObjectFit::Contain),
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
     }
+}
+
+/// The tile a picture that no longer exists leaves behind: the box, its radius
+/// and a mark, with nothing for the asset loader to read.
+fn missing_tile(radius: Pixels) -> AnyElement {
+    let p = crate::palette::current();
+    div()
+        .size_full()
+        .rounded(radius)
+        .bg(rgb(p.panel_hi))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_size(rems(0.75))
+                .text_color(rgb(p.text_faint))
+                .child(SharedString::from("?")),
+        )
+        .into_any_element()
 }
 
 /// The square thumbnail for `source`, cropping it on first use. `None` when the
@@ -216,6 +247,33 @@ fn remember_failure(source: &Path, stamp: u64) {
 mod tests {
     use super::*;
     use image::GenericImageView;
+
+    /// A path whose file is gone must not reach `img(..)`.
+    ///
+    /// `square_for` already answers `None` for a missing file, and the
+    /// fallback handed that dead path to gpui's asset loader, which logs
+    /// `Failed to load asset: IO error` on the paint that touches it. A
+    /// deleted attachment then reads like a product fault in the log
+    /// (#3133). The check has to sit ahead of the fallback, not inside it.
+    #[test]
+    fn a_deleted_picture_never_reaches_the_asset_loader() {
+        let src = include_str!("thumbs.rs");
+        let body = src
+            .split("pub fn picture(")
+            .nth(1)
+            .expect("the tile is drawn somewhere");
+        let head = body.split("\n}\n").next().expect("a body");
+        let guard = head.find("path.is_file()").expect("a guard");
+        let fallback = head.find("img(path.to_path_buf())").expect("the fallback");
+        assert!(
+            guard < fallback,
+            "the existence check must precede the fallback: {head}"
+        );
+        assert!(
+            head.contains("missing_tile(radius)"),
+            "a missing file draws a tile, not a dead path: {head}"
+        );
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()

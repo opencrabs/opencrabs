@@ -457,10 +457,12 @@ impl AnalyzeVideoTool {
         mime_type: &'static str,
         size: u64,
     ) -> super::error::Result<Value> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(600))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        // Start, upload and poll all share this client, and the ceiling is a
+        // client-level setting, so the slot builds it once.
+        static UPLOAD_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = crate::utils::http::cached_client(&UPLOAD_CLIENT, |b| {
+            b.timeout(Duration::from_secs(600))
+        });
 
         // Step 1: start a resumable upload session — Gemini returns the
         // upload URL in the X-Goog-Upload-URL response header.
@@ -624,12 +626,9 @@ impl AnalyzeVideoTool {
             }]
         });
 
-        // Generous timeout — video processing can take a while server-side
+        // Generous timeout: video processing can take a while server-side
         // even after Files-API ACTIVE.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;
+        let client = crate::utils::http::shared();
 
         tracing::info!(
             "analyze_video: calling Gemini generateContent model={} url={}",
@@ -642,6 +641,7 @@ impl AnalyzeVideoTool {
             .header("Content-Type", "application/json")
             .header("x-goog-api-key", &self.api_key)
             .json(&body)
+            .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| super::error::ToolError::Execution(e.to_string()))?;

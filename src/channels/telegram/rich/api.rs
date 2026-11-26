@@ -278,7 +278,7 @@ async fn post_rich(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut attempt = 0u32;
 
     // The 429 handler below needs the chat this body targets (#635). It cannot
@@ -666,7 +666,7 @@ async fn post_rich_multipart(
     origin: &str,
     origin_detail: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut attempt = 0u32;
 
     loop {

@@ -129,6 +129,51 @@ pub async fn lookup_session_for_context(pool: &Pool, context_id: &str) -> Option
     }
 }
 
+/// The A2A context a chat session was created under, if it has one.
+///
+/// The reverse of [`lookup_session_for_context`], and the reason a remote
+/// composer can answer the conversation it is reading. `message/send` binds a
+/// task to a session through `context_id`; a client that sends without one gets
+/// a fresh context, and a fresh context is a fresh session on the far side, so
+/// the message never lands in the transcript on screen (#3133). A session this
+/// crab started locally has no context and answers `None`, which is correct:
+/// the first send to it opens one, and the answer carries it back.
+pub async fn lookup_context_for_session(pool: &Pool, session_id: Uuid) -> Option<String> {
+    let sid = session_id.to_string();
+    let conn = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("A2A persistence: failed to get connection: {}", e);
+            return None;
+        }
+    };
+
+    let result = conn
+        .interact(move |conn| {
+            conn.query_row(
+                "SELECT context_id FROM a2a_context_sessions
+                 WHERE session_id = ?1
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![sid],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .await;
+
+    match result {
+        Ok(Ok(ctx)) => Some(ctx),
+        Ok(Err(rusqlite::Error::QueryReturnedNoRows)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("A2A persistence: session context lookup failed: {}", e);
+            None
+        }
+        Err(e) => {
+            tracing::warn!("A2A persistence: interact error on session lookup: {}", e);
+            None
+        }
+    }
+}
+
 /// Bind an A2A context to a chat session (upsert).
 pub async fn save_context_session(pool: &Pool, context_id: &str, session_id: Uuid) {
     let now = chrono::Utc::now().timestamp();

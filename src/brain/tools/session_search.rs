@@ -427,7 +427,24 @@ impl SessionSearchTool {
             })
             .collect();
 
-        let render = |msg: &crate::db::models::Message, terms: &[&str]| -> String {
+        let render = |msg: &crate::db::models::Message, terms: &[&str]| -> Option<String> {
+            let body = visible_text(&msg.content);
+            if body.is_empty() {
+                // The row matched only inside reasoning or a replay ledger,
+                // neither of which a reader ever saw (#3091).
+                return None;
+            }
+            // A row can match only inside reasoning while still carrying a
+            // visible answer. Rendering it would answer the query with a row
+            // that does not contain the query, so a visible row has to name
+            // at least one of the terms itself (#3091).
+            let lower = body.to_lowercase();
+            if !terms
+                .iter()
+                .any(|term| lower.contains(&term.to_lowercase()))
+            {
+                return None;
+            }
             let title = title_map
                 .get(&msg.session_id)
                 .map(String::as_str)
@@ -438,8 +455,11 @@ impl SessionSearchTool {
             } else {
                 "assistant"
             };
-            let snippet = extract_snippet(&msg.content, terms, 280);
-            format!("**{}** [{} • {}]\n   {}\n\n", title, role, date, snippet)
+            let snippet = extract_snippet(&body, terms, 280);
+            Some(format!(
+                "**{}** [{} • {}]\n   {}\n\n",
+                title, role, date, snippet
+            ))
         };
 
         // #1626: zero contiguous-verbatim hits do not mean the content is
@@ -471,18 +491,30 @@ impl SessionSearchTool {
             terms.extend(tokens.iter().copied());
             let mut output = format!(
                 "~ token match — no contiguous match for '{}'; every row below \
-                 contains all of its words, ranked by word hits then recency.\n\n",
+                 matched all of its words, ranked by word hits then recency.\n\n",
                 trimmed
             );
+            let mut rendered = 0usize;
             for msg in &tokenized {
-                output.push_str(&render(msg, &terms));
+                if let Some(row) = render(msg, &terms) {
+                    output.push_str(&row);
+                    rendered += 1;
+                }
+            }
+            if rendered == 0 {
+                return Ok(hidden_match_only(trimmed));
             }
             return Ok(ToolResult::success(output));
         }
 
         let mut output = String::new();
         for msg in &messages {
-            output.push_str(&render(msg, std::slice::from_ref(&trimmed)));
+            if let Some(row) = render(msg, std::slice::from_ref(&trimmed)) {
+                output.push_str(&row);
+            }
+        }
+        if output.is_empty() {
+            return Ok(hidden_match_only(trimmed));
         }
 
         Ok(ToolResult::success(output))
@@ -566,12 +598,7 @@ impl SessionSearchTool {
             )));
         }
 
-        let mut output = format!(
-            "Last {} of {} messages in \"{}\":\n\n",
-            messages.len(),
-            message_repo.count_by_session(session.id).await.unwrap_or(0),
-            title
-        );
+        let mut rows = String::new();
         for msg in &messages {
             let date = msg.created_at.format("%Y-%m-%d %H:%M").to_string();
             let role = if msg.role == "user" {
@@ -579,7 +606,15 @@ impl SessionSearchTool {
             } else {
                 "assistant"
             };
-            let body: String = msg.content.split_whitespace().collect::<Vec<_>>().join(" ");
+            let visible = visible_text(&msg.content);
+            let visible = if visible.is_empty() {
+                // A row holding only reasoning or a replay ledger: name it
+                // rather than print a body no reader ever saw (#3091).
+                "(no visible text)".to_string()
+            } else {
+                visible
+            };
+            let body: String = visible.split_whitespace().collect::<Vec<_>>().join(" ");
             let body = if body.len() > 500 {
                 let mut end = 500.min(body.len());
                 while !body.is_char_boundary(end) {
@@ -589,11 +624,65 @@ impl SessionSearchTool {
             } else {
                 body
             };
-            output.push_str(&format!("[{}] {}: {}\n\n", date, role, body));
+            rows.push_str(&format!("[{}] {}: {}\n\n", date, role, body));
         }
 
-        Ok(ToolResult::success(output))
+        Ok(ToolResult::success(format!(
+            "Last {} of {} messages in \"{}\":\n\n{}",
+            messages.len(),
+            message_repo.count_by_session(session.id).await.unwrap_or(0),
+            title,
+            rows
+        )))
     }
+}
+
+/// The prose a stored row shows a reader (#3091).
+///
+/// `session_search` used to format `msg.content` verbatim, so a hit came back
+/// wrapped in `<!-- reasoning -->` markers and `<!-- tools-v2: ... -->`
+/// ledgers. That output goes straight into the model's context: a search
+/// taught the model its own storage format, leaked the reasoning it was never
+/// supposed to read as history, and inflated the result with text every
+/// display path folds away.
+///
+/// Only `Segment::Text` survives the same walk `src/gui/transcript.rs` and
+/// `src/tui/app/messaging.rs` already run before rendering, so the tool output
+/// matches what a human sees. Reasoning is dropped rather than returned
+/// (search results are not context), phantom-blocked sections go with it, and
+/// the replay ledgers fall to the HTML-comment sweep.
+pub(crate) fn visible_text(content: &str) -> String {
+    use crate::tui::app::reasoning_split::{Segment, split_segments};
+
+    let mut out = String::new();
+    for segment in split_segments(content) {
+        let Segment::Text(text) = segment else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(text);
+    }
+    if out.contains("<!--") {
+        out = crate::brain::agent::service::AgentService::strip_html_comments(&out);
+    }
+    out.trim().to_string()
+}
+
+/// The query matched rows, but every hit sat inside text this tool does not
+/// show. Reporting "no messages" would be wrong, and returning the raw rows
+/// would defeat the strip (#3091).
+fn hidden_match_only(query: &str) -> ToolResult {
+    ToolResult::success(format!(
+        "Matches for '{}' sit only inside reasoning blocks or replay ledgers, \
+         which session_search does not show. Try words from the visible answer.",
+        query
+    ))
 }
 
 fn extract_snippet(body: &str, terms: &[&str], max_len: usize) -> String {

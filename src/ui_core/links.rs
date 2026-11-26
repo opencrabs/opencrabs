@@ -227,6 +227,71 @@ fn token_at(line: &str, col: usize) -> Option<&str> {
     line.get(start..end)
 }
 
+/// The token a click at `byte` sits inside, expanded both ways along the text.
+///
+/// This is the same span [`target_at_roots`] tries first, so a miss can name
+/// what the resolver actually looked at. The pointer's own tail is not that
+/// span: a click in the middle of `brain-audit-2026-11-17.md` used to log
+/// `26-11-17.md`, a string no resolver ever considered (#3085).
+pub fn token_at_byte(text: &str, byte: usize) -> Option<&str> {
+    token_at(text, char_col(text, byte))
+}
+
+/// Whether a click at `byte` named anything the resolver would even try.
+///
+/// The miss line exists to explain a click that named a file or a url and did
+/// not open it. A click on ordinary prose named nothing, so writing it into
+/// the log only buried the lines that matter: `bisa`, `etap` and an empty
+/// token were all reported as misses (#3085).
+///
+/// This asks the same question the resolver asks before it probes the disk,
+/// so a token that was probed and failed still logs, and a word that never
+/// reached a probe stays silent.
+pub fn click_names_target(text: &str, byte: usize) -> bool {
+    let col = char_col(text, byte);
+    if token_at(text, col).is_some_and(names_target) {
+        return true;
+    }
+    joined_spans(text, col)
+        .iter()
+        .any(|span| names_target(span))
+}
+
+/// The candidate test behind [`click_names_target`]: a url with something
+/// host-shaped after its scheme, or a token shaped like a path.
+fn names_target(raw: &str) -> bool {
+    let token = clean_token(raw);
+    if token.is_empty() {
+        return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let scheme_end = lower.find("://").map_or(lower.len(), |at| at + 3);
+        return token.get(scheme_end..).is_some_and(|rest| {
+            rest.contains('.') || rest.contains(':') || rest.eq_ignore_ascii_case("localhost")
+        });
+    }
+    if lower.starts_with("file://") {
+        return token.len() > "file://".len();
+    }
+    if lower.starts_with("mailto:") {
+        return token.contains('@');
+    }
+    names_path(strip_line_ref(token))
+}
+
+/// The shapes worth a disk probe: an absolute, home or relative path, a
+/// separator, or a plausible extension. Bare prose words fail here, which is
+/// what keeps them out of both the resolver and the log.
+fn names_path(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with('~')
+        || token.starts_with('.')
+        || token.contains('/')
+        || token.contains('\\')
+        || looks_extended(token)
+}
+
 /// How many adjacent words one click may join when it names a file that holds
 /// a space (#2846). Six covers the shape the agent writes most: a generated
 /// artifact whose name is separated from its timestamp by one space.
@@ -349,13 +414,7 @@ fn resolve_path_in(token: &str, roots: &[&Path], home: Option<&Path>) -> Option<
     // words without a dot have no chance of resolving anyway; bare dotted
     // names ("README.md") DO get probed because clicking exactly the word
     // that names a real file in the root is the point.
-    let path_like = token.starts_with('/')
-        || token.starts_with('~')
-        || token.starts_with('.')
-        || token.contains('/')
-        || token.contains('\\')
-        || looks_extended(token);
-    if !path_like {
+    if !names_path(token) {
         return None;
     }
     let expanded = expand_tilde(token, home)?;

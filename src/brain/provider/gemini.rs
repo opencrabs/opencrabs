@@ -32,43 +32,6 @@ use std::sync::Arc;
 
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-// TCP keepalive: OS-level probes detect silent connection drops without
-// waiting for the 300s request timeout. Critical for streaming.
-const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
-
-/// The streaming client: same pool and keepalive tuning as the request client,
-/// deliberately NO total request timeout. reqwest's `.timeout()` bounds the
-/// whole exchange including the body read, so on an SSE stream it is a
-/// wall-clock guillotine on healthy responses (#1687). Inter-chunk silence is
-/// guarded at the app level in `brain/agent/service/helpers.rs`; a handshake
-/// that never lands is still bounded by `connect_timeout`.
-fn build_stream_client() -> Client {
-    Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create streaming HTTP client")
-}
-
-/// The NON-streaming request client: same pool and keepalive tuning as the
-/// stream client, plus a total ceiling. That ceiling is a budget on a call that
-/// buffers its whole body (title generation, compaction, `/models`); streams
-/// never touch this client, so `with_timeout` can only ever change how long a
-/// non-streaming call is allowed to hang (#1687).
-fn build_request_client(timeout: Duration) -> Client {
-    Client::builder()
-        .timeout(timeout)
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT)
-        .pool_max_idle_per_host(2)
-        .tcp_keepalive(DEFAULT_TCP_KEEPALIVE)
-        .build()
-        .expect("Failed to create HTTP client")
-}
 
 /// Google Gemini provider
 #[derive(Clone)]
@@ -136,8 +99,8 @@ pub(crate) fn sanitize_schema_for_gemini(value: Value) -> Value {
 impl GeminiProvider {
     /// Create a new Gemini provider
     pub fn new(api_key: String) -> Self {
-        let client = build_request_client(DEFAULT_TIMEOUT);
-        let stream_client = build_stream_client();
+        let client = crate::utils::http::buffered_transport(DEFAULT_TIMEOUT);
+        let stream_client = crate::utils::http::streaming_transport();
 
         Self {
             api_key,
@@ -158,7 +121,7 @@ impl GeminiProvider {
     /// `timeout_secs` cannot put a wall clock back on an SSE body (#1687).
     /// Pairs with the `request_timeout()` trait accessor.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.client = build_request_client(timeout);
+        self.client = crate::utils::http::buffered_transport(timeout);
         self.request_timeout = Some(timeout);
         self
     }

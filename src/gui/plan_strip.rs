@@ -25,7 +25,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui::{
-    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, rgb, rgba,
+    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, relative, rgb,
+    rgba,
 };
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
@@ -284,6 +285,22 @@ impl PlanStripState {
             return None;
         }
         let lines = pane_lines(plan, density, expanded);
+        // The bar row draws a track and the percentage (#3131), so the card
+        // has to budget for both. The wall-of-panes count keeps its compact
+        // shape: no track there, the click expands it.
+        let percent = progress(plan).2;
+        let percent_width = line_width(window, &format!("{percent}%"), SMALL_TEXT_SIZE);
+        let track_wide = |line: &str, lead: f32, wide: bool| {
+            if wide {
+                line_width(window, line, SMALL_TEXT_SIZE)
+                    + lead
+                    + PROGRESS_TRACK_WIDTH
+                    + ROW_GAP
+                    + percent_width
+            } else {
+                line_width(window, line, SMALL_TEXT_SIZE) + lead
+            }
+        };
         // The pane card is as wide as its longest line (#3124). A pane is the
         // place this matters most: the card was `w_full` inside a column that
         // can be 600 points, so a task name was cut to forty characters with
@@ -291,11 +308,12 @@ impl PlanStripState {
         // title is long" when the truth was "the card is short of nothing but
         // its own text".
         let mut widths = Vec::with_capacity(lines.len());
-        for (index, (_, line)) in lines.iter().enumerate() {
+        for (index, (kind, line)) in lines.iter().enumerate() {
             // The leading chevron and the gap after it belong to the first row
             // alone; the rest start at the card's padding.
             let lead = if index == 0 { 16.0 + ROW_GAP } else { 0.0 };
-            widths.push(line_width(window, line, SMALL_TEXT_SIZE) + lead);
+            let wide = matches!(kind, LineKind::Bar) && (expanded || density != PaneDensity::Bar);
+            widths.push(track_wide(line, lead, wide));
         }
         // `flex_none` on the card itself: inside a pane the transcript above
         // it takes `flex_1`, and a shrinkable card was squeezed to zero height
@@ -353,6 +371,12 @@ impl PlanStripState {
                 LineKind::Running => palette::current().text,
                 LineKind::Next => palette::current().text_faint,
             };
+            // The bar row draws the track and the percentage (#3131): the
+            // same drawn bar the composer header paints, never the glyph
+            // string. The wall-of-panes count stays plain text, because a
+            // wall has room for the count alone and the click expands it.
+            let draws_track =
+                matches!(kind, LineKind::Bar) && (expanded || density != PaneDensity::Bar);
             // A flex row with a growing, shrinkable text child, not a
             // width-full block div holding truncating text (#2624). gpui
             // measures a nowrap child once, at the flex basis it is handed, and
@@ -384,6 +408,17 @@ impl PlanStripState {
                         .text_color(rgb(color))
                         .child(SharedString::from(line)),
                 );
+            let row = if draws_track {
+                row.child(progress_bar_view(percent, color)).child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(color))
+                        .child(SharedString::from(format!("{percent}%"))),
+                )
+            } else {
+                row
+            };
             if expanded && index >= 2 {
                 scroll.push(row);
             } else {
@@ -536,7 +571,7 @@ pub fn pane_lines(
     density: PaneDensity,
     expanded: bool,
 ) -> Vec<(LineKind, String)> {
-    let (done, total, percent, bar) = progress(plan);
+    let (done, total, _) = progress(plan);
     if total == 0 {
         // Approved design whose checklist is still being seeded, or a seed
         // that failed. Same two states the terminal names.
@@ -548,7 +583,10 @@ pub fn pane_lines(
     if expanded {
         let mut out = vec![
             (LineKind::Title, format!("{} · {done}/{total}", plan.title)),
-            (LineKind::Bar, format!("{bar} {percent}%")),
+            // The bar row carries no text: the view draws the track and the
+            // percentage itself (#3131), and the count already rides the
+            // title beside it.
+            (LineKind::Bar, String::new()),
         ];
         // Every task, not the six-row window (#3124). The card that draws this
         // list scrolls, so the window only ever hid work: a twenty-task plan in
@@ -575,13 +613,13 @@ pub fn pane_lines(
         None if done == total => "✓ complete".to_string(),
         None => "▸ waiting".to_string(),
     };
-    let progress_line = format!("{done}/{total} · {bar} {percent}%");
+    let progress_line = format!("{done}/{total}");
     match density {
         // A wall of panes gets the chevron and count. The click expands it,
         // and anything more leaves no room for conversations.
         PaneDensity::Bar => vec![(LineKind::Bar, format!("{done}/{total}"))],
         PaneDensity::Summary => vec![
-            (LineKind::Bar, progress_line),
+            (LineKind::Bar, progress_line.clone()),
             (LineKind::Running, running_line),
         ],
         PaneDensity::Tasks => {
@@ -618,12 +656,12 @@ pub fn pane_lines(
 /// The line a pane prints while an approved plan has no checklist yet.
 const CHECKLIST_NOT_SEEDED: &str = "checklist not seeded";
 
-/// `done`, `total`, the percentage and the ten-cell bar. One place, so the
-/// full card and the compact strip can never disagree about the same plan.
-fn progress(plan: &PlanDocument) -> (usize, usize, usize, String) {
+/// `done`, `total` and the percentage. One place, so the full card and the
+/// compact strip can never disagree about the same plan.
+fn progress(plan: &PlanDocument) -> (usize, usize, usize) {
     let (done, total) = progress_counts(plan);
-    let (percent, bar) = progress_bar(done, total);
-    (done, total, percent, bar)
+    let (percent, _) = progress_bar(done, total);
+    (done, total, percent)
 }
 
 /// The counting rule: Completed and Skipped both count as done. Shared with
@@ -641,11 +679,36 @@ pub(crate) fn progress_bar(done: usize, total: usize) -> (usize, String) {
     opencrabs::ui_core::plan_index::progress_bar(done, total)
 }
 
+/// The plan bar as a drawn track, not a glyph string (#3131).
+///
+/// The ten `█`/`░` cells were typed text with no font family, so every
+/// platform resolved the block elements through its own fallback chain: on
+/// Linux with Inter neither codepoint exists, so the cell width was whatever
+/// fontconfig answered, `░` dithered differently per face, and there was no
+/// track at all. A recessed slot with a fill child at the done percentage is
+/// font independent, resolution independent, and gives the bar a real track
+/// for free. The cell count disappears with the glyphs; `percent` is exact.
+pub(crate) fn progress_bar_view(percent: usize, colour: u32) -> Div {
+    div()
+        .flex_none()
+        .w(px(PROGRESS_TRACK_WIDTH))
+        .h(px(6.0))
+        .rounded_full()
+        .bg(rgb(palette::current().panel))
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative((percent.min(100) as f32) / 100.0))
+                .bg(rgb(colour)),
+        )
+}
+
 /// The header row of a plan card: the line the caller wrote, then the bar and
 /// the percentage at the trailing edge (#2496). The title takes the slack and
 /// cuts, so a long plan name never pushes the metrics out of the card.
 fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
-    let (_, _, percent, bar) = progress(plan);
+    let (_, _, percent) = progress(plan);
     div()
         .flex()
         .flex_row()
@@ -663,13 +726,7 @@ fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(text)),
         )
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(rgb(palette::current().teal))
-                .child(bar),
-        )
+        .child(progress_bar_view(percent, palette::current().teal))
         .child(
             div()
                 .flex_none()
@@ -866,6 +923,11 @@ const CARD_PAD_X: f32 = 24.0;
 const CARD_EDGE: f32 = 2.0;
 /// `gap_2`, the step a row keeps between its parts.
 const ROW_GAP: f32 = 8.0;
+
+/// The drawn track's width in points (#3131). The pane card's width budget
+/// and the header's share it, so the card is sized for the bar it actually
+/// draws.
+const PROGRESS_TRACK_WIDTH: f32 = 60.0;
 /// `px_3`, the padding inside one of the approval card's chips.
 const CHIP_PAD_X: f32 = 24.0;
 /// A few points of slack, so a measured line is never a pixel short of the box
@@ -916,14 +978,14 @@ fn card_width(rows: impl IntoIterator<Item = f32>) -> f32 {
     rows.into_iter().fold(0.0_f32, f32::max) + CARD_PAD_X + CARD_EDGE + CARD_SLACK
 }
 
-/// The width of a card's header row: the line the caller wrote, then the bar and
-/// the percentage at the trailing edge with the row's own 8 between them
-/// (#2496, #3124).
+/// The width of a card's header row: the line the caller wrote, then the drawn
+/// track and the percentage at the trailing edge with the row's own 8 between
+/// them (#2496, #3124, #3131).
 fn header_width(window: &Window, plan: &PlanDocument, text: &str) -> f32 {
-    let (_, _, percent, bar) = progress(plan);
+    let (_, _, percent) = progress(plan);
     line_width(window, text, SMALL_TEXT_SIZE)
         + ROW_GAP
-        + line_width(window, &bar, SMALL_TEXT_SIZE)
+        + PROGRESS_TRACK_WIDTH
         + ROW_GAP
         + line_width(window, &format!("{percent}%"), SMALL_TEXT_SIZE)
 }

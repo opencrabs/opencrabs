@@ -300,12 +300,33 @@ impl App {
 
     /// The newest turn's anchor id, if there is one. `ctrl+o` is scoped to this
     /// turn so a long transcript does not reflow under the user.
-    fn newest_turn_anchor(&self) -> Option<String> {
+    pub(crate) fn newest_turn_anchor(&self) -> Option<String> {
         let turns = crate::tui::render::chat::turn_ranges(&self.messages);
         let last = turns.last()?;
         self.messages
             .get(last.start)
             .map(crate::tui::render::chat::turn_anchor)
+    }
+
+    /// Whether the newest turn is sticky-expanded (#3094). A `turn_expanded`
+    /// entry that exists as `true` means Ctrl+O (or a header click) opened the
+    /// turn; blocks constructed later inside that turn inherit that state so
+    /// the user's choice stays sticky instead of whack-a-mole. Absent or
+    /// `false` means folded is the default and nothing inherits.
+    pub(crate) fn newest_turn_is_expanded(&self) -> bool {
+        self.newest_turn_anchor()
+            .is_some_and(|anchor| self.turn_expanded.get(&anchor).copied().unwrap_or(false))
+    }
+
+    /// `ctrl+o` while a turn streams flips the LIVE reasoning view between
+    /// the capped status and the full wrapped stream (#3093). An idle turn
+    /// leaves the flag alone, so the key keeps its stored-turn meaning; a
+    /// fresh send resets the flag, so the full wall never persists across
+    /// turns.
+    pub(crate) fn toggle_live_reasoning(&mut self) {
+        if self.is_processing && self.streaming_reasoning.is_some() {
+            self.live_reasoning_full = !self.live_reasoning_full;
+        }
     }
 
     /// `ctrl+o`: open or close the newest turn, working-out and all.
@@ -1427,6 +1448,13 @@ impl App {
             && !group.calls.is_empty()
         {
             let count = group.calls.len();
+            // The flushed group inherits the turn's sticky expansion (#3094):
+            // if the user opened this turn, the flushed group stays open with
+            // everything else under that header.
+            let turn_expanded = self.newest_turn_is_expanded();
+            let mut group = group;
+            // The renderer reads the GROUP's flag (#3094).
+            group.expanded = turn_expanded;
             self.messages.push(DisplayMessage {
                 id: Uuid::new_v4(),
                 role: "tool_group".to_string(),
@@ -1437,7 +1465,7 @@ impl App {
                 approval: None,
                 approve_menu: None,
                 details: None,
-                expanded: false,
+                expanded: turn_expanded,
                 expanded_full: false,
                 tool_group: Some(group),
                 duration_secs: None,
@@ -1921,6 +1949,45 @@ impl App {
             return Ok(());
         }
 
+        // cmd/ctrl+1..9 jumps (#3166): the nth entry of what the user is
+        // looking at, `0` being position ten. The open conversation's topics
+        // win when it has any, so the session under the reader never changes;
+        // a conversation with no topics hands the chord to the session list.
+        // It sits above the composer so a chord is never text, and it claims
+        // the key even when the position lands past the list's end. Kitty
+        // terminals report ctrl+digit as CSI u, which crossterm hands over as
+        // a plain digit with CONTROL; on terminals without the protocol only
+        // ctrl+4..7 reach here (the 0x1c..0x1f bytes parse as digits), and
+        // the rest of the number row is simply not a chord.
+        use crate::ui_core::numbered_jump as jump;
+        if let KeyCode::Char(digit) = event.code
+            && let Some(position) = jump::chord_position(
+                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::SUPER),
+                digit,
+            )
+        {
+            // The bar's drawing order is the jump order: `All` first, then
+            // the topics in list order, the same ids its own chips open
+            // (#2701). The list order comes from the same rows Up/Down
+            // walks on the sessions screen.
+            let scope = jump::scope_for(false, self.chat_topic_bar.is_some());
+            let topics: Vec<Uuid> = self
+                .chat_topic_bar
+                .as_ref()
+                .map(|bar| bar.entries.iter().map(|e| e.session(bar.root)).collect())
+                .unwrap_or_default();
+            let sessions: Vec<Uuid> = self
+                .visible_session_indices()
+                .iter()
+                .filter_map(|i| self.sessions.get(*i).map(|s| s.id))
+                .collect();
+            if let Some(target) = jump::resolve_target(scope, position, &topics, &sessions) {
+                self.load_session(target).await?;
+            }
+            return Ok(());
+        }
+
         // When slash suggestions are active, intercept navigation keys
         if self.slash_suggestions_active {
             if keys::is_up(&event) {
@@ -2347,10 +2414,21 @@ impl App {
                 self.error_message_shown_at = Some(std::time::Instant::now());
             }
         } else if event.code == KeyCode::Char('o') && event.modifiers == KeyModifiers::CONTROL {
-            // Ctrl+O: open or close the newest turn, its fold, its tool groups
-            // and its reasoning details. Scoped to that turn so a long
-            // transcript does not reflow out from under the user.
-            self.toggle_newest_turn(true);
+            // Ctrl+O while a turn streams owns the LIVE reasoning (#3093):
+            // the stored turn underneath is not what the user is watching,
+            // the capped Thinking line is. Flip that view between the capped
+            // status and the full wrapped stream; the newest-turn toggle
+            // keeps its meaning once the turn has settled. The approval
+            // path never reaches here, and the flag resets on the next
+            // send, so nothing persists across turns.
+            if self.is_processing && self.streaming_reasoning.is_some() {
+                self.toggle_live_reasoning();
+            } else {
+                // Ctrl+O: open or close the newest turn, its fold, its tool
+                // groups and its reasoning details. Scoped to that turn so a
+                // long transcript does not reflow out from under the user.
+                self.toggle_newest_turn(true);
+            }
         } else if keys::is_clipboard_paste(&event) {
             // Ctrl+V (#1740), or Cmd+V passed through as SUPER (#1812): paste
             // or attach from the OS clipboard. File-shaped clipboard text
@@ -2659,6 +2737,65 @@ impl App {
         Ok(())
     }
 
+    /// Open the session row the list cursor points at (#3166). Enter lands
+    /// here and so does a numbered jump, so the two surfaces can never
+    /// disagree about what opening a row means: in assign mode the row is
+    /// assigned and the list stays up, and a session already pinned to
+    /// another pane pulls the focus to that pane instead of yanking the
+    /// session out of it.
+    pub(crate) async fn open_selected_session(&mut self) -> Result<()> {
+        let Some(session) = self
+            .selected_session_actual_index()
+            .and_then(|i| self.sessions.get(i))
+        else {
+            return Ok(());
+        };
+        let session_id = session.id;
+
+        if let Some(project_id) = self.assigning_to_project {
+            // Assign mode: assign this session to the project, stay in list
+            let title = session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Untitled".to_string());
+            match self
+                .project_service
+                .assign_session(session_id, project_id)
+                .await
+            {
+                Ok(()) => {
+                    self.notification = Some(format!("Assigned: {title}"));
+                    // Reflect the assignment in the in-memory list right
+                    // away so the project badge appears in real time,
+                    // without leaving and re-entering the sessions list.
+                    if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                        s.project_id = Some(project_id);
+                    }
+                }
+                Err(e) => {
+                    self.notification = Some(format!("Failed to assign: {e}"));
+                }
+            }
+            self.notification_shown_at = Some(std::time::Instant::now());
+            // Stay in sessions list for more picks
+        } else {
+            // Normal mode: load session and go to chat
+            // If this session is already in another pane, switch focus there
+            let existing_pane =
+                self.pane_manager.panes.iter().find(|p| {
+                    p.session_id == Some(session_id) && p.id != self.pane_manager.focused
+                });
+            if let Some(pane) = existing_pane {
+                let target_id = pane.id;
+                self.pane_manager.focused = target_id;
+            }
+
+            self.load_session(session_id).await?;
+            self.switch_mode(AppMode::Chat).await?;
+        }
+        Ok(())
+    }
+
     /// Handle keys in sessions mode
     pub(crate) async fn handle_sessions_key(
         &mut self,
@@ -2793,6 +2930,42 @@ impl App {
             return Ok(());
         }
 
+        // cmd/ctrl+1..9 jumps (#3166): the list is what is on screen, so the
+        // chord always targets its visible rows, `0` being position ten. It
+        // sits above the search field because a jump chord is never text,
+        // and it claims the key even when the position lands past the list's
+        // end. Kitty terminals report ctrl+digit as CSI u, which crossterm
+        // hands over as a plain digit with CONTROL; on terminals without the
+        // protocol only ctrl+4..7 reach here (the 0x1c..0x1f bytes parse as
+        // digits), and the rest of the number row is simply not a chord.
+        use crate::ui_core::numbered_jump as jump;
+        if let KeyCode::Char(digit) = event.code
+            && let Some(position) = jump::chord_position(
+                event.modifiers.contains(KeyModifiers::CONTROL),
+                event.modifiers.contains(KeyModifiers::SUPER),
+                digit,
+            )
+        {
+            // The visible rows, in the order the list paints them: the same
+            // order Up/Down walks, so digit n opens what row n shows.
+            let rows: Vec<Uuid> = self
+                .visible_session_indices()
+                .iter()
+                .filter_map(|i| self.sessions.get(*i).map(|s| s.id))
+                .collect();
+            if let Some(target) =
+                jump::resolve_target(jump::JumpScope::Sessions, position, &[], &rows)
+                && let Some(row) = rows.iter().position(|id| *id == target)
+            {
+                // The cursor follows the jump, so the next Up/Down moves
+                // from where it landed, and the row opens exactly the way
+                // Enter opens it.
+                self.selected_session_index = row;
+                self.open_selected_session().await?;
+            }
+            return Ok(());
+        }
+
         // Search mode: typing to filter sessions
         if self.session_search_active {
             match event.code {
@@ -2887,53 +3060,7 @@ impl App {
             self.selected_session_index =
                 (self.selected_session_index + 1).min(count.saturating_sub(1));
         } else if keys::is_enter(&event) {
-            if let Some(session) = self
-                .selected_session_actual_index()
-                .and_then(|i| self.sessions.get(i))
-            {
-                let session_id = session.id;
-
-                if let Some(project_id) = self.assigning_to_project {
-                    // Assign mode: assign this session to the project, stay in list
-                    let title = session
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Untitled".to_string());
-                    match self
-                        .project_service
-                        .assign_session(session_id, project_id)
-                        .await
-                    {
-                        Ok(()) => {
-                            self.notification = Some(format!("Assigned: {title}"));
-                            // Reflect the assignment in the in-memory list right
-                            // away so the project badge appears in real time,
-                            // without leaving and re-entering the sessions list.
-                            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                                s.project_id = Some(project_id);
-                            }
-                        }
-                        Err(e) => {
-                            self.notification = Some(format!("Failed to assign: {e}"));
-                        }
-                    }
-                    self.notification_shown_at = Some(std::time::Instant::now());
-                    // Stay in sessions list for more picks
-                } else {
-                    // Normal mode: load session and go to chat
-                    // If this session is already in another pane, switch focus there
-                    let existing_pane = self.pane_manager.panes.iter().find(|p| {
-                        p.session_id == Some(session_id) && p.id != self.pane_manager.focused
-                    });
-                    if let Some(pane) = existing_pane {
-                        let target_id = pane.id;
-                        self.pane_manager.focused = target_id;
-                    }
-
-                    self.load_session(session_id).await?;
-                    self.switch_mode(AppMode::Chat).await?;
-                }
-            }
+            self.open_selected_session().await?;
         } else if event.code == KeyCode::Char('t') || event.code == KeyCode::Char('T') {
             // Topics on the selected session (#2306, two-state since #2701):
             // the first press turns topics on, the next one asks for the name

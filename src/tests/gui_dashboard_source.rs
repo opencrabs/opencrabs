@@ -49,5 +49,8 @@ pub const DASHBOARD: &str = concat!(
     include_str!("../gui/dashboard_state.rs"),
     include_str!("../gui/dashboard_topics.rs"),
     include_str!("../gui/dashboard_turns.rs"),
+    // The bang operator's built-in editor (#3163), mirroring the window's
+    // own concat.
+    include_str!("../gui/editor_dialog.rs"),
     include_str!("../gui/main.rs"),
 );

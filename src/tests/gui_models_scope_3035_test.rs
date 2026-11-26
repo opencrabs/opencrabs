@@ -110,3 +110,42 @@ fn opening_the_picker_resets_the_scope() {
         "the picker opens on this-session scope"
     );
 }
+
+/// The typed path is not a side door (#3168): a trailing ` all` typed in the
+/// composer is parsed before anything runs, and a scope-all argument counts
+/// through the same route the picker takes. A plain pair keeps the bare
+/// switch it has always had.
+#[test]
+fn the_typed_argument_routes_through_the_scope_route_too() {
+    assert!(
+        MODELS.contains("strip_suffix(\" all\")"),
+        "the typed argument is parsed for the scope suffix before anything runs"
+    );
+    assert!(
+        MODELS.contains("self.begin_scope_all(pair, cx)"),
+        "a scope-all typed argument counts before it writes"
+    );
+    assert!(
+        MODELS.matches("self.begin_scope_all").count() == 2,
+        "the picker and the typed path are the only two callers"
+    );
+}
+
+/// The ask cannot live in a footer the typed command never opened: when the
+/// picker is not on screen, the count prompt lands in the conversation, and
+/// it is the shared channel text, not a window-private sentence.
+#[test]
+fn the_typed_ask_lands_in_the_conversation() {
+    assert!(
+        TURNS.contains("self.screen != Screen::Models"),
+        "the in-chat ask only fires when no footer can show it"
+    );
+    assert!(
+        TURNS.contains("opencrabs::channels::commands::apply_all_prompt_text"),
+        "the in-chat ask reads the same text the channels use"
+    );
+    assert!(
+        TURNS.contains("enter apply to all  esc cancel"),
+        "the ask names the keys that answer it"
+    );
+}

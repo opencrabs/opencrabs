@@ -173,7 +173,7 @@ pub struct TokenResponse {
 
 /// Start the OAuth device flow. Returns device code + user code for display.
 pub async fn start_device_flow() -> anyhow::Result<DeviceFlowResponse> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .post(DEVICE_CODE_URL)
         .header("content-type", "application/json")
@@ -201,7 +201,7 @@ pub async fn poll_for_device_code(
     user_code: &str,
     interval: u64,
 ) -> anyhow::Result<DeviceAuthCodeResponse> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let poll_interval = Duration::from_secs(interval.max(5));
     let max_wait = Duration::from_secs(15 * 60);
     let start = Instant::now();
@@ -251,7 +251,7 @@ pub async fn poll_for_device_code(
 pub async fn exchange_device_code_for_tokens(
     device_code: &DeviceAuthCodeResponse,
 ) -> anyhow::Result<TokenResponse> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let redirect_uri = "https://auth.openai.com/deviceauth/callback";
 
     let resp = client
@@ -341,7 +341,7 @@ fn decode_jwt_claims(id_token: &str) -> (Option<String>, u64) {
 /// Exchange tokens for an OpenAI API key (optional — gives longer-lived access).
 /// This is the `urn:ietf:params:oauth:grant-type:token-exchange` flow.
 pub async fn exchange_for_api_key(id_token: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let resp = client
         .post(OAUTH_TOKEN_URL)
         .header("content-type", "application/json")
@@ -458,7 +458,7 @@ impl CodexTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?
         };
 
-        let client = reqwest::Client::new();
+        let client = crate::utils::http::shared();
         let resp = client
             .post(OAUTH_TOKEN_URL)
             .header("content-type", "application/json")

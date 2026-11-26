@@ -20,7 +20,7 @@ impl TrelloClient {
         Self {
             api_key: api_key.into(),
             api_token: api_token.into(),
-            http: Client::new(),
+            http: crate::utils::http::shared().clone(),
         }
     }
 

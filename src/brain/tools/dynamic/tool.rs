@@ -409,7 +409,7 @@ impl DynamicTool {
             None => return Ok(ToolResult::error("HTTP tool missing 'url' field".into())),
         };
         let method = self.def.method.as_deref().unwrap_or("GET").to_uppercase();
-        let client = reqwest::Client::new();
+        let client = crate::utils::http::shared();
         let mut req = match method.as_str() {
             "POST" => client.post(&url),
             "PUT" => client.put(&url),

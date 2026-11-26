@@ -131,10 +131,16 @@ pub enum OverlayId {
     Warning,
     /// A file preview, which covers the window.
     Preview,
+    /// The built-in editor a bang command opened (#3163), which covers the
+    /// window and owns the keyboard while it is up.
+    Editor,
     /// A row's context menu.
     RailMenu,
     /// Waiting for a second session while a split is set up.
     SplitPick,
+    /// A card of the instance strip (pair, share, a crab's own card): it has
+    /// fields the owner types into.
+    InstancePair,
     /// Seeker.
     CommandPalette,
     /// The theme modal, which owns the window while it is open (#2619).
@@ -369,5 +375,24 @@ mod tests {
             assert_eq!(focus_target(owner), FocusTarget::Root, "{owner:?}");
         }
         assert_eq!(focus_target(KeyboardOwner::Composer), FocusTarget::Composer);
+    }
+
+    /// The same hole for the strip's cards: a character typed into the
+    /// pairing form reached the hidden editor, so the field looked dead. The
+    /// upstream mark editor (`InstanceGlyph`) has no card here yet, so the
+    /// strip's one overlay carries the check.
+    #[test]
+    fn the_instance_forms_take_the_keyboard_too() {
+        for overlay in [OverlayId::InstancePair] {
+            assert_eq!(
+                keyboard_owner(&[overlay], Screen::Chat),
+                KeyboardOwner::Overlay(overlay),
+                "{overlay:?}"
+            );
+            assert_eq!(
+                focus_target(KeyboardOwner::Overlay(overlay)),
+                FocusTarget::Root
+            );
+        }
     }
 }

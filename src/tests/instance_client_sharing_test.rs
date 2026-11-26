@@ -55,6 +55,21 @@ fn the_remote_runtime_is_built_once() {
     );
 }
 
+/// The window must go through that entry point. It used to build a
+/// current-thread runtime per call, and a client with it.
+#[test]
+fn the_window_runs_remote_calls_on_the_shared_runtime() {
+    let source = read_src("src/gui/dashboard_instances.rs");
+    assert!(
+        !source.contains("new_current_thread"),
+        "the window builds its own runtime again for remote calls"
+    );
+    assert!(
+        source.contains("instance_client::block_on"),
+        "the window no longer routes remote calls through the shared runtime"
+    );
+}
+
 /// `block_on` is a real door: it drives a future to completion and hands back
 /// its value, twice in a row, on the same runtime.
 #[test]

@@ -504,7 +504,7 @@ fn render_reads_cost_zero_network_calls() {
 /// The first `BangOutput` the sink receives, or a failure naming what came.
 fn bang_output(rx: &std::sync::mpsc::Receiver<TurnEvent>) -> String {
     match rx.recv_timeout(Duration::from_secs(20)) {
-        Ok(TurnEvent::BangOutput(text)) => text,
+        Ok(TurnEvent::BangOutput { text, .. }) => text,
         Ok(_) => panic!("the sink got another event first"),
         Err(e) => panic!("no bang output: {e}"),
     }
@@ -521,7 +521,7 @@ fn a_bang_command_goes_to_the_remote_crab_and_its_refusal_comes_back() {
     ));
     let backend = Backend::Remote(served.crab.clone());
     let (sink, rx) = std::sync::mpsc::channel();
-    crate::bang::spawn(&backend, "ls".to_string(), sink);
+    crate::bang::spawn(&backend, "ls".to_string(), None, sink);
     let text = bang_output(&rx);
     assert_eq!(
         text,
@@ -541,7 +541,7 @@ fn an_editor_with_a_remote_crab_answers_with_the_reason() {
     let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
     let backend = Backend::Remote(served.crab.clone());
     let (sink, rx) = std::sync::mpsc::channel();
-    crate::bang::spawn(&backend, "vim notes.txt".to_string(), sink);
+    crate::bang::spawn(&backend, "vim notes.txt".to_string(), None, sink);
     assert_eq!(
         bang_output(&rx),
         "$ vim notes.txt\nonly on a crab on this machine"

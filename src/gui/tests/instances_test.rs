@@ -56,6 +56,48 @@ fn a_probe_for_an_id_the_window_does_not_hold_is_ignored() {
 }
 
 #[test]
+fn upsert_keeps_position_and_health() {
+    let mut set = Instances::from_file(&file(&[("a:1", "alpha"), ("b:2", "beta")]));
+    set.record_probe("a:1", Ok(3), 500);
+    let mut renamed = known("a:1", "alpha nova");
+    renamed.url = "http://10.0.0.5:7878".to_string();
+    set.upsert(renamed);
+    assert_eq!(set.len(), 2);
+    assert_eq!(set.entries()[0].label(), "alpha nova");
+    assert_eq!(set.entries()[0].url(), "http://10.0.0.5:7878");
+    assert!(set.entries()[0].health.is_up());
+}
+
+#[test]
+fn remove_clears_a_selection_that_pointed_at_it() {
+    let mut set = Instances::from_file(&file(&[("a:1", "alpha"), ("b:2", "beta")]));
+    assert!(set.select("b:2"));
+    assert!(set.remove("b:2"));
+    assert_eq!(set.selected_host_id(), None);
+    assert!(!set.remove("b:2"));
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
+fn probe_for_a_removed_instance_is_ignored() {
+    let mut set = Instances::from_file(&file(&[("a:1", "alpha")]));
+    set.remove("a:1");
+    set.record_probe("a:1", Ok(5), 900);
+    assert!(set.is_empty());
+}
+
+#[test]
+fn select_step_wraps_both_ways() {
+    let mut set = Instances::from_file(&file(&[("a:1", "alpha"), ("b:2", "beta")]));
+    assert_eq!(set.select_step(1), Some("a:1"));
+    assert_eq!(set.select_step(1), Some("b:2"));
+    assert_eq!(set.select_step(1), Some("a:1"));
+    assert_eq!(set.select_step(-1), Some("b:2"));
+    let mut empty = Instances::default();
+    assert_eq!(empty.select_step(1), None);
+}
+
+#[test]
 fn select_refuses_an_unknown_id() {
     let mut set = Instances::from_file(&file(&[("a:1", "alpha")]));
     assert!(!set.select("zzz:9"));
@@ -85,6 +127,21 @@ fn strip_label_collapses_and_cuts_on_char_boundaries() {
         STRIP_LABEL_MAX
     );
     assert_eq!(strip_label(""), "");
+}
+
+#[test]
+fn badge_glyph_is_one_character_and_never_an_empty_circle() {
+    // "lenovo" was drawn whole inside a 32 px circle and spilled out of it.
+    assert_eq!(badge_glyph("lenovo-g780"), "L");
+    assert_eq!(badge_glyph("  portátil do norte"), "P");
+    // A leading symbol is not a letter: the initial is the first alphanumeric.
+    assert_eq!(badge_glyph("_crab"), "C");
+    assert_eq!(badge_glyph("i7"), "I");
+    // Multi-byte input yields exactly one code point, never a broken one.
+    assert_eq!(badge_glyph("ção").chars().count(), 1);
+    // No alphanumeric at all still has to draw something.
+    assert_eq!(badge_glyph(""), "?");
+    assert_eq!(badge_glyph("---"), "?");
 }
 
 #[test]
@@ -119,5 +176,42 @@ fn badge_title_names_the_state() {
             5
         )
         .contains("por verificar")
+    );
+}
+
+#[test]
+fn badge_tint_is_stable_and_bounded() {
+    // Same id, same slot, every run and every machine: the strip's colour is a
+    // property of the crab, not of this boot.
+    assert_eq!(badge_tint("lenovo:4f2a"), badge_tint("lenovo:4f2a"));
+    for id in [
+        "a:1",
+        "",
+        "lenovo:4f2a",
+        "máquina do norte",
+        "192.168.1.114",
+    ] {
+        assert!(badge_tint(id) < BADGE_TINTS, "slot out of range for {id:?}");
+    }
+}
+
+#[test]
+fn badge_tint_does_not_collapse_a_realistic_column() {
+    // The first draft hashed with plain FNV and `% 6`, which is where this
+    // test comes from: five different ids landed in slot 5, so a column of
+    // crabs wore one colour. Four distinct slots over six ids is the floor.
+    let ids = [
+        "pc-do-daniel",
+        "lenovo",
+        "mac",
+        "server i7",
+        "thinkpad",
+        "192.168.1.114",
+    ];
+    let slots: std::collections::BTreeSet<usize> = ids.iter().map(|id| badge_tint(id)).collect();
+    assert!(
+        slots.len() >= 4,
+        "tints collapsed to {} slots: {slots:?}",
+        slots.len()
     );
 }

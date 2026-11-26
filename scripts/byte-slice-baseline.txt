@@ -397,6 +397,7 @@
 1	src/gui/editor.rs	render[clip_at..input_at]
 1	src/gui/sessions.rs	title_line[..cluster_at]
 1	src/gui/sessions.rs	title_line[cluster_open..cluster_end]
+1	src/gui/tests/editor_dialog_test.rs	DASHBOARD[module..]
 1	src/gui/tests/main_test.rs	render[card..]
 3	src/gui/tests/main_test.rs	render[render
 2	src/gui/tests/main_test.rs	src[..at]
@@ -812,3 +813,8 @@
 1	src/utils/string.rs	s[1..]
 1	src/utils/string.rs	s[s.ceil_char_boundary(s.len() - max_bytes)..]
 1	src/utils/string.rs	s[tail_start..]
+1	src/tests/compaction_notice_test.rs	COMPACTION[branch..branch + 1600]
+1	src/tests/compaction_notice_test.rs	src[cursor..]
+1	src/tests/compaction_notice_test.rs	src[start..start + 500]
+2	src/tests/compaction_summary_budget_test.rs	src[fn_start..]
+1	src/tests/compaction_summary_budget_test.rs	src[fn_start + cut_check..fn_start + extraction]

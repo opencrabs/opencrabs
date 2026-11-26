@@ -664,6 +664,13 @@ impl Dashboard {
         if self.themes_open {
             return vec![OverlayId::Themes];
         }
+        // The editor dialog owns the keyboard on every screen, the same law
+        // as the theme and settings modals: it is the topmost surface while
+        // it is up, so the composer and the panes underneath cannot answer a
+        // key meant for the buffer (#3163).
+        if self.editor_focus.is_some() {
+            return vec![OverlayId::Editor];
+        }
         // A full screen is its own surface: the rail and the chat overlays are
         // not drawn over it, so nothing below can own a key there.
         if self.screen != Screen::Chat {
@@ -710,6 +717,15 @@ impl Dashboard {
         }
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
+        }
+        // The strip's cards are fields the owner types into, drawn over the
+        // whole window: they sit at the modal tier, above the rail. `on_key`
+        // already routes to them first; this is what moves focus to the root
+        // so the hidden local editor cannot take the characters instead
+        // (#3133). The strip keeps the card and says whether one is up
+        // through the cell it shares with the window.
+        if self.instance_card.get() {
+            open.push(OverlayId::InstancePair);
         }
         if self.group_target.is_some() {
             open.push(OverlayId::GroupPick);

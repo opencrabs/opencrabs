@@ -1673,7 +1673,7 @@ async fn execute_direct_trigger_job(
 }
 /// Deliver cron result via HTTP POST to a generic webhook URL.
 async fn deliver_http(url: &str, job_name: &str, content: &str, api_key: Option<&str>) {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let body = serde_json::json!({
         "job_name": job_name,
         "content": content,
@@ -1925,7 +1925,7 @@ async fn deliver_discord(channel_id: &str, message: &str) {
     };
 
     let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages");
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut delivered = 0usize;
     for chunk in discord_chunks_for_delivery(message) {
         let body = serde_json::json!({ "content": chunk });
@@ -1974,7 +1974,7 @@ async fn deliver_discord_forum(forum_id: &str, job_name: &str, message: &str) {
         return;
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let base = "https://discord.com/api/v10";
     let auth = format!("Bot {token}");
 
@@ -2113,7 +2113,7 @@ async fn deliver_slack(channel_id: &str, message: &str) {
     };
 
     let url = "https://slack.com/api/chat.postMessage";
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut delivered = 0usize;
     for chunk in slack_chunks_for_delivery(message) {
         let body = serde_json::json!({ "channel": channel_id, "text": chunk });

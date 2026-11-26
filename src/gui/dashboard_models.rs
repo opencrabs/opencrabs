@@ -191,11 +191,21 @@ impl Dashboard {
             };
         }
         if let Some(arg) = arg {
+            // The typed command answers in the conversation and no screen
+            // opens. But a trailing ` all` is a scope-all write (#3168), and
+            // a bulk write never runs unannounced: the typed argument is
+            // parsed the way the engine parses it (#468) and a scope-all
+            // takes the same count-then-confirm the picker takes, only with
+            // the ask landing in the conversation instead of a footer.
+            let (pair_arg, scope_all) = match arg.trim().strip_suffix(" all") {
+                Some(rest) if !rest.trim().is_empty() => (rest.trim(), true),
+                _ => (arg.trim(), false),
+            };
             // A bare model id resolves against these rows, the ones the
             // switch would have read had it waited for them in place.
-            let pair = match models::find(&rows, &arg) {
+            let pair = match models::find(&rows, pair_arg) {
                 Some(row) => row.pair(),
-                None => arg,
+                None => pair_arg.to_string(),
             };
             if fresh {
                 self.models_rows = rows;
@@ -204,7 +214,11 @@ impl Dashboard {
             // since keeps the session it is about.
             let open = self.models_session;
             self.models_session = target;
-            self.switch_model(pair, cx);
+            if scope_all {
+                self.begin_scope_all(pair, cx);
+            } else {
+                self.switch_model(pair, cx);
+            }
             if !fresh {
                 self.models_session = open;
             }

@@ -111,6 +111,8 @@ impl Dashboard {
                 }
             }
             commands::GuiAction::ToggleHelp => self.toggle_help(cx),
+            // `/new` follows the crab on screen: the window's backend is the
+            // crab it holds, so the row is created there (#3133).
             commands::GuiAction::NewSession => self.new_session(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),

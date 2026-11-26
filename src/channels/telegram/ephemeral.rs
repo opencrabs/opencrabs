@@ -220,7 +220,12 @@ enum Outcome {
 async fn post(token: &str, method: &str, body: &serde_json::Value) -> Outcome {
     const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(15);
     let url = format!("https://api.telegram.org/bot{token}/{method}");
-    let mut resp = match reqwest::Client::new().post(&url).json(body).send().await {
+    let mut resp = match crate::utils::http::shared()
+        .post(&url)
+        .json(body)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Telegram: ephemeral {method} transport error: {e}, sending publicly");
@@ -243,7 +248,12 @@ async fn post(token: &str, method: &str, body: &serde_json::Value) -> Outcome {
             "Telegram: ephemeral {method} throttled, waiting {retry_after:?} and retrying once"
         );
         tokio::time::sleep(retry_after).await;
-        resp = match reqwest::Client::new().post(&url).json(body).send().await {
+        resp = match crate::utils::http::shared()
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(

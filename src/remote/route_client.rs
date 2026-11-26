@@ -82,7 +82,7 @@ pub async fn harvest(
     base_url: &str,
     api_key: Option<&str>,
 ) -> Result<Option<(String, usize)>> {
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let mut req = client
         .get(format!("{}/a2a/routes", base_url.trim_end_matches('/')))
         .timeout(Duration::from_secs(5));

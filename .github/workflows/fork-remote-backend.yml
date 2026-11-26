@@ -172,10 +172,21 @@ jobs:
       # Same arrangement as the test-linux leg of ci.yml: clang drives mold.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      # The citest comment in Cargo.toml: two concurrent units of this crate
+      # The citest note below: two concurrent units of this crate
       # evict the 16 GB runner. One unit at a time, each fanning its codegen
       # across every core.
       CARGO_BUILD_JOBS: 1
+      # Upstream dropped `[profile.citest]` from Cargo.toml (2c1b0971c, #2934):
+      # on its runners `ci` measured faster. This lane's slices were tuned on
+      # it, so the fork defines the same profile here, in cargo's own config,
+      # instead of carrying a Cargo.toml hunk upstream removed on purpose.
+      CARGO_PROFILE_CITEST_INHERITS: dev
+      CARGO_PROFILE_CITEST_OPT_LEVEL: "1"
+      CARGO_PROFILE_CITEST_DEBUG: "0"
+      CARGO_PROFILE_CITEST_CODEGEN_UNITS: "256"
+      CARGO_PROFILE_CITEST_LTO: "false"
+      CARGO_PROFILE_CITEST_DEBUG_ASSERTIONS: "false"
+      CARGO_PROFILE_CITEST_OVERFLOW_CHECKS: "false"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
@@ -353,6 +364,17 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # Two concurrent units of this crate evict the 16 GB runner.
       CARGO_BUILD_JOBS: 1
+      # Upstream dropped `[profile.citest]` from Cargo.toml (2c1b0971c, #2934):
+      # on its runners `ci` measured faster. This lane's slices were tuned on
+      # it, so the fork defines the same profile here, in cargo's own config,
+      # instead of carrying a Cargo.toml hunk upstream removed on purpose.
+      CARGO_PROFILE_CITEST_INHERITS: dev
+      CARGO_PROFILE_CITEST_OPT_LEVEL: "1"
+      CARGO_PROFILE_CITEST_DEBUG: "0"
+      CARGO_PROFILE_CITEST_CODEGEN_UNITS: "256"
+      CARGO_PROFILE_CITEST_LTO: "false"
+      CARGO_PROFILE_CITEST_DEBUG_ASSERTIONS: "false"
+      CARGO_PROFILE_CITEST_OVERFLOW_CHECKS: "false"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 

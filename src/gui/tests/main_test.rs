@@ -2689,6 +2689,7 @@ fn help_lists_every_rail_chord() {
         ("ctrl+f", "Find a session"),
         ("ctrl+shift+p", "Pin the selected session"),
         ("ctrl+d", "Delete session (asks first)"),
+        ("ctrl+1..9,0", "Jump to the nth session or topic"),
         ("ctrl+g", "Session files"),
         ("p", "Browse projects"),
         ("esc", "Cancel or step back"),
@@ -2706,6 +2707,7 @@ fn help_lists_every_rail_chord() {
                 "ctrl+f" => "ctrl-f",
                 "ctrl+shift+p" => "ctrl-shift-p",
                 "ctrl+d" => "ctrl-d",
+                "ctrl+1..9,0" => "ctrl-1..9,0",
                 "ctrl+s" => "ctrl-s",
                 "ctrl+g" => "ctrl-g",
                 "p" => "alt-p",
@@ -2967,6 +2969,18 @@ fn the_seeker_hint_is_visible_and_clickable() {
     assert!(
         hint.contains("seeker_chord_label()"),
         "the chord printed must come from the shared label, not a literal"
+    );
+    // The pill shares its row with the identity, which paints `text_faint`.
+    // At `text_muted` the chord was the loudest ink in a footer of chrome, so
+    // the eye landed on the key before the session it described (#3146). The
+    // resting token is the row's own; the hover wash stays the door's cue.
+    assert!(
+        hint.contains(".text_color(rgb(palette::current().text_faint))"),
+        "the pill rests on the same ink as the live state beside it"
+    );
+    assert!(
+        !hint.contains("text_muted"),
+        "a chord label must not out-shine the live state it shares the row with"
     );
 }
 
@@ -4009,5 +4023,40 @@ fn a_provider_retry_says_so_on_the_card() {
     assert!(
         line.contains("dns error"),
         "the reason the user can act on has to survive: {line}"
+    );
+}
+
+/// The hint line breaks instead of cutting its sentence (#3162).
+///
+/// The line used to carry `truncate()`, so a narrow pane put an ellipsis where
+/// the tail of the hint used to be. The tail is where the second command and
+/// the joke live, so the whole sentence has to survive: the text wraps onto a
+/// second or third row, the label stays on the first row of it, and the row
+/// takes the width it has left to break against.
+#[test]
+fn the_hint_line_wraps_instead_of_truncating() {
+    let render = include_str!("../dashboard_render.rs");
+    let line = fn_body(render, "hint_line");
+    assert!(
+        !line.contains(".truncate()"),
+        "the hint sentence is never cut: {line}"
+    );
+    assert!(
+        line.contains(".whitespace_normal()"),
+        "the sentence wraps instead of being cut: {line}"
+    );
+    assert!(
+        line.contains(".flex_1()"),
+        "the sentence has a width to break against: {line}"
+    );
+    assert!(
+        line.contains(".items_start()"),
+        "the label stays on the first row of a wrapped sentence: {line}"
+    );
+    // The dismiss control is still there: a line that cannot be hidden is a
+    // line nobody can get rid of.
+    assert!(
+        line.contains("hint-dismiss"),
+        "the line can still be dismissed: {line}"
     );
 }

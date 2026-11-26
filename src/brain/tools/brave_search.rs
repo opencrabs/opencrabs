@@ -117,10 +117,7 @@ impl Tool for BraveSearchTool {
     async fn execute(&self, input: Value, _context: &ToolExecutionContext) -> Result<ToolResult> {
         let input: BraveSearchInput = serde_json::from_value(input)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;
+        let client = crate::utils::http::shared();
 
         let url = format!(
             "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
@@ -132,6 +129,7 @@ impl Tool for BraveSearchTool {
             .get(&url)
             .header("X-Subscription-Token", &self.api_key)
             .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .map_err(|e| ToolError::Execution(format!("Brave search request failed: {}", e)))?;

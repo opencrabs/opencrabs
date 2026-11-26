@@ -10,6 +10,25 @@
 //! has never seen in the chat, so probing first costs a round trip per user per
 //! group and still errors. The failed call is the membership test.
 
+/// The bot owner's numeric user id, or `None` when the config carries no
+/// resolvable id at all.
+///
+/// `allowed_users` is a *list*, not an ordered pair: the shipped convention
+/// permits the wildcard `"*"` anywhere in it, and plenty of real configs put
+/// it first (`allowed_users = ["*", "1608111860"]`). Callers used to take
+/// `.first()` and parse it, which returned `None` on exactly those configs, and every owner-menu path treats `None` as "no owner configured", so
+/// `register_scoped_menus` returned early and the Telegram `/` picker was
+/// left with nothing but `/start`. The first entry that parses wins;
+/// non-numeric entries (`"*"`, channel handles, typos) are skipped instead of
+/// aborting the lookup.
+///
+/// Delegates to [`crate::config::owner::resolve_owner_id`] so the per-user
+/// menu and the command-level owner gate resolve ownership the same way:
+/// explicit `bot_owner` first, positional fallback second.
+pub fn owner_user_id(allowed_users: &[String], bot_owner: &[String]) -> Option<u64> {
+    crate::config::owner::resolve_owner_id(allowed_users, bot_owner)
+}
+
 /// Does this error mean "that user is not in this chat" rather than a fault?
 ///
 /// Matched on the rendered error because teloxide surfaces these as opaque API

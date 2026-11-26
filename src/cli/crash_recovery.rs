@@ -28,7 +28,7 @@ async fn fetch_available_versions() -> Result<Vec<ReleaseEntry>> {
     let is_windows = std::env::consts::OS == "windows";
     let ext = if is_windows { "zip" } else { "tar.gz" };
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let releases: Vec<serde_json::Value> = client
         .get(GITHUB_RELEASES_API)
         .query(&[("per_page", "15")])
@@ -93,7 +93,7 @@ async fn download_and_install_binary(url: &str, version: &str) -> Result<()> {
     print!("  {}Downloading v{}...{}", orange, version, reset);
     io::stdout().flush()?;
 
-    let client = reqwest::Client::new();
+    let client = crate::utils::http::shared();
     let archive_bytes = client
         .get(url)
         .send()

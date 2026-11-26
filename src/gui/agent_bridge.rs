@@ -30,8 +30,39 @@ use uuid::Uuid;
 
 /// A turn outcome the worker thread hands back to the UI thread.
 pub enum TurnEvent {
-    /// Output of a `!cmd` the user ran in the window (#2437).
-    BangOutput(String),
+    /// Output of a `!cmd` the user ran, with the conversation that ran it
+    /// (#3160).
+    ///
+    /// The id is what keeps the output in the conversation that asked for it.
+    /// The event used to carry the text alone, and the window painted it on
+    /// whichever conversation happened to be on screen when the command came
+    /// back: in a split, pane A's output landed in pane B's chat, and
+    /// switching conversations while a command ran put the output in the
+    /// conversation the reader had already moved to. The id travels with the
+    /// output, and the arrival is routed to its owner, the same door a
+    /// command reply takes (#3036).
+    BangOutput {
+        /// The conversation the command was run in.
+        session: Option<Uuid>,
+        /// The command's output, already formatted the way the terminal
+        /// prints it.
+        text: String,
+    },
+    /// An editor the user asked for with `!vi`, `!nano`, and the
+    /// conversation that asked for it (#3163).
+    ///
+    /// The window opens a built-in buffer instead of handing the editor to
+    /// Terminal.app. The request travels with the id of the conversation that
+    /// ran it, so the dialog opens on the pane that asked for it: a split
+    /// shows a pane per conversation and each one owns its own working
+    /// directory, so the id is what decides which pane answers and which
+    /// directory a relative path is read from.
+    EditorRequest {
+        /// The conversation the editor was asked for in.
+        session: Option<Uuid>,
+        /// The editor invocation: program, file, line, read-only.
+        command: opencrabs::ui_core::bang::EditorCommand,
+    },
     /// ctrl+k cleared this session's messages; the transcript empties (#2430).
     MessagesCleared(Uuid),
     /// ctrl+k could not clear the session: the reason, for the notices.

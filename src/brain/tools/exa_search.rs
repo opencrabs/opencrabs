@@ -154,14 +154,16 @@ impl ExaSearchTool {
         num_results: usize,
         search_type: &str,
     ) -> Result<ToolResult> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;
+        // The MCP walk makes several calls with one client, and the ceiling is
+        // part of that client, so it lives in a slot and is built once.
+        static MCP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = crate::utils::http::cached_client(&MCP_CLIENT, |b| {
+            b.timeout(std::time::Duration::from_secs(30))
+        });
 
         // Try with existing session, re-init on 404
         let result = self
-            .try_mcp_tool_call(&client, query, num_results, search_type)
+            .try_mcp_tool_call(client, query, num_results, search_type)
             .await;
 
         match result {
@@ -170,7 +172,7 @@ impl ExaSearchTool {
                 // Session expired — re-initialize
                 tracing::info!("MCP session expired, re-initializing");
                 *self.mcp_session_id.write().await = None;
-                self.try_mcp_tool_call(&client, query, num_results, search_type)
+                self.try_mcp_tool_call(client, query, num_results, search_type)
                     .await
             }
             Err(e) => Err(e),
@@ -327,10 +329,7 @@ impl ExaSearchTool {
             ToolError::Execution("Direct API mode requires EXA_API_KEY".to_string())
         })?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;
+        let client = crate::utils::http::shared();
 
         let body = serde_json::json!({
             "query": input.query,
@@ -347,6 +346,7 @@ impl ExaSearchTool {
             .header("Content-Type", "application/json")
             .header("x-exa-integration", "opencrabs")
             .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .map_err(|e| ToolError::Execution(format!("EXA search request failed: {}", e)))?;

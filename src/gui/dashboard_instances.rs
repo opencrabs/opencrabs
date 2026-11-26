@@ -93,6 +93,22 @@ impl Dashboard {
         self.instance_switch(backend, cx);
     }
 
+    /// Ctrl+Alt+Up/Down: open the crab `delta` places from the one on screen,
+    /// wrapping. The walk runs on a copy so the pick goes through
+    /// [`Self::instance_picked`] like a click, swap and all; landing on the
+    /// crab already open (a column of one) leaves it open rather than taking
+    /// the click's "back home" meaning.
+    pub(crate) fn instance_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let mut walk = self.instances.clone();
+        let Some(host_id) = walk.select_step(delta).map(str::to_string) else {
+            return;
+        };
+        if self.instances.selected_host_id() == Some(host_id.as_str()) {
+            return;
+        }
+        self.instance_picked(&host_id, cx);
+    }
+
     /// Back to the local crab: the workspace mark at the top of the strip, or
     /// a second click on the open badge.
     pub(crate) fn instance_clear(&mut self, cx: &mut Context<Self>) {

@@ -4,6 +4,7 @@ use super::failure_window;
 use super::types::*;
 use crate::brain::agent::context::AgentContext;
 use crate::brain::agent::error::{AgentError, Result};
+use crate::brain::provider::fallback::PRIMARY_REPROBE_TTL;
 use crate::brain::provider::{ContentBlock, LLMRequest, LLMResponse, Message, Role};
 use crate::brain::tools::ToolExecutionContext;
 use crate::db::models::TitleSource;
@@ -3344,14 +3345,15 @@ impl AgentService {
                                                     )
                                                 } else {
                                                     format!(
-                                                        "Stream error → rescued by {}/{} ({}/{} within {}m; primary will be tried again next turn)",
+                                                        "Stream error → rescued by {}/{} ({}/{} within {}m; primary is re-probed within {}s)",
                                                         fb_name,
                                                         fb_model,
                                                         streak,
                                                         STICKY_FALLBACK_THRESHOLD,
                                                         failure_window::STICKY_FALLBACK_WINDOW
                                                             .as_secs()
-                                                            / 60
+                                                            / 60,
+                                                        PRIMARY_REPROBE_TTL.as_secs()
                                                     )
                                                 },
                                             },
@@ -3709,14 +3711,15 @@ impl AgentService {
                                                     )
                                                 } else {
                                                     format!(
-                                                        "5xx error → rescued by {}/{} ({}/{} within {}m; primary will be tried again next turn)",
+                                                        "5xx error → rescued by {}/{} ({}/{} within {}m; primary is re-probed within {}s)",
                                                         fb_name,
                                                         fb_model,
                                                         streak,
                                                         STICKY_FALLBACK_THRESHOLD,
                                                         failure_window::STICKY_FALLBACK_WINDOW
                                                             .as_secs()
-                                                            / 60
+                                                            / 60,
+                                                        PRIMARY_REPROBE_TTL.as_secs()
                                                     )
                                                 },
                                             },

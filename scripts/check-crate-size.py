@@ -145,6 +145,7 @@ def self_test(root: str) -> int:
         ("src/gui/main.rs", "src/tests/**", False),
         ("src/assets/onboard3.png", "src/assets/onboard*.png", True),
         ("src/assets/split-panes.png", "src/assets/onboard*.png", False),
+        ("src/assets/split-panes.png", "src/assets/split-panes.png", True),
         ("scripts/check-crate-size.py", "scripts/**", True),
         ("src/scripts_like_name.rs", "scripts/**", False),
         ("CHANGELOG.md", "CHANGELOG.md", True),
@@ -171,7 +172,6 @@ def self_test(root: str) -> int:
         "src/assets/icon-packs/topics/crab_api.png",
         "src/assets/sound/notification.wav",
         "src/brain/tools/doc_gen/fonts/DejaVuSans.ttf",
-        "src/assets/split-panes.png",
     ):
         if must_keep not in files:
             failures.append(f"{must_keep} is needed at build time but is not packaged")

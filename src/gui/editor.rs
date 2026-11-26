@@ -473,6 +473,12 @@ pub struct ReplyAttachment {
 
 /// The editor view. Ranges internal to this struct are utf8; every value
 /// crossing the `EntityInputHandler` boundary is utf16, per the contract.
+/// What an empty composer says. Shared with the remote panel, which draws the
+/// same field for a crab on the other machine: two copies of this string drift
+/// the first time one of them is edited, and the owner reads the drift as "the
+/// composer is not the same" (#3133).
+pub(crate) const PLACEHOLDER: &str = "Talk to the crab…";
+
 pub struct Editor {
     pub focus_handle: FocusHandle,
     /// A request to put the caret back in this field once a frame with a
@@ -783,7 +789,7 @@ impl Editor {
             session: None,
             attachments: Vec::new(),
             reply: None,
-            placeholder: "Talk to the crab…".into(),
+            placeholder: PLACEHOLDER.into(),
             docked: false,
             selected_range: 0..0,
             selection_reversed: false,
@@ -1949,7 +1955,10 @@ impl Editor {
     /// read with `cx` alone, and nothing in the body below ever touched the
     /// window. So the emoji branch stays in `send`, where the key belongs, and
     /// everything that builds a payload lives here, where a tick can reach it.
-    fn submit(&mut self, cx: &mut Context<Self>) {
+    /// Visible to the window so a composer that is not the chat's can send
+    /// through the same path: the remote panel's "enviar" button has no key
+    /// behind it either (#3133).
+    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         // A command it is still spelling runs the highlighted name, which is
         // what Enter on the terminal's suggestion list does. Attachments are
         // not part of a command, so a draft carrying them goes out as text.
@@ -3903,10 +3912,23 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-shift-right", SelectWordRight, None),
         KeyBinding::new("ctrl-shift-left", SelectWordLeft, None),
         KeyBinding::new("ctrl-shift-right", SelectWordRight, None),
+        // `cmd` is gpui's Super key on every platform, not the platform's own
+        // command key: `Keystroke::parse` sets `modifiers.platform` for it and
+        // never `control` (gpui 0.2.2, `platform/keystroke.rs`). A chord
+        // written only as `cmd-*` therefore answers Super+V on Linux and
+        // Win+V on Windows and nothing else, which is why the owner had to
+        // paste with the right-click menu ("no linux tenho sempre de usar o
+        // rato para colar"). Every editing chord needs its ctrl twin, and
+        // ctrl-c got one first in #2587.
         KeyBinding::new("cmd-a", SelectAll, None),
+        KeyBinding::new("ctrl-a", SelectAll, None),
         KeyBinding::new("cmd-v", Paste, None),
+        KeyBinding::new("ctrl-v", Paste, None),
         KeyBinding::new("cmd-c", Copy, None),
         KeyBinding::new("ctrl-c", Copy, None),
+        // Cut stays `cmd-x` alone on purpose: the Help Center already gives
+        // ctrl+x to "close the pane holding the caret", and one chord must not
+        // mean two things.
         KeyBinding::new("cmd-x", Cut, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
@@ -4175,9 +4197,15 @@ fn line_col(content: &str, offset: usize) -> (usize, usize) {
 }
 
 /// What the composer says while an image sits unpasted in the clipboard
-/// (#2479). The TUI prints the same notice with its own key; here the field's
-/// own binding is `cmd-v`.
-const CLIPBOARD_IMAGE_HINT: &str = "\u{1f4cb} Image in clipboard - \u{2318}V to paste";
+/// (#2479). The TUI prints the same notice with its own key; here the field
+/// answers `cmd-v` on macOS and `ctrl-v` everywhere else, so the notice names
+/// the key the platform actually has. It used to spell `⌘V` on every system,
+/// which told a Linux user to press a key that did nothing.
+const CLIPBOARD_IMAGE_HINT: &str = if cfg!(target_os = "macos") {
+    "\u{1f4cb} Image in clipboard - \u{2318}V to paste"
+} else {
+    "\u{1f4cb} Image in clipboard - Ctrl+V to paste"
+};
 
 /// The hint paints at this fraction of the composer's own text size. A full
 /// size line of key names read as a second paragraph above the caret (#2630).
@@ -4516,6 +4544,63 @@ mod tests {
             .expect("editor key bindings");
         assert!(bindings.contains("KeyBinding::new(\"cmd-c\", Copy, None)"));
         assert!(bindings.contains("KeyBinding::new(\"ctrl-c\", Copy, None)"));
+    }
+
+    /// Every editing chord answers the key the platform actually has.
+    ///
+    /// gpui's `cmd-` is the Super key on every platform, never the platform's
+    /// command key (`Keystroke::parse` sets `modifiers.platform` and leaves
+    /// `control` alone). A chord bound only as `cmd-v` therefore answered
+    /// Super+V on Linux, and the owner could not paste into the composer at
+    /// all: "no linux tenho sempre de usar o rato para colar". This pins the
+    /// class, not the one key: paste, select-all and copy each need their ctrl
+    /// twin, and cut is the documented exception because ctrl+x already closes
+    /// a pane.
+    #[test]
+    fn editing_chords_carry_a_ctrl_twin() {
+        let src = include_str!("editor.rs");
+        let bindings = src
+            .split("pub fn bind_keys(")
+            .nth(1)
+            .and_then(|rest| rest.split("// Line math").next())
+            .expect("editor key bindings");
+        for (chord, action) in [("v", "Paste"), ("a", "SelectAll"), ("c", "Copy")] {
+            assert!(
+                bindings.contains(&format!("KeyBinding::new(\"cmd-{chord}\", {action}, None)")),
+                "the mac chord for {action} must stay: cmd-{chord}"
+            );
+            assert!(
+                bindings.contains(&format!(
+                    "KeyBinding::new(\"ctrl-{chord}\", {action}, None)"
+                )),
+                "a Linux and Windows user presses ctrl-{chord} for {action}, and it has to answer"
+            );
+        }
+        assert!(
+            !bindings.contains("KeyBinding::new(\"ctrl-x\""),
+            "ctrl+x closes the pane holding the caret, so it must not also cut"
+        );
+    }
+
+    /// The waiting-image notice names the key the reader's own system has.
+    #[test]
+    fn the_clipboard_hint_names_the_platform_key() {
+        if cfg!(target_os = "macos") {
+            assert!(
+                CLIPBOARD_IMAGE_HINT.contains('\u{2318}'),
+                "a mac reader is told the command key: {CLIPBOARD_IMAGE_HINT}"
+            );
+        } else {
+            assert!(
+                CLIPBOARD_IMAGE_HINT.contains("Ctrl+V"),
+                "a Linux or Windows reader is told ctrl: {CLIPBOARD_IMAGE_HINT}"
+            );
+            assert!(
+                !CLIPBOARD_IMAGE_HINT.contains('\u{2318}'),
+                "and never the command glyph, which is not on their keyboard: \
+                 {CLIPBOARD_IMAGE_HINT}"
+            );
+        }
     }
 
     /// Word motion answers every chord the TUI documents: ctrl and alt on

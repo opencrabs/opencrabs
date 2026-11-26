@@ -96,6 +96,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install ALSA dev (for local-stt feature)
@@ -242,6 +244,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build (macOS)
@@ -401,6 +405,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
 
       # Pinned to a released tag and an explicit tool version: the action
       # defaults cmakeVersion to "latest" and resolves it at run time.
@@ -677,6 +683,14 @@ jobs:
             exit 1
           fi
           echo "slice binary: $exe"
+          # Results are written to disk as they happen, not held in a shell
+          # variable until the end (#2944). The slice used to report nothing
+          # at all when it was cancelled mid-run: zero MODULE lines, zero
+          # `test result:` lines, no verdict in either direction. A per-module
+          # file on disk survives a later module's crash, and the summary
+          # below survives the job's own failure, so the receipt outlives the
+          # log scrollback.
+          mkdir -p slice-results
           status=0
           for m in config::winlock tests::utils_shell_test \
                    tests::utils_cwd_test tests::browser_default_windows_test \
@@ -688,20 +702,48 @@ jobs:
             out=$("$exe" "$m" 2>&1)
             rc=$?
             set -e
+            # The full output of this module, kept whatever the verdict is.
+            printf '%s\n' "$out" > "slice-results/$m.txt"
             n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
             failed=$(printf '%s\n' "$out" | sed -n 's/.*; \([0-9]*\) failed.*/\1/p' | head -n1)
             if [ $rc -ne 0 ]; then
               echo "::warning::Windows slice FAILS (rc=$rc, failed=${failed:-?}): $m"
               printf '%s\n' "$out" | tail -20
+              printf '%s FAIL rc=%s failed=%s\n' "$m" "$rc" "${failed:-?}" >> slice-results/summary.txt
               status=1
             elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
               echo "::warning::Windows slice ZERO-MATCH: $m names no tests here (renamed by a sibling PR)"
+              printf '%s ZERO-MATCH\n' "$m" >> slice-results/summary.txt
               status=1
             else
               echo "Windows slice PASS: $m ($n tests)"
+              printf '%s PASS %s tests\n' "$m" "$n" >> slice-results/summary.txt
             fi
           done
+          # The summary is also the job summary: the one place a reader looks
+          # for "did the slice have a verdict".
+          {
+            echo "### Windows scoped slice"
+            echo ""
+            echo '```'
+            cat slice-results/summary.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+
+      # The slice's receipts, kept whether it passed, failed, or was
+      # interrupted after some modules ran (#2944). `always()` covers the
+      # failure and the step-skip cases; a job killed by the runner's own
+      # timeout cannot upload anything, which is exactly why the results are
+      # written to disk DURING the run and not collected at the end.
+      - name: "Upload (windows): the slice's results"
+        if: "always()"
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-slice-results
+          path: slice-results
+          if-no-files-found: ignore
+          retention-days: 14
 
       # Fail fast from inside the job that failed (#2595): the fan-in `abort`
       # job cannot do it, because `needs` holds it until the run is over.
@@ -769,10 +811,10 @@ jobs:
     name: Test
     needs: [lint, audit]
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'ubuntu-latest' || 'self-hosted' }}
-    # This leg is the release-mode correctness check, so it stays on
-    # `--profile ci` (release, thin LTO). The cheap `citest` profile is
-    # only for the legs that exist to prove the code works, not to prove
-    # it works optimised.
+    # This leg is the release-mode correctness check, so it runs
+    # `--profile ci` (release, thin LTO). Every test leg runs the same
+    # profile: a cheaper test-only profile was tried, measured slower, and
+    # removed (#2934), so there is one profile to reason about.
     env:
       TEST_PROFILE: ci
     # Fork PRs run this on hosted runners, where the cache key can never
@@ -824,6 +866,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           # A fork PR saves too, so `cache-on-failure` can keep the partial
           # compile from a cancelled attempt and the retry restores it
           # (#3132). The save lands on the PR's own ref, never on main, so
@@ -873,11 +917,10 @@ jobs:
         # so the peak is a single rustc (~9 GB) instead of two, and each unit
         # still fans its codegen across all four cores.
         #
-        # The profile is per-leg (#2934): macOS keeps `ci` and stays the
-        # release-mode correctness check, while `test-linux` sets
-        # TEST_PROFILE=citest, opt-level 1 with 256 codegen units. The suite
-        # is 166 s of testing behind 43 minutes of rustc, so most of that leg
-        # was optimising test code nobody ships.
+        # Every test leg runs the same `ci` profile (#2934). A cheaper
+        # test-only profile was tried on the Linux leg and measured slower
+        # than `ci` (median 60m against 47m across the runs that reported),
+        # so it was removed and the profile no longer varies per leg.
         #
         # Do NOT pin CARGO_PROFILE_CI_CODEGEN_UNITS here. Codegen-units is part
         # of cargo's fingerprint, so overriding it rebuilds the entire dependency
@@ -939,18 +982,13 @@ jobs:
     needs: [lint, audit]
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-24.04
-    # 180, not 90 (#2934): the citest profile changed `Cargo.toml`, and
-    # rust-cache keys on that file, so the run that introduces the profile
-    # rebuilds every dependency from source. At 90 that run hit the ceiling
-    # mid-compile and then failed to save the cache, so the profile could
-    # never warm itself: every attempt started cold and died the same way.
-    # A ceiling is not a target, a warm run never approaches it.
-    timeout-minutes: 180
-    env:
-      # Cheaper than the macOS leg on purpose: see [profile.citest] in
-      # Cargo.toml. macOS keeps `ci` so release-mode correctness is still
-      # proven on every push.
-      TEST_PROFILE: citest
+    # 90, back from the 180 that stood here (#2934). The 180 existed only
+    # because a test-only profile changed `Cargo.toml`, and rust-cache keys
+    # on that file, so every run that touched the profile rebuilt all deps
+    # from source and needed the extra headroom to reach a cache save. That
+    # profile is gone, so this is back to a ceiling a warm run never
+    # approaches: the `ci` profile lands around 47 minutes here.
+    timeout-minutes: 90
     steps: *test-steps
 
   # ── Stage 2a3: GUI path filter (decides whether Stage 2c runs) ───────────
@@ -1076,6 +1114,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install build toolchain, display and software renderer (Linux)
@@ -1292,6 +1332,8 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
+          shared-key: rust-${{ runner.os }}-shared
+          key: ${{ hashFiles('Cargo.lock') }}-r2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Refuse to administer the host's rustup

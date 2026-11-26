@@ -100,7 +100,7 @@ pub(crate) async fn post_jsonrpc(
             tracing::debug!(attempt, backoff_ms = backoff, "retrying A2A transport");
             tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
         }
-        let mut req = reqwest::Client::new()
+        let mut req = crate::utils::http::shared()
             .post(url)
             .timeout(std::time::Duration::from_secs(10))
             .json(body);

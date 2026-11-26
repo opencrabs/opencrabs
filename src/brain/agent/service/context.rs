@@ -1321,6 +1321,22 @@ impl AgentService {
         // response's own verdict is read here, at the source.
         Self::warn_if_summary_truncated(response.stop_reason.clone(), &response.usage);
 
+        // #3172: a cut is a failed attempt, not a summary. With text the
+        // document is mutilated (typically missing the context-manifest
+        // fence), and the budget guard cannot see it because a capped
+        // document sits exactly at the budget. Without text there is no
+        // document at all. Either way the attempt must fail so the
+        // caller's retry loop retries, and a terminal cut flows to the
+        // honest CompactionOutcome::Truncated marker instead of shipping
+        // the cut as the continuation document.
+        if Self::summary_stop_is_cut(response.stop_reason.clone()) {
+            return Err(AgentError::Internal(format!(
+                "summariser stopped at MaxTokens ({} output / {} reasoning tokens): \
+                 the continuation document is cut, counting as a failed attempt",
+                response.usage.output_tokens, response.usage.reasoning_tokens
+            )));
+        }
+
         let summary = Self::extract_text_from_response(&response);
 
         if let Err(e) = Self::save_compaction_summary_to_memory(session_id, &summary).await {
@@ -1586,6 +1602,22 @@ impl AgentService {
                 usage.reasoning_tokens,
             );
         }
+    }
+
+    /// The enforcement predicate for the visibility check above (#3172):
+    /// does this stop verdict mean the summariser failed to deliver a
+    /// complete continuation document? A `MaxTokens` stop is a cut whatever
+    /// the text looks like: with text the document is mutilated (typically
+    /// missing the context-manifest fence), without text there is no
+    /// document at all. Pure, so the policy is testable without a provider
+    /// harness.
+    pub(crate) fn summary_stop_is_cut(
+        stop_reason: Option<crate::brain::provider::StopReason>,
+    ) -> bool {
+        matches!(
+            stop_reason,
+            Some(crate::brain::provider::StopReason::MaxTokens)
+        )
     }
 
     /// Append a harness-written correction for artifacts the summary reports as
@@ -1916,6 +1948,12 @@ pub(crate) fn reinjectable_summary(
     if !content.starts_with(COMPACTION_MARKER_PREFIX) {
         return content.to_string();
     }
+    // #3170: a `/clear` marker shares this prefix but is not a continuation
+    // document. It carries no sections, only the exchanges it quoted, so the
+    // section strip below has nothing to cut and would delete all of it.
+    if content.starts_with(crate::brain::agent::service::clear::CLEAR_MARKER_PREFIX) {
+        return content.to_string();
+    }
     // The banner is its own line; the document starts after the blank line
     // that follows it. A marker with no body keeps its banner and gains no
     // stamp, because there is nothing to age.
@@ -1997,6 +2035,21 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
     let mut in_fence = false;
     let mut dropping = false;
     let mut skipping_manifest = false;
+    // #3167: the prompt asks for a `## 0. IMMEDIATE TASK` heading, but the
+    // summariser sometimes writes the directive as an unheaded preamble above
+    // the first durable heading. A heading-anchored strip cannot see it, so
+    // nothing before the first durable heading is trusted: it is all execution
+    // spill from one session.
+    let mut seen_durable = false;
+    // #3170: a stored body that is not a continuation document at all carries
+    // no `## ` heading anywhere, so there are no sections to slice by. The
+    // unheaded-preamble rule above deleted every line of such a body, which
+    // emptied `/clear`'s quoted exchanges on replay and made a capped entry
+    // claim it had nothing durable to say. Only a document with headings can
+    // be taken apart by them.
+    let keep_unstructured = !summary
+        .lines()
+        .any(|line| line.trim_start().starts_with("## "));
 
     for line in summary.lines() {
         let trimmed = line.trim_start();
@@ -2018,7 +2071,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
                 }
             }
             in_fence = !in_fence;
-            if !dropping {
+            if !dropping && (seen_durable || keep_unstructured) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2026,7 +2079,7 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
         }
 
         if in_fence {
-            if !dropping {
+            if !dropping && (seen_durable || keep_unstructured) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -2038,8 +2091,15 @@ pub(crate) fn strip_session_local_sections(summary: &str) -> String {
             if dropping {
                 continue;
             }
+            seen_durable = true;
         }
-        if dropping {
+        // The obligation line belongs to section 0, but a summariser that
+        // lost its heading writes it inside durable prose too (#3167).
+        if trimmed.starts_with("**Obligation status:") || trimmed.starts_with("Obligation status:")
+        {
+            continue;
+        }
+        if dropping || (!seen_durable && !keep_unstructured) {
             continue;
         }
         out.push_str(line);

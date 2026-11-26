@@ -1339,6 +1339,28 @@ pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
     {
         // Render reasoning/thinking content above the response text (dimmed style)
         if let Some(ref reasoning) = app.streaming_reasoning {
+            // See comment at the expanded-message reasoning site above.
+            // Cap thinking display to last N lines (rolling window) to avoid
+            // swallowing the entire viewport during long thinking phases.
+            // Ctrl+O lifts the cap for the current turn (#3093): the full
+            // stream replaces the rolling window so a thinking phase can be
+            // read, or judged degenerate, before the turn is interrupted.
+            const MAX_THINKING_LINES: usize = 12;
+            let inner_width = content_width.saturating_sub(2);
+            let reasoning_lines = reasoning_to_lines(reasoning, inner_width);
+            let reasoning_style = Style::default()
+                .fg(theme::role(Role::GrayDim))
+                .add_modifier(Modifier::ITALIC);
+            // The header names what the key does right now, so the affordance
+            // is visible instead of documented (#3093).
+            let (hint, start_idx) = if app.live_reasoning_full {
+                ("  (ctrl+o to cap)", 0)
+            } else {
+                (
+                    "  (ctrl+o to expand)",
+                    reasoning_lines.len().saturating_sub(MAX_THINKING_LINES),
+                )
+            };
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
@@ -1347,17 +1369,8 @@ pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         .fg(theme::role(Role::GrayDim))
                         .add_modifier(Modifier::ITALIC | Modifier::BOLD),
                 ),
+                Span::styled(hint, Style::default().fg(theme::role(Role::GrayDim))),
             ]));
-            // See comment at the expanded-message reasoning site above.
-            // Cap thinking display to last N lines (rolling window) to avoid
-            // swallowing the entire viewport during long thinking phases.
-            const MAX_THINKING_LINES: usize = 12;
-            let inner_width = content_width.saturating_sub(2);
-            let reasoning_lines = reasoning_to_lines(reasoning, inner_width);
-            let reasoning_style = Style::default()
-                .fg(theme::role(Role::GrayDim))
-                .add_modifier(Modifier::ITALIC);
-            let start_idx = reasoning_lines.len().saturating_sub(MAX_THINKING_LINES);
             if start_idx > 0 {
                 lines.push(Line::from(Span::styled(
                     format!("  ⋯ {} more lines", start_idx),
@@ -1458,41 +1471,52 @@ pub(crate) fn render_chat(f: &mut Frame, app: &mut App, area: Rect) {
     {
         // Show a short latest-sentence excerpt of the live reasoning instead of
         // a scrolling 12-line window, so a long thought reads as one status line
-        // rather than a wall (#742). The full reasoning stays available on the
-        // finalized message's 3-state expand.
-        let excerpt = crate::utils::string::thinking_excerpt_capped(
-            reasoning,
-            crate::utils::string::THINKING_EXCERPT_CHARS,
-        )
-        .unwrap_or_else(|| "Thinking…".to_string());
-        // Wrap across at most 3 lines (#768). One line cut a multi-step chain
-        // off mid-thought; the ceiling is what keeps this a status line and not
-        // the scrolling window #742 replaced.
+        // rather than a wall (#742). Ctrl+O lifts the cap for the current turn
+        // (#3093): the full wrapped stream replaces the excerpt, so a thinking
+        // phase can be read before deciding to interrupt.
         let style = Style::default()
             .fg(theme::role(Role::GrayDim))
             .add_modifier(Modifier::ITALIC);
-        let wrapped = wrap_line_with_padding(
-            Line::from(Span::styled(excerpt, style)),
-            content_width.saturating_sub(5),
-            "",
-        );
-        let overflows = wrapped.len() > THINKING_EXCERPT_LINES;
-        for (i, wrapped_line) in wrapped.into_iter().take(THINKING_EXCERPT_LINES).enumerate() {
-            // Continuations align under the first line's text, past the emoji.
-            let prefix = if i == 0 { "  🧠 " } else { "     " };
-            let mut spans = vec![Span::styled(
-                prefix,
-                Style::default().fg(theme::role(Role::GrayDim)),
-            )];
-            spans.extend(wrapped_line.spans);
-            if overflows && i == THINKING_EXCERPT_LINES - 1 {
-                spans.push(Span::styled("…", style));
+        if app.live_reasoning_full {
+            let inner_width = content_width.saturating_sub(5);
+            for line in reasoning_to_lines(reasoning, inner_width) {
+                let mut spans = vec![Span::styled("  ", Style::default())];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
             }
-            lines.push(Line::from(spans));
-        }
+            lines.push(Line::from(""));
+        } else {
+            let excerpt = crate::utils::string::thinking_excerpt_capped(
+                reasoning,
+                crate::utils::string::THINKING_EXCERPT_CHARS,
+            )
+            .unwrap_or_else(|| "Thinking…".to_string());
+            // Wrap across at most 3 lines (#768). One line cut a multi-step chain
+            // off mid-thought; the ceiling is what keeps this a status line and not
+            // the scrolling window #742 replaced.
+            let wrapped = wrap_line_with_padding(
+                Line::from(Span::styled(excerpt, style)),
+                content_width.saturating_sub(5),
+                "",
+            );
+            let overflows = wrapped.len() > THINKING_EXCERPT_LINES;
+            for (i, wrapped_line) in wrapped.into_iter().take(THINKING_EXCERPT_LINES).enumerate() {
+                // Continuations align under the first line's text, past the emoji.
+                let prefix = if i == 0 { "  🧠 " } else { "     " };
+                let mut spans = vec![Span::styled(
+                    prefix,
+                    Style::default().fg(theme::role(Role::GrayDim)),
+                )];
+                spans.extend(wrapped_line.spans);
+                if overflows && i == THINKING_EXCERPT_LINES - 1 {
+                    spans.push(Span::styled("…", style));
+                }
+                lines.push(Line::from(spans));
+            }
 
-        // Blank line to separate reasoning from status spinner
-        lines.push(Line::from(""));
+            // Blank line to separate reasoning from status spinner
+            lines.push(Line::from(""));
+        }
 
         // Spinner at BOTTOM of reasoning content so it's always visible
         let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

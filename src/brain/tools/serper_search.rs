@@ -155,10 +155,7 @@ impl Tool for SerperSearchTool {
     async fn execute(&self, input: Value, _context: &ToolExecutionContext) -> Result<ToolResult> {
         let input: SerperSearchInput = serde_json::from_value(input)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| ToolError::Execution(format!("Failed to create HTTP client: {}", e)))?;
+        let client = crate::utils::http::shared();
 
         let body = SerperRequest {
             q: &input.query,
@@ -172,6 +169,7 @@ impl Tool for SerperSearchTool {
             .header("X-API-KEY", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .map_err(|e| ToolError::Execution(format!("Serper search request failed: {}", e)))?;
