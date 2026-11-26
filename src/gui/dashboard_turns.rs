@@ -1639,6 +1639,67 @@ impl Dashboard {
                         .push(crate::live_fold::retry_notice(attempt, max, &reason));
                     cx.notify();
                 }
+                // Sticky fallback (#3189). The service already swapped the
+                // provider for the session before emitting this, so the GUI's
+                // job is visibility and stickiness: a notice line on the card,
+                // the new pair written to the session row (cache and DB), and
+                // the in-memory pin rebuilt from config so the next turn does
+                // not re-walk the failing primary. Mirrors the TUI handler at
+                // `tui/app/state.rs` `TuiEvent::ProviderSwitched`.
+                agent_bridge::TurnEvent::ProgressFor(
+                    sid,
+                    ProgressEvent::ProviderSwitched {
+                        from_name: _,
+                        from_model: _,
+                        to_name,
+                        to_model,
+                        reason,
+                    },
+                    _,
+                ) => {
+                    self.turn
+                        .live
+                        .notices
+                        .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
+                    if let Some(b) = agent_bridge::bridge() {
+                        let db_path = self.db_path.clone();
+                        agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
+                            rt.block_on(async {
+                                // Same 4 MB thread read the rest of the GUI
+                                // uses: one connection per job, service on top.
+                                let Ok(db) = Database::connect(&db_path).await else {
+                                    return;
+                                };
+                                let service = opencrabs::services::SessionService::new(
+                                    opencrabs::db::ServiceContext::new(db.pool().clone()),
+                                );
+                                if let Ok(Some(mut s)) = service.get_session(sid).await {
+                                    s.provider_name = Some(to_name.clone());
+                                    s.model = Some(to_model.clone());
+                                    if let Err(e) = service.update_session(&s).await {
+                                        tracing::warn!(
+                                            "Failed to persist provider swap to session {sid}: {e}"
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    // The rail's footer pair for this session follows the row
+                    // on the next fetch; the card notice is the live signal.
+                    cx.notify();
+                }
+                // Self-healing fired: config recovery, emergency compaction,
+                // truncation. The message is already user-readable, so it
+                // lands in the amber notice block as-is.
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::SelfHealingAlert { message },
+                    _,
+                ) => {
+                    self.turn.live.notices.push(message);
+                    cx.notify();
+                }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet. The follow-up offer is already

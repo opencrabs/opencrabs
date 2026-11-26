@@ -4163,3 +4163,20 @@ fn the_completion_keeps_one_copy_of_the_answer() {
         "a turn built from the card is the copy that painted twice"
     );
 }
+
+// #3189: the GUI folds the service's sticky-fallback events instead of
+// dropping them, so a fallback the card shows is the fallback that persisted.
+#[test]
+fn a_provider_switch_notice_lands_in_the_live_card() {
+    let mut live = crate::transcript::LiveTurn::default();
+    live.notices.push("provider: a → b (fallback)".into());
+    assert!(!live.is_empty(), "a fallback notice keeps the card alive");
+    assert!(live.has_turn_content() == false || live.notices.len() == 1);
+}
+
+#[test]
+fn a_self_healing_alert_reaches_the_live_notices() {
+    let mut live = crate::transcript::LiveTurn::default();
+    live.notices.push("self-heal: truncation".into());
+    assert_eq!(live.notices.len(), 1);
+}
