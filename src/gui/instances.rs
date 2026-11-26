@@ -135,7 +135,9 @@ impl Instances {
 
     /// Insert or replace a record, keeping its position when it already
     /// exists. Health survives a replace: re-pairing a crab that is up must
-    /// not blank its dot until the next probe.
+    /// not blank its dot until the next probe. Test-only: a pairing hands
+    /// the window the store as it now reads (`instance_paired`).
+    #[cfg(test)]
     pub fn upsert(&mut self, known: KnownInstance) {
         if let Some(existing) = self
             .entries

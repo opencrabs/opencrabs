@@ -383,16 +383,15 @@ mod tests {
     /// strip's one overlay carries the check.
     #[test]
     fn the_instance_forms_take_the_keyboard_too() {
-        for overlay in [OverlayId::InstancePair] {
-            assert_eq!(
-                keyboard_owner(&[overlay], Screen::Chat),
-                KeyboardOwner::Overlay(overlay),
-                "{overlay:?}"
-            );
-            assert_eq!(
-                focus_target(KeyboardOwner::Overlay(overlay)),
-                FocusTarget::Root
-            );
-        }
+        let overlay = OverlayId::InstancePair;
+        assert_eq!(
+            keyboard_owner(&[overlay], Screen::Chat),
+            KeyboardOwner::Overlay(overlay),
+            "{overlay:?}"
+        );
+        assert_eq!(
+            focus_target(KeyboardOwner::Overlay(overlay)),
+            FocusTarget::Root
+        );
     }
 }

@@ -45,6 +45,8 @@ fn health_never_reorders() {
     assert_eq!(set.entries()[0].label(), "alpha");
     assert_eq!(set.entries()[0].health, Health::Down { since: 500 });
     assert_eq!(set.entries()[1].health, Health::Up { latency_ms: 12 });
+    assert!(set.entries()[0].health.is_down());
+    assert!(set.entries()[1].health.is_up());
 }
 
 #[test]
