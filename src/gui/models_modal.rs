@@ -7,7 +7,22 @@ impl Dashboard {
     pub(crate) fn models_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
         let visible = models::filtered_rows(&self.models_rows, &self.models_query);
-        let providers = models::providers(&visible);
+        // The selected provider keeps its tile while the filter runs (#3183):
+        // the tiles are built from the filtered rows, so typing a query that
+        // hides every model of the provider in scope made its tile vanish and
+        // the selection look deselected. Rebuild it from the unfiltered
+        // catalogue and append it, still highlighted, until the selection
+        // changes. Its click stays meaningful too: picking it clears nothing,
+        // the picker just keeps filtering by the query, and the count shown
+        // is the catalogue count.
+        let mut providers = models::providers(&visible);
+        if let Some(selected) = self.models_provider.as_deref()
+            && !providers.iter().any(|row| row.provider == selected)
+            && let Some(pinned) =
+                models::providers(&self.models_rows).into_iter().find(|row| row.provider == selected)
+        {
+            providers.push(pinned);
+        }
         let live =
             agent_bridge::bridge().map(|bridge| match self.models_session.or(self.chat_session) {
                 Some(sid) => (
