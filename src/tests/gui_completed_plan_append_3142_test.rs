@@ -23,10 +23,12 @@ const BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const LEDGER: &str = include_str!("../services/message.rs");
 
-/// The settle event carries the row. Without the field the window has no way
-/// to learn that this turn finished a plan.
+/// #3142 first carried the checklist on the settle event. #3190 removed that
+/// copy: the row is in the ledger before the turn settles, and the reload reads
+/// it back, so a second channel on the event is the duplication bug again.
+/// These pins hold the removal in place.
 #[test]
-fn the_settle_event_carries_the_completed_plan_row() {
+fn the_settle_event_carries_no_completed_plan_copy() {
     let done = BRIDGE
         .split("pub enum TurnEvent {")
         .nth(1)
@@ -35,22 +37,20 @@ fn the_settle_event_carries_the_completed_plan_row() {
         .next()
         .expect("the Done arm must end before the Failed arm");
     assert!(
-        done.contains("completed_plan: Option<Box<opencrabs::db::models::Message>>,"),
-        "Done must carry the checklist row the tool loop handed back"
+        !done.contains("completed_plan"),
+        "Done must not carry a checklist copy: the ledger row is the only one"
     );
 }
 
-/// Both places that report a finished turn fill the field from the response.
-/// A resumed turn re-runs a parked prompt, so it settles through the second
-/// site, and a field filled at one site only would leave that turn empty.
+/// Both places that report a finished turn fill no field from the response.
+/// The checklist reaches the screen through the reload of the row the ledger
+/// writes at settle, on the sent turn and the resumed turn alike.
 #[test]
-fn both_settle_sites_fill_the_field_from_the_response() {
-    let filled = BRIDGE
-        .matches("completed_plan: response.completed_plan.map(Box::new),")
-        .count();
+fn no_settle_site_copies_the_checklist_from_the_response() {
+    let filled = BRIDGE.matches("completed_plan").count();
     assert_eq!(
-        filled, 2,
-        "the sent turn and the resumed turn both report their own checklist"
+        filled, 0,
+        "agent_bridge must not route the checklist outside the ledger row"
     );
 }
 

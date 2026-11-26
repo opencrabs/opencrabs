@@ -97,13 +97,6 @@ pub enum TurnEvent {
         /// the next TYPED turn of that conversation was answered aloud. A turn
         /// can only speak for itself.
         voice: bool,
-        /// The checklist this turn finished, when it finished one (#3142).
-        /// The tool loop writes that row at settle and hands the record back
-        /// with the response, the same way the terminal gets it. The window
-        /// builds its finished turn from live state (#3032), which holds no
-        /// rows, so the card has to travel on the event or the conversation
-        /// loses it the moment the plan completes.
-        completed_plan: Option<Box<opencrabs::db::models::Message>>,
     },
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
@@ -1294,7 +1287,6 @@ pub fn spawn_turn(
                         context_tokens: response.context_tokens,
                         tokens_per_second: response.tokens_per_second,
                         voice,
-                        completed_plan: response.completed_plan.map(Box::new),
                     });
                 }
                 Err(e) => {
@@ -1370,7 +1362,6 @@ fn spawn_resume(
                         // answers in text rather than guessing at speech
                         // (#3096).
                         voice: false,
-                        completed_plan: response.completed_plan.map(Box::new),
                     });
                 }
                 Err(e) => {

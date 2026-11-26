@@ -1651,10 +1651,6 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                     voice,
-                    // The checklist reaches the screen as the row the ledger
-                    // holds, read back by the reload above (#3190), so the
-                    // event's own copy is not drawn here.
-                    completed_plan: _,
                 } => {
                     // The card's live line belongs to this turn (#2718), so
                     // it retires with it: the preview under it is the ledger's

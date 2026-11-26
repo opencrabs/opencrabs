@@ -3830,7 +3830,7 @@ pub fn live_slot_sequence(live: &LiveTurn, rows: &[Message], slot: LiveSlot) -> 
 /// The card's body as data: every entry in order, resolved against the rows it
 /// names. The original entry index travels with the line so a menu acts on the
 /// exact row that was pressed, even when a stale tool index draws nothing.
-fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
+pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
     let mut lines = Vec::new();
     for (entry_index, entry) in live.entries.iter().enumerate() {
         match entry {
