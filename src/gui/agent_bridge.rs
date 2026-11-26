@@ -3271,6 +3271,7 @@ mod tests {
     /// painting scaffold.
     #[tokio::test]
     async fn ledger_question_returns_none_when_only_markers_exist() {
+        use opencrabs::db::models::Message;
         let (repo, db, _session) = ledger_with_marker().await;
         // A second session with nothing but marker rows.
         let context = ServiceContext::new(db.pool().clone());

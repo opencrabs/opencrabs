@@ -4794,7 +4794,7 @@ mod embedded_compaction_render_tests {
                 .to_string(),
             0,
         );
-        let rows = expand_message(msg);
+        let rows = crate::tui::app::App::expand_message(msg);
         assert_eq!(rows.len(), 1, "the row still renders");
         let shown = &rows[0].content;
         assert!(
@@ -4816,7 +4816,7 @@ mod embedded_compaction_render_tests {
             "plain words about compaction".to_string(),
             0,
         );
-        let rows = expand_message(msg);
+        let rows = crate::tui::app::App::expand_message(msg);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].content, "plain words about compaction");
     }
