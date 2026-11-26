@@ -80,7 +80,12 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                     row = row.child(text(search, Size::Sm, shown.text_faint).flex_1().min_w_0());
                 }
                 Some(field) => {
+                    // Owned, because the spans borrow from the field and the
+                    // field borrows from `view`: a `&str` here would escape
+                    // the function with a non-'static lifetime.
                     let (before, selected, after) = field.render_spans();
+                    let (before, selected, after) =
+                        (before.to_string(), selected.to_string(), after.to_string());
                     row = row
                         .child(text(before, Size::Sm, shown.text))
                         .when(!selected.is_empty(), |row| {
