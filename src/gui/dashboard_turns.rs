@@ -1661,8 +1661,11 @@ impl Dashboard {
                         .live
                         .notices
                         .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
-                    if agent_bridge::bridge().is_some() {
+                    if let Some(bridge) = agent_bridge::bridge() {
                         let db_path = self.db_path.clone();
+                        let pin_to = to_name.clone();
+                        let pin_model = to_model.clone();
+                        let agent_service = bridge.service.clone();
                         let _ = agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
                             rt.block_on(async {
                                 // Same 4 MB thread read the rest of the GUI
@@ -1686,7 +1689,7 @@ impl Dashboard {
                                 if let Ok(config) = opencrabs::config::Config::load()
                                     && let Ok(new_provider) = opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
                                 {
-                                    service.swap_provider_for_session(sid, new_provider, rebuild_model);
+                                    agent_service.swap_provider_for_session(sid, new_provider, rebuild_model);
                                     tracing::info!(
                                         "[ProviderSwitched] rebuilt pinned provider for session {sid} → {rebuild_to}"
                                     );

@@ -1052,7 +1052,7 @@ pub fn strip_llm_artifacts(text: &str) -> String {
 /// dash kinds collapse to a plain hyphen-minus instead; every other line
 /// keeps the original chain. Splitting is newline-inclusive so trailing
 /// newlines and CRLF bytes survive byte-for-byte.
-pub(crate) fn normalize_dashes(text: &str) -> String {
+pub fn normalize_dashes(text: &str) -> String {
     text.split_inclusive('\n')
         .map(|line| {
             if line.trim_start().starts_with('|') {
