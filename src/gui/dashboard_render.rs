@@ -1401,7 +1401,8 @@ impl Render for Dashboard {
                             cx,
                             model_picker::ModelPickerView {
                                 rows: &self.models_rows,
-                                query: &self.models_query,
+                                query: self.models_query.text(),
+                                field: None,
                                 selected: self.models_index,
                                 fetching: self.models_fetching,
                                 pending: self.models_pending.len(),

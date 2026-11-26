@@ -655,7 +655,7 @@ pub(crate) fn run() {
                         cd_show_hidden: false,
                         cd_session: None,
                         models_rows: Vec::new(),
-                        models_query: String::new(),
+                        models_query: TextField::new(),
                         models_index: 0,
                         models_provider: None,
                         models_session: None,

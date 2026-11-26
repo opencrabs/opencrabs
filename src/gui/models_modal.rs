@@ -6,7 +6,7 @@ use opencrabs::ui_core::card::concentric_radius;
 impl Dashboard {
     pub(crate) fn models_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
-        let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+        let visible = models::filtered_rows(&self.models_rows, self.models_query.text());
         // The selected provider keeps its tile while the filter runs (#3183):
         // the tiles are built from the filtered rows, so typing a query that
         // hides every model of the provider in scope made its tile vanish and
@@ -103,7 +103,8 @@ impl Dashboard {
             cx,
             model_picker::ModelPickerView {
                 rows: &model_rows,
-                query: &self.models_query,
+                query: self.models_query.text(),
+                field: Some(&self.models_query),
                 selected: self.models_index,
                 fetching: self.models_fetching,
                 pending: self.models_pending.len(),

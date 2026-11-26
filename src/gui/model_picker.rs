@@ -5,10 +5,16 @@ use super::{Dashboard, models, palette};
 use gpui::{Context, Div, SharedString, div, prelude::*, px, rgb};
 use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::model_layout::ModelRowLayout;
+use opencrabs::ui_core::text_field::TextField;
 
 pub struct ModelPickerView<'a> {
     pub rows: &'a [models::Row],
     pub query: &'a str,
+    /// The live field behind `query` (#3186): with it the renderer paints the
+    /// caret where it actually is and shows the selection, instead of a bar
+    /// welded to the end. The onboarding wizard keeps its plain `String`
+    /// filter, so this stays optional.
+    pub field: Option<&'a TextField>,
     pub selected: usize,
     pub fetching: bool,
     pub pending: usize,
@@ -64,30 +70,59 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         } else {
             shown.track
         }))
-        .child(
-            text(
-                search,
-                Size::Sm,
-                if view.query.is_empty() {
-                    shown.text_faint
-                } else {
-                    shown.text
-                },
-            )
-            .flex_1()
-            .min_w_0()
-            .truncate(),
-        )
-        .child(text(
-            if search_focused { "\u{258f}" } else { "" },
-            Size::Sm,
-            shown.accent,
-        ))
+        .child({
+            // The caret and the selection come from the field itself (#3186),
+            // the same span split the composer and the pairing form paint.
+            // Without a field the wizard keeps its single-string label.
+            let mut row = div().flex().flex_row().items_center().flex_1().min_w_0();
+            match view.field {
+                Some(field) if field.text().is_empty() => {
+                    row = row.child(text(search, Size::Sm, shown.text_faint).flex_1().min_w_0());
+                }
+                Some(field) => {
+                    let (before, selected, after) = field.render_spans();
+                    row = row
+                        .child(text(before, Size::Sm, shown.text))
+                        .when(!selected.is_empty(), |row| {
+                            row.child(div().bg(rgb(shown.selection)).child(text(
+                                selected,
+                                Size::Sm,
+                                shown.text,
+                            )))
+                        })
+                        .child(div().flex_none().w(px(1.5)).h(px(14.0)).bg(rgb(
+                            if search_focused {
+                                shown.accent
+                            } else {
+                                shown.track
+                            },
+                        )))
+                        .child(text(after, Size::Sm, shown.text));
+                }
+                None => {
+                    row = row.child(
+                        text(
+                            search,
+                            Size::Sm,
+                            if view.query.is_empty() {
+                                shown.text_faint
+                            } else {
+                                shown.text
+                            },
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .truncate(),
+                    );
+                }
+            }
+            row
+        })
         .on_click(cx.listener(move |this, _ev, _window, cx| {
             if onboarding {
                 if let Some(ob) = this.onboard.as_mut() {
                     ob.field = ob.search_field();
-                    ob.wizard.ps.model_filter = this.models_query.clone();
+                    ob.wizard.ps.model_filter = this.models_query.text().to_string();
                 }
             } else {
                 this.refocus_screen();

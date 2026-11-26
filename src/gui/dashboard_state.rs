@@ -597,9 +597,13 @@ pub(crate) struct Dashboard {
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     pub(crate) models_rows: Vec<models::Row>,
-    /// The live search text. Selection indexes the filtered rows, never the
+    /// The live search text, with a caret and a selection (#3186). It is the
+    /// same [`TextField`] engine the composer and the name prompts use, so
+    /// alt+backspace and ctrl+w remove a word, ctrl+u clears to the start,
+    /// ctrl+a selects all, and copy/cut/paste act on the selection exactly as
+    /// they do in the composer. Selection indexes the filtered rows, never the
     /// unfiltered catalogue underneath them.
-    pub(crate) models_query: String,
+    pub(crate) models_query: TextField,
     /// The row the arrows stand on.
     pub(crate) models_index: usize,
     /// The provider the models screen's list marks. A click sets it and moves
