@@ -147,14 +147,13 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
-        // The simple send path stamps its pair like the tool loop does
-        // (#3177): `response.model` is what the endpoint reported, and this
-        // path always counts as started-on-session-provider, so an unstamped
-        // model from a provider-internal rescue would persist an impossible
-        // pair under the session provider's name.
-        let response_provider_name = self.provider_name_for_session(session_id);
-        let response_model =
-            self.stamp_turn_pair(session_id, response_provider_name.clone(), response.model);
+        // `response.model` stays VERBATIM here (#3177, corrected): the
+        // endpoint's echo is the truth about what served the turn, and
+        // agent_model_selection_test pins that contract. Catalog-based
+        // repair at construction ate legitimate per-turn overrides whose
+        // echo is not in the provider's (live-fetched) list. Contamination
+        // is caught where it actually matters: at the session-row WRITE,
+        // see `validated_session_pair`.
 
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
@@ -164,8 +163,8 @@ impl AgentService {
             usage: response.usage,
             tokens_per_second: None,
             cost,
-            model: response_model,
-            provider_name: response_provider_name,
+            model: response.model,
+            provider_name: self.provider_name_for_session(session_id),
             // This simple send path is not the restart-remap vector (#705); it
             // resolves the session provider directly, so it always counts as
             // started-on-session-provider.

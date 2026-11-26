@@ -2063,24 +2063,30 @@ impl AgentService {
         self.provider_for_session(session_id).name().to_string()
     }
 
-    /// Stamp a finished turn's `(provider, model)` pair coherent (#3177).
+    /// Validate a `{provider, model}` pair at session-row WRITE time (#3177).
     ///
-    /// `provider_name` is who the ledger will say served the turn
-    /// ([`Self::provider_name_for_session`]); `model` is what the final
-    /// response reported. When a sticky fallback is the active server, the
-    /// name IS the subprovider and the model is its own, so the pair passes
-    /// through untouched. Every other combination is judged against the
-    /// session provider's catalogue via `tool_loop::stamp_response_pair`: a
-    /// model it does not know repairs to its default, so a transient
-    /// fallback's model never persists under the primary's name.
-    pub(crate) fn stamp_turn_pair(
+    /// Construction keeps `response.model` VERBATIM: the endpoint's echo is
+    /// the truth about what served the turn, and `agent_model_selection_test`
+    /// pins that contract (a catalog repair at construction ate legitimate
+    /// per-turn overrides whose echo is not in a live-fetched model list).
+    /// The WRITE is where contamination actually persists, so the judgment
+    /// lives here, right before `update_session`: when the named provider is
+    /// the session's own chain, judge the model against that chain's
+    /// catalogue via `stamp_response_pair`. A transient loop-fallback's echo
+    /// (e.g. `combo/murah` under `ngodeai`, the #3177 victim rows) repairs to
+    /// the chain default and logs both names instead of persisting an
+    /// impossible pair. A sticky subprovider name passes through untouched:
+    /// the pair is the subprovider's own and is already coherent.
+    pub(crate) fn validated_session_pair(
         &self,
         session_id: Uuid,
         provider_name: String,
         model: String,
     ) -> String {
         let p = self.provider_for_session(session_id);
-        if p.active_subprovider_name().as_deref() == Some(provider_name.as_str()) {
+        if p.name() != provider_name {
+            // The response names a subprovider (sticky pin) or a different
+            // serving provider entirely: its pair is its own, coherent.
             return model;
         }
         let provider_default = p.default_model().to_string();

@@ -1575,11 +1575,10 @@ impl AgentService {
                         context_tokens: context.token_count as u32,
                         tokens_per_second: None,
                         cost: 0.0,
-                        model: self.stamp_turn_pair(
-                            session_id,
-                            self.provider_name_for_session(session_id),
-                            model_name.clone(),
-                        ),
+                        // Verbatim (#3177, corrected): compaction early-returns
+                        // carry the canonicalized request model on the session
+                        // provider, no repair at construction.
+                        model: model_name.clone(),
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
                         completed_plan: None,
@@ -1617,11 +1616,10 @@ impl AgentService {
                         context_tokens: context.token_count as u32,
                         tokens_per_second: None,
                         cost: 0.0,
-                        model: self.stamp_turn_pair(
-                            session_id,
-                            self.provider_name_for_session(session_id),
-                            model_name.clone(),
-                        ),
+                        // Verbatim (#3177, corrected): compaction early-returns
+                        // carry the canonicalized request model on the session
+                        // provider, no repair at construction.
+                        model: model_name.clone(),
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
                         completed_plan: None,
@@ -8690,13 +8688,13 @@ impl AgentService {
             }
         }
 
-        // The ledger pair is stamped, not trusted (#3177): a transient
-        // fallback can have served the final response while
-        // `provider_name_for_session` still reports the primary, and that
-        // impossible pair is what the locked-unit persist would write.
+        // `response.model` stays VERBATIM (#3177, corrected): the echo is the
+        // truth about what served the turn, and the construction contract is
+        // pinned by agent_model_selection_test. A transient loop-fallback's
+        // echo is caught at the session-row WRITE via `validated_session_pair`,
+        // not mutilated here (catalog repair at construction ate legitimate
+        // per-turn overrides whose echo is not in a live-fetched list).
         let response_provider_name = self.provider_name_for_session(session_id);
-        let response_model =
-            self.stamp_turn_pair(session_id, response_provider_name.clone(), response.model);
 
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
@@ -8712,7 +8710,7 @@ impl AgentService {
             context_tokens: context.token_count as u32,
             tokens_per_second,
             cost,
-            model: response_model,
+            model: response.model,
             provider_name: response_provider_name,
             started_on_session_provider,
             completed_plan,
