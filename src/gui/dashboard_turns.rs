@@ -1661,17 +1661,18 @@ impl Dashboard {
                         .live
                         .notices
                         .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
-                    if let Some(b) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         let db_path = self.db_path.clone();
-                        agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
+                        let _ = agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
                             rt.block_on(async {
                                 // Same 4 MB thread read the rest of the GUI
                                 // uses: one connection per job, service on top.
-                                let Ok(db) = Database::connect(&db_path).await else {
+                                let Ok(db) = opencrabs::db::Database::connect(&db_path).await
+                                else {
                                     return;
                                 };
                                 let service = opencrabs::services::SessionService::new(
-                                    opencrabs::db::ServiceContext::new(db.pool().clone()),
+                                    opencrabs::services::ServiceContext::new(db.pool().clone()),
                                 );
                                 if let Ok(Some(mut s)) = service.get_session(sid).await {
                                     s.provider_name = Some(to_name.clone());
