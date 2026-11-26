@@ -4070,3 +4070,96 @@ fn the_hint_line_wraps_instead_of_truncating() {
         "the line can still be dismissed: {line}"
     );
 }
+
+/// #3190: the prose a turn is still sending paints INSIDE the live card.
+///
+/// Reported: the narration streamed in a bubble under the tool block and only
+/// then appeared at the top of the block, so the same words read twice in two
+/// places. The card now carries the pending prose as its last line, and the
+/// bubble under the card is left for the settled answer alone.
+#[test]
+fn the_pending_prose_streams_inside_the_live_card() {
+    use crate::transcript::{
+        LiveCardLine, LiveTurn, ToolCall, collapsed_narration, live_card_lines,
+    };
+
+    let mut live = LiveTurn::default();
+    live.begin("fix it".into());
+    live.push_tool(ToolCall {
+        name: "read_file".into(),
+        description: "reading the parser".into(),
+        success: true,
+        done: true,
+        task_id: None,
+    });
+    live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+
+    let pending = live.pending().expect("streamed prose is still pending");
+    assert!(pending.contains("Checking the parser"), "got {pending:?}");
+    assert!(
+        matches!(
+            live_card_lines(&live).last().map(|(_, line)| line),
+            Some(LiveCardLine::Pending(_))
+        ),
+        "the pending paragraph is drawn inside the card, after the call"
+    );
+    assert_eq!(
+        collapsed_narration(&live).as_deref(),
+        Some("Checking the parser now."),
+        "a folded card still shows the pending paragraph in its head"
+    );
+    assert!(
+        live.settled.is_none(),
+        "nothing settled yet, so the bubble under the card draws nothing"
+    );
+
+    live.settled = Some("fixed".into());
+    assert_eq!(live.pending(), None, "a settled turn has nothing pending");
+}
+
+/// #3190: the completion never repeats a paragraph the card already claims.
+///
+/// The answer painted twice, once from the card and once from the turn the
+/// window appended at Done, until a session switch dropped one copy. The
+/// provider sends the same paragraph as streamed chunks and again as
+/// intermediate text, and the cut is what keeps the card's copy and the
+/// answer's copy from being the same words.
+#[test]
+fn the_completion_keeps_one_copy_of_the_answer() {
+    use crate::transcript::{LiveCardLine, LiveTurn, live_card_lines};
+
+    let mut live = LiveTurn::default();
+    live.begin("fix it".into());
+    live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+    live.push_narration("Checking the parser now.");
+
+    let paragraphs: Vec<String> = live_card_lines(&live)
+        .into_iter()
+        .filter_map(|(_, line)| match line {
+            LiveCardLine::Narration(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paragraphs,
+        vec!["Checking the parser now.".to_string()],
+        "the card owns the paragraph, so the answer must not repeat it"
+    );
+
+    let turns = include_str!("../dashboard_turns.rs");
+    let done = turns
+        .split("agent_bridge::TurnEvent::Done {")
+        .nth(1)
+        .expect("the Done arm must exist")
+        .split("agent_bridge::TurnEvent::Failed {")
+        .next()
+        .expect("the Done arm must end before the Failed arm");
+    assert!(
+        done.contains("reload = Some(sid);"),
+        "the completion is rendered from the rows, not from a second copy"
+    );
+    assert!(
+        !turns.contains("turn_from_live"),
+        "a turn built from the card is the copy that painted twice"
+    );
+}
