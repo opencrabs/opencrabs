@@ -15,6 +15,15 @@
 //! went away), the last receiver of a session removes the session's channel.
 //! There is no reaper.
 //!
+//! The same subscription is served twice: as SSE on `GET /gui/events`, and
+//! as a WebSocket on `GET /gui/events/ws`, one [`Event`] as JSON per text
+//! message. The WebSocket exists because a Cloudflare quick tunnel
+//! (`*.trycloudflare.com`, what `opencrabs connect` opens) holds an SSE body
+//! back until the response ends, so a turn's progress reached a surface
+//! behind it only as the final reply; a WebSocket crosses the same tunnel
+//! frame by frame. Both routes share the scope gate, the recheck and the
+//! hub, so neither can see what the other cannot.
+//!
 //! The route is a GET rather than a JSON-RPC method because SSE is a GET in
 //! every client that speaks it (`EventSource` reconnects by itself), and
 //! because the scope gate then lives here, next to the stream, instead of in
@@ -29,6 +38,9 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use axum::Extension;
+use axum::extract::ws::{
+    Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection,
+};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response, Sse, sse};
@@ -201,6 +213,82 @@ pub async fn handle_events(
             .is_some_and(|scopes| allows(&scopes, SCOPE_READ))
     };
     stream_events(hub().subscribe(query.session), RECHECK, still_allowed)
+}
+
+/// `GET /gui/events/ws?session=<id>`: the same events as [`handle_events`],
+/// one [`Event`] as JSON per WebSocket text message.
+///
+/// The scope gate runs before the upgrade, so a caller without `a2a:read`
+/// gets the same 403 as on the SSE route and never holds a socket. The
+/// upgrade is taken as a `Result` for that reason: a request that is no
+/// WebSocket handshake is still refused for its scope first.
+pub async fn handle_events_ws(
+    State(state): State<A2aState>,
+    Extension(granted): Extension<GrantedScopes>,
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    crate::remote::tunnel::note_traffic(&state.remote_state_dir);
+    if !allows(&granted.0, SCOPE_READ) {
+        return forbidden();
+    }
+    let upgrade = match upgrade {
+        Ok(upgrade) => upgrade,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let token = super::bearer_from_headers(&headers).map(str::to_string);
+    let still_allowed = move || {
+        super::credential_scopes(&state, token.as_deref())
+            .is_some_and(|scopes| allows(&scopes, SCOPE_READ))
+    };
+    // Subscribed before the handshake answers, so nothing published after
+    // the client sees `101` is lost.
+    let subscription = hub().subscribe(query.session);
+    upgrade.on_upgrade(move |socket| pump_socket(socket, subscription, RECHECK, still_allowed))
+}
+
+/// Forward one subscription onto a WebSocket until the client leaves, the
+/// channel closes, or `still_allowed`, asked every `recheck`, says no. The
+/// same tick sends a ping, which keeps an idle socket alive through a tunnel
+/// that drops quiet connections.
+async fn pump_socket(
+    mut socket: WebSocket,
+    mut subscription: Subscription,
+    recheck: Duration,
+    still_allowed: impl Fn() -> bool + Send + 'static,
+) {
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + recheck, recheck);
+    loop {
+        tokio::select! {
+            event = subscription.next() => {
+                let Some(event) = event else { break };
+                let text = match serde_json::to_string(&event) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::warn!("gui/events/ws: an event did not encode: {e}");
+                        continue;
+                    }
+                };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = timer.tick() => {
+                if !still_allowed() {
+                    break;
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
+            incoming = socket.recv() => match incoming {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 /// The SSE body for one subscription. The subscription lives in the stream,
@@ -543,6 +631,144 @@ mod tests {
             .expect("response");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert!(!hub().is_watched(session));
+    }
+
+    /// The payload of the next server frame off `stream`: server frames
+    /// are unmasked, so the header is the opcode byte and a length.
+    async fn read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+        use tokio::io::AsyncReadExt;
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await.expect("a frame header");
+        let len = match head[1] & 0x7f {
+            126 => {
+                let mut ext = [0u8; 2];
+                stream.read_exact(&mut ext).await.expect("a length");
+                usize::from(u16::from_be_bytes(ext))
+            }
+            127 => panic!("no event is that large"),
+            n => usize::from(n),
+        };
+        let mut payload = vec![0u8; len];
+        stream.read_exact(&mut payload).await.expect("a payload");
+        (head[0] & 0x0f, payload)
+    }
+
+    /// Through the real router on a real socket: the handshake upgrades, and
+    /// each published event arrives as its own text message while the
+    /// connection stays open. Nothing waits for the response to end, which
+    /// is what a quick tunnel needs from this route.
+    #[tokio::test]
+    async fn a_turn_crosses_the_socket_unchanged_and_in_order() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = build_router(router_state(dir.path(), None).await, &[]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let session = Uuid::new_v4();
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let handshake = format!(
+            "GET /gui/events/ws?session={session} HTTP/1.1\r\nHost: {addr}\r\n\
+             Upgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream
+            .write_all(handshake.as_bytes())
+            .await
+            .expect("handshake");
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).await.expect("the reply head");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        assert!(hub().is_watched(session), "the handshake subscribed");
+
+        let turn_events = vec![
+            Event::Turn {
+                session_id: session,
+                progress: ProgressEvent::Thinking,
+            },
+            turn(session, "hel"),
+            turn(session, "lo"),
+        ];
+        for event in &turn_events {
+            publish(&turn(Uuid::new_v4(), "not yours"));
+            assert_eq!(publish(event), 1);
+            let (opcode, payload) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut stream))
+                    .await
+                    .expect("the event within 5s, before anything ends");
+            assert_eq!(opcode, 0x1, "an event is a text message");
+            let got: Event = serde_json::from_slice(&payload).expect("an Event");
+            assert_eq!(&got, event);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_socket_is_behind_the_bearer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app = build_router(router_state(dir.path(), Some("secret")).await, &[]);
+        let session = Uuid::new_v4();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/gui/events/ws?session={session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(!hub().is_watched(session));
+    }
+
+    /// The socket route refuses a caller without `a2a:read` before any
+    /// upgrade, with the same typed 403 as the SSE route, even when the
+    /// request is no handshake at all.
+    #[tokio::test]
+    async fn a_socket_caller_without_read_is_refused_and_subscribes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = router_state(dir.path(), None).await;
+        let session = Uuid::new_v4();
+        let (mut parts, ()) = Request::builder()
+            .uri("/gui/events/ws")
+            .body(())
+            .expect("request")
+            .into_parts();
+        let upgrade =
+            <WebSocketUpgrade as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await;
+        let resp = handle_events_ws(
+            State(state),
+            Extension(GrantedScopes(vec![
+                crate::remote::scopes::SCOPE_SEND.to_string(),
+            ])),
+            HeaderMap::new(),
+            Query(EventsQuery { session }),
+            upgrade,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!hub().is_watched(session));
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: JsonRpcResponse = serde_json::from_slice(&bytes).expect("JSON-RPC");
+        assert_eq!(
+            body.error.expect("an error").code,
+            error_codes::INSUFFICIENT_SCOPE
+        );
     }
 
     #[tokio::test]

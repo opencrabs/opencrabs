@@ -120,7 +120,8 @@ reqwest = { version = "0.13", features = [
 ], default-features = false }
 
 # A2A Gateway (HTTP Server)
-axum = "0.8"
+# `ws`: `GET /gui/events/ws`, the event stream a quick tunnel does not buffer.
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Provider registry: the client lives in src/config/registry_client.rs. It was
