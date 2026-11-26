@@ -337,9 +337,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                         div()
                             .text_xs()
                             .text_color(rgb(shown.text_muted))
-                            .child(SharedString::from(
-                                "filter or paste a custom model id",
-                            )),
+                            .child(SharedString::from("filter or paste a custom model id")),
                     )
                     .child(div().flex_1().h(px(1.0)).bg(rgb(shown.track))),
             )
