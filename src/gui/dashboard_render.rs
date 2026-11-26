@@ -3811,13 +3811,7 @@ impl Render for Dashboard {
 
 impl Dashboard {
     /// The facts the hint row is decided from, read off state the app already
-/// keeps for its own gauge, footer and update badge.
-///
-/// Nothing here is bookkeeping kept only for the hint: `ctx_tokens` and
-/// `ctx_max` are the numbers the context gauge prints, `busy` is what the
-/// composer shows while a turn runs, and `update_available` is the version the
-/// badge already names.
-impl Dashboard {
+    /// keeps for its own gauge, footer and update badge.
     pub(crate) fn hint_state(&self) -> HintState {
         let mut state = HintState {
             processing: self.turn.busy,
