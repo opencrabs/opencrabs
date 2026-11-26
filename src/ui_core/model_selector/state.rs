@@ -527,6 +527,8 @@ pub fn single_model_choice(models: &[String]) -> Option<&str> {
 /// "qwen_ambassador" are one name, so a query typed with any of the three
 /// finds a catalogue row written with another (#3182). The `/` that splits a
 /// `provider/model` pair is kept, because it carries meaning a space does not.
+/// Leading and trailing separators are dropped, so a needle never carries a
+/// dangling space that the candidate does not have.
 pub fn normalize_filter_query(text: &str) -> String {
     let lowered = text.to_lowercase();
     let mut out = String::with_capacity(lowered.len());
@@ -542,7 +544,7 @@ pub fn normalize_filter_query(text: &str) -> String {
             last_was_separator = false;
         }
     }
-    out
+    out.trim_end().to_string()
 }
 
 impl ProviderSelectorState {
