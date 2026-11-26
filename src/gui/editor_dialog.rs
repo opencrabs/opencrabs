@@ -532,6 +532,9 @@ impl super::Dashboard {
     /// session's own directory and save there (#3163).
     fn save_editor_as(&mut self, session: &Uuid, name: &str, cx: &mut Context<Self>) {
         let trimmed = name.trim().to_string();
+        // Read before the dialog is borrowed: the lookup goes through the
+        // window's backend, which needs `self` whole.
+        let cwd = self.session_cwd(*session);
         let Some(dialog) = self.editor_dialogs.get_mut(session) else {
             return;
         };
@@ -541,7 +544,6 @@ impl super::Dashboard {
             cx.notify();
             return;
         }
-        let cwd = self.session_cwd(*session);
         let raw = Path::new(&trimmed);
         let resolved = if raw.is_absolute() {
             raw.to_path_buf()

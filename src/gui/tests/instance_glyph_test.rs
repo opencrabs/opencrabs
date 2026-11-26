@@ -24,6 +24,7 @@ fn known(id: &str, label: &str, glyph: Option<&str>) -> KnownInstance {
         added_at: 100,
         last_ok: 0,
         glyph: glyph.map(str::to_string),
+        routes: Vec::new(),
     }
 }
 
