@@ -721,7 +721,10 @@ fn every_card_measures_the_size_its_rows_paint_at() {
          constant: {chip}"
     );
 
-    let pane = body_of("pub fn pane_view(", "/// What the approval card calls the plan");
+    let pane = body_of(
+        "pub fn pane_view(",
+        "/// What the approval card calls the plan",
+    );
     assert!(
         pane.contains(".items_center()"),
         "the pane row centres its track and its count on one line: {pane}"
