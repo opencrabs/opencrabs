@@ -41,7 +41,7 @@ fn session_rows_paint_edge_to_edge_without_card_chrome() {
     let rail_root = block(
         SESSIONS,
         "pub fn rail(",
-        ".child(brand_header(rail_actions))",
+        ".child(brand_header(brand.actions, brand.crabs_toggle))",
     );
     assert!(
         !rail_root.contains(".p_2()") && !rail_root.contains(".gap_1()"),
