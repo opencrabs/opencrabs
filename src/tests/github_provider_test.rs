@@ -7,7 +7,7 @@ use crate::brain::Provider;
 use crate::brain::provider::custom_openai_compatible::OpenAIProvider;
 use crate::config::{Config, ProviderConfig, ProviderConfigs, resolve_provider_from_config};
 use crate::tui::onboarding::{OnboardingWizard, PROVIDERS};
-use opencrabs::ui_core::model_selector::normalize_filter_query;
+use crate::ui_core::model_selector::normalize_filter_query;
 
 // ── Provider array ──────────────────────────────────────────────
 
