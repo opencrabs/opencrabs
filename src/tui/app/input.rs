@@ -2508,8 +2508,11 @@ impl App {
             }
         } else if keys::is_down(&event)
             && !self.slash_suggestions_active
-            && vertical_action(self.cursor_position, self.input_buffer.len(), Vertical::Down)
-                == VerticalAction::Caret
+            && vertical_action(
+                self.cursor_position,
+                self.input_buffer.len(),
+                Vertical::Down,
+            ) == VerticalAction::Caret
         {
             // Arrow Down — navigate lines within the buffer. Runs regardless
             // of whether we're inside a history browse, so a recalled

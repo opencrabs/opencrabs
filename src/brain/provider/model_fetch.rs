@@ -100,7 +100,9 @@ pub(crate) fn catalogue_request_headers(
     {
         headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
     }
-    headers.extend(crate::brain::provider::identity::headers_for(base_url, None));
+    headers.extend(crate::brain::provider::identity::headers_for(
+        base_url, None,
+    ));
     headers
 }
 

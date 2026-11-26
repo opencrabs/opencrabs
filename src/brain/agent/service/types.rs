@@ -416,8 +416,7 @@ impl QueuedUserMessage {
             .iter()
             .map(|m| {
                 let half = m.display_text.as_str();
-                crate::utils::strip_embedded_compaction(half)
-                    .unwrap_or_else(|| half.to_string())
+                crate::utils::strip_embedded_compaction(half).unwrap_or_else(|| half.to_string())
             })
             .collect::<Vec<_>>()
             .join("\n");

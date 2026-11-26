@@ -97,7 +97,7 @@ pub fn strip_embedded_compaction(content: &str) -> Option<String> {
 
 #[cfg(test)]
 mod embedded_compaction_tests {
-    use super::{strip_embedded_compaction, COMPACTION_BANNER};
+    use super::{COMPACTION_BANNER, strip_embedded_compaction};
 
     #[test]
     fn an_embedded_banner_is_cut_with_its_tail() {
@@ -106,7 +106,10 @@ mod embedded_compaction_tests {
         // not.
         let row = "what the actual fuck [CONTEXT COMPACTION — DELTA SEGMENT. More\nscaffold lines\nand more";
         let stripped = strip_embedded_compaction(row).expect("the banner is embedded");
-        assert_eq!(stripped, "what the actual fuck\n\n[compaction summary hidden]");
+        assert_eq!(
+            stripped,
+            "what the actual fuck\n\n[compaction summary hidden]"
+        );
         assert!(!stripped.contains("scaffold lines"));
     }
 

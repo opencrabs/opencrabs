@@ -1541,10 +1541,10 @@ impl Dashboard {
                     // Same scaffold strip as live_fold: a queued message that
                     // carries the compaction banner never paints it into the
                     // live card (2026-11-26 GUI leak).
-                    self.turn.live.injected.push(
-                        opencrabs::utils::strip_embedded_compaction(&text)
-                            .unwrap_or(text),
-                    );
+                    self.turn
+                        .live
+                        .injected
+                        .push(opencrabs::utils::strip_embedded_compaction(&text).unwrap_or(text));
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(sid, ProgressEvent::TokenCount(count), _) => {

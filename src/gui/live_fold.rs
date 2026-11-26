@@ -153,10 +153,8 @@ pub(crate) fn fold_live(
         // that rode in with the banner must not paint the whole summary back
         // (2026-11-26 GUI leak). Same rule the reload path applies.
         ProgressEvent::QueuedUserMessage { text } => {
-            live.injected.push(
-                opencrabs::utils::strip_embedded_compaction(&text)
-                    .unwrap_or(text),
-            );
+            live.injected
+                .push(opencrabs::utils::strip_embedded_compaction(&text).unwrap_or(text));
         }
         // The service discarded what it had already streamed: a phantom
         // iteration, a gaslighting preamble, a thinking-loop timeout. The card

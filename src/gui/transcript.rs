@@ -7306,7 +7306,9 @@ mod tests {
         // The full-context marker as the WHOLE question (the resume seed the
         // restart bug shipped): the card holds the hidden note, not the
         // summary.
-        live.begin("[CONTEXT COMPACTION — The conversation was automatically compacted.".to_string());
+        live.begin(
+            "[CONTEXT COMPACTION — The conversation was automatically compacted.".to_string(),
+        );
         let shown = live.user.as_deref().expect("the question is held");
         assert!(
             !shown.contains("automatically compacted"),

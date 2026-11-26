@@ -141,7 +141,10 @@ fn the_vertical_key_is_the_carets_until_the_caret_is_out_of_the_text() {
     let len = text.len();
 
     // The caret sits inside the text: it keeps the key, both ways.
-    assert_eq!(vertical_action(len, len, Vertical::Up), VerticalAction::Caret);
+    assert_eq!(
+        vertical_action(len, len, Vertical::Up),
+        VerticalAction::Caret
+    );
     assert_eq!(
         vertical_action(0, len, Vertical::Down),
         VerticalAction::Caret
@@ -156,10 +159,7 @@ fn the_vertical_key_is_the_carets_until_the_caret_is_out_of_the_text() {
         VerticalAction::History
     );
     // An empty field has nowhere for the caret to go.
-    assert_eq!(
-        vertical_action(0, 0, Vertical::Up),
-        VerticalAction::History
-    );
+    assert_eq!(vertical_action(0, 0, Vertical::Up), VerticalAction::History);
     assert_eq!(
         vertical_action(0, 0, Vertical::Down),
         VerticalAction::History
@@ -235,7 +235,8 @@ fn both_surfaces_read_and_write_the_one_entry_per_record_file() {
         "the file says which format it is in"
     );
     assert!(
-        composer.contains("fn encode_history_record(") && composer.contains("fn decode_history_record("),
+        composer.contains("fn encode_history_record(")
+            && composer.contains("fn decode_history_record("),
         "an entry is a record with its newlines escaped"
     );
 }
