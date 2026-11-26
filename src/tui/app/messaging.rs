@@ -2714,7 +2714,7 @@ impl App {
         }
     }
 
-    pub(crate) fn expand_message(msg: crate::db::models::Message) -> Vec<DisplayMessage> {
+    pub(crate) fn expand_message(mut msg: crate::db::models::Message) -> Vec<DisplayMessage> {
         if msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
             return if crate::services::message::CompletedPlanPayload::from_message(&msg).is_some() {
                 vec![DisplayMessage::from(msg)]
