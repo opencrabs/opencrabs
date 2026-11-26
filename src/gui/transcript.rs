@@ -773,25 +773,19 @@ impl LiveTurn {
         // the card's line said the sentence and the answer bubble under the
         // card said it again. Cutting the one copy the card now owns leaves
         // whatever the turn really answered, and nothing of the paragraph.
-        //
-        // The match is whitespace-insensitive (#3179, 2026-11-26): the
-        // intermediate text and the streamed chunks do not always agree on
-        // line breaks, and an exact `find` then missed the copy, left it in
-        // the answer buffer, and the card said the paragraph while the bubble
-        // under the card said it again the moment the turn settled.
-        if let Some((start, end)) = find_stream_copy(&self.stream, text) {
+        if let Some(at) = self.stream.find(text) {
             // `get` hands back None unless both ends land on a char boundary,
-            // so a cut that cannot land mid-character drops the copy instead
-            // of panicking (#3179). The byte-slice ratchet wants the same
+            // so a cut that cannot land mid-character leaves the stream alone
+            // instead of panicking. The byte-slice ratchet wants the same
             // thing: no `str[a..b]` on a live buffer.
-            let mut kept = String::with_capacity(self.stream.len());
-            if let Some(head) = self.stream.get(..start) {
-                kept.push_str(head);
+            let cut = self
+                .stream
+                .get(..at)
+                .zip(self.stream.get(at + text.len()..))
+                .map(|(head, tail)| format!("{head}{tail}"));
+            if let Some(kept) = cut {
+                self.stream = kept.trim().to_string();
             }
-            if let Some(tail) = self.stream.get(end..) {
-                kept.push_str(tail);
-            }
-            self.stream = kept.trim().to_string();
         }
         self.push_narration_entry(text);
     }
@@ -918,6 +912,22 @@ impl LiveTurn {
             Some(self.stream.as_str())
         } else {
             self.settled.as_deref().filter(|t| !t.trim().is_empty())
+        }
+    }
+
+    /// The prose still arriving, and nothing else (#3190): the chunks the
+    /// turn is sending right now, gone the moment it settles. The card is
+    /// where that prose belongs while the turn runs, so the body paints it
+    /// in place and the bubble under the card is left for the settled
+    /// answer alone.
+    pub fn pending(&self) -> Option<&str> {
+        if self.settled.is_some() {
+            return None;
+        }
+        if self.stream.trim().is_empty() {
+            None
+        } else {
+            Some(self.stream.as_str())
         }
     }
 
@@ -1640,141 +1650,6 @@ pub fn turns_with_origins(
     (hidden, out)
 }
 
-/// The finished turn as a transcript entry, built from the card that was
-/// painting it instead of from a refetched window (#3032).
-///
-/// Every finished turn used to buy a new OS thread, a fresh tokio runtime, its
-/// own `Database::connect`, a 200-row read and a rebuild of every turn in the
-/// window, only to learn that the rows it had just written were there. The
-/// content never needed reading: the card had it all along. This produces the
-/// same `Turn` that rebuild would have produced for that turn, so the list
-/// grows by one instead of being re-derived. The reload is kept for the reads
-/// that genuinely need the rows: a session switch, a ledger that moved under
-/// us, and the settle path that proves a slow write landed.
-///
-/// The anchor is spelled the way `turns_with_origins` spells it, from the
-/// question row and the second it was sent, so an opened turn stays open. A
-/// turn with no question of its own (a resumed task) has no anchor it could
-/// honestly claim, so it returns `None` and the caller reloads.
-pub fn turn_from_live(live: &LiveTurn, metrics: Option<TurnMetrics>) -> Option<Turn> {
-    let question = live.user.as_deref()?;
-    if question.trim().is_empty() {
-        return None;
-    }
-    // The stamp is what the rows would carry: the second the question went
-    // out. Without it there is no anchor to match a reload against.
-    let sent = live.sent_at?;
-    let mut blocks: Vec<Block> = vec![Block::Msg {
-        role: "user".into(),
-        content: question.to_string(),
-        time: live_time(Some(sent)),
-        placeholder: false,
-        message_id: None,
-        forward: None,
-    }];
-    // The body in the order the card drew it: calls, narration and reasoning
-    // interleaved. Consecutive calls collapse into one ledger, the way a
-    // persisted row's own ledger reads.
-    let mut open: Option<Vec<ToolCall>> = None;
-    let mut listed = vec![false; live.tools.len()];
-    let flush = |open: &mut Option<Vec<ToolCall>>, blocks: &mut Vec<Block>| {
-        if let Some(calls) = open.take() {
-            blocks.push(Block::Tools { calls });
-        }
-    };
-    for entry in &live.entries {
-        match entry {
-            LiveEntry::Tool(i) => {
-                let Some(call) = live.tools.get(*i) else {
-                    continue;
-                };
-                if let Some(slot) = listed.get_mut(*i) {
-                    *slot = true;
-                }
-                open.get_or_insert_with(Vec::new).push(call.clone());
-            }
-            LiveEntry::Narration(text) => {
-                flush(&mut open, &mut blocks);
-                if !text.trim().is_empty() {
-                    blocks.push(Block::Msg {
-                        role: "assistant".into(),
-                        content: text.clone(),
-                        time: String::new(),
-                        placeholder: false,
-                        message_id: None,
-                        forward: None,
-                    });
-                }
-            }
-            LiveEntry::Reasoning(text) => {
-                flush(&mut open, &mut blocks);
-                if !text.trim().is_empty() {
-                    blocks.push(Block::Thinking {
-                        content: text.clone(),
-                    });
-                }
-            }
-        }
-    }
-    // A call that never reached the entry list still belongs to the turn: an
-    // approval waiting when the turn ended, or a ledger the card appended out
-    // of order. Dropping it would hide work the reader watched.
-    for (i, call) in live.tools.iter().enumerate() {
-        if !listed.get(i).copied().unwrap_or(true) {
-            open.get_or_insert_with(Vec::new).push(call.clone());
-        }
-    }
-    flush(&mut open, &mut blocks);
-    // The answer last, so it is the turn's final block and the fold keeps it.
-    if let Some(answer) = live.answer()
-        && !answer.trim().is_empty()
-    {
-        blocks.push(Block::Msg {
-            role: "assistant".into(),
-            content: answer.to_string(),
-            time: live_time(live.answer_at),
-            placeholder: false,
-            message_id: None,
-            forward: None,
-        });
-    }
-    let final_idx = blocks.iter().enumerate().rev().find_map(|(i, b)| match b {
-        Block::Msg {
-            role,
-            content,
-            placeholder,
-            ..
-        } if role == "assistant" && !*placeholder && !content.trim().is_empty() => Some(i),
-        _ => None,
-    });
-    let mut summary = TurnSummary::default();
-    for b in &blocks {
-        match b {
-            Block::Tools { calls } => {
-                summary.tool_calls += calls.len();
-                summary.failed += calls.iter().filter(|c| !c.success).count();
-            }
-            Block::Msg { role, .. } if role == "error" => summary.has_error = true,
-            _ => {}
-        }
-    }
-    summary.stopped = live.stopped;
-    summary.duration_secs = live.elapsed_secs() as i64;
-    let steps = (0..blocks.len())
-        .filter(|&i| !visible_when_folded(&blocks[i], final_idx, i))
-        .count();
-    let header = format_turn_header(summary, steps);
-    Some(Turn {
-        header,
-        summary,
-        metrics,
-        anchor: format!("user@{}", sent.timestamp()),
-        blocks,
-        final_idx,
-        origin: None,
-    })
-}
-
 /// Whether the persisted rows of one turn stay out of the conversation
 /// because the live card is already drawing that same exchange.
 ///
@@ -1833,56 +1708,6 @@ pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
             sent.checked_add_signed(chrono::TimeDelta::seconds(*offset))
                 .is_some_and(|at| live_time(Some(at)) == *time)
         })
-}
-
-/// Where one block of a carded turn draws around its card (#3179, 2026-11-26).
-///
-/// The card is the working-out box, so a block's place is the place the live
-/// card gave it while the turn ran: the question above, calls and narration
-/// in order inside, the final answer below. Bucketing by block kind put
-/// every `Msg` below the card instead, which is what moved a narration
-/// paragraph out from under its ledger the moment the turn settled, and what
-/// painted a queued mid-turn question again under the answer it belongs to.
-pub(crate) enum TurnBucket {
-    /// Above the card, in order: the question and any mid-turn question.
-    Pre,
-    /// Inside the card, in order: the working-out the reader watched.
-    Body,
-    /// Below the card: the answer and the harness rows a fold must keep.
-    Post,
-}
-
-pub(crate) fn turn_block_bucket(
-    block: &Block,
-    header_at: usize,
-    idx: usize,
-    final_idx: Option<usize>,
-    folded: bool,
-) -> TurnBucket {
-    if idx < header_at {
-        return TurnBucket::Pre;
-    }
-    if let Block::Msg { role, .. } = block {
-        return match role.as_str() {
-            "user" => TurnBucket::Pre,
-            // The answer keeps the place the fold and the reader expect:
-            // below the card. Everything else the assistant said between
-            // calls is narration and rides inside the working-out.
-            "assistant" if Some(idx) == final_idx => TurnBucket::Post,
-            // A fold already skipped what it hides, so an assistant row that
-            // survives it is a deliverable report: it stays outside the
-            // collapsed card or a closed card body would bury it.
-            "assistant" if folded => TurnBucket::Post,
-            "assistant" => TurnBucket::Body,
-            // Errors, harness status and markers stay readable without
-            // opening the card (#786).
-            _ => TurnBucket::Post,
-        };
-    }
-    if folded {
-        return TurnBucket::Post;
-    }
-    TurnBucket::Body
 }
 
 /// Whether one block still renders while its turn is folded. Mirrors
@@ -3929,6 +3754,10 @@ pub enum LiveCardLine {
     },
     /// Narration between calls, drawn as markdown.
     Narration(String),
+    /// Prose still streaming, drawn as markdown like narration. It is the
+    /// text the turn is sending right now, so it lives in the card in the
+    /// order it happens instead of in a second bubble under it (#3190).
+    Pending(String),
     /// Reasoning, dimmed and capped.
     Reasoning(String),
 }
@@ -4026,6 +3855,13 @@ fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
                 lines.push((entry_index, LiveCardLine::Reasoning(fit(text.trim(), 600))));
             }
         }
+    }
+    // The prose still streaming draws inside the card, last, in the order it
+    // happens (#3190). The index is past the entries, so it never collides
+    // with a real one and a menu on it resolves to nothing the way a stale
+    // tool index already does.
+    if let Some(text) = live.pending() {
+        lines.push((live.entries.len(), LiveCardLine::Pending(text.to_string())));
     }
     lines
 }
@@ -4188,6 +4024,9 @@ fn live_card_line_text(line: &LiveCardLine) -> String {
     match line {
         LiveCardLine::Tool { mark, text, .. } => format!("{mark} {text}"),
         LiveCardLine::Narration(text) => markdown_copy_text(text, markdown::MdFlow::Prose),
+        // The prose still streaming copies as prose: it is drawn as markdown
+        // below, so its copy text is the same parse (#3190).
+        LiveCardLine::Pending(text) => markdown_copy_text(text, markdown::MdFlow::Prose),
         // Reasoning is parsed for the pixels now, so its copy text is the
         // visible segments of that same parse.
         LiveCardLine::Reasoning(text) => markdown_copy_text(text, markdown::MdFlow::Prose),
@@ -4218,6 +4057,15 @@ fn live_card_line(line: LiveCardLine, selection: Option<&SelectionContext>) -> A
             )
             .into_any_element(),
         LiveCardLine::Narration(text) => md_block(
+            &text,
+            MdLook::body(SMALL_TEXT_SIZE),
+            markdown::MdFlow::Prose,
+            selection,
+        )
+        .into_any_element(),
+        // The prose still streaming draws like narration: same size, same
+        // parse, same selection (#3190).
+        LiveCardLine::Pending(text) => md_block(
             &text,
             MdLook::body(SMALL_TEXT_SIZE),
             markdown::MdFlow::Prose,
@@ -4295,7 +4143,9 @@ fn live_card(
     } else {
         let newest = collapsed_narration(live);
         lines.iter().rev().find_map(|(entry, line)| match line {
-            LiveCardLine::Narration(text) if Some(collapsed_paragraph(text)) == newest => {
+            LiveCardLine::Narration(text) | LiveCardLine::Pending(text)
+                if Some(collapsed_paragraph(text)) == newest =>
+            {
                 Some((*entry, collapsed_paragraph(text)))
             }
             _ => None,
@@ -4622,42 +4472,6 @@ pub(crate) const SPINNER_FRAMES: [&str; 10] = [
 
 /// A live timestamp rendered exactly like a persisted row's, so the bubble
 /// does not change shape when the DB reload replaces it.
-/// Locate the streamed copy of a narration paragraph inside the answer
-/// buffer, ignoring whitespace, and return its byte range (#3179).
-///
-/// The intermediate text and the streamed chunks of the same paragraph do not
-/// always agree on line breaks: the stream wraps where the event does not.
-/// An exact `find` then missed the copy, the card took its own line AND the
-/// answer buffer kept the paragraph, so the bubble under the card said the
-/// same words again the moment the turn settled. Whitespace-insensitive
-/// matching closes that hole without touching punctuation or case, so a
-/// similar sentence is never eaten by mistake.
-fn find_stream_copy(haystack: &str, needle: &str) -> Option<(usize, usize)> {
-    let mut kept_spans: Vec<(usize, usize)> = Vec::with_capacity(haystack.len() / 4);
-    let mut stripped = String::with_capacity(haystack.len());
-    for (i, ch) in haystack.char_indices() {
-        if !ch.is_whitespace() {
-            kept_spans.push((i, i + ch.len_utf8()));
-            stripped.push(ch);
-        }
-    }
-    let mut wanted = String::with_capacity(needle.len());
-    let mut wanted_len = 0usize;
-    for ch in needle.chars() {
-        if !ch.is_whitespace() {
-            wanted.push(ch);
-            wanted_len += 1;
-        }
-    }
-    if wanted_len == 0 {
-        return None;
-    }
-    let at = stripped.find(&wanted)?;
-    let start = kept_spans.get(at)?.0;
-    let end = kept_spans.get(at + wanted_len - 1)?.1;
-    Some((start, end))
-}
-
 fn live_time(at: Option<chrono::DateTime<chrono::Local>>) -> String {
     at.map(|t| t.format("%m-%d %H:%M:%S").to_string())
         .unwrap_or_default()
@@ -4859,8 +4673,11 @@ const COLLAPSED_NARRATION_CHARS: usize = 280;
 /// paragraph the newest intermediate opened with, so both surfaces clip the
 /// prose the same way.
 pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
-    live.narration()
-        .last()
+    // The prose still streaming leads, and the narration behind it waits (#3190):
+    // the sentence the turn is sending RIGHT NOW is what the card shows, and
+    // the paragraph it already owns is what it falls back to.
+    live.pending()
+        .or_else(|| live.narration().last().copied())
         .map(collapsed_paragraph)
         .filter(|text| !text.is_empty())
 }
@@ -5132,7 +4949,15 @@ fn live_view(
             None => card,
         });
     }
-    if let Some(answer) = live.answer() {
+    // The bubble under the card holds the SETTLED answer (#3190). While the
+    // turn runs, the prose it is sending draws inside the card, so a bubble
+    // under it would print the same words twice: once in the block and once
+    // below it. The settled answer waits here until the rows take it over.
+    if let Some(answer) = live
+        .settled
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         let block = Block::Msg {
             role: "assistant".into(),
             content: answer.to_string(),
@@ -6926,21 +6751,15 @@ pub fn view(
                 },
             };
             // Working-out rows ride inside the card; conversation rows keep
-            // their place around it (#2632). The split is by PLACE, not by
-            // block kind (#3179, 2026-11-26): bucketing every `Msg` below the
-            // card dropped the narration paragraph out from under its ledger
-            // the moment the turn settled, and a queued mid-turn question
-            // repeated under the answer it belongs to. The live card drew
-            // those rows in the order they happened, inside the working-out,
-            // and the settled turn reads the same way.
+            // their place around it (#2632).
             if !carded {
                 col = col.child(child);
+            } else if i < header_at {
+                pre.push(child);
+            } else if folded || matches!(block, Block::Msg { .. }) {
+                post.push(child);
             } else {
-                match turn_block_bucket(block, header_at, i, turn.final_idx, folded) {
-                    TurnBucket::Pre => pre.push(child),
-                    TurnBucket::Body => body.push(child),
-                    TurnBucket::Post => post.push(child),
-                }
+                body.push(child);
             }
         }
         col = col.children(pre);
@@ -8159,6 +7978,88 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The owner's #3190: prose used to appear in a bubble under the tool
+    /// block and only then jump into the card. While the answer streams it
+    /// is the card's last line, and the bubble under the card stays empty
+    /// until the turn settles.
+    #[test]
+    fn the_pending_prose_streams_inside_the_live_card() {
+        let mut live = LiveTurn::default();
+        live.begin("fix it".into());
+        live.push_tool(ToolCall {
+            name: "read_file".into(),
+            description: "reading the parser".into(),
+            success: true,
+            done: true,
+            task_id: None,
+        });
+        live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+        let text = live.pending().expect("streamed prose is pending");
+        assert!(text.contains("Checking the parser"), "got {text:?}");
+        assert_eq!(
+            live_card_lines(&live)
+                .last()
+                .map(|(_, line)| matches!(line, LiveCardLine::Pending(_))),
+            Some(true),
+            "the pending paragraph is drawn inside the card, after the call"
+        );
+        assert_eq!(
+            collapsed_narration(&live).as_deref(),
+            Some("Checking the parser now."),
+            "a folded card still shows the pending paragraph in its head"
+        );
+        assert!(
+            live.settled.is_none() && !live.stream.trim().is_empty(),
+            "nothing settled yet, so the bubble under the card draws nothing"
+        );
+
+        live.settled = Some("fixed".into());
+        assert_eq!(live.pending(), None, "a settled turn has nothing pending");
+    }
+
+    /// Every paragraph the card owns, in order, so the completion test reads
+    /// what the card would carry into the turn it installs at Done.
+    fn card_narration(live: &LiveTurn) -> Vec<String> {
+        live_card_lines(live)
+            .into_iter()
+            .filter_map(|(_, line)| match line {
+                LiveCardLine::Narration(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The owner's #3190, second half: the completion used to paint twice,
+    /// once from the card and once from the appended turn, until a session
+    /// switch dropped one copy. The paragraph the provider sends twice, as
+    /// streamed chunks and again as intermediate text, is what made the card
+    /// hold it; the answer then has to read it once, not twice.
+    #[test]
+    fn the_completion_keeps_one_copy_of_the_answer() {
+        let mut live = LiveTurn::default();
+        live.begin("fix it".into());
+        live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+        live.push_narration("Checking the parser now.");
+        assert_eq!(
+            card_narration(&live),
+            vec!["Checking the parser now.".to_string()],
+            "the card owns the paragraph, so the answer must not repeat it"
+        );
+        let done = include_str!("dashboard_turns.rs");
+        let arm = done
+            .get(src_at(done, "TurnEvent::Done")..)
+            .and_then(|tail| tail.get(..src_at(tail, "TurnEvent::Failed")))
+            .expect("the Done arm runs up to the Failed arm");
+        assert!(
+            arm.contains("reload = Some(sid)"),
+            "the completion is rendered from the rows at Done"
+        );
+        assert!(
+            !done.contains("turn_from_live"),
+            "one append at Done is the duplicate the owner still sees"
+        );
     }
 
     /// The settle test measures the session, not the window (#2705): a
@@ -11144,120 +11045,5 @@ mod tests {
         // whole run goes instead of leaving the emptiness behind.
         assert_eq!(without_trailing_blanks("\n\n\n"), "");
         assert_eq!(without_trailing_blanks("   \n \t\n"), "");
-    }
-
-    /// #3179: the bucket decides where a settled block paints around its
-    /// card, and the card is the working-out box. The question above, calls
-    /// and narration inside in the order they ran, the answer below.
-    mod bucketing {
-        use super::*;
-
-        fn msg(role: &str, text: &str) -> Block {
-            Block::Msg {
-                role: role.into(),
-                content: text.into(),
-                time: String::new(),
-                placeholder: false,
-                message_id: None,
-                forward: None,
-            }
-        }
-
-        #[test]
-        fn narration_rides_inside_the_card_not_below_it() {
-            // A narration paragraph the turn produced between calls: exactly
-            // the row that fell out under its ledger when every `Msg` was
-            // bucketed below the card.
-            let narration = msg("assistant", "checking the schema first");
-            assert!(
-                matches!(
-                    turn_block_bucket(&narration, 1, 2, None, false),
-                    TurnBucket::Body
-                ),
-                "non-final assistant text is working-out and stays in the card"
-            );
-        }
-
-        #[test]
-        fn question_goes_above_the_card() {
-            let question = msg("user", "why is the build red");
-            assert!(matches!(
-                turn_block_bucket(&question, 1, 0, None, false),
-                TurnBucket::Pre
-            ));
-        }
-
-        #[test]
-        fn final_answer_goes_below_the_card() {
-            let answer = msg("assistant", "the lockfile was stale");
-            assert!(matches!(
-                turn_block_bucket(&answer, 1, 3, Some(3), false),
-                TurnBucket::Post
-            ));
-        }
-
-        #[test]
-        fn mid_turn_question_stays_above_not_repeated_under_the_answer() {
-            // The duplicate the user saw: a prompt sent while the turn was
-            // running repainted UNDER the answer it belongs to. It is a
-            // conversation row, and its place is above the card, in order.
-            let queued = msg("user", "also fix the flake");
-            assert!(matches!(
-                turn_block_bucket(&queued, 1, 4, Some(3), false),
-                TurnBucket::Pre
-            ));
-        }
-
-        #[test]
-        fn errors_and_markers_stay_readable_when_folded() {
-            // A fold skips what it hides before bucketing, so anything still
-            // standing while folded is a keep-visible row (#786) and a closed
-            // card body would bury it.
-            let error = msg("error", "provider timed out");
-            assert!(matches!(
-                turn_block_bucket(&error, 1, 2, Some(3), true),
-                TurnBucket::Post
-            ));
-        }
-    }
-
-    /// #3179: the stream copy of a narration paragraph is cut wherever it
-    /// sits, and the match survives a line-break disagreement between the
-    /// streamed chunks and the intermediate text.
-    mod stream_copy {
-        use super::find_stream_copy;
-
-        #[test]
-        fn finds_an_exact_copy() {
-            let (start, end) = find_stream_copy("draft kept\n\ncopied text\nmore", "copied text")
-                .expect("plain copy is found");
-            assert_eq!(
-                "draft kept\n\ncopied text\nmore".get(start..end),
-                Some("copied text")
-            );
-        }
-
-        #[test]
-        fn finds_a_copy_despite_line_break_mismatch() {
-            // Stream wrapped where the event did not: same words, different
-            // whitespace, and the exact `find` this replaces missed it.
-            let haystack = "kept part\nwrapped copy\nstill more";
-            let (start, end) =
-                find_stream_copy(haystack, "wrapped\ncopy").expect("line-break mismatch found");
-            assert_eq!(haystack.get(start..end), Some("wrapped copy"));
-        }
-
-        #[test]
-        fn misses_a_different_paragraph() {
-            assert_eq!(
-                find_stream_copy("the answer is five", "the answer is six"),
-                None
-            );
-        }
-
-        #[test]
-        fn empty_needle_never_matches() {
-            assert_eq!(find_stream_copy("anything", ""), None);
-        }
     }
 }
