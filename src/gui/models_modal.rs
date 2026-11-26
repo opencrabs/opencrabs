@@ -205,23 +205,17 @@ impl Dashboard {
                 ))
         } else {
             // The chip sits on the hint line it belongs to (#3181).
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(picker.footer)
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(scope_chip)
-                        .child(modal_shell::footer(
-                            "type filter or custom id  enter switch  tab scope  esc close"
-                                .to_string(),
-                        )),
-                )
+            div().flex().flex_col().gap_1().child(picker.footer).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(scope_chip)
+                    .child(modal_shell::footer(
+                        "type filter or custom id  enter switch  tab scope  esc close".to_string(),
+                    )),
+            )
         };
 
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {

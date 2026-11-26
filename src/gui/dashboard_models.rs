@@ -328,7 +328,11 @@ impl Dashboard {
         };
         // Only the standalone picker gains the extra step; the wizard's
         // Down stays clamped to its catalogue exactly as before.
-        let walk_last = if !onboarding && custom_pair.is_some() { last + 1 } else { last };
+        let walk_last = if !onboarding && custom_pair.is_some() {
+            last + 1
+        } else {
+            last
+        };
         let mut query_changed = false;
         match ev.keystroke.key.as_str() {
             "up" => self.models_index = self.models_index.saturating_sub(1),

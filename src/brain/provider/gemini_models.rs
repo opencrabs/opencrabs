@@ -107,10 +107,7 @@ pub(crate) async fn fetch_live_chat_models(api_key: &str) -> Vec<String> {
             }
         };
         if !response.status().is_success() {
-            tracing::warn!(
-                "[gemini_models] catalogue returned {}",
-                response.status()
-            );
+            tracing::warn!("[gemini_models] catalogue returned {}", response.status());
             return Vec::new();
         }
         let page = match response.json::<GeminiModelsPage>().await {

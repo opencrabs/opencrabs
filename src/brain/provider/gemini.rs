@@ -91,9 +91,7 @@ fn version_of(name: &str) -> f32 {
     name.split('-')
         .find_map(|part| {
             let numeric = !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.')
+                && part.chars().all(|c| c.is_ascii_digit() || c == '.')
                 && part.chars().any(|c| c.is_ascii_digit());
             numeric.then(|| part.parse::<f32>().ok()).flatten()
         })

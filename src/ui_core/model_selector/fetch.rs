@@ -309,8 +309,7 @@ pub async fn fetch_provider_models(
                     return Vec::new();
                 }
             };
-            let models =
-                crate::brain::provider::gemini_models::fetch_live_chat_models(key).await;
+            let models = crate::brain::provider::gemini_models::fetch_live_chat_models(key).await;
             tracing::info!(
                 "[fetch_provider_models] Gemini: fetched {} live chat models",
                 models.len()

@@ -718,10 +718,7 @@ fn the_delay_marker_never_reaches_the_identity() {
         "a differently-aged header must strip the same way"
     );
     // A push can pick up both framings, in either order.
-    let both = mark_delayed(
-        &format!("{BUSY_LANE_WRAPPER}{body}"),
-        STALE_NOTICE_SECS * 2,
-    );
+    let both = mark_delayed(&format!("{BUSY_LANE_WRAPPER}{body}"), STALE_NOTICE_SECS * 2);
     assert_eq!(
         durable_context_text(&both),
         body,

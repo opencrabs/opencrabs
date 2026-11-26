@@ -262,15 +262,14 @@ async fn promotion_does_not_repaint_rows_the_db_reload_already_has() {
 
     // The sidecar accumulated the live echo of the SAME rows while the
     // session was off-screen, plus one delta the DB has never seen.
-    let sidecar =
-        crate::tui::app::background_session::BackgroundSessionState {
-            pending_messages: vec![
-                msg_at("user", "more critical is this"),
-                msg_at("assistant", "The DB has the review text in one row."),
-                msg_at("user", "and the fresh one"),
-            ],
-            ..Default::default()
-        };
+    let sidecar = crate::tui::app::background_session::BackgroundSessionState {
+        pending_messages: vec![
+            msg_at("user", "more critical is this"),
+            msg_at("assistant", "The DB has the review text in one row."),
+            msg_at("user", "and the fresh one"),
+        ],
+        ..Default::default()
+    };
     app.background_sessions.insert(sid, sidecar);
 
     assert!(app.promote_to_foreground(sid));
@@ -315,14 +314,10 @@ async fn promotion_keeps_pending_rows_that_only_resemble_persisted_ones() {
     let sid = Uuid::new_v4();
 
     app.messages = vec![msg_at("assistant", "the full answer text")];
-    let sidecar =
-        crate::tui::app::background_session::BackgroundSessionState {
-            pending_messages: vec![msg_at(
-                "assistant",
-                "the full answer",
-            )],
-            ..Default::default()
-        };
+    let sidecar = crate::tui::app::background_session::BackgroundSessionState {
+        pending_messages: vec![msg_at("assistant", "the full answer")],
+        ..Default::default()
+    };
     app.background_sessions.insert(sid, sidecar);
 
     assert!(app.promote_to_foreground(sid));

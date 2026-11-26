@@ -15,7 +15,10 @@ const GUI_MOUNT: &str = concat!(
 #[test]
 fn instance_rail_is_off_by_default() {
     let config = GuiConfig::default();
-    assert!(!config.instance_rail, "the rail must be opt-in, never on for a fresh install");
+    assert!(
+        !config.instance_rail,
+        "the rail must be opt-in, never on for a fresh install"
+    );
 }
 
 #[test]
@@ -70,7 +73,10 @@ fn the_settings_row_carries_the_restart_chip() {
         .and_then(|tail| tail.split("SettingSpec {").next())
         .expect("the instance_rail spec exists");
     assert!(spec.contains("restart: true,"), "the row must say restart");
-    assert!(spec.contains("SettingsSection::Advanced,"), "the row groups under Advanced");
+    assert!(
+        spec.contains("SettingsSection::Advanced,"),
+        "the row groups under Advanced"
+    );
     assert!(
         src.contains("(\"gui\", \"instance_rail\") => RowValue::Bool(g.instance_rail)"),
         "the spec has a reader"

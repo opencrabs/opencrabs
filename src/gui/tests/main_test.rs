@@ -214,8 +214,7 @@ fn a_provider_retry_says_so_on_the_card() {
     // `send_label` counts the initial send, so retry 1 of a 4-retry ceiling is
     // "attempt 2 of 5" -- the same wording Telegram and the terminal use.
     assert_eq!(
-        notice,
-        "Retry attempt 2 of 5: dns error: failed to lookup address information",
+        notice, "Retry attempt 2 of 5: dns error: failed to lookup address information",
         "the card's retry line drifted from the other surfaces"
     );
 }

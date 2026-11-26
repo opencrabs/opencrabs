@@ -388,6 +388,7 @@ pub mod gui_focus_report_test;
 pub mod gui_font_test;
 pub mod gui_footer_title_test;
 pub mod gui_help_cards_test;
+pub mod gui_instance_rail_test;
 pub mod gui_lane_3033_test;
 pub mod gui_layout_test;
 #[cfg(feature = "gui")]
@@ -402,7 +403,6 @@ pub mod gui_models_modal_layout_test;
 pub mod gui_overlay_layer_test;
 pub mod gui_panes_follow_test;
 pub mod gui_projects_screen_test;
-pub mod gui_instance_rail_test;
 pub mod gui_rail_last_activity_test;
 pub mod gui_rail_letters_test;
 pub mod gui_reply_quote_2827_test;

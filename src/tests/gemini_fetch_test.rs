@@ -138,7 +138,7 @@ mod tests {
 #[cfg(test)]
 mod default_resolution {
     use crate::brain::provider::gemini::{
-        FALLBACK_MODELS, LATEST_FLASH_MODEL, GeminiProvider, is_chat_model, pick_default_model,
+        FALLBACK_MODELS, GeminiProvider, LATEST_FLASH_MODEL, is_chat_model, pick_default_model,
     };
     use crate::brain::provider::r#trait::Provider;
 
