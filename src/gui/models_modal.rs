@@ -209,27 +209,62 @@ impl Dashboard {
         // A pending all-sessions pick owns the footer (#3035): the count and
         // the second tap are the whole point, so the normal hint steps aside
         // until the reader answers.
+        // The footer is a structured keycap row (#3181), matching the help
+        // dialog's command row: every chord is its own bordered chip with the
+        // action spelled beside it, not one dumped plain-text string.
+        let hint = |chord: &'static str, label: &'static str| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .px_1()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(shown.track))
+                        .bg(rgb(shown.panel_hi))
+                        .text_xs()
+                        .text_color(rgb(shown.text_normal))
+                        .child(SharedString::from(chord)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(label)),
+                )
+        };
         let footer = if let Some(prompt) = self.models_scope_prompt() {
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(text(prompt, Size::Sm, shown.text))
-                .child(modal_shell::footer(
-                    "enter apply to all  esc cancel".to_string(),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_4()
+                        .child(hint("enter", "apply to all"))
+                        .child(hint("esc", "cancel")),
+                )
         } else {
-            // The chip sits on the hint line it belongs to (#3181).
+            // The chip sits on the hint row it belongs to (#3181).
             div().flex().flex_col().gap_1().child(picker.footer).child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_4()
                     .child(scope_chip)
-                    .child(modal_shell::footer(
-                        "type filter or custom id  enter switch  tab scope  esc close".to_string(),
-                    )),
+                    .child(hint("\u{2191}\u{2193}", "scroll"))
+                    .child(hint("enter", "switch"))
+                    .child(hint("tab", "scope"))
+                    .child(hint("esc", "close")),
             )
         };
 
