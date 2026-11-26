@@ -521,6 +521,30 @@ pub fn single_model_choice(models: &[String]) -> Option<&str> {
     }
 }
 
+/// Fold a search query or a candidate name into its comparable shape:
+/// lowercased, with a space, a dash or an underscore treated as one separator
+/// and runs of them collapsed. "qwen ambassador", "Qwen-Ambassador" and
+/// "qwen_ambassador" are one name, so a query typed with any of the three
+/// finds a catalogue row written with another (#3182). The `/` that splits a
+/// `provider/model` pair is kept, because it carries meaning a space does not.
+pub fn normalize_filter_query(text: &str) -> String {
+    let lowered = text.to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    let mut last_was_separator = false;
+    for ch in lowered.chars() {
+        if matches!(ch, ' ' | '-' | '_' | '\t') {
+            if !last_was_separator && !out.is_empty() {
+                out.push(' ');
+            }
+            last_was_separator = true;
+        } else {
+            out.push(ch);
+            last_was_separator = false;
+        }
+    }
+    out
+}
+
 impl ProviderSelectorState {
     /// The OpenCode plan's (`name`, chat `base_url`) pair, for config writes.
     /// Zen and Go serve different catalogs (#2040).
@@ -1029,15 +1053,16 @@ impl ProviderSelectorState {
         single_model_choice(&offered).map(str::to_string)
     }
 
-    /// Model names filtered by `model_filter` (case-insensitive substring match).
+    /// Model names filtered by `model_filter` (case-insensitive substring
+    /// match, with separators folded: see [`normalize_filter_query`]).
     pub fn filtered_model_names(&self) -> Vec<&str> {
         let all = self.all_model_names();
         let mut out = if self.model_filter.is_empty() {
             all
         } else {
-            let q = self.model_filter.to_lowercase();
+            let q = normalize_filter_query(&self.model_filter);
             all.into_iter()
-                .filter(|m| m.to_lowercase().contains(&q))
+                .filter(|m| normalize_filter_query(m).contains(&q))
                 .collect()
         };
         // Newest first, here rather than in all_model_names: that function's

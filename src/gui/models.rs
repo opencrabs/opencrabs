@@ -11,7 +11,8 @@
 
 use opencrabs::tui::onboarding_render::visible_window;
 use opencrabs::ui_core::model_selector::{
-    CUSTOM_PROVIDER_IDX, ProviderSelectorState, single_model_choice, sort_newest_first,
+    CUSTOM_PROVIDER_IDX, ProviderSelectorState, normalize_filter_query, single_model_choice,
+    sort_newest_first,
 };
 
 /// One selectable pair.
@@ -65,17 +66,19 @@ pub struct Panel {
 }
 
 /// Case-insensitive live filtering, across the model id, provider id and
-/// provider display name. Order stays exactly as the catalogue or live fetch
+/// provider display name, with separators folded (see
+/// [`normalize_filter_query`]): "qwen ambassador" and "Qwen-Ambassador" are
+/// one query (#3182). Order stays exactly as the catalogue or live fetch
 /// supplied it.
 pub fn filtered_rows(rows: &[Row], query: &str) -> Vec<Row> {
-    let needle = query.to_lowercase();
+    let needle = normalize_filter_query(query);
     if needle.is_empty() {
         return rows.to_vec();
     }
     rows.iter()
         .filter(|row| {
-            row.pair().to_lowercase().contains(&needle)
-                || row.provider_name.to_lowercase().contains(&needle)
+            normalize_filter_query(&row.pair()).contains(&needle)
+                || normalize_filter_query(&row.provider_name).contains(&needle)
         })
         .cloned()
         .collect()
@@ -395,6 +398,27 @@ mod tests {
         assert!(empty.rows.is_empty());
         assert_eq!(empty.matched, 0);
         assert_eq!(empty.total, 2);
+    }
+
+    /// #3182: the owner types "qwen ambassador" and the row on screen is
+    /// "Qwen-Ambassador/Qwen4-Max". A space and a dash are one separator, so
+    /// the query finds the row however either side spells it.
+    #[test]
+    fn a_search_folds_separators_between_the_query_and_the_pair() {
+        let rows = vec![
+            row("one", "Qwen-Ambassador", "Qwen4-Max"),
+            row("two", "Spaced Name", "beta"),
+        ];
+        // Space query against a dash-shaped pair.
+        assert_eq!(filtered_rows(&rows, "qwen ambassador").len(), 1);
+        // Dash query against a space-shaped display name.
+        assert_eq!(filtered_rows(&rows, "spaced-name")[0].model, "beta");
+        // Underscore folds like any other separator.
+        assert_eq!(filtered_rows(&rows, "qwen_ambassador").len(), 1);
+        // The `/` in the pair is kept, so a space never spans the
+        // provider/model split; the provider display name is the bridge
+        // for that case.
+        assert_eq!(filtered_rows(&rows, "one qwen4 max").len(), 0);
     }
 
     #[test]
