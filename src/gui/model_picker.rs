@@ -349,7 +349,7 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
                     .text_color(rgb(shown.text_faint))
                     .whitespace_normal()
                     .child(SharedString::from(
-                        "type a name to filter, or a full id (provider/model) and press enter to use it",
+                        "type a name to filter, or any model id and press enter to use it",
                     )),
             );
     }

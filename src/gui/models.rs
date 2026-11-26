@@ -248,8 +248,15 @@ fn provider_rows(selector: &ProviderSelectorState, current: Option<(&str, &str)>
         .collect()
 }
 
-/// Resolve a typed id which is absent from every fetched catalogue. A fully
-/// qualified pair keeps its provider; a bare id uses the active provider.
+/// Resolve a typed id which is absent from every fetched catalogue.
+///
+/// With a provider selected the typed text is that provider's model id, so
+/// slashes inside it are part of the id and never a provider boundary
+/// (#3185): picking ModelScope and typing `Qwen-Ambassador/Qwen4-Max` used
+/// to be read as provider `Qwen-Ambassador`, which failed as an unknown
+/// provider. Only an unqualified picker, with no provider selected at all,
+/// reads `provider/model` as a pair, and a bare id then has nothing to
+/// attach to.
 pub fn manual_pair(query: &str, active_provider: &str) -> Option<String> {
     let query = query.trim();
     if query.is_empty() || query.chars().any(char::is_whitespace) {
@@ -258,12 +265,21 @@ pub fn manual_pair(query: &str, active_provider: &str) -> Option<String> {
     if query.starts_with('/') || query.ends_with('/') {
         return None;
     }
+    if !active_provider.is_empty() {
+        // A pasted pair that already names the selected provider is kept as
+        // typed, so the common paste does not become `modelscope/modelscope/...`.
+        if query
+            .strip_prefix(active_provider)
+            .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Some(query.to_string());
+        }
+        return Some(format!("{active_provider}/{query}"));
+    }
     if query.contains('/') {
         Some(query.to_string())
-    } else if active_provider.is_empty() {
-        None
     } else {
-        Some(format!("{active_provider}/{query}"))
+        None
     }
 }
 
@@ -543,13 +559,35 @@ mod tests {
             manual_pair("new-model-2027", "openai").as_deref(),
             Some("openai/new-model-2027")
         );
+        // A selected provider owns the typed text, slashes included: the id
+        // belongs to that provider, so its slashes are not a provider
+        // boundary. Reading them as one made ModelScope ids fail as an
+        // unknown provider.
+        assert_eq!(
+            manual_pair("Qwen-Ambassador/Qwen4-Max", "modelscope").as_deref(),
+            Some("modelscope/Qwen-Ambassador/Qwen4-Max")
+        );
         assert_eq!(
             manual_pair("custom/tenant/model", "openai").as_deref(),
+            Some("openai/custom/tenant/model")
+        );
+        // With nothing selected, a slashed id is already a full pair and a
+        // bare id has no provider to attach to.
+        assert_eq!(
+            manual_pair("custom/tenant/model", "").as_deref(),
             Some("custom/tenant/model")
         );
+        // Pasting the full pair while its provider is already selected keeps
+        // the paste instead of stacking the provider twice.
+        assert_eq!(
+            manual_pair("modelscope/Qwen-Ambassador/Qwen4-Max", "modelscope").as_deref(),
+            Some("modelscope/Qwen-Ambassador/Qwen4-Max")
+        );
+        assert_eq!(manual_pair("new-model", ""), None);
         assert_eq!(manual_pair("   ", "openai"), None);
         assert_eq!(manual_pair("has spaces", "openai"), None);
-        assert_eq!(manual_pair("new-model", ""), None);
+        assert_eq!(manual_pair("/leading", "openai"), None);
+        assert_eq!(manual_pair("trailing/", "openai"), None);
     }
 
     #[test]
