@@ -155,31 +155,11 @@ impl Dashboard {
                     .bg(rgb(shown.bg))
                     .child(picker.body),
             );
-        // A pending all-sessions pick owns the footer (#3035): the count and
-        // the second tap are the whole point, so the normal hint steps aside
-        // until the reader answers.
-        let footer = if let Some(prompt) = self.models_scope_prompt() {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(text(prompt, Size::Sm, shown.text))
-                .child(modal_shell::footer(
-                    "enter apply to all  esc cancel".to_string(),
-                ))
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(picker.footer)
-                .child(modal_shell::footer(
-                    "type filter or custom id  enter switch  tab scope  esc close".to_string(),
-                ))
-        };
-        // The scope control (#3035): two states, this session or all
-        // sessions, in the header slot the modal already reserves. Tab flips
-        // it as well, and the subtitle spells the state out either way.
+        // The scope control (#3035, placement #3181): two states, this
+        // session or all sessions. It lives in the footer beside the
+        // "tab scope" hint, so the control, its hint and the apply action
+        // read as one unit instead of header chrome. Tab flips it as well,
+        // and the subtitle spells the state out either way.
         let scope_chip = div()
             .id("models-scope")
             .flex()
@@ -211,6 +191,38 @@ impl Dashboard {
                 this.models_scope_all = !this.models_scope_all;
                 cx.notify();
             }));
+        // A pending all-sessions pick owns the footer (#3035): the count and
+        // the second tap are the whole point, so the normal hint steps aside
+        // until the reader answers.
+        let footer = if let Some(prompt) = self.models_scope_prompt() {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(text(prompt, Size::Sm, shown.text))
+                .child(modal_shell::footer(
+                    "enter apply to all  esc cancel".to_string(),
+                ))
+        } else {
+            // The chip sits on the hint line it belongs to (#3181).
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(picker.footer)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(scope_chip)
+                        .child(modal_shell::footer(
+                            "type filter or custom id  enter switch  tab scope  esc close"
+                                .to_string(),
+                        )),
+                )
+        };
 
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.screen = Screen::Chat;
@@ -222,7 +234,7 @@ impl Dashboard {
                 id: "models-modal",
                 title: "Models".to_string(),
                 subtitle,
-                actions: Some(scope_chip.into_any_element()),
+                actions: None,
                 header_close: true,
                 body: body.into_any_element(),
                 footer: Some(footer.into_any_element()),
