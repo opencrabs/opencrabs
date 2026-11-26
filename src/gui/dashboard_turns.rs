@@ -1542,7 +1542,7 @@ impl Dashboard {
                     // carries the compaction banner never paints it into the
                     // live card (2026-11-26 GUI leak).
                     self.turn.live.injected.push(
-                        crate::utils::strip_embedded_compaction(&text)
+                        opencrabs::utils::strip_embedded_compaction(&text)
                             .unwrap_or(text),
                     );
                     cx.notify();

@@ -593,7 +593,7 @@ impl LiveTurn {
         // resume question that carries the banner pasted inside it never paints
         // the summary on the live card (2026-11-26 GUI leak).
         let user = spoken::without_prefix(&user).to_string();
-        let user = crate::utils::strip_embedded_compaction(&user).unwrap_or(user);
+        let user = opencrabs::utils::strip_embedded_compaction(&user).unwrap_or(user);
         self.user = Some(user);
         self.started = Some(std::time::Instant::now());
         self.sent_at = Some(chrono::Local::now());
@@ -1361,7 +1361,7 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     // session 00d3619d: the display painted a full delta-segment summary
     // inside a quoted reply, which is the never-visible rule broken on the
     // one row type the starts_with skip does not reach).
-    let content = crate::utils::strip_embedded_compaction(&m.content)
+    let content = opencrabs::utils::strip_embedded_compaction(&m.content)
         .unwrap_or_else(|| m.content.clone());
     // A hidden prompt is not a conversation row (#2756). Rows written before
     // the display line existed still hold the `[SYSTEM: ...]` scaffolding, and

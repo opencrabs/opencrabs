@@ -1536,8 +1536,8 @@ async fn ledger_question(
         // actually asked.
         .find(|row| {
             row.role == "user"
-                && !row.content.starts_with(crate::utils::COMPACTION_BANNER)
-                && !crate::utils::is_internal_system_message(&row.content)
+                && !row.content.starts_with(opencrabs::utils::COMPACTION_BANNER)
+                && !opencrabs::utils::is_internal_system_message(&row.content)
         })
         .map(|row| row.content)
 }

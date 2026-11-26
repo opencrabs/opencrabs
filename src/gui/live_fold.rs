@@ -154,7 +154,7 @@ pub(crate) fn fold_live(
         // (2026-11-26 GUI leak). Same rule the reload path applies.
         ProgressEvent::QueuedUserMessage { text } => {
             live.injected.push(
-                crate::utils::strip_embedded_compaction(&text)
+                opencrabs::utils::strip_embedded_compaction(&text)
                     .unwrap_or(text),
             );
         }
