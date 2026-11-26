@@ -1688,6 +1688,33 @@ impl Dashboard {
                     }
                     // The rail's footer pair for this session follows the row
                     // on the next fetch; the card notice is the live signal.
+                    // The in-memory pin must also be rebuilt from config, or
+                    // the next turn re-walks the dead primary: the agent's own
+                    // swap reuses the fallback Arc, which still carries the
+                    // failing primary internally. Same rebuild the TUI does at
+                    // `tui/app/state.rs` (ProviderSwitched).
+                    if let Some(bridge) = agent_bridge::bridge() {
+                        let service = bridge.service.clone();
+                        let rebuild_to = to_name.clone();
+                        let rebuild_model = to_model.clone();
+                        agent_bridge::spawn_worker("gui-provider-pin-rebuild", move |rt| {
+                            rt.block_on(async {
+                                if let Ok(config) = opencrabs::config::Config::load()
+                                    && let Ok(new_provider) =
+                                        opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
+                                {
+                                    service.swap_provider_for_session(
+                                        sid,
+                                        new_provider,
+                                        rebuild_model,
+                                    );
+                                    tracing::info!(
+                                        "[ProviderSwitched] rebuilt pinned provider for session {sid} → {rebuild_to}"
+                                    );
+                                }
+                            });
+                        });
+                    }
                     cx.notify();
                 }
                 // Self-healing fired: config recovery, emergency compaction,
@@ -1698,7 +1725,10 @@ impl Dashboard {
                     ProgressEvent::SelfHealingAlert { message },
                     _,
                 ) => {
-                    self.turn.live.notices.push(message);
+                    self.turn.live.notices.push(format!(
+                        "🔧 {}",
+                        crate::utils::sanitize::normalize_dashes(&message)
+                    ));
                     cx.notify();
                 }
                 // Compaction notices and queue echoes: the phase-2 transcript
