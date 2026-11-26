@@ -1,7 +1,7 @@
 //! The single GPUI model-picker renderer used by `/models` and Brain Fuel.
 
 use super::theme::{Size, text};
-use super::{Dashboard, agent_bridge, models, palette};
+use super::{Dashboard, models, palette};
 use gpui::{Context, Div, SharedString, div, prelude::*, px, rgb};
 use opencrabs::ui_core::card::concentric_radius;
 use opencrabs::ui_core::model_layout::ModelRowLayout;
@@ -221,35 +221,41 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         }
     }
     if matched == 0 {
-        let active = if onboarding {
-            view.active_provider.to_string()
-        } else {
-            agent_bridge::bridge()
-                .map(|bridge| bridge.service.provider_name())
-                .unwrap_or_default()
-        };
-        if let Some(pair) = models::manual_pair(view.query, &active) {
-            list = list.child(
-                div()
-                    .id("models-use-custom-id")
-                    .px_3()
-                    .py_2()
-                    .child(text(
-                        format!("Use custom model: {pair}"),
-                        Size::Sm,
-                        shown.accent,
-                    ))
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.activate_model_pair(pair.clone(), onboarding, cx);
-                    })),
-            );
-        } else {
+        let manual = models::manual_pair(view.query, view.active_provider);
+        if manual.is_none() {
             list = list.child(div().px_3().py_2().child(text(
                 format!("no models match \"{}\"", view.query),
                 Size::Sm,
                 shown.text_muted,
             )));
         }
+    }
+    // The typed id is always offered on the standalone picker (#3180): a
+    // fuzzy half-match must not hide the exact id the user typed. The
+    // wizard keeps its zero-match-only row and its own layout.
+    if let Some(pair) = models::manual_pair(view.query, view.active_provider)
+        .filter(|_| !onboarding || matched == 0)
+    {
+        let selected = !onboarding && view.selected >= matched;
+        let mut entry = div()
+            .id("models-use-custom-id")
+            .flex()
+            .px_3()
+            .py_2()
+            .rounded(px(concentric_radius(12.0)))
+            .cursor_pointer()
+            .hover(|d| d.bg(rgb(shown.panel_hi)))
+            .child(text(
+                format!("Use custom model: {pair}"),
+                Size::Sm,
+                shown.accent,
+            ));
+        if selected {
+            entry = entry.bg(rgb(shown.panel_hi));
+        }
+        list = list.child(entry.on_click(cx.listener(move |this, _ev, _window, cx| {
+            this.activate_model_pair(pair.clone(), onboarding, cx);
+        })));
     }
     if below > 0 {
         list = list.child(div().px_3().child(text(

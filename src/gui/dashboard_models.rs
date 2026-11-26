@@ -302,37 +302,46 @@ impl Dashboard {
         }
         let visible = self.visible_model_rows();
         let last = visible.len().saturating_sub(1);
+        // The typed id is one step past the last catalogue row (#3180), so
+        // Down walks into it and Enter fires it. The wizard keeps its own
+        // zero-match-only row and never gains the extra step.
+        let custom_pair = if onboarding {
+            // The wizard resolves its typed id against the provider it is
+            // editing (custom name or picked provider), as before.
+            let provider = self.onboard.as_ref().map(|ob| {
+                if ob.wizard.ps.is_custom() {
+                    ob.wizard.ps.custom_name.clone()
+                } else {
+                    ob.provider_id().to_string()
+                }
+            });
+            models::manual_pair(&self.models_query, provider.as_deref().unwrap_or_default())
+        } else {
+            let provider = self.models_provider.clone().or_else(|| {
+                let target = self.models_session.or(self.chat_session);
+                agent_bridge::bridge().map(|bridge| match target {
+                    Some(sid) => bridge.service.provider_name_for_session(sid),
+                    None => bridge.service.provider_name(),
+                })
+            });
+            models::manual_pair(&self.models_query, provider.as_deref().unwrap_or_default())
+        };
+        // Only the standalone picker gains the extra step; the wizard's
+        // Down stays clamped to its catalogue exactly as before.
+        let walk_last = if !onboarding && custom_pair.is_some() { last + 1 } else { last };
         let mut query_changed = false;
         match ev.keystroke.key.as_str() {
             "up" => self.models_index = self.models_index.saturating_sub(1),
-            "down" => self.models_index = (self.models_index + 1).min(last),
+            "down" => self.models_index = (self.models_index + 1).min(walk_last),
             "enter" => {
-                let pair = visible
-                    .get(self.models_index.min(last))
-                    .map(models::Row::pair)
-                    .or_else(|| {
-                        let provider = if onboarding {
-                            self.onboard.as_ref().map(|ob| {
-                                if ob.wizard.ps.is_custom() {
-                                    ob.wizard.ps.custom_name.clone()
-                                } else {
-                                    ob.provider_id().to_string()
-                                }
-                            })
-                        } else {
-                            self.models_provider.clone().or_else(|| {
-                                let target = self.models_session.or(self.chat_session);
-                                agent_bridge::bridge().map(|bridge| match target {
-                                    Some(sid) => bridge.service.provider_name_for_session(sid),
-                                    None => bridge.service.provider_name(),
-                                })
-                            })
-                        };
-                        models::manual_pair(
-                            &self.models_query,
-                            provider.as_deref().unwrap_or_default(),
-                        )
-                    });
+                let pair = if custom_pair.is_some() && self.models_index > last {
+                    custom_pair.clone()
+                } else {
+                    visible
+                        .get(self.models_index.min(last))
+                        .map(models::Row::pair)
+                        .or_else(|| custom_pair.clone())
+                };
                 if let Some(pair) = pair {
                     if onboarding {
                         self.select_onboard_pair(&pair);

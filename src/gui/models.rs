@@ -144,8 +144,11 @@ pub fn single_model_pair(rows: &[Row], row: &ProviderRow) -> Option<String> {
 pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> Panel {
     let filtered = filtered_rows(rows, query);
     let matched = filtered.len();
-    let selected = selected.min(matched.saturating_sub(1));
-    let (start, end) = visible_window(matched, selected, max_models);
+    // `selected == matched` means the typed-id row below the list owns the
+    // highlight (#3180): the window still clamps to the tail, but no
+    // catalogue row paints as selected.
+    let window_selected = selected.min(matched.saturating_sub(1));
+    let (start, end) = visible_window(matched, window_selected, max_models);
     let mut painted = Vec::new();
     let mut previous_provider: Option<&str> = None;
 
