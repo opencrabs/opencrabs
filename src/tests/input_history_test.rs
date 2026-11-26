@@ -125,3 +125,30 @@ fn input_history_entering_from_an_empty_field_keeps_the_parked_draft() {
     assert_eq!(buffer, "what i was writing", "and comes back on Down");
     assert!(draft.is_empty());
 }
+
+/// One file, one format, one entry per record (#3187).
+///
+/// The file used to hold one entry per line, which cannot hold a pasted
+/// block, so a log came back torn into fragments. Both surfaces read and
+/// write it through the same module, so neither can keep the old shape.
+#[test]
+fn both_surfaces_read_and_write_the_one_entry_per_record_file() {
+    let terminal = include_str!("../tui/app/input.rs");
+    let gui_app = include_str!("../gui/app.rs");
+    let gui = include_str!("../gui/editor.rs");
+
+    assert!(terminal.contains("composer::load_history("));
+    assert!(terminal.contains("composer::append_history("));
+    assert!(gui_app.contains("composer::load_history("));
+    assert!(gui.contains("composer::append_history("));
+
+    let composer = include_str!("../ui_core/composer.rs");
+    assert!(
+        composer.contains("pub const HISTORY_FORMAT_MARKER:"),
+        "the file says which format it is in"
+    );
+    assert!(
+        composer.contains("fn encode_history_record(") && composer.contains("fn decode_history_record("),
+        "an entry is a record with its newlines escaped"
+    );
+}
