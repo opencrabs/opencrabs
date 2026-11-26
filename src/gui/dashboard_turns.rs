@@ -1683,6 +1683,14 @@ impl Dashboard {
                                         );
                                     }
                                 }
+                                if let Ok(config) = opencrabs::config::Config::load()
+                                    && let Ok(new_provider) = opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
+                                {
+                                    service.swap_provider_for_session(sid, new_provider, rebuild_model);
+                                    tracing::info!(
+                                        "[ProviderSwitched] rebuilt pinned provider for session {sid} → {rebuild_to}"
+                                    );
+                                }
                             });
                         });
                     }
