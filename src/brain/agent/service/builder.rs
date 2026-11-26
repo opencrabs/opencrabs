@@ -2063,6 +2063,31 @@ impl AgentService {
         self.provider_for_session(session_id).name().to_string()
     }
 
+    /// Stamp a finished turn's `(provider, model)` pair coherent (#3177).
+    ///
+    /// `provider_name` is who the ledger will say served the turn
+    /// ([`Self::provider_name_for_session`]); `model` is what the final
+    /// response reported. When a sticky fallback is the active server, the
+    /// name IS the subprovider and the model is its own, so the pair passes
+    /// through untouched. Every other combination is judged against the
+    /// session provider's catalogue via `tool_loop::stamp_response_pair`: a
+    /// model it does not know repairs to its default, so a transient
+    /// fallback's model never persists under the primary's name.
+    pub(crate) fn stamp_turn_pair(
+        &self,
+        session_id: Uuid,
+        provider_name: String,
+        model: String,
+    ) -> String {
+        let p = self.provider_for_session(session_id);
+        if p.active_subprovider_name().as_deref() == Some(provider_name.as_str()) {
+            return model;
+        }
+        let provider_default = p.default_model().to_string();
+        let supported = p.supported_models();
+        super::tool_loop::stamp_response_pair(&provider_name, &model, &provider_default, &supported)
+    }
+
     /// Default model for a specific session, including sticky-fallback
     /// active sub-model. Resolution order:
     /// 1. The per-session override in `session_models` (set by

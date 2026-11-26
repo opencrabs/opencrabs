@@ -147,6 +147,15 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
+        // The simple send path stamps its pair like the tool loop does
+        // (#3177): `response.model` is what the endpoint reported, and this
+        // path always counts as started-on-session-provider, so an unstamped
+        // model from a provider-internal rescue would persist an impossible
+        // pair under the session provider's name.
+        let response_provider_name = self.provider_name_for_session(session_id);
+        let response_model =
+            self.stamp_turn_pair(session_id, response_provider_name.clone(), response.model);
+
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
             content: assistant_text,
@@ -155,8 +164,8 @@ impl AgentService {
             usage: response.usage,
             tokens_per_second: None,
             cost,
-            model: response.model,
-            provider_name: self.provider_name_for_session(session_id),
+            model: response_model,
+            provider_name: response_provider_name,
             // This simple send path is not the restart-remap vector (#705); it
             // resolves the session provider directly, so it always counts as
             // started-on-session-provider.

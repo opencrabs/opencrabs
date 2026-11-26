@@ -272,6 +272,49 @@ pub(crate) fn guard_cross_provider_model_leak(
     }
 }
 
+/// Stamp the model of a finished turn onto the provider the ledger NAMED as
+/// its server (#3177).
+///
+/// The final `AgentResponse` takes `model` from the last LLM response, which
+/// a transient (non-sticky) fallback can have served, while `provider_name`
+/// resolves through the session: the primary, when no sticky swap fired.
+/// Persisting both verbatim writes an impossible pair
+/// (`primary / fallback-model`) into the locked unit and the session row,
+/// the exact leak #705's guard never covered, because that guard runs at
+/// REQUEST time, before the loop, and the fallback fires INSIDE it.
+///
+/// Reuses `guard_cross_provider_model_leak`: canonicalize against the named
+/// provider's catalogue (so a bare vs self-prefixed spelling still passes,
+/// #2289), repair to the provider's default on a real miss, and log BOTH
+/// names so the repair is visible in the ledger. An empty catalogue passes
+/// through untouched: providers with live-only model lists can't be judged.
+pub(crate) fn stamp_response_pair(
+    provider_name: &str,
+    model: &str,
+    provider_default: &str,
+    supported: &[String],
+) -> String {
+    let (stamped, leaked) = guard_cross_provider_model_leak(
+        provider_name,
+        model.to_string(),
+        provider_default,
+        supported,
+    );
+    if let Some(stale) = leaked {
+        tracing::warn!(
+            "Response pair repair: model '{}' served the final response but is not in \
+             provider '{}' catalogue ({} entries), stamping its default '{}'. \
+             A transient fallback's model must not persist under another provider's \
+             name (#3177).",
+            stale,
+            provider_name,
+            supported.len(),
+            stamped
+        );
+    }
+    stamped
+}
+
 /// Strip ANSI escape codes from raw tool output before persisting to DB.
 /// Prevents garbled artifacts in session history.
 /// Build the content string sent to the LLM for a tool result.
@@ -1514,6 +1557,12 @@ impl AgentService {
                         "✅ Context compacted — now at {}% ({} tokens).",
                         pct, context.token_count
                     );
+                    // The compaction early-return names the session provider,
+                    // and `model_name` was already canonicalized against it
+                    // at request time, so this stamp is a pass-through in the
+                    // normal case and a repair if plan-mode swapped the
+                    // provider mid-turn. The invariant stays mechanical: every
+                    // AgentResponse routes its model through the stamp (#3177).
                     return Ok(AgentResponse {
                         message_id: assistant_db_msg.id,
                         content: confirmation,
@@ -1526,7 +1575,11 @@ impl AgentService {
                         context_tokens: context.token_count as u32,
                         tokens_per_second: None,
                         cost: 0.0,
-                        model: model_name,
+                        model: self.stamp_turn_pair(
+                            session_id,
+                            self.provider_name_for_session(session_id),
+                            model_name.clone(),
+                        ),
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
                         completed_plan: None,
@@ -1549,6 +1602,9 @@ impl AgentService {
                         .await
                         .map_err(AgentError::db)?;
 
+                    // Same mechanical stamp as the success branch above: the
+                    // response pair stays coherent no matter which compaction
+                    // branch produced it (#3177).
                     return Ok(AgentResponse {
                         message_id: assistant_db_msg.id,
                         content: error_msg,
@@ -1561,7 +1617,11 @@ impl AgentService {
                         context_tokens: context.token_count as u32,
                         tokens_per_second: None,
                         cost: 0.0,
-                        model: model_name,
+                        model: self.stamp_turn_pair(
+                            session_id,
+                            self.provider_name_for_session(session_id),
+                            model_name.clone(),
+                        ),
                         provider_name: self.provider_name_for_session(session_id),
                         started_on_session_provider,
                         completed_plan: None,
@@ -8630,6 +8690,14 @@ impl AgentService {
             }
         }
 
+        // The ledger pair is stamped, not trusted (#3177): a transient
+        // fallback can have served the final response while
+        // `provider_name_for_session` still reports the primary, and that
+        // impossible pair is what the locked-unit persist would write.
+        let response_provider_name = self.provider_name_for_session(session_id);
+        let response_model =
+            self.stamp_turn_pair(session_id, response_provider_name.clone(), response.model);
+
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
             content: final_text,
@@ -8644,8 +8712,8 @@ impl AgentService {
             context_tokens: context.token_count as u32,
             tokens_per_second,
             cost,
-            model: response.model,
-            provider_name: self.provider_name_for_session(session_id),
+            model: response_model,
+            provider_name: response_provider_name,
             started_on_session_provider,
             completed_plan,
         })
