@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response, Sse, sse};
 use axum::routing::{get, post};
@@ -25,7 +26,9 @@ use uuid::Uuid;
 
 use crate::agent_bridge::TurnEvent;
 use crate::backend_glue::Backend;
-use crate::backend_remote::{Frames, RemoteCrab, call_json, decode_reply, to_turn_event, watch};
+use crate::backend_remote::{
+    Frames, RemoteCrab, call_json, decode_reply, socket_url, to_turn_event, watch,
+};
 
 /// A stand-in for a crab's gateway. `POST /a2a/v1` answers `gui/call`
 /// in the gateway's shape (`src/a2a/handler/gui.rs`): the operation runs
@@ -39,6 +42,11 @@ struct Mock {
     events: Vec<Event>,
     events_status: StatusCode,
     dials: AtomicUsize,
+    /// Whether `GET /gui/events/ws` exists. Off, it answers 404, the way a
+    /// crab built before that route does.
+    socket: bool,
+    /// Every WebSocket it accepted on `/gui/events/ws`.
+    socket_dials: AtomicUsize,
     /// Every `POST /a2a/v1` it answered: one per round trip.
     calls: AtomicUsize,
 }
@@ -84,6 +92,28 @@ async fn events(State(mock): State<Arc<Mock>>) -> Response {
     Sse::new(futures::stream::iter(frames)).into_response()
 }
 
+/// `GET /gui/events/ws`: `events` as WebSocket text messages, then the
+/// socket stays open until the client leaves, so a test sees them arrive
+/// on a connection that has not ended.
+async fn events_ws(State(mock): State<Arc<Mock>>, upgrade: WebSocketUpgrade) -> Response {
+    if !mock.socket {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if mock.events_status != StatusCode::OK {
+        return mock.events_status.into_response();
+    }
+    mock.socket_dials.fetch_add(1, Ordering::SeqCst);
+    upgrade.on_upgrade(move |mut socket| async move {
+        for event in &mock.events {
+            let text = serde_json::to_string(event).expect("an Event encodes");
+            if socket.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
+        }
+        while let Some(Ok(_)) = socket.recv().await {}
+    })
+}
+
 /// A served mock and the runtime it runs on; the runtime must outlive
 /// the test's calls.
 struct Served {
@@ -98,6 +128,7 @@ fn serve(mock: Mock) -> Served {
     let app = Router::new()
         .route("/a2a/v1", post(rpc))
         .route("/gui/events", get(events))
+        .route("/gui/events/ws", get(events_ws))
         .with_state(mock.clone());
     let listener = runtime
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
@@ -124,6 +155,8 @@ fn mock(ctx: Ctx, granted: &[Scope]) -> Mock {
         events: Vec::new(),
         events_status: StatusCode::OK,
         dials: AtomicUsize::new(0),
+        socket: false,
+        socket_dials: AtomicUsize::new(0),
         calls: AtomicUsize::new(0),
     }
 }
@@ -448,6 +481,84 @@ fn a_refused_reader_says_so_and_stops() {
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
     ));
     assert_eq!(served.mock.dials.load(Ordering::SeqCst), 1);
+}
+
+/// A crab with the WebSocket route is read over it, and its events reach
+/// the window while that connection is still open. That is the property a
+/// Cloudflare quick tunnel takes from SSE: it holds the SSE body back until
+/// the response ends, so over SSE a turn's progress arrived only with its
+/// final reply.
+#[test]
+fn the_reader_takes_the_socket_and_delivers_while_it_is_open() {
+    let session = Uuid::new_v4();
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL);
+    m.socket = true;
+    m.events = vec![
+        Event::Turn {
+            session_id: session,
+            progress: ProgressEvent::Thinking,
+        },
+        Event::Turn {
+            session_id: session,
+            progress: ProgressEvent::StreamingChunk { text: "hel".into() },
+        },
+    ];
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let watch = watch(served.crab.clone(), session, sink).expect("reader started");
+    assert!(
+        matches!(next(&rx), TurnEvent::ProgressFor(id, ProgressEvent::Thinking, _) if id == session)
+    );
+    match next(&rx) {
+        TurnEvent::ProgressFor(id, ProgressEvent::StreamingChunk { text }, _) => {
+            assert_eq!(id, session);
+            assert_eq!(text, "hel");
+        }
+        _ => panic!("the second event arrives on the same open socket"),
+    }
+    assert_eq!(served.mock.socket_dials.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        served.mock.dials.load(Ordering::SeqCst),
+        0,
+        "a crab with the socket route was read over SSE"
+    );
+    drop(watch);
+}
+
+/// A refusal on the socket route ends the reader there: the same
+/// credential is not tried again over SSE.
+#[test]
+fn a_socket_refusal_is_not_retried_over_sse() {
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), &[]);
+    m.socket = true;
+    m.events_status = StatusCode::FORBIDDEN;
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let _watch = watch(served.crab.clone(), Uuid::new_v4(), sink).expect("reader started");
+    match next(&rx) {
+        TurnEvent::CommandReply {
+            session: None,
+            text,
+        } => assert!(text.contains("HTTP 403"), "{text}"),
+        _ => panic!("the refusal is told to the notices"),
+    }
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(20)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(served.mock.dials.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_crab_url_becomes_its_socket_url() {
+    assert_eq!(
+        socket_url("https://a-b.trycloudflare.com/gui/events/ws?session=x"),
+        "wss://a-b.trycloudflare.com/gui/events/ws?session=x"
+    );
+    assert_eq!(
+        socket_url("http://127.0.0.1:18799/gui/events/ws"),
+        "ws://127.0.0.1:18799/gui/events/ws"
+    );
 }
 
 #[test]

@@ -7,9 +7,10 @@
 //!   [`Op`] value the local backend runs. The other crab decodes it and runs
 //!   it through `backend::dispatch_as`, so the reply is the one a local call
 //!   would have returned.
-//! - its events: [`watch`], a reader on `GET /gui/events?session=<id>` that
-//!   pushes into the window's own [`EventSink`]. The window's poll does not
-//!   know where an event came from.
+//! - its events: [`watch`], a reader on `GET /gui/events/ws?session=<id>`
+//!   (a WebSocket; `GET /gui/events`, the SSE stream, for a crab that has no
+//!   WebSocket route) that pushes into the window's own [`EventSink`]. The
+//!   window's poll does not know where an event came from.
 //! - a refusal: every failure is a [`BackendError`]. A typed one rides in the
 //!   JSON-RPC error's `data` and comes back as itself; a failure of the wire
 //!   becomes `Failed` with the crab's name, the text the notices print.
@@ -712,10 +713,150 @@ async fn read_events(
     }
 }
 
-/// One connection to `GET /gui/events`, read until it ends. `down` says the
+/// One connection to the crab's events, read until it ends. `down` says the
 /// notices were told the stream is gone; an open stream tells them it is
 /// back and clears it.
+///
+/// The WebSocket route goes first: a Cloudflare quick tunnel, what
+/// `opencrabs connect` opens, holds an SSE body back until it ends, so over
+/// SSE a turn's progress arrived only with its final reply. A crab older
+/// than that route answers the handshake with an HTTP error other than a
+/// refusal, and the reader falls back to SSE for that connection.
 async fn stream_once(
+    crab: &Arc<RemoteCrab>,
+    session: Uuid,
+    sink: &EventSink,
+    down: &mut bool,
+) -> Ended {
+    match socket_once(crab, session, sink, down).await {
+        Some(ended) => ended,
+        None => sse_once(crab, session, sink, down).await,
+    }
+}
+
+/// The `ws(s)://` form of an `http(s)://` crab URL.
+pub(crate) fn socket_url(http_url: &str) -> String {
+    if let Some(rest) = http_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = http_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        http_url.to_string()
+    }
+}
+
+/// One connection to `GET /gui/events/ws`. `None` when the crab has no
+/// such route, so the caller reads SSE instead.
+async fn socket_once(
+    crab: &Arc<RemoteCrab>,
+    session: Uuid,
+    sink: &EventSink,
+    down: &mut bool,
+) -> Option<Ended> {
+    use futures::StreamExt as _;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, header::AUTHORIZATION};
+    use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+    let url = socket_url(&crab.url(&format!("/gui/events/ws?session={session}")));
+    let mut request = match url.into_client_request() {
+        Ok(request) => request,
+        Err(e) => {
+            return Some(Ended::Dropped {
+                reason: e.to_string(),
+                delivered: false,
+            });
+        }
+    };
+    if let Some(token) = &crab.token
+        && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        request.headers_mut().insert(AUTHORIZATION, value);
+    }
+    let mut socket = match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => socket,
+        Err(WsError::Http(resp)) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                return Some(refused(crab, status));
+            }
+            return None;
+        }
+        Err(e) => {
+            return Some(Ended::Dropped {
+                reason: e.to_string(),
+                delivered: false,
+            });
+        }
+    };
+    if !opened(crab, sink, down) {
+        return Some(Ended::SinkGone);
+    }
+    let mut delivered = false;
+    while let Some(message) = socket.next().await {
+        match message {
+            Ok(Message::Text(text)) => match serde_json::from_str::<Event>(text.as_str()) {
+                Ok(event) => {
+                    delivered = true;
+                    if !deliver(crab, sink, event) {
+                        return Some(Ended::SinkGone);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("gui/events/ws: skipped an event that does not decode: {e}");
+                }
+            },
+            Ok(Message::Close(_)) => break,
+            // Pings are answered by the socket itself; nothing else is sent.
+            Ok(_) => {}
+            Err(e) => {
+                return Some(Ended::Dropped {
+                    reason: e.to_string(),
+                    delivered,
+                });
+            }
+        }
+    }
+    Some(Ended::Dropped {
+        reason: "closed by the crab".into(),
+        delivered,
+    })
+}
+
+/// The notice for a crab that refused its events to this credential.
+fn refused(crab: &RemoteCrab, status: u16) -> Ended {
+    Ended::Refused(format!(
+        "{}: the crab refused its events to this credential (HTTP {status})",
+        crab.name
+    ))
+}
+
+/// The stream is open: when the notices were told it was gone, read the
+/// cache again and tell them it is back. `false` when the window is gone.
+fn opened(crab: &Arc<RemoteCrab>, sink: &EventSink, down: &mut bool) -> bool {
+    if *down {
+        *down = false;
+        refresh(crab, Part::Facts, sink);
+        refresh(crab, Part::Tasks, sink);
+        return notice(sink, format!("{}: event stream back", crab.name));
+    }
+    true
+}
+
+/// Hand one crab event to the window: the cache reads it asks for, then the
+/// window event it becomes. `false` when the window is gone.
+fn deliver(crab: &Arc<RemoteCrab>, sink: &EventSink, event: Event) -> bool {
+    for part in moved_by(&event) {
+        refresh(crab, *part, sink);
+    }
+    match to_turn_event(event) {
+        Some(turn_event) => sink.send(turn_event).is_ok(),
+        None => true,
+    }
+}
+
+/// One connection to `GET /gui/events` (SSE), read until it ends.
+async fn sse_once(
     crab: &Arc<RemoteCrab>,
     session: Uuid,
     sink: &EventSink,
@@ -734,10 +875,7 @@ async fn stream_once(
     };
     let status = resp.status().as_u16();
     if status == 401 || status == 403 {
-        return Ended::Refused(format!(
-            "{}: the crab refused its events to this credential (HTTP {status})",
-            crab.name
-        ));
+        return refused(crab, status);
     }
     if !resp.status().is_success() {
         return Ended::Dropped {
@@ -745,13 +883,8 @@ async fn stream_once(
             delivered: false,
         };
     }
-    if *down {
-        *down = false;
-        refresh(crab, Part::Facts, sink);
-        refresh(crab, Part::Tasks, sink);
-        if !notice(sink, format!("{}: event stream back", crab.name)) {
-            return Ended::SinkGone;
-        }
+    if !opened(crab, sink, down) {
+        return Ended::SinkGone;
     }
     let mut frames = Frames::default();
     let mut delivered = false;
@@ -760,12 +893,7 @@ async fn stream_once(
             Ok(Some(bytes)) => {
                 for event in frames.push(&bytes) {
                     delivered = true;
-                    for part in moved_by(&event) {
-                        refresh(crab, *part, sink);
-                    }
-                    if let Some(turn_event) = to_turn_event(event)
-                        && sink.send(turn_event).is_err()
-                    {
+                    if !deliver(crab, sink, event) {
                         return Ended::SinkGone;
                     }
                 }

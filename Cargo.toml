@@ -392,6 +392,9 @@ gui = [
     "dep:symphonia",
     "dep:symphonia-adapter-libopus",
     "dep:opusic-sys",
+    # The remote crab's events arrive over `GET /gui/events/ws` (axum's `ws`
+    # on the crab's side), the stream a Cloudflare quick tunnel passes live.
+    "tokio-tungstenite",
 ]
 [profile.dev]
 # Our own crate is optimised too: the GUI re-runs transcript layout on every
