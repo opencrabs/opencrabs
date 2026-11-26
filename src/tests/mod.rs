@@ -1065,6 +1065,7 @@ pub mod mission_control_input_test;
 pub mod mission_control_layout_test;
 pub mod mission_control_schedule_service_test;
 pub mod mission_control_skill_inbox_test;
+pub mod model_fetch_identity_test;
 pub mod model_fetch_test;
 #[cfg(feature = "telegram")]
 pub mod models_picker_dedup_test;

@@ -82,6 +82,45 @@ pub(crate) fn normalize_base_url(base_url: &str) -> String {
         .to_string()
 }
 
+/// The headers a catalogue request carries: the bearer token when there is
+/// one, plus the identity headers the target host asks for.
+///
+/// The identity part is what tells our own endpoint that the caller is an
+/// OpenCrabs install. Without it a catalogue fetch aimed at our gateway
+/// arrives anonymous, and the proxy cannot tell it apart from any other HTTP
+/// client. For a host without an identity contract this is empty and nothing
+/// changes for it.
+pub(crate) fn catalogue_request_headers(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if let Some(key) = api_key
+        && !key.is_empty()
+    {
+        headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
+    }
+    headers.extend(crate::brain::provider::identity::headers_for(base_url, None));
+    headers
+}
+
+/// One catalogue request, with its identity headers already attached.
+///
+/// Both attempts of the catalogue fetch go through here, so neither can end
+/// up going out anonymous.
+pub(crate) fn catalogue_request(
+    client: &reqwest::Client,
+    url: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut req = client.get(url);
+    for (key, value) in catalogue_request_headers(base_url, api_key) {
+        req = req.header(key.as_str(), value.as_str());
+    }
+    req
+}
+
 /// Fetch model names from an OpenAI-compatible endpoint.
 ///
 /// Strategy:
@@ -105,12 +144,7 @@ pub async fn fetch_models_from_endpoint(base_url: &str, api_key: Option<&str>) -
     let models_url = format!("{}/v1/models", base);
     tracing::debug!("[model_fetch] trying OpenAI-compatible: {}", models_url);
 
-    let mut req = client.get(&models_url);
-    if let Some(key) = api_key
-        && !key.is_empty()
-    {
-        req = req.header("Authorization", format!("Bearer {}", key));
-    }
+    let req = catalogue_request(client, &models_url, base_url, api_key);
 
     match req.send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<OpenAIModelsResponse>().await {
@@ -158,12 +192,7 @@ pub async fn fetch_models_from_endpoint(base_url: &str, api_key: Option<&str>) -
     let ollama_url = format!("{}/api/tags", base);
     tracing::debug!("[model_fetch] trying Ollama: {}", ollama_url);
 
-    let mut req = client.get(&ollama_url);
-    if let Some(key) = api_key
-        && !key.is_empty()
-    {
-        req = req.header("Authorization", format!("Bearer {}", key));
-    }
+    let req = catalogue_request(client, &ollama_url, base_url, api_key);
 
     match req.send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<OllamaModelsResponse>().await {
