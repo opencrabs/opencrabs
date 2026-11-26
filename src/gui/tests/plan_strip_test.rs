@@ -662,3 +662,68 @@ fn a_split_draws_the_plan_once_and_the_hint_still_rides_the_chat() {
         "the plan card stands down in a split"
     );
 }
+
+/// Every card measures the size its rows paint at (#3197).
+///
+/// The budget shaped text at the fixed `SMALL_TEXT_SIZE` in the regular weight,
+/// while the rows drew `text_xs` (which is `rems(0.75)`, so it follows the zoom
+/// knob) and the header drew bold. The budget came out short, the truncating
+/// title absorbed the whole deficit, and the bar and the count were crowded on
+/// a card that still had width to spare. One helper, one bold shaping call, and
+/// the chip the exception: it paints at a fixed pixel size, so it measures at
+/// the constant.
+#[test]
+fn every_card_measures_the_size_its_rows_paint_at() {
+    let src = include_str!("../plan_strip.rs");
+    let body_of = |anchor: &str, end: &str| -> String {
+        src.split(anchor)
+            .nth(1)
+            .and_then(|rest| rest.split(end).next())
+            .unwrap_or_else(|| panic!("missing {anchor:?}"))
+            .to_string()
+    };
+
+    let helper = body_of("fn card_text_size(", "\n}");
+    assert!(
+        helper.contains("rem_size()") && helper.contains("0.75"),
+        "the paint size is the rem times the text_xs factor, not a constant: {helper}"
+    );
+
+    let header = body_of("fn header_width(", "\nfn ");
+    assert!(
+        header.contains("bold_line_width("),
+        "the header title is measured in the weight it paints: {header}"
+    );
+    assert!(
+        header.contains("card_text_size(window)"),
+        "the header row is measured at the size it paints: {header}"
+    );
+
+    for (name, anchor, end) in [
+        ("task row", "fn task_row_width(", "\nfn "),
+        (
+            "pane row",
+            "pub fn pane_view(",
+            "/// What the approval card calls the plan",
+        ),
+    ] {
+        let body = body_of(anchor, end);
+        assert!(
+            body.contains("card_text_size(window)"),
+            "the {name} is measured at the size it paints: {body}"
+        );
+    }
+
+    let chip = body_of("fn action_chip_width(", "}\n");
+    assert!(
+        chip.contains("SMALL_TEXT_SIZE") && !chip.contains("card_text_size"),
+        "the approval chip paints at a fixed pixel size, so it keeps the \
+         constant: {chip}"
+    );
+
+    let pane = body_of("pub fn pane_view(", "/// What the approval card calls the plan");
+    assert!(
+        pane.contains(".items_center()"),
+        "the pane row centres its track and its count on one line: {pane}"
+    );
+}
