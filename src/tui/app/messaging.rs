@@ -2728,6 +2728,14 @@ impl App {
         if msg.content.starts_with("[CONTEXT COMPACTION") {
             return vec![];
         }
+        // A row the user DID author can carry the scaffold EMBEDDED: a summary
+        // copied out of the transcript and pasted into the composer rides after
+        // the typed words, and Enter persists it as one row (2026-11-26 GUI
+        // leak). Cut everything from the banner down before any render path
+        // sees it; the typed head is what the user wrote, the tail is scaffold.
+        if let Some(stripped) = crate::utils::strip_embedded_compaction(&msg.content) {
+            msg.content = stripped;
+        }
         // A synthetic seed is context for the model, never a message the user
         // wrote (#2756). Rows persisted before the fix still carry the whole
         // prompt, so the reload path refuses them too instead of painting a
@@ -4769,5 +4777,47 @@ pub(crate) async fn run_evolve_directly(
                 text: format!("Evolve error: {}", e),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod embedded_compaction_render_tests {
+    /// A user row the user DID author, with the summary pasted inside it: the
+    /// reload path shows the words, never the scaffold (2026-11-26 GUI leak,
+    /// mirrored here so the TUI cannot regress on it).
+    #[test]
+    fn expand_message_cuts_an_embedded_compaction_banner() {
+        let msg = crate::db::models::Message::new(
+            uuid::Uuid::new_v4(),
+            "user".to_string(),
+            "what the actual fuck [CONTEXT COMPACTION — DELTA SEGMENT. Obligation status: OPEN"
+                .to_string(),
+            0,
+        );
+        let rows = expand_message(msg);
+        assert_eq!(rows.len(), 1, "the row still renders");
+        let shown = &rows[0].content;
+        assert!(
+            !shown.contains("[CONTEXT COMPACTION"),
+            "the banner never paints: {shown}"
+        );
+        assert!(
+            shown.contains("what the actual fuck"),
+            "the user's own words survive: {shown}"
+        );
+    }
+
+    /// A row without the banner is untouched.
+    #[test]
+    fn expand_message_leaves_plain_rows_alone() {
+        let msg = crate::db::models::Message::new(
+            uuid::Uuid::new_v4(),
+            "user".to_string(),
+            "plain words about compaction".to_string(),
+            0,
+        );
+        let rows = expand_message(msg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "plain words about compaction");
     }
 }

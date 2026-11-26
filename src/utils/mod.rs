@@ -55,7 +55,7 @@ pub use image::{
     extract_local_files, extract_react_marker, extract_react_marker_lenient, extract_vid_markers,
     file_failure_notice, rewrite_local_files, strip_invalid_react_markers, validate_local_file,
 };
-pub use internal_message::is_internal_system_message;
+pub use internal_message::{is_internal_system_message, strip_embedded_compaction, COMPACTION_BANNER};
 pub use prompt_analyzer::PromptAnalyzer;
 pub use retry::{RetryConfig, RetryableError, retry, retry_with_check};
 pub use sanitize::{redact_secrets, redact_secrets_scoped, redact_tool_input};

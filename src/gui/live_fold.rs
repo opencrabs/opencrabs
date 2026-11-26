@@ -148,7 +148,16 @@ pub(crate) fn fold_live(
             // A finish with no row is not an error: the turn may have settled.
             transcript::settle_detached(&mut live.tools, &task_id, success, elapsed_secs);
         }
-        ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+        // The scaffold strip keeps a pasted compaction summary out of the
+        // live card: the event text is whatever the user queued, and a copy
+        // that rode in with the banner must not paint the whole summary back
+        // (2026-11-26 GUI leak). Same rule the reload path applies.
+        ProgressEvent::QueuedUserMessage { text } => {
+            live.injected.push(
+                crate::utils::strip_embedded_compaction(&text)
+                    .unwrap_or(text),
+            );
+        }
         // The service discarded what it had already streamed: a phantom
         // iteration, a gaslighting preamble, a thinking-loop timeout. The card
         // has to drop it too, or the working-out that just got retried stays on

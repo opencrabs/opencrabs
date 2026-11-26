@@ -1538,7 +1538,13 @@ impl Dashboard {
                     ProgressEvent::QueuedUserMessage { text },
                     _,
                 ) if self.chat_state.session() == Some(sid) => {
-                    self.turn.live.injected.push(text);
+                    // Same scaffold strip as live_fold: a queued message that
+                    // carries the compaction banner never paints it into the
+                    // live card (2026-11-26 GUI leak).
+                    self.turn.live.injected.push(
+                        crate::utils::strip_embedded_compaction(&text)
+                            .unwrap_or(text),
+                    );
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(sid, ProgressEvent::TokenCount(count), _) => {

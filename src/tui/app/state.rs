@@ -3160,7 +3160,11 @@ impl App {
                     state.push_message(DisplayMessage {
                         id: Uuid::new_v4(),
                         role: "user".to_string(),
-                        content: text,
+                        // The scaffold never paints: a queued message that
+                        // carries the compaction banner is cut here, so the
+                        // echo of a pasted summary stays the user's own words
+                        // (2026-11-26 GUI leak, same rule as the GUI card).
+                        content: crate::utils::strip_embedded_compaction(&text).unwrap_or(text),
                         timestamp: chrono::Utc::now(),
                         token_count: None,
                         cost: None,

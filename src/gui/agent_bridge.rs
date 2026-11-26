@@ -1524,10 +1524,21 @@ async fn ledger_question(
     messages: &opencrabs::db::repository::MessageRepository,
     session: Uuid,
 ) -> Option<String> {
-    let rows = messages.find_recent_by_session(session, 8).await.ok()?;
+    let rows = messages.find_recent_by_session(session, 16).await.ok()?;
     rows.into_iter()
         .rev()
-        .find(|row| row.role == "user")
+        // Compaction markers are user-role rows the model needs, not questions
+        // a reader asked. After a delta compaction the newest user row IS the
+        // marker, so a blind walk-back seeded the resumed card with the whole
+        // summary and painted it on the live bubble after a restart
+        // (2026-11-26 GUI leak, session 00d3619d). Skip them, and the internal
+        // system seeds with them, so the card draws the last question a human
+        // actually asked.
+        .find(|row| {
+            row.role == "user"
+                && !row.content.starts_with(crate::utils::COMPACTION_BANNER)
+                && !crate::utils::is_internal_system_message(&row.content)
+        })
         .map(|row| row.content)
 }
 
@@ -3194,5 +3205,88 @@ mod tests {
             guard < send,
             "the guard has to run before the turn persists its rows (#2697)"
         );
+    }
+
+    // ── 2026-11-26 GUI leak: a resumed card must never draw the marker ──────
+
+    /// A ledger whose newest user row is a compaction marker, the exact shape
+    /// a session reaches after a delta compaction. `ledger_question` is what
+    /// seeded the resumed card, and it took the newest user row blind, so the
+    /// whole summary painted as the question bubble after a restart.
+    async fn ledger_with_marker() -> (
+        opencrabs::db::repository::MessageRepository,
+        opencrabs::db::Database,
+        Uuid,
+    ) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        db.run_migrations().await.expect("migrations");
+        let context = ServiceContext::new(db.pool().clone());
+        let sessions = opencrabs::services::SessionService::new(context.clone());
+        let session = sessions
+            .create_session(Some("leak".to_string()))
+            .await
+            .expect("session");
+        let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
+        use opencrabs::db::models::Message;
+        repo.create(&Message::new(
+            session.id,
+            "user".to_string(),
+            "ship it".to_string(),
+            0,
+        ))
+        .await
+        .expect("the real question");
+        repo.create(&Message::new(
+            session.id,
+            "assistant".to_string(),
+            "on it".to_string(),
+            1,
+        ))
+        .await
+        .expect("the answer");
+        repo.create(&Message::new(
+            session.id,
+            "user".to_string(),
+            "[CONTEXT COMPACTION — DELTA SEGMENT. This block summarises only the messages since the previous compaction marker.".to_string(),
+            2,
+        ))
+        .await
+        .expect("the delta marker");
+        (repo, db, session.id)
+    }
+
+    /// The walk-back skips the marker row and returns the human question.
+    #[tokio::test]
+    async fn ledger_question_skips_the_compaction_marker() {
+        let (repo, _db, session) = ledger_with_marker().await;
+        let question = ledger_question(&repo, session)
+            .await
+            .expect("a real question exists behind the marker");
+        assert_eq!(question, "ship it");
+        assert!(!question.contains("CONTEXT COMPACTION"));
+    }
+
+    /// A session whose ONLY user rows are markers has no question to draw.
+    /// `None` sends the resume down the parked-prompt fallback instead of
+    /// painting scaffold.
+    #[tokio::test]
+    async fn ledger_question_returns_none_when_only_markers_exist() {
+        let (repo, db, _session) = ledger_with_marker().await;
+        // A second session with nothing but marker rows.
+        let context = ServiceContext::new(db.pool().clone());
+        let sessions = opencrabs::services::SessionService::new(context);
+        let fresh = sessions
+            .create_session(Some("markers only".to_string()))
+            .await
+            .expect("session");
+        repo.create(&Message::new(
+            fresh.id,
+            "user".to_string(),
+            "[CONTEXT COMPACTION — The conversation was automatically compacted.".to_string(),
+            0,
+        ))
+        .await
+        .expect("marker row");
+        assert!(ledger_question(&repo, fresh.id).await.is_none());
     }
 }

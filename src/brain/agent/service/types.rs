@@ -402,10 +402,28 @@ impl QueuedUserMessage {
         if msgs.is_empty() {
             return None;
         }
-        let join_on = |f: fn(&Self) -> &str| msgs.iter().map(f).collect::<Vec<_>>().join("\n");
+        // The display half gets the compaction strip per entry: a copy of the
+        // summary pasted into the composer and queued with the banner rides in
+        // display_text, and a join would otherwise weld it into one persisted
+        // row and one bubble (2026-11-26 GUI leak). The context half stays
+        // verbatim: the model reads what was actually queued.
+        let context_text = msgs
+            .iter()
+            .map(|m| m.context_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let display_text = msgs
+            .iter()
+            .map(|m| {
+                let half = m.display_text.as_str();
+                crate::utils::strip_embedded_compaction(half)
+                    .unwrap_or_else(|| half.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         Some(Self {
-            context_text: join_on(|m| m.context_text.as_str()),
-            display_text: join_on(|m| m.display_text.as_str()),
+            context_text,
+            display_text,
             // #1221: a joined batch inherits the head message's origin — the
             // first-completed task dominates what the echo announces.
             origin: msgs[0].origin,

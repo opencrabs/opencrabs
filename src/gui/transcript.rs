@@ -589,7 +589,12 @@ impl LiveTurn {
         // A card draws the question the reader asked, never the note that told
         // the model it was spoken (#3092). Stripping here covers both ways a
         // turn starts, because `resume` is this call plus the ledger flag.
-        self.user = Some(spoken::without_prefix(&user).to_string());
+        // The compaction strip rides the same seam: a question or a seeded
+        // resume question that carries the banner pasted inside it never paints
+        // the summary on the live card (2026-11-26 GUI leak).
+        let user = spoken::without_prefix(&user).to_string();
+        let user = crate::utils::strip_embedded_compaction(&user).unwrap_or(user);
+        self.user = Some(user);
         self.started = Some(std::time::Instant::now());
         self.sent_at = Some(chrono::Local::now());
     }
@@ -1349,21 +1354,30 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     if m.content.starts_with("[CONTEXT COMPACTION") {
         return blocks;
     }
+    // A row that QUOTES the scaffold must not paint it either. The summary is
+    // context wherever it sits, so an assistant reply citing the marker (or a
+    // user row carrying a copy of it) renders the words before the banner and
+    // a one-line placeholder after, never the scaffold itself (2026-11-26,
+    // session 00d3619d: the display painted a full delta-segment summary
+    // inside a quoted reply, which is the never-visible rule broken on the
+    // one row type the starts_with skip does not reach).
+    let content = crate::utils::strip_embedded_compaction(&m.content)
+        .unwrap_or_else(|| m.content.clone());
     // A hidden prompt is not a conversation row (#2756). Rows written before
     // the display line existed still hold the `[SYSTEM: ...]` scaffolding, and
     // a row persisted while a turn was in flight can too; neither may render.
-    if m.role == "user" && is_internal_system_message(&m.content) {
+    if m.role == "user" && is_internal_system_message(&content) {
         return blocks;
     }
     if m.role != "assistant" {
-        let role = if m.role == "user" && is_model_change_notice(&m.content) {
+        let role = if m.role == "user" && is_model_change_notice(&content) {
             "system"
         } else {
             m.role.as_str()
         };
         blocks.push(Block::Msg {
             role: role.to_string(),
-            content: m.content.clone(),
+            content: content.clone(),
             time: stamp(m),
             placeholder: false,
             message_id: Some(m.id),
@@ -1371,17 +1385,17 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
         });
         return blocks;
     }
-    let lower = m.content.to_lowercase();
+    let lower = content.to_lowercase();
     let has_db_thinking = m.thinking.as_deref().is_some_and(|t| !t.trim().is_empty());
-    let has_tool_tag = m.content.contains("\u{fe0f}\u{20e3}") || m.content.contains("<tool_call>");
-    let expandable = m.content.contains("<!-- tools")
-        || m.content.contains("<!-- reasoning -->")
+    let has_tool_tag = content.contains("\u{fe0f}\u{20e3}") || content.contains("<tool_call>");
+    let expandable = content.contains("<!-- tools")
+        || content.contains("<!-- reasoning -->")
         // A blocked section is a marker the split knows how to fold, so the row
         // must reach it. Without this arm a phantom iteration persisted by a
         // model that streams its chain inline (no `<!-- reasoning -->` block,
         // no tool ledger) missed the split entirely and painted both markers
         // plus the narration it was supposed to withhold (#3052).
-        || m.content.contains(reasoning_split::BLOCKED_OPEN)
+        || content.contains(reasoning_split::BLOCKED_OPEN)
         || lower.contains("<antthinking")
         || lower.contains("<think")
         || lower.contains("<mm:think")
@@ -1390,7 +1404,7 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
     if !expandable {
         blocks.push(Block::Msg {
             role: "assistant".into(),
-            content: m.content.clone(),
+            content: content.clone(),
             time: stamp(m),
             placeholder: false,
             message_id: Some(m.id),
@@ -1399,7 +1413,7 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
         return blocks;
     }
     let row_start = blocks.len();
-    let mut before: &str = m.content.as_str();
+    let mut before: &str = content.as_str();
     while let Some(ledger) = next_ledger(before) {
         if let Some(head) = before.get(..ledger.start) {
             let text_before = head.trim();
@@ -7266,6 +7280,38 @@ mod tests {
         live.stop();
         assert!(live.stopped, "a stop is a verdict");
         assert_eq!(live.stopped_at, end, "a stop after the end keeps the end");
+    }
+
+    /// The live card never paints compaction scaffold (2026-11-26 GUI leak).
+    /// A question can carry the banner pasted inside it, and a restart-resume
+    /// seeds `begin` from ledger rows, so the card's question text is stripped
+    /// at the seam rather than trusted at every caller.
+    #[test]
+    fn the_live_question_never_carries_the_compaction_banner() {
+        let mut live = LiveTurn::default();
+        live.begin(
+            "we are leaking the prompt [CONTEXT COMPACTION — DELTA SEGMENT. Obligation status: OPEN"
+                .to_string(),
+        );
+        let shown = live.user.as_deref().expect("the question is held");
+        assert!(
+            !shown.contains("[CONTEXT COMPACTION"),
+            "the banner never paints: {shown}"
+        );
+        assert!(
+            shown.starts_with("we are leaking the prompt"),
+            "the user's own words survive: {shown}"
+        );
+
+        // The full-context marker as the WHOLE question (the resume seed the
+        // restart bug shipped): the card holds the hidden note, not the
+        // summary.
+        live.begin("[CONTEXT COMPACTION — The conversation was automatically compacted.".to_string());
+        let shown = live.user.as_deref().expect("the question is held");
+        assert!(
+            !shown.contains("automatically compacted"),
+            "the summary body never paints: {shown}"
+        );
     }
 
     /// Perceived brightness of a packed RGB colour, 0..=255.
