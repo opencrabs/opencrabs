@@ -654,7 +654,7 @@ fn with_the_flag_off_the_rail_mounts_nothing_new() {
     );
     assert!(render.contains(".filter(|crabs| crabs.open)"), "{render}");
     assert!(SESSIONS.contains("None => icon::banner_logo().into_any_element(),"));
-    assert!(SESSIONS.contains("if let Some(list) = crabs.list {"));
+    assert!(SESSIONS.contains("if let Some(list) = brand.crabs_list {"));
     // The arrow is drawn only inside the toggle, so no flag, no arrow.
     assert_eq!(RAIL_VIEW.matches("\\u{25b8}").count(), 1);
     // The flag off also folds the list, so turning it back on starts closed.

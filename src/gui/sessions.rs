@@ -1930,15 +1930,12 @@ pub fn rail(
     width_rem: f32,
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
-    // The header's buttons (#2969), built by the view with their handlers and
-    // seated at the end of the brand row. None until the view supplies them.
-    rail_actions: Option<AnyElement>,
+    // The brand row's parts: its buttons (#2969) and the crabs under the
+    // logo (#3178), built by the view with their handlers.
+    brand: RailBrand,
     // The filter menu (#2719), built by the view with its click handlers and
     // pinned to the top-right of the rail. None until the view supplies it.
     filter_control: Option<AnyElement>,
-    // The crabs under the logo (#3178). Both `None` with `[gui]
-    // remote_crabs` off, and then the brand row is exactly main's.
-    crabs: RailCrabs,
 ) -> Stateful<Div> {
     // No rail padding or inter-row gap: selection and hover paint edge to edge.
     let mut col = div()
@@ -1952,8 +1949,8 @@ pub fn rail(
         .h_full()
         .bg(rgb(palette::current().panel))
         .py_2()
-        .child(brand_header(rail_actions, crabs.toggle));
-    if let Some(list) = crabs.list {
+        .child(brand_header(brand.actions, brand.crabs_toggle));
+    if let Some(list) = brand.crabs_list {
         col = col.child(list);
     }
 
@@ -2001,14 +1998,19 @@ pub fn rail(
     col
 }
 
-/// The crabs the rail's brand row can unfold (#3178), built by the view
-/// with their handlers. `Default` is the flag off: nothing new is mounted.
+/// What the view hands the rail's brand row, built with their handlers.
+///
+/// The crabs are both `None` with `[gui] remote_crabs` off (#3178), and
+/// then the brand row is exactly main's: the bare logo, no arrow, no list.
 #[derive(Default)]
-pub struct RailCrabs {
+pub struct RailBrand {
+    /// The header's buttons (#2969), seated at the end of the brand row.
+    /// None until the view supplies them.
+    pub actions: Option<AnyElement>,
     /// The logo as a button, with the arrow that says which way it folds.
-    pub toggle: Option<AnyElement>,
-    /// The unfolded list, seated under the brand row.
-    pub list: Option<AnyElement>,
+    pub crabs_toggle: Option<AnyElement>,
+    /// The unfolded list of crabs, seated under the brand row.
+    pub crabs_list: Option<AnyElement>,
 }
 
 /// The closed rail keeps the brand and its reopen button in the same thin

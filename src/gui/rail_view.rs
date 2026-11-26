@@ -602,9 +602,12 @@ impl Render for RailView {
             self.frame.width_rem,
             &self.scroll,
             footer,
-            Some(actions),
+            sessions::RailBrand {
+                actions: Some(actions),
+                crabs_toggle: toggle,
+                crabs_list: list,
+            },
             control,
-            sessions::RailCrabs { toggle, list },
         ))
     }
 }
