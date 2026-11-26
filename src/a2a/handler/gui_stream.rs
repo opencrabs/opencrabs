@@ -233,6 +233,14 @@ pub async fn handle_events_ws(
     if !allows(&granted.0, SCOPE_READ) {
         return forbidden();
     }
+    // A browser sends `Origin` on every WebSocket handshake, and unlike a
+    // fetch of the SSE route the socket is not held to CORS. On a gateway
+    // with no key (loopback only), any page open in this machine's browser
+    // could otherwise read the session's turns. The window's reader sends
+    // no `Origin`, so the route refuses every handshake that has one.
+    if headers.contains_key(axum::http::header::ORIGIN) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let upgrade = match upgrade {
         Ok(upgrade) => upgrade,
         Err(rejection) => return rejection.into_response(),
@@ -709,6 +717,43 @@ mod tests {
             let got: Event = serde_json::from_slice(&payload).expect("an Event");
             assert_eq!(&got, event);
         }
+    }
+
+    /// A handshake from a browser page (it carries `Origin`) is refused
+    /// even on a gateway with no key, where the bearer gate lets it in.
+    #[tokio::test]
+    async fn a_socket_from_a_browser_page_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = router_state(dir.path(), None).await;
+        let session = Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("https://evil.example"),
+        );
+        let (mut parts, ()) = Request::builder()
+            .uri("/gui/events/ws")
+            .body(())
+            .expect("request")
+            .into_parts();
+        let upgrade =
+            <WebSocketUpgrade as axum::extract::FromRequestParts<()>>::from_request_parts(
+                &mut parts,
+                &(),
+            )
+            .await;
+        let resp = handle_events_ws(
+            State(state),
+            Extension(GrantedScopes(vec![
+                crate::remote::scopes::SCOPE_READ.to_string(),
+            ])),
+            headers,
+            Query(EventsQuery { session }),
+            upgrade,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!hub().is_watched(session));
     }
 
     #[tokio::test]
