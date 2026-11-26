@@ -4180,3 +4180,43 @@ fn a_self_healing_alert_reaches_the_live_notices() {
     live.notices.push("self-heal: truncation".into());
     assert_eq!(live.notices.len(), 1);
 }
+
+/// #3190: a user row carries the same no-ledger rule the terminal applies.
+///
+/// A queued user message can carry a glued `<!-- tools-v2: ... -->` tail from
+/// a mid-turn drain, and the desktop's user-row path used to push the content
+/// through untouched, painting raw tool JSON in the conversation. The terminal
+/// strips comment markers for every role (tui/render/panes.rs:271-277); the
+/// user arm must run the same shared stripper before the row becomes a block.
+#[test]
+fn a_user_row_runs_the_all_roles_ledger_strip() {
+    let src = include_str!("../transcript.rs");
+    let arm_start = src
+        .find("if m.role != \"assistant\" {")
+        .expect("the non-assistant arm exists");
+    let arm_end = src[arm_start..]
+        .find("let lower = content.to_lowercase();")
+        .map(|at| arm_start + at)
+        .expect("the assistant expandable path follows the arm");
+    let arm = &src[arm_start..arm_end];
+    assert!(
+        arm.contains("strip_comment_markers"),
+        "the user arm strips comment markers before pushing the block"
+    );
+    assert!(
+        src.contains("pub fn strip_comment_markers"),
+        "the wrapper is the shared pub entry the desktop reads"
+    );
+}
+
+/// #3190: the shared stripper cuts a glued tool ledger wherever it sits, and
+/// the words before it survive byte-for-byte. This is the same call the
+/// user-row path now makes (transcript.rs), so a poisoned row can never paint
+/// raw tool JSON again.
+#[test]
+fn a_glued_tools_v2_tail_is_cut_and_the_head_survives() {
+    let row = "what the actual fuck <!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->";
+    let stripped = opencrabs::utils::strip_comment_markers(row);
+    assert_eq!(stripped, "what the actual fuck");
+    assert!(!stripped.contains("tools-v2"));
+}
