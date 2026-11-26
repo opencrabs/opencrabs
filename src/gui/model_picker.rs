@@ -96,12 +96,34 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         }));
 
     let mut list = div().flex().flex_col().gap_1().w_full().min_w_0();
+    // The walk's last selectable index, shared by both fold rows (#3184): the
+    // keyboard clamps at the last row, plus one more step when the custom-id
+    // row is painted, so a click must land in the same place.
+    let custom_offered =
+        models::manual_pair(view.query, view.active_provider).is_some() && (!onboarding || matched == 0);
+    let walk_last = matched.saturating_sub(1) + usize::from(custom_offered);
     if above > 0 {
-        list = list.child(div().px_3().child(text(
-            format!("\u{2191} {above} more"),
-            Size::Xs,
-            shown.text_muted,
-        )));
+        // The fold row is a control, not text (#3184): clicking it pages the
+        // selection up one window, the same distance the window slid.
+        let window = view.max_models;
+        list = list.child(
+            div()
+                .id("models-page-up")
+                .px_3()
+                .py_1()
+                .rounded(px(concentric_radius(6.0)))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(shown.panel_hi)))
+                .child(text(
+                    format!("\u{2191} {above} more"),
+                    Size::Xs,
+                    shown.text_muted,
+                ))
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.models_index = this.models_index.saturating_sub(window);
+                    cx.notify();
+                })),
+        );
     }
     for line in rows {
         match line {
@@ -258,11 +280,28 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         })));
     }
     if below > 0 {
-        list = list.child(div().px_3().child(text(
-            format!("\u{2193} {below} more"),
-            Size::Xs,
-            shown.text_muted,
-        )));
+        // The fold row is a control, not text (#3184): clicking it pages the
+        // selection down one window, landing on the first row the fold hid,
+        // clamped where the keyboard walk clamps.
+        let window = view.max_models;
+        list = list.child(
+            div()
+                .id("models-page-down")
+                .px_3()
+                .py_1()
+                .rounded(px(concentric_radius(6.0)))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(shown.panel_hi)))
+                .child(text(
+                    format!("\u{2193} {below} more"),
+                    Size::Xs,
+                    shown.text_muted,
+                ))
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    this.models_index = (this.models_index + window).min(walk_last);
+                    cx.notify();
+                })),
+        );
     }
     let mut results = div()
         .id(if onboarding {
