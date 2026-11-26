@@ -159,7 +159,12 @@ impl AgentService {
             message_id: assistant_db_msg.id,
             content: assistant_text,
             stop_reason: response.stop_reason,
-            context_tokens: response.usage.input_tokens,
+            // Same identity the live ctx counter reads (tool_loop.rs
+            // `call_context_tokens` = `usage.context_input()`): input +
+            // cache_creation + cache_read. input-only here made the settled
+            // footer repaint LOWER than the live reading on cache-served
+            // providers (97k in-turn -> 70k settled, no compaction between).
+            context_tokens: response.usage.context_input(),
             usage: response.usage,
             tokens_per_second: None,
             cost,
