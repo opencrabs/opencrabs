@@ -1727,7 +1727,7 @@ impl Dashboard {
                 ) => {
                     self.turn.live.notices.push(format!(
                         "🔧 {}",
-                        crate::utils::sanitize::normalize_dashes(&message)
+                        opencrabs::utils::sanitize::normalize_dashes(&message)
                     ));
                     cx.notify();
                 }
