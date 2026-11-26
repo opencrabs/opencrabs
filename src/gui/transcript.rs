@@ -1885,6 +1885,18 @@ pub(crate) fn small_style(size: f32, color: u32) -> TextStyle {
     }
 }
 
+/// The same small line, bold: for the row that leads a card, where the weight
+/// carries the hierarchy the colour alone lost (#3193).
+pub(crate) fn small_bold_style(size: f32, color: u32) -> TextStyle {
+    TextStyle {
+        font_family: crate::fonts::current_ui().into(),
+        color: rgb(color).into(),
+        font_size: AbsoluteLength::Pixels(px(size)),
+        font_weight: gpui::FontWeight::BOLD,
+        ..Default::default()
+    }
+}
+
 fn mono_style(size: f32) -> TextStyle {
     TextStyle {
         // The mono walk, not a fixed name (#2786): `Menlo` ships on macOS

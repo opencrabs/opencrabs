@@ -488,6 +488,59 @@ fn the_checklist_header_gives_the_title_the_slack() {
     );
 }
 
+/// #3193: the card leads with its title in bold and the task in flight is
+/// cyan. The selectable-text conversion (#2678) dropped the weight silently,
+/// and plain body text drowned the running row into the list, so both facts
+/// are pinned where a restyle cannot shed them again. `small_bold_style` is
+/// the weight-carrying style the completed card draws through, and its own
+/// body carries the weight in the style, not on the div.
+#[test]
+fn the_plan_card_leads_with_bold_and_the_running_task_is_cyan() {
+    let src = include_str!("../plan_strip.rs");
+    let header = src
+        .split("fn progress_header_row(plan: &PlanDocument, text: String) -> Div {")
+        .nth(1)
+        .and_then(|rest| rest.split("\nfn ").next())
+        .expect("the header row body");
+    assert!(
+        header.contains(".font_weight(FontWeight::BOLD)"),
+        "the card's title is bold"
+    );
+    let row = src
+        .split("fn task_row(task: &PlanTask) -> Div {")
+        .nth(1)
+        .and_then(|rest| rest.split("\nfn ").next())
+        .expect("the task row body");
+    let running = row
+        .split("TaskStatus::InProgress) {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("the running branch of the title's colour");
+    assert!(
+        running.contains("palette::current().teal"),
+        "the task in flight is cyan: {running:?}"
+    );
+    let transcript = include_str!("../transcript.rs");
+    let bold = transcript
+        .split("pub(crate) fn small_bold_style(size: f32, color: u32) -> TextStyle {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the bold style body");
+    assert!(
+        bold.contains("font_weight: gpui::FontWeight::BOLD"),
+        "the bold style carries its weight in the TextStyle"
+    );
+    let completed = src
+        .split("pub fn completed_plan_card(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the completed card body");
+    assert!(
+        completed.contains("small_bold_style(SMALL_TEXT_SIZE, palette::current().teal)"),
+        "the completed card's header draws through the bold style"
+    );
+}
+
 /// #2678: a finished plan's card is text the user reads, so each of its
 /// lines has to be a selectable segment, spelled exactly as `copy_text`
 /// spells it. Otherwise the only thing a drag can copy is the whole card.

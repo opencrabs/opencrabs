@@ -16,7 +16,7 @@ use super::icon::disclosure_icon;
 use crate::palette;
 use crate::transcript::{
     ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
-    selectable_styled_text, small_style,
+    selectable_styled_text, small_bold_style, small_style,
 };
 use opencrabs::ui_core::card::{glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui::{
-    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, relative, rgb,
-    rgba,
+    Div, FontWeight, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px,
+    relative, rgb, rgba,
 };
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
@@ -697,7 +697,9 @@ pub(crate) fn progress_bar_view(percent: usize, colour: u32) -> Div {
 
 /// The header row of a plan card: the line the caller wrote, then the bar and
 /// the percentage at the trailing edge (#2496). The title takes the slack and
-/// cuts, so a long plan name never pushes the metrics out of the card.
+/// cuts, so a long plan name never pushes the metrics out of the card, and it
+/// carries bold weight (#3193): the card leads with its title, and plain small
+/// muted text read as a caption rather than as the header.
 fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
     let (_, _, percent) = progress(plan);
     div()
@@ -714,6 +716,7 @@ fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
                 .overflow_hidden()
                 .truncate()
                 .text_xs()
+                .font_weight(FontWeight::BOLD)
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(text)),
         )
@@ -749,7 +752,9 @@ fn task_row(task: &PlanTask) -> Div {
                 .truncate()
                 .text_xs()
                 .text_color(rgb(if matches!(task.status, TaskStatus::InProgress) {
-                    palette::current().text
+                    // Cyan (#3193): the row in flight is the one thing the eye
+                    // hunts for, and plain body text drowned it into the list.
+                    palette::current().teal
                 } else {
                     palette::current().text_muted
                 }))
@@ -865,7 +870,7 @@ pub fn completed_plan_card(
         .bg(glass_fill(message_card_surface()))
         .child(selectable_styled_text(
             format!("\u{2611} {}", plan.header()),
-            small_style(SMALL_TEXT_SIZE, palette::current().teal),
+            small_bold_style(SMALL_TEXT_SIZE, palette::current().teal),
             Vec::new(),
             &[],
             selection,
