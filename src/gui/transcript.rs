@@ -773,8 +773,14 @@ impl LiveTurn {
         // the card's line said the sentence and the answer bubble under the
         // card said it again. Cutting the one copy the card now owns leaves
         // whatever the turn really answered, and nothing of the paragraph.
-        if let Some(at) = self.stream.find(text) {
-            let kept = format!("{}{}", &self.stream[..at], &self.stream[at + text.len()..]);
+        //
+        // The match is whitespace-insensitive (#3179, 2026-11-26): the
+        // intermediate text and the streamed chunks do not always agree on
+        // line breaks, and an exact `find` then missed the copy, left it in
+        // the answer buffer, and the card said the paragraph while the bubble
+        // under the card said it again the moment the turn settled.
+        if let Some((start, end)) = find_stream_copy(&self.stream, text) {
+            let kept = format!("{}{}", &self.stream[..start], &self.stream[end..]);
             self.stream = kept.trim().to_string();
         }
         self.push_narration_entry(text);
@@ -1838,6 +1844,56 @@ pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
 /// twin goes.
 pub fn drop_live_twins(turns: &mut Vec<Turn>, live: &LiveTurn) {
     turns.retain(|turn| !newest_live_turn_matches(turn, live));
+}
+
+/// Where one block of a carded turn draws around its card (#3179, 2026-11-26).
+///
+/// The card is the working-out box, so a block's place is the place the live
+/// card gave it while the turn ran: the question above, calls and narration
+/// in order inside, the final answer below. Bucketing by block kind put
+/// every `Msg` below the card instead, which is what moved a narration
+/// paragraph out from under its ledger the moment the turn settled, and what
+/// painted a queued mid-turn question again under the answer it belongs to.
+pub(crate) enum TurnBucket {
+    /// Above the card, in order: the question and any mid-turn question.
+    Pre,
+    /// Inside the card, in order: the working-out the reader watched.
+    Body,
+    /// Below the card: the answer and the harness rows a fold must keep.
+    Post,
+}
+
+pub(crate) fn turn_block_bucket(
+    block: &Block,
+    header_at: usize,
+    idx: usize,
+    final_idx: Option<usize>,
+    folded: bool,
+) -> TurnBucket {
+    if idx < header_at {
+        return TurnBucket::Pre;
+    }
+    if let Block::Msg { role, .. } = block {
+        return match role.as_str() {
+            "user" => TurnBucket::Pre,
+            // The answer keeps the place the fold and the reader expect:
+            // below the card. Everything else the assistant said between
+            // calls is narration and rides inside the working-out.
+            "assistant" if Some(idx) == final_idx => TurnBucket::Post,
+            // A fold already skipped what it hides, so an assistant row that
+            // survives it is a deliverable report: it stays outside the
+            // collapsed card or a closed card body would bury it.
+            "assistant" if folded => TurnBucket::Post,
+            "assistant" => TurnBucket::Body,
+            // Errors, harness status and markers stay readable without
+            // opening the card (#786).
+            _ => TurnBucket::Post,
+        };
+    }
+    if folded {
+        return TurnBucket::Post;
+    }
+    TurnBucket::Body
 }
 
 /// Whether one block still renders while its turn is folded. Mirrors
@@ -4577,6 +4633,42 @@ pub(crate) const SPINNER_FRAMES: [&str; 10] = [
 
 /// A live timestamp rendered exactly like a persisted row's, so the bubble
 /// does not change shape when the DB reload replaces it.
+/// Locate the streamed copy of a narration paragraph inside the answer
+/// buffer, ignoring whitespace, and return its byte range (#3179).
+///
+/// The intermediate text and the streamed chunks of the same paragraph do not
+/// always agree on line breaks: the stream wraps where the event does not.
+/// An exact `find` then missed the copy, the card took its own line AND the
+/// answer buffer kept the paragraph, so the bubble under the card said the
+/// same words again the moment the turn settled. Whitespace-insensitive
+/// matching closes that hole without touching punctuation or case, so a
+/// similar sentence is never eaten by mistake.
+fn find_stream_copy(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    let mut kept_spans: Vec<(usize, usize)> = Vec::with_capacity(haystack.len() / 4);
+    let mut stripped = String::with_capacity(haystack.len());
+    for (i, ch) in haystack.char_indices() {
+        if !ch.is_whitespace() {
+            kept_spans.push((i, i + ch.len_utf8()));
+            stripped.push(ch);
+        }
+    }
+    let mut wanted = String::with_capacity(needle.len());
+    let mut wanted_len = 0usize;
+    for ch in needle.chars() {
+        if !ch.is_whitespace() {
+            wanted.push(ch);
+            wanted_len += 1;
+        }
+    }
+    if wanted_len == 0 {
+        return None;
+    }
+    let at = stripped.find(&wanted)?;
+    let start = kept_spans.get(at)?.0;
+    let end = kept_spans.get(at + wanted_len - 1)?.1;
+    Some((start, end))
+}
+
 fn live_time(at: Option<chrono::DateTime<chrono::Local>>) -> String {
     at.map(|t| t.format("%m-%d %H:%M:%S").to_string())
         .unwrap_or_default()
@@ -6845,15 +6937,21 @@ pub fn view(
                 },
             };
             // Working-out rows ride inside the card; conversation rows keep
-            // their place around it (#2632).
+            // their place around it (#2632). The split is by PLACE, not by
+            // block kind (#3179, 2026-11-26): bucketing every `Msg` below the
+            // card dropped the narration paragraph out from under its ledger
+            // the moment the turn settled, and a queued mid-turn question
+            // repeated under the answer it belongs to. The live card drew
+            // those rows in the order they happened, inside the working-out,
+            // and the settled turn reads the same way.
             if !carded {
                 col = col.child(child);
-            } else if i < header_at {
-                pre.push(child);
-            } else if folded || matches!(block, Block::Msg { .. }) {
-                post.push(child);
             } else {
-                body.push(child);
+                match turn_block_bucket(block, header_at, i, turn.final_idx, folded) {
+                    TurnBucket::Pre => pre.push(child),
+                    TurnBucket::Body => body.push(child),
+                    TurnBucket::Post => post.push(child),
+                }
             }
         }
         col = col.children(pre);
@@ -11147,5 +11245,120 @@ mod tests {
         // whole run goes instead of leaving the emptiness behind.
         assert_eq!(without_trailing_blanks("\n\n\n"), "");
         assert_eq!(without_trailing_blanks("   \n \t\n"), "");
+    }
+
+    /// #3179: the bucket decides where a settled block paints around its
+    /// card, and the card is the working-out box. The question above, calls
+    /// and narration inside in the order they ran, the answer below.
+    mod bucketing {
+        use super::*;
+
+        fn msg(role: &str, text: &str) -> Block {
+            Block::Msg {
+                role: role.into(),
+                content: text.into(),
+                time: String::new(),
+                placeholder: false,
+                message_id: None,
+                forward: None,
+            }
+        }
+
+        #[test]
+        fn narration_rides_inside_the_card_not_below_it() {
+            // A narration paragraph the turn produced between calls: exactly
+            // the row that fell out under its ledger when every `Msg` was
+            // bucketed below the card.
+            let narration = msg("assistant", "checking the schema first");
+            assert!(
+                matches!(
+                    turn_block_bucket(&narration, 1, 2, None, false),
+                    TurnBucket::Body
+                ),
+                "non-final assistant text is working-out and stays in the card"
+            );
+        }
+
+        #[test]
+        fn question_goes_above_the_card() {
+            let question = msg("user", "why is the build red");
+            assert!(matches!(
+                turn_block_bucket(&question, 1, 0, None, false),
+                TurnBucket::Pre
+            ));
+        }
+
+        #[test]
+        fn final_answer_goes_below_the_card() {
+            let answer = msg("assistant", "the lockfile was stale");
+            assert!(matches!(
+                turn_block_bucket(&answer, 1, 3, Some(3), false),
+                TurnBucket::Post
+            ));
+        }
+
+        #[test]
+        fn mid_turn_question_stays_above_not_repeated_under_the_answer() {
+            // The duplicate the user saw: a prompt sent while the turn was
+            // running repainted UNDER the answer it belongs to. It is a
+            // conversation row, and its place is above the card, in order.
+            let queued = msg("user", "also fix the flake");
+            assert!(matches!(
+                turn_block_bucket(&queued, 1, 4, Some(3), false),
+                TurnBucket::Pre
+            ));
+        }
+
+        #[test]
+        fn errors_and_markers_stay_readable_when_folded() {
+            // A fold skips what it hides before bucketing, so anything still
+            // standing while folded is a keep-visible row (#786) and a closed
+            // card body would bury it.
+            let error = msg("error", "provider timed out");
+            assert!(matches!(
+                turn_block_bucket(&error, 1, 2, Some(3), true),
+                TurnBucket::Post
+            ));
+        }
+    }
+
+    /// #3179: the stream copy of a narration paragraph is cut wherever it
+    /// sits, and the match survives a line-break disagreement between the
+    /// streamed chunks and the intermediate text.
+    mod stream_copy {
+        use super::find_stream_copy;
+
+        #[test]
+        fn finds_an_exact_copy() {
+            let (start, end) = find_stream_copy("draft kept\n\ncopied text\nmore", "copied text")
+                .expect("plain copy is found");
+            assert_eq!(
+                &"draft kept\n\ncopied text\nmore"[start..end],
+                "copied text"
+            );
+        }
+
+        #[test]
+        fn finds_a_copy_despite_line_break_mismatch() {
+            // Stream wrapped where the event did not: same words, different
+            // whitespace, and the exact `find` this replaces missed it.
+            let haystack = "kept part\nwrapped copy\nstill more";
+            let (start, end) =
+                find_stream_copy(haystack, "wrapped\ncopy").expect("line-break mismatch found");
+            assert_eq!(&haystack[start..end], "wrapped copy");
+        }
+
+        #[test]
+        fn misses_a_different_paragraph() {
+            assert_eq!(
+                find_stream_copy("the answer is five", "the answer is six"),
+                None
+            );
+        }
+
+        #[test]
+        fn empty_needle_never_matches() {
+            assert_eq!(find_stream_copy("anything", ""), None);
+        }
     }
 }
