@@ -383,3 +383,59 @@ fn a_swap_leaves_the_open_conversation_before_taking_the_new_crab() {
         "a turn still running on the crab being left is parked, not dropped"
     );
 }
+
+/// Every per-crab rail store the window reads at boot is read again on a swap.
+///
+/// The boot path asks the crab for the rows, the pins, the topic flags, the
+/// closed set, the topic parents and the topic icons. A swap that re-read the
+/// rows and not the parents drew the new crab's topics as flat sessions under
+/// the old crab's grouping. The check walks the boot loaders, so a store added
+/// to the boot path without a reread on the swap fails here.
+#[test]
+fn a_swap_rereads_every_rail_store_the_window_loads_at_boot() {
+    let mut boot: Vec<&str> = APP
+        .split("sessions::load_")
+        .skip(1)
+        .filter_map(|rest| rest.split('(').next())
+        .filter(|name| name.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .collect();
+    boot.sort_unstable();
+    boot.dedup();
+    assert!(
+        boot.contains(&"topic_parents"),
+        "the boot reads the parents"
+    );
+
+    let switch = fn_body(WIRING, "instance_switch");
+    for refresh in ["self.refresh_rail(cx);", "self.refresh_topic_state(cx);"] {
+        assert!(switch.contains(refresh), "a swap must run `{refresh}`");
+    }
+    let rereads = [
+        fn_body(RAIL, "refresh_rail"),
+        fn_body(SESSIONS, "refresh_favorites"),
+        fn_body(TOPICS, "refresh_topic_state"),
+    ]
+    .concat();
+    for name in boot {
+        assert!(
+            rereads.contains(&format!("sessions::load_{name}(")),
+            "`sessions::load_{name}` is read at boot and never again on a swap"
+        );
+    }
+
+    // The old crab's grouping is dropped before the new one lands, so a slow
+    // or failed read never groups the new rows under the old parents.
+    let swapped = at(&switch, "self.backend = backend;", "instance_switch");
+    for cleared in [
+        "self.sessions.parents.clear();",
+        "self.sessions.topics.clear();",
+        "self.sessions.closed.clear();",
+        "self.sessions.topic_icons.clear();",
+        "self.sessions.topic_icon_files.clear();",
+    ] {
+        assert!(
+            swapped < at(&switch, cleared, "instance_switch"),
+            "`{cleared}` runs after the swap"
+        );
+    }
+}

@@ -162,15 +162,26 @@ impl Dashboard {
     /// a notice, the way it did before the handshake existed.
     ///
     /// What the window keeps per crab is read again from the new one: the
-    /// usage view for the period on screen, the mission control snapshot and
-    /// the channel chip. None of them is left showing the crab it left.
+    /// usage view for the period on screen, the mission control snapshot, the
+    /// topic state and the channel chip. None of them is left showing the
+    /// crab it left.
     fn instance_switch(&mut self, backend: Backend, cx: &mut Context<Self>) {
         self.leave_conversation_for_swap(cx);
         self.backend = backend;
         self.hello = None;
         self.instance_error = None;
         self.instance_epoch = self.instance_epoch.wrapping_add(1);
+        // The topic grouping, the closed set and the icons are per crab too.
+        // The rail's refetch reads the rows and the pins only, so without
+        // this the new crab's topics stood flat under the old crab's map.
+        self.sessions.parents.clear();
+        self.sessions.topics.clear();
+        self.sessions.closed.clear();
+        self.sessions.topic_icons.clear();
+        self.sessions.topic_icon_files.clear();
+        self.refresh_icon_images();
         self.refresh_rail(cx);
+        self.refresh_topic_state(cx);
         self.fetch_hello(cx);
         self.reload_usage(cx);
         self.mc = None;
