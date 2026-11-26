@@ -321,8 +321,39 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
         .gap_2()
         .w_full()
         .min_w_0()
-        .child(search_field)
-        .child(results);
+        .child(search_field);
+    if !onboarding {
+        // The filter field is also the custom-id field (#3180). Without a
+        // visible label it reads as a pure filter and the custom path is
+        // undiscoverable: name the field and spell the rule out.
+        body = body
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(shown.text_muted))
+                            .child(SharedString::from(
+                                "filter or paste a custom model id",
+                            )),
+                    )
+                    .child(div().flex_1().h(px(1.0)).bg(rgb(shown.track))),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(shown.text_faint))
+                    .whitespace_normal()
+                    .child(SharedString::from(
+                        "type a name to filter, or a full id (provider/model) and press enter to use it",
+                    )),
+            );
+    }
+    body = body.child(results);
     if !onboarding {
         body = body.flex_1().min_h_0();
     }
