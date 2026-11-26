@@ -739,6 +739,8 @@ History is one list, shared in real time. The terminal and the window read and w
 
 One entry is one record in that file, so a pasted block of text comes back as the block you pasted, newlines and blank lines included, instead of one entry per line.
 
+The arrows walk the text in the field first, line by line, and only a caret that is out of the way hands the key to the history, which then moves one entry per press. The window and the terminal ask the same question about that (`src/ui_core/input_history.rs`), so the two walk the history the same way.
+
 #### Voice messages
 
 The microphone sits at the right end of the composer and records a real message, not a dictation draft: click it, or press `ctrl+alt+r`, or pick `start dictation` in Seeker, and one control takes over the row. While the microphone is open it counts the take, draws a wave of what the device is actually hearing, and turns its mark into the stop square, so the thing that started the recording is the thing that ends it. Escape stops it too, and a click on the square; every way out of a take goes through the same stop (#3044).

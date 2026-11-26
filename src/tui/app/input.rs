@@ -4,7 +4,9 @@ use super::events::{AppMode, ToolApprovalResponse, TuiEvent};
 use super::mission_control::McPanel;
 use super::*;
 use crate::tui::input_layout;
-use crate::ui_core::input_history::{input_history_down, input_history_up};
+use crate::ui_core::input_history::{
+    Vertical, VerticalAction, input_history_down, input_history_up, vertical_action,
+};
 use crate::ui_core::text_field::{self, TextField, TextFieldEdit};
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -182,20 +184,6 @@ impl App {
             crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80)
         };
         input_layout::content_width(area_width).max(1)
-    }
-
-    /// Read-only predicate: is there anywhere for the cursor to move up to?
-    /// True whenever the cursor isn't already at the very start of the
-    /// buffer — this covers visual rows, logical lines, and "move to 0"
-    /// when we're already on the first line but mid-line.
-    fn can_cursor_move_up(&self) -> bool {
-        self.cursor_position > 0
-    }
-
-    /// Read-only predicate: is there anywhere for the cursor to move down to?
-    /// True whenever the cursor isn't already at the very end of the buffer.
-    fn can_cursor_move_down(&self) -> bool {
-        self.cursor_position < self.input_buffer.len()
     }
 
     /// Move cursor up one visual line within a logical line, accounting for soft wrapping.
@@ -2477,13 +2465,17 @@ impl App {
             self.delete_last_word();
         } else if keys::is_up(&event)
             && !self.slash_suggestions_active
-            && !self.input_buffer.is_empty()
-            && self.can_cursor_move_up()
+            && vertical_action(self.cursor_position, self.input_buffer.len(), Vertical::Up)
+                == VerticalAction::Caret
         {
             // Arrow Up — navigate lines within the buffer. Runs regardless
             // of whether we're inside a history browse, so a recalled
             // multiline entry is navigable. Only falls through to history
             // when the cursor is already at the top and can't move further.
+            //
+            // The shared rule in ui_core::input_history decides that, the
+            // same one the window asks, so the two surfaces walk the history
+            // the same way (#3188).
             if !self.cursor_visual_up() {
                 // Already on first visual line of this logical line
                 let line_start = self.cursor_line_position().0;
@@ -2516,13 +2508,16 @@ impl App {
             }
         } else if keys::is_down(&event)
             && !self.slash_suggestions_active
-            && !self.input_buffer.is_empty()
-            && self.can_cursor_move_down()
+            && vertical_action(self.cursor_position, self.input_buffer.len(), Vertical::Down)
+                == VerticalAction::Caret
         {
             // Arrow Down — navigate lines within the buffer. Runs regardless
             // of whether we're inside a history browse, so a recalled
             // multiline entry is navigable. Only falls through to history
             // when the cursor is already at the bottom.
+            //
+            // The shared rule in ui_core::input_history decides that, the
+            // same one the window asks (#3188).
             if !self.cursor_visual_down() {
                 // Already on last visual line of this logical line
                 let line_start = self.cursor_line_position().0;
