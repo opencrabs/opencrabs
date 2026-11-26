@@ -116,8 +116,11 @@ pub(crate) fn durable_context_text(context_text: &str) -> String {
 pub(crate) fn strip_delayed_mark(text: &str) -> &str {
     let mut rest = text;
     while let Some(tail) = rest.strip_prefix(DELAYED_MARK_PREFIX) {
-        match tail.find("\n\n") {
-            Some(idx) => rest = &tail[idx + 2..],
+        // split_once, not `tail.find` plus `&tail[idx + 2..]`: the byte
+        // index is a clippy::string_slice site, and the byte-slice ratchet in
+        // CI fails the push on a new one (scripts/byte-slice-baseline.txt).
+        match tail.split_once("\n\n") {
+            Some((_, after)) => rest = after,
             None => break,
         }
     }

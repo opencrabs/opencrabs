@@ -90,8 +90,13 @@ pub const COMPACTION_BANNER: &str = "[CONTEXT COMPACTION";
 /// and the head is the user's own words. `None` when the row carries no
 /// banner, so callers keep the text untouched.
 pub fn strip_embedded_compaction(content: &str) -> Option<String> {
-    let idx = content.find(COMPACTION_BANNER)?;
-    let head = content[..idx].trim_end();
+    // split_once, not a byte index: `find` plus `content[..idx]` is a
+    // clippy::string_slice site, and the byte-slice ratchet in CI fails the
+    // push on any new one (scripts/byte-slice-baseline.txt). split_once hands
+    // back the head without an index, and it is the same first-match
+    // semantics the find had.
+    let (head, _) = content.split_once(COMPACTION_BANNER)?;
+    let head = head.trim_end();
     Some(format!("{head}\n\n[compaction summary hidden]"))
 }
 
