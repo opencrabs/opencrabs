@@ -10653,7 +10653,11 @@ mod tests {
         let stamped = live_time(live.sent_at);
         let mut turns = vec![
             turn_with("an older question", "11-26 03:00:00".into(), "older answer"),
-            turn_with("audit the repo config", stamped, "config audited, two fixes filed."),
+            turn_with(
+                "audit the repo config",
+                stamped,
+                "config audited, two fixes filed.",
+            ),
         ];
         drop_live_twins(&mut turns, &live);
         turns.push(card_turn);
@@ -10678,10 +10682,9 @@ mod tests {
             "the question the reader watched must render once, not twice"
         );
         assert!(
-            turns[0]
-                .blocks
-                .first()
-                .is_some_and(|b| matches!(b, Block::Msg { content, .. } if content == "an older question")),
+            turns[0].blocks.first().is_some_and(
+                |b| matches!(b, Block::Msg { content, .. } if content == "an older question")
+            ),
             "a turn that merely sits next to the exchange must survive the drop"
         );
         assert!(
