@@ -115,7 +115,6 @@ impl Backend {
 
     /// The per-frame facts for `session`, or `None` while the crab is still
     /// booting. Synchronous: the window reads it while it renders.
-    #[allow(dead_code)] // no window caller yet: the footer still reads the service
     pub fn facts(&self, session: Option<Uuid>) -> Option<Facts> {
         match self {
             Backend::Local(ctx) => opencrabs::backend::facts_for(ctx, session).ok(),
