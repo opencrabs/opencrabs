@@ -247,7 +247,12 @@ fn in_catalogue_response_model_passes_through() {
     // The happy path: the response model is the provider's own spelling,
     // possibly canonicalized from a self-prefixed catalogue (#2289).
     let supported = vec!["ngodeai/glm-5.3-flash".to_string()];
-    let stamped = stamp_response_pair("ngodeai", "glm-5.3-flash", "ngodeai/glm-5.3-flash", &supported);
+    let stamped = stamp_response_pair(
+        "ngodeai",
+        "glm-5.3-flash",
+        "ngodeai/glm-5.3-flash",
+        &supported,
+    );
     assert_eq!(stamped, "ngodeai/glm-5.3-flash");
 }
 
