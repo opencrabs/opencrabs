@@ -4171,7 +4171,7 @@ fn a_provider_switch_notice_lands_in_the_live_card() {
     let mut live = crate::transcript::LiveTurn::default();
     live.notices.push("provider: a → b (fallback)".into());
     assert!(!live.is_empty(), "a fallback notice keeps the card alive");
-    assert!(live.has_turn_content() == false || live.notices.len() == 1);
+    assert!(!live.has_turn_content() || live.notices.len() == 1);
 }
 
 #[test]
