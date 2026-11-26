@@ -124,6 +124,46 @@ impl Dashboard {
                 show_provider_labels: false,
             },
         );
+        // The scope control (#3035, placement #3181): two states, this
+        // session or all sessions. It lives in the footer beside the
+        // "tab scope" hint, so the control, its hint and the apply action
+        // read as one unit instead of header chrome. Tab flips it as well,
+        // and the subtitle spells the state out either way.
+        //
+        // It is built above the body row on purpose: the body slice is what
+        // the layout pin measures, and that slice is the two panels only.
+        // A third radius inside it read as a third panel (#2921).
+        let scope_chip = div()
+            .id("models-scope")
+            .flex()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(px(concentric_radius(6.0)))
+            .border_1()
+            .border_color(rgb(if scope_all { shown.accent } else { shown.track }))
+            .cursor_pointer()
+            .hover(|d| d.border_color(rgb(shown.accent)))
+            .child(text(
+                if scope_all {
+                    "scope: all sessions"
+                } else {
+                    "scope: this session"
+                },
+                Size::Xs,
+                if scope_all {
+                    shown.accent
+                } else {
+                    shown.text_muted
+                },
+            ))
+            .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.models_scope_all = !this.models_scope_all;
+                cx.notify();
+            }));
         let body = div()
             .flex()
             .flex_row()
@@ -171,42 +211,6 @@ impl Dashboard {
                     .bg(rgb(shown.bg))
                     .child(picker.body),
             );
-        // The scope control (#3035, placement #3181): two states, this
-        // session or all sessions. It lives in the footer beside the
-        // "tab scope" hint, so the control, its hint and the apply action
-        // read as one unit instead of header chrome. Tab flips it as well,
-        // and the subtitle spells the state out either way.
-        let scope_chip = div()
-            .id("models-scope")
-            .flex()
-            .flex_none()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .rounded(px(concentric_radius(6.0)))
-            .border_1()
-            .border_color(rgb(if scope_all { shown.accent } else { shown.track }))
-            .cursor_pointer()
-            .hover(|d| d.border_color(rgb(shown.accent)))
-            .child(text(
-                if scope_all {
-                    "scope: all sessions"
-                } else {
-                    "scope: this session"
-                },
-                Size::Xs,
-                if scope_all {
-                    shown.accent
-                } else {
-                    shown.text_muted
-                },
-            ))
-            .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.models_scope_all = !this.models_scope_all;
-                cx.notify();
-            }));
         // A pending all-sessions pick owns the footer (#3035): the count and
         // the second tap are the whole point, so the normal hint steps aside
         // until the reader answers.
