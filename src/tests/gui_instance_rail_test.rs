@@ -4,7 +4,7 @@
 //! the config key gets the same default-off and round-trip pins the other
 //! `[gui]` keys have.
 
-use opencrabs::config::types::GuiConfig;
+use crate::config::types::GuiConfig;
 
 const GUI_MOUNT: &str = concat!(
     include_str!("../gui/app.rs"),
