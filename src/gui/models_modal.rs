@@ -18,8 +18,9 @@ impl Dashboard {
         let mut providers = models::providers(&visible);
         if let Some(selected) = self.models_provider.as_deref()
             && !providers.iter().any(|row| row.provider == selected)
-            && let Some(pinned) =
-                models::providers(&self.models_rows).into_iter().find(|row| row.provider == selected)
+            && let Some(pinned) = models::providers(&self.models_rows)
+                .into_iter()
+                .find(|row| row.provider == selected)
         {
             providers.push(pinned);
         }

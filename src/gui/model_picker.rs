@@ -99,8 +99,8 @@ pub fn render(cx: &mut Context<Dashboard>, view: ModelPickerView<'_>) -> Rendere
     // The walk's last selectable index, shared by both fold rows (#3184): the
     // keyboard clamps at the last row, plus one more step when the custom-id
     // row is painted, so a click must land in the same place.
-    let custom_offered =
-        models::manual_pair(view.query, view.active_provider).is_some() && (!onboarding || matched == 0);
+    let custom_offered = models::manual_pair(view.query, view.active_provider).is_some()
+        && (!onboarding || matched == 0);
     let walk_last = matched.saturating_sub(1) + usize::from(custom_offered);
     if above > 0 {
         // The fold row is a control, not text (#3184): clicking it pages the
