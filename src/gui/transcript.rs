@@ -1835,27 +1835,6 @@ pub fn newest_live_turn_matches(turn: &Turn, live: &LiveTurn) -> bool {
         })
 }
 
-/// Drop the persisted copy of the exchange the live card is about to append
-/// (#3179).
-///
-/// A reload that ran while the turn was in flight (a settle that proved an
-/// earlier write, a boot resume, opening the session mid-turn) already
-/// installed the exchange's rows, and the render guard hid that persisted
-/// copy only while the card was on screen (`newest_is_live`). At Done the
-/// card appends its own copy and clears, the guard loses its `live` and both
-/// copies rendered: the duplicated question the reader saw the moment the
-/// answer landed, gone again after a session switch rebuilt the list from
-/// the rows alone.
-///
-/// The card's copy is the one that stays: it carries the blocks the reader
-/// actually watched, the reload reconciles ids on the next read anyway, and
-/// the same [`newest_live_turn_matches`] predicate the render guard used
-/// decides which persisted turn yields. Older turns never match, so only the
-/// twin goes.
-pub fn drop_live_twins(turns: &mut Vec<Turn>, live: &LiveTurn) {
-    turns.retain(|turn| !newest_live_turn_matches(turn, live));
-}
-
 /// Where one block of a carded turn draws around its card (#3179, 2026-11-26).
 ///
 /// The card is the working-out box, so a block's place is the place the live
@@ -10711,96 +10690,6 @@ mod tests {
         assert!(
             !newest_live_turn_matches(&turn_with("something else", drifted), &known),
             "the text still decides, so a late stamp cannot hide another turn"
-        );
-    }
-
-    /// A reload that ran while the turn was in flight already installed the
-    /// exchange's rows, and the Done append added the card's copy on top. The
-    /// render guard hid the persisted copy only while the card was on screen,
-    /// so the moment the answer landed the question showed twice and a session
-    /// switch (a list rebuilt from the rows alone) was the only way to clear
-    /// it (#3179). The Done append must drop the persisted twin first, keep
-    /// every older turn, and keep the card's copy.
-    #[test]
-    fn the_done_append_drops_the_persisted_twin_the_reload_installed() {
-        let mut live = LiveTurn::default();
-        live.begin("audit the repo config".into());
-        live.settled = Some("config audited, two fixes filed.".to_string());
-        let card_turn = turn_from_live(&live, None).expect("an answered card builds a turn");
-
-        let turn_with = |question: &str, time: String, answer: &str| Turn {
-            header: None,
-            summary: TurnSummary::default(),
-            metrics: None,
-            anchor: format!("{question}@{time}"),
-            blocks: vec![
-                Block::Msg {
-                    role: "user".into(),
-                    content: question.into(),
-                    time,
-                    placeholder: false,
-                    message_id: None,
-                    forward: None,
-                },
-                Block::Msg {
-                    role: "assistant".into(),
-                    content: answer.into(),
-                    time: String::new(),
-                    placeholder: false,
-                    message_id: None,
-                    forward: None,
-                },
-            ],
-            final_idx: None,
-            origin: None,
-        };
-
-        // The list state a mid-turn reload leaves behind: the turns before
-        // this exchange, then the persisted copy of the same exchange the
-        // card just drew.
-        let stamped = live_time(live.sent_at);
-        let mut turns = vec![
-            turn_with("an older question", "11-26 03:00:00".into(), "older answer"),
-            turn_with(
-                "audit the repo config",
-                stamped,
-                "config audited, two fixes filed.",
-            ),
-        ];
-        drop_live_twins(&mut turns, &live);
-        turns.push(card_turn);
-
-        assert_eq!(
-            turns.len(),
-            2,
-            "the persisted twin yields; the older turn and the card's copy stay"
-        );
-        let question_copies = turns
-            .iter()
-            .filter(|turn| {
-                matches!(
-                    turn.blocks.first(),
-                    Some(Block::Msg { role, content, .. })
-                        if role == "user" && content == "audit the repo config"
-                )
-            })
-            .count();
-        assert_eq!(
-            question_copies, 1,
-            "the question the reader watched must render once, not twice"
-        );
-        assert!(
-            turns[0].blocks.first().is_some_and(
-                |b| matches!(b, Block::Msg { content, .. } if content == "an older question")
-            ),
-            "a turn that merely sits next to the exchange must survive the drop"
-        );
-        assert!(
-            turns[1]
-                .blocks
-                .iter()
-                .any(|b| matches!(b, Block::Msg { role, content, .. } if role == "assistant" && content == "config audited, two fixes filed.")),
-            "the copy that stays is the card's, with the blocks the reader watched"
         );
     }
 
