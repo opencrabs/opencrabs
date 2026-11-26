@@ -1663,9 +1663,8 @@ impl Dashboard {
                         .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
                     if let Some(bridge) = agent_bridge::bridge() {
                         let db_path = self.db_path.clone();
-                        let pin_to = to_name.clone();
-                        let pin_model = to_model.clone();
-                        let agent_service = bridge.service.clone();
+                        let persist_to = to_name.clone();
+                        let persist_model = to_model.clone();
                         let _ = agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
                             rt.block_on(async {
                                 // Same 4 MB thread read the rest of the GUI
@@ -1678,8 +1677,8 @@ impl Dashboard {
                                     opencrabs::services::ServiceContext::new(db.pool().clone()),
                                 );
                                 if let Ok(Some(mut s)) = service.get_session(sid).await {
-                                    s.provider_name = Some(to_name.clone());
-                                    s.model = Some(to_model.clone());
+                                    s.provider_name = Some(persist_to);
+                                    s.model = Some(persist_model);
                                     if let Err(e) = service.update_session(&s).await {
                                         tracing::warn!(
                                             "Failed to persist provider swap to session {sid}: {e}"
@@ -1688,25 +1687,23 @@ impl Dashboard {
                                 }
                             });
                         });
-                    }
-                    // The rail's footer pair for this session follows the row
-                    // on the next fetch; the card notice is the live signal.
-                    // The in-memory pin must also be rebuilt from config, or
-                    // the next turn re-walks the dead primary: the agent's own
-                    // swap reuses the fallback Arc, which still carries the
-                    // failing primary internally. Same rebuild the TUI does at
-                    // `tui/app/state.rs` (ProviderSwitched).
-                    if let Some(bridge) = agent_bridge::bridge() {
-                        let service = bridge.service.clone();
+                        // The rail's footer pair for this session follows the
+                        // row on the next fetch; the card notice is the live
+                        // signal. The in-memory pin must also be rebuilt from
+                        // config, or the next turn re-walks the dead primary:
+                        // the agent's own swap reuses the fallback Arc, which
+                        // still carries the failing primary internally. Same
+                        // rebuild the TUI does at `tui/app/state.rs`
+                        // (ProviderSwitched).
+                        let rebuild_service = bridge.service.clone();
                         let rebuild_to = to_name.clone();
                         let rebuild_model = to_model.clone();
-                        agent_bridge::spawn_worker("gui-provider-pin-rebuild", move |rt| {
+                        let _ = agent_bridge::spawn_worker("gui-provider-pin-rebuild", move |rt| {
                             rt.block_on(async {
                                 if let Ok(config) = opencrabs::config::Config::load()
-                                    && let Ok(new_provider) =
-                                        opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
+                                    && let Ok(new_provider) = opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
                                 {
-                                    service.swap_provider_for_session(
+                                    rebuild_service.swap_provider_for_session(
                                         sid,
                                         new_provider,
                                         rebuild_model,
