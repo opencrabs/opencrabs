@@ -1936,6 +1936,9 @@ pub fn rail(
     // The filter menu (#2719), built by the view with its click handlers and
     // pinned to the top-right of the rail. None until the view supplies it.
     filter_control: Option<AnyElement>,
+    // The crabs under the logo (#3178). Both `None` with `[gui]
+    // remote_crabs` off, and then the brand row is exactly main's.
+    crabs: RailCrabs,
 ) -> Stateful<Div> {
     // No rail padding or inter-row gap: selection and hover paint edge to edge.
     let mut col = div()
@@ -1949,7 +1952,10 @@ pub fn rail(
         .h_full()
         .bg(rgb(palette::current().panel))
         .py_2()
-        .child(brand_header(rail_actions));
+        .child(brand_header(rail_actions, crabs.toggle));
+    if let Some(list) = crabs.list {
+        col = col.child(list);
+    }
 
     // The filter menu rides top-right, just under the brand (#2719). The
     // element carries its own gaps and clicks; the rail only seats it.
@@ -1995,6 +2001,16 @@ pub fn rail(
     col
 }
 
+/// The crabs the rail's brand row can unfold (#3178), built by the view
+/// with their handlers. `Default` is the flag off: nothing new is mounted.
+#[derive(Default)]
+pub struct RailCrabs {
+    /// The logo as a button, with the arrow that says which way it folds.
+    pub toggle: Option<AnyElement>,
+    /// The unfolded list, seated under the brand row.
+    pub list: Option<AnyElement>,
+}
+
 /// The closed rail keeps the brand and its reopen button in the same thin
 /// column, without resolving any session rows or filter chrome (#2982).
 pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
@@ -2026,7 +2042,7 @@ pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
 /// paid a band of nothing before the first one. `actions` is the view's own
 /// button row: the sidebar toggle and the menu, already carrying their
 /// handlers.
-fn brand_header(actions: Option<AnyElement>) -> Div {
+fn brand_header(actions: Option<AnyElement>, crabs_toggle: Option<AnyElement>) -> Div {
     let mut row = div()
         .w_full()
         .flex()
@@ -2050,7 +2066,12 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
                 .items_center()
                 .justify_center()
                 .size(rems(RAIL_MARK_REMS))
-                .child(icon::banner_logo()),
+                .child(match crabs_toggle {
+                    // The logo made the door to the crabs (#3178): the same
+                    // mark, with its arrow, as a button.
+                    Some(toggle) => toggle,
+                    None => icon::banner_logo().into_any_element(),
+                }),
         )
         .child(
             div()

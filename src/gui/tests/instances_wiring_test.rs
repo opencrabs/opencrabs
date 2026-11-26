@@ -23,6 +23,8 @@ use crate::instances::{Health, Instances};
 
 const WIRING: &str = include_str!("../dashboard_instances.rs");
 const STRIP: &str = include_str!("../instance_strip.rs");
+const RAIL_VIEW: &str = include_str!("../rail_view.rs");
+const SESSIONS: &str = include_str!("../sessions.rs");
 const APP: &str = include_str!("../app.rs");
 const RENDER: &str = include_str!("../dashboard_render.rs");
 const RAIL: &str = include_str!("../dashboard_rail.rs");
@@ -192,7 +194,9 @@ fn the_window_mounts_and_starts_the_strip() {
     assert!(APP.contains("Dashboard::spawn_instance_probe(cx);"));
     assert!(APP.contains("home_backend: backend.clone(),"));
     assert!(STRIP.contains("dash.instance_picked("));
-    assert!(STRIP.contains("dash.instance_clear(cx)"));
+    // The list in the rail is where a crab is picked and home is reached.
+    assert!(RAIL_VIEW.contains("dash.instance_picked(&host_id, cx)"));
+    assert!(RAIL_VIEW.contains("dash.instance_clear(cx)"));
 }
 
 #[test]
@@ -329,12 +333,17 @@ fn the_share_address_says_when_it_cannot_be_reached() {
 fn the_strip_is_drawn_only_behind_the_remote_crabs_flag() {
     // Off by default: a single-crab install must not spend a column on it.
     // The only way out of the function without a strip is the flag check.
-    let element = fn_body(WIRING, "instance_strip_element");
-    assert_eq!(element.matches("return None").count(), 1, "{element}");
+    // The one gate: the list's frame. The strip's mount and the rail's
+    // list both go through it, so neither can appear with the flag off.
+    let frame = fn_body(WIRING, "crab_list_frame");
+    assert_eq!(frame.matches("return None").count(), 1, "{frame}");
     assert!(
-        element.contains("if !self.remote_crabs {\n            return None;"),
-        "{element}"
+        frame.contains("if !self.remote_crabs {\n            return None;"),
+        "{frame}"
     );
+    let element = fn_body(WIRING, "instance_strip_element");
+    assert!(element.contains("self.crab_list_frame()?"), "{element}");
+    assert!(RAIL.contains("crabs: self.crab_list_frame().map("));
     assert!(APP.contains("remote_crabs: Config::current().gui.remote_crabs,"));
     // While off no paired crab is probed: the loop's target list is empty.
     let probe = fn_body(WIRING, "spawn_instance_probe");
@@ -355,8 +364,11 @@ fn the_strip_is_drawn_only_behind_the_remote_crabs_flag() {
     );
     assert!(CONFIG_RELOAD.contains("self.set_remote_crabs(config.gui.remote_crabs, cx);"));
     assert!(SETTINGS.contains("body.push(self.remote_crabs_row(cx));"));
-    // Once on, the `+` that pairs the first crab is always there.
-    assert!(STRIP.contains("children.push(self.add_mark(cx));"));
+    // Once on, the row that pairs the first crab is always in the list.
+    let list = fn_body(RAIL_VIEW, "crabs_list");
+    assert!(list.contains("\"rail-crab-pair\""), "{list}");
+    assert!(list.contains("dash.instance_pair(cx)"), "{list}");
+    assert!(WIRING.contains("strip.open_pair(cx)"));
     assert!(STRIP.contains("this.open_pair(cx)"));
     // The card is painted over the window from the strip, not in its 56 px.
     let overlay = fn_body(STRIP, "card_overlay");
@@ -400,15 +412,15 @@ fn the_card_owns_the_keyboard_before_the_seeker_and_the_composer() {
 /// the window goes home first when the crab being forgotten is the open one.
 #[test]
 fn a_badge_right_click_forgets_its_crab_off_the_ui_thread() {
-    let badge = fn_body(STRIP, "badge");
+    // The crab's row in the rail's list carries the right-click (#3178).
+    let list = fn_body(RAIL_VIEW, "crabs_list");
     assert!(
-        badge.contains("on_mouse_down(MouseButton::Right, ask)"),
-        "{badge}"
+        list.contains("on_mouse_down(MouseButton::Right, manage)"),
+        "{list}"
     );
-    assert!(
-        badge.contains("this.open_manage(&manage_badge, cx)"),
-        "{badge}"
-    );
+    assert!(list.contains("dash.instance_manage(&badge, cx)"), "{list}");
+    let manage = fn_body(WIRING, "instance_manage");
+    assert!(manage.contains("strip.open_manage(&badge, cx)"), "{manage}");
 
     let card = fn_body(STRIP, "manage_body");
     assert!(
@@ -547,18 +559,27 @@ fn a_link_without_a_code_is_not_a_link() {
     assert!(parse_pair_link("").is_none());
 }
 
+/// The `let home = { ... };` listener of the rail's list, and nothing else.
+fn home_listener() -> &'static str {
+    let at = RAIL_VIEW
+        .find("let home = {")
+        .expect("the list has a home row");
+    let rest = RAIL_VIEW.get(at..).unwrap_or("");
+    let end = rest.find("\n        };").expect("the home listener ends");
+    rest.get(..end).unwrap_or("")
+}
+
 #[test]
 fn the_workspace_mark_is_the_way_home() {
     // The owner's report: clicking the mark did nothing, and the only way back
-    // to his own crab was toggling a badge off (#3133). The wiring is a gpui
-    // listener, and what can regress is the listener going away while the
-    // element still paints.
-    let source = include_str!("../instance_strip.rs");
-    let body = fn_body(source, "workspace_mark");
+    // to his own crab was toggling a badge off (#3133). The mark now lives as
+    // the list's first row, "este crab" (#3178); what can regress is the
+    // listener going away while the row still paints.
+    let list = fn_body(RAIL_VIEW, "crabs_list");
     assert!(
-        body.contains(".on_click(click)") && body.contains("this.home(cx)"),
-        "the mark must answer a left click: it is the only way home from a \
-         remote crab, and a right-click menu cannot be discovered"
+        list.contains("\"rail-crab-home\"") && list.contains(".on_click(home)"),
+        "this machine's crab must answer a left click: it is the only way home \
+         from a remote crab"
     );
 }
 
@@ -566,16 +587,15 @@ fn the_workspace_mark_is_the_way_home() {
 fn clearing_the_remote_keeps_the_pairing() {
     // Two different acts share a neighbourhood here and must never share a
     // control: going home closes the view, forgetting drops the crab (and costs
-    // a fresh code to get back). The mark is the first one only.
-    let source = include_str!("../instance_strip.rs");
-    let body = fn_body(source, "home");
+    // a fresh code to get back). The home row is the first one only.
+    let home = home_listener();
     assert!(
-        body.contains("instance_clear"),
+        home.contains("instance_clear"),
         "going home must go through instance_clear, which keeps the pairing: \
-         forgetting lives in the badge's right-click card"
+         forgetting lives in the crab's right-click card"
     );
     assert!(
-        !body.contains("forget"),
+        !home.contains("forget") && !home.contains("manage"),
         "the way home must never forget the crab: a code is a fresh round trip \
          to the other machine"
     );
@@ -584,47 +604,105 @@ fn clearing_the_remote_keeps_the_pairing() {
 #[test]
 fn the_mark_and_the_badges_are_rounded_squares() {
     // A circle in a column of squares read as a different widget from the rail
-    // it sits in. The badge's own box is the square; the health dot and the
-    // selection bar inside it stay round, because they are a dot and a bar.
-    let source = include_str!("../instance_strip.rs");
-    let mark = fn_body(source, "workspace_mark");
+    // it sits in. A crab's square and the list's rows are rounded squares.
+    let mark = fn_body(STRIP, "badge_mark");
     assert!(
         mark.contains(".rounded_md()") && !mark.contains("rounded_full"),
-        "the mark is a rounded square, the shape of the session marks and the \
-         topic tabs"
+        "a crab's mark is a rounded square, the shape of the session marks \
+         and the topic tabs"
     );
-    let badge = fn_body(source, "badge");
-    let square_at = badge
-        .find(".rounded_md()")
-        .expect("the badge's box is a rounded square");
-    let first_round = badge.find("rounded_full()").unwrap_or(usize::MAX);
-    assert!(
-        square_at < first_round,
-        "the badge's box must take its radius before the dot inside it does, \
-         or the box itself is being drawn as a circle"
-    );
+    let row = fn_body(RAIL_VIEW, "crab_row");
+    assert!(row.contains(".rounded_md()") && !row.contains("rounded_full"));
 }
 
 #[test]
 fn each_badge_wears_the_hue_of_its_host_id() {
-    // Upstream 6472af7b5: the column is recognisable before any label is read.
+    // Upstream 6472af7b5: the list is recognisable before any label is read.
     // The slot is pinned in `instances_test`; this pins that the paint reads it.
-    let source = include_str!("../instance_strip.rs");
-    let badge = fn_body(source, "badge");
+    let mark = fn_body(STRIP, "badge_mark");
     assert!(
-        badge.contains("tint_hue(badge_tint(&badge.host_id), &p)"),
-        "the badge must take its wash from its own host id"
+        mark.contains("tint_hue(badge_tint(&badge.host_id), &p)"),
+        "a crab's square must take its wash from its own host id"
     );
+    let list = fn_body(RAIL_VIEW, "crabs_list");
+    assert!(list.contains("crate::instance_strip::badge_mark(badge, is_selected, CRAB_MARK_REM)"));
 }
 
 #[test]
 fn a_badge_draws_the_mark_and_a_card_names_the_crab() {
-    // Upstream 277c5bbca/124522964: the badge draws one initial or a picture,
-    // while the right-click card still names the crab in full.
-    let source = include_str!("../instance_strip.rs");
-    assert!(source.contains("tab_icon(&badge.glyph, BADGE_REM * 0.62)"));
-    assert!(source.contains("glyph: SharedString::from(entry.glyph())"));
-    assert!(source.contains("label: badge.label.clone()"));
+    // Upstream 277c5bbca/124522964: the square draws one initial or a picture,
+    // while the row and the right-click card still name the crab in full.
+    assert!(STRIP.contains("tab_icon(&badge.glyph, box_rem * 0.62)"));
+    assert!(STRIP.contains("glyph: SharedString::from(entry.glyph())"));
+    assert!(STRIP.contains("label: badge.label.clone()"));
+    assert!(fn_body(RAIL_VIEW, "crabs_list").contains("badge.label.clone(),"));
+}
+
+// ── #3178: the crabs live inside the rail, behind the flag ──────────────────
+
+#[test]
+fn with_the_flag_off_the_rail_mounts_nothing_new() {
+    // The regression the issue names: a window with `[gui] remote_crabs =
+    // false` draws main's sidebar. The rail frame's `crabs` is `None` (the
+    // gate is pinned in `the_strip_is_drawn_only_behind_the_remote_crabs_flag`),
+    // and `None` builds no toggle and no list, so the brand row falls back to
+    // the bare logo, the one main draws.
+    let render = fn_body(RAIL_VIEW, "render");
+    assert!(
+        render.contains(".map(|crabs| self.crabs_toggle(crabs.open, cx));"),
+        "{render}"
+    );
+    assert!(render.contains(".filter(|crabs| crabs.open)"), "{render}");
+    assert!(SESSIONS.contains("None => icon::banner_logo().into_any_element(),"));
+    assert!(SESSIONS.contains("if let Some(list) = crabs.list {"));
+    // The arrow is drawn only inside the toggle, so no flag, no arrow.
+    assert_eq!(RAIL_VIEW.matches("\\u{25b8}").count(), 1);
+    // The flag off also folds the list, so turning it back on starts closed.
+    let set = fn_body(WIRING, "set_remote_crabs");
+    assert!(set.contains("self.crabs_open = false;"), "{set}");
+    let toggle = fn_body(WIRING, "toggle_crab_list");
+    assert!(toggle.contains("if !self.remote_crabs {"), "{toggle}");
+    // And the old column is gone from the layout: the strip mounts with no
+    // box of its own, only for its cards.
+    assert!(!STRIP.contains("STRIP_REM"));
+    assert!(!STRIP.contains("fn column("));
+    let element = fn_body(WIRING, "instance_strip_element");
+    assert!(!element.contains(".cached("), "{element}");
+}
+
+#[test]
+fn with_the_flag_on_the_logo_unfolds_the_crabs() {
+    // The arrow sits on the logo and the list holds this machine's crab, every
+    // paired one in the store's order, and the pairing row.
+    let toggle = fn_body(RAIL_VIEW, "crabs_toggle");
+    assert!(toggle.contains("crate::icon::banner_logo()"), "{toggle}");
+    assert!(toggle.contains("dash.toggle_crab_list(cx)"), "{toggle}");
+    let list = fn_body(RAIL_VIEW, "crabs_list");
+    assert!(list.contains("for badge in &crabs.list.badges {"), "{list}");
+    // The data the list reads, from the model: both crabs, in order, and the
+    // pick.
+    let mut model = two();
+    assert!(model.select("b:2"));
+    let crabs = crate::rail_view::CrabsFrame {
+        open: true,
+        list: crate::instance_strip::StripFrame::from_model(&model, 0, None),
+    };
+    let ids: Vec<&str> = crabs
+        .list
+        .badges
+        .iter()
+        .map(|b| b.host_id.as_str())
+        .collect();
+    assert_eq!(ids, ["a:1", "b:2"]);
+    assert_eq!(crabs.list.selected.as_deref(), Some("b:2"));
+    // Folded is a different frame, so the rail repaints on the click.
+    assert_ne!(
+        crabs,
+        crate::rail_view::CrabsFrame {
+            open: false,
+            ..crabs.clone()
+        }
+    );
 }
 
 #[test]

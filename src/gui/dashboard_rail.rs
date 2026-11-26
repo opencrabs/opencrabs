@@ -833,6 +833,12 @@ impl Dashboard {
             },
             rows,
             footer,
+            // The crabs under the logo (#3178): `None` with the flag off, so
+            // the rail is the one main draws.
+            crabs: self.crab_list_frame().map(|list| rail_view::CrabsFrame {
+                open: self.crabs_open,
+                list,
+            }),
             // The filter menu's own state (#2719, #2787), which lives on
             // `sessions` so it survives the repaint and resets when the rail
             // closes.

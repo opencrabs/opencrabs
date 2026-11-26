@@ -19,7 +19,7 @@
 
 use super::*;
 use crate::backend_glue::Backend;
-use crate::instance_strip::{self, StripFrame};
+use crate::instance_strip::{StripBadge, StripFrame};
 use crate::instances::{Health, Instances};
 use opencrabs::backend::Op;
 use opencrabs::backend::cap;
@@ -255,24 +255,51 @@ impl Dashboard {
         .detach();
     }
 
-    /// The strip as a cached view, handed one frame of plain data.
-    ///
-    /// Drawn only with `[gui] remote_crabs` on: a machine with one crab
-    /// spends no column on it. With the switch on it is drawn even while the
-    /// window knows no other crab, because the `+` under the workspace mark is
-    /// how the first one gets paired.
-    pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The crabs as the rail's list reads them (#3178), or `None` with
+    /// `[gui] remote_crabs` off: then the rail mounts nothing new, not even
+    /// the arrow beside its logo.
+    pub(crate) fn crab_list_frame(&self) -> Option<StripFrame> {
         if !self.remote_crabs {
             return None;
         }
-        let frame = StripFrame::from_model(&self.instances, now(), self.instance_error.clone());
+        Some(StripFrame::from_model(
+            &self.instances,
+            now(),
+            self.instance_error.clone(),
+        ))
+    }
+
+    /// The rail's logo was clicked: fold or unfold the list of crabs.
+    pub(crate) fn toggle_crab_list(&mut self, cx: &mut Context<Self>) {
+        if !self.remote_crabs {
+            return;
+        }
+        self.crabs_open = !self.crabs_open;
+        cx.notify();
+    }
+
+    /// A crab's row in the list was right-clicked: its own card (open,
+    /// forget, a new address).
+    pub(crate) fn instance_manage(&mut self, badge: &StripBadge, cx: &mut Context<Self>) {
+        let badge = badge.clone();
+        self.instance_strip
+            .update(cx, |strip, cx| strip.open_manage(&badge, cx));
+    }
+
+    /// The list's "emparelhar um crab" row: the pairing card.
+    pub(crate) fn instance_pair(&mut self, cx: &mut Context<Self>) {
+        self.instance_strip
+            .update(cx, |strip, cx| strip.open_pair(cx));
+    }
+
+    /// The strip entity, mounted for its cards only: it has no box of its
+    /// own and paints the card that is up over the window. Mounted only with
+    /// `[gui] remote_crabs` on, the only way a card can be opened.
+    pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let frame = self.crab_list_frame()?;
         let view = self.instance_strip.clone();
         view.update(cx, |strip, cx| strip.set_frame(frame, cx));
-        Some(
-            AnyView::from(view)
-                .cached(instance_strip::strip_root_style())
-                .into_any_element(),
-        )
+        Some(AnyView::from(view).into_any_element())
     }
 
     /// A pairing went through: the strip hands over the store as it now
@@ -338,6 +365,7 @@ impl Dashboard {
             self.instance_clear(cx);
             self.instance_strip
                 .update(cx, |strip, cx| strip.close_card(cx));
+            self.crabs_open = false;
         }
         self.remote_crabs = on;
         logging::info(&format!(

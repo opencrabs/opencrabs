@@ -1,32 +1,29 @@
-//! The instance strip: 56 px of column on the far left that says *which crab*
-//! this window is looking at.
+//! The instance strip: which crab this window is looking at, and the cards
+//! that pair, share, forget or move one.
 //!
-//! Three nested scopes, one per column, and this is the outermost: the strip
-//! picks the instance, the rail lists that instance's sessions, the panes show
-//! the selected session. Only the first is new; the other two are the window's
-//! own and are reused untouched, because a pick swaps the backend they read
-//! from rather than drawing a second rail.
+//! Three nested scopes, and this is the outermost: the strip picks the
+//! instance, the rail lists that instance's sessions, the panes show the
+//! selected session. A pick swaps the backend the other two read from rather
+//! than drawing a second rail.
 //!
-//! Like the rail (#2933) this is a cached view: the window resolves a
-//! [`StripFrame`] of plain data and hands it over, and a frame that compares
-//! equal replays the last prepaint instead of rebuilding badges for a keystroke
-//! typed in the composer.
+//! It has no column of its own (#3178). With `[gui] remote_crabs` on, the
+//! rail's logo unfolds a list of the crabs (`rail_view.rs`), and the list
+//! reads the [`StripFrame`] the window resolves here. The strip entity keeps
+//! the cards and paints only the one that is up, over the whole window.
 //!
-//! Two rules the paint follows, both from the mockup that was approved:
+//! Two rules the list follows, both from the mockup that was approved:
 //!
-//! 1. **The accent belongs to the selection alone.** Ring, number and the edge
-//!    bar are the only orange in the column; a crab that is merely online gets a
-//!    green dot, not a glow.
-//! 2. **Health never moves a crab.** Order is the store's, so the badge under
+//! 1. **The accent belongs to the selection alone.** A crab that is merely
+//!    online gets a green dot, not a glow.
+//! 2. **Health never moves a crab.** Order is the store's, so the row under
 //!    the pointer cannot slide away between the press and the release.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Div, IntoElement, Keystroke, MouseButton,
-    MouseDownEvent, Render, SharedString, StyleRefinement, WeakEntity, Window, anchored, deferred,
-    div, point, prelude::*, px, rems, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, IntoElement, Keystroke, Render,
+    SharedString, WeakEntity, Window, anchored, deferred, div, point, prelude::*, px, rems, rgb,
 };
 use opencrabs::config::{A2aConfig, Config, gui_theme};
 use opencrabs::remote::instance_client;
@@ -37,15 +34,8 @@ use opencrabs::remote::scopes::BASE_SCOPES;
 use opencrabs::remote::tunnel;
 use opencrabs::ui_core::text_field::{self, TextField};
 
-use crate::instances::{Health, InstanceEntry, Instances, badge_tint, badge_title, health_mark};
+use crate::instances::{Health, InstanceEntry, Instances, badge_tint, badge_title};
 use crate::{modal_shell, palette};
-
-/// The strip's width in rems. 56 px at the window's 16 px root, which is the
-/// mockup's number and the same axis the badges are centred on.
-pub(crate) const STRIP_REM: f32 = 3.5;
-
-/// A badge's diameter in rems (32 px).
-const BADGE_REM: f32 = 2.0;
 
 /// One crab, resolved to what the paint reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,223 +156,61 @@ impl InstanceStrip {
             .update(cx, |dash, cx| dash.instance_picked(host_id.as_ref(), cx))
             .ok();
     }
-
-    fn home(&self, cx: &mut Context<Self>) {
-        self.dashboard
-            .update(cx, |dash, cx| dash.instance_clear(cx))
-            .ok();
-    }
-
-    /// The window's mark at the top of the column: this machine's own crab.
-    /// A click on it goes home, the same as a second click on the badge that
-    /// is open, so the way back is never only the picker that led away.
-    fn workspace_mark(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let home = self.frame.selected.is_none();
-        let click = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.home(cx));
-        div()
-            .id("instance-strip-home")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w(rems(BADGE_REM))
-            .h(rems(1.75))
-            // A rounded square, like the rail's session marks and the topic
-            // tabs: the strip is part of the same chrome, and a circle in a
-            // column of squares read as a different widget (#3133).
-            .rounded_md()
-            .cursor_pointer()
-            .bg(rgb(p.panel_hi))
-            .border_1()
-            .border_color(rgb(if home { p.accent } else { p.track }))
-            .on_click(click)
-            .child(
-                div()
-                    .text_size(rems(0.6875))
-                    .text_color(rgb(if home { p.accent } else { p.text_title }))
-                    .child(SharedString::from("C")),
-            )
-            .into_any_element()
-    }
-
-    fn badge(&self, badge: &StripBadge, selected: bool, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let dot = match badge.health {
-            Health::Up { .. } => p.green,
-            Health::Down { .. } => p.red,
-            Health::Unknown => p.text_faint,
-        };
-        // Each crab wears its own hue, derived from its host id, so the column
-        // is recognisable before any label is read. The wash and the ring are
-        // the same hue at two strengths; the glyph mixes with the palette's own
-        // text colour, which keeps it legible in the light theme too.
-        let hue = tint_hue(badge_tint(&badge.host_id), &p);
-        let wash = gui_theme::mix(p.panel, hue, 30, 100);
-        let ring = gui_theme::mix(p.panel, hue, 62, 100);
-        let glyph = gui_theme::mix(hue, p.text, 40, 100);
-        let text = if selected { p.accent } else { glyph };
-        let host_id = SharedString::from(badge.host_id.clone());
-        let title = badge.title.clone();
-        let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-            this.pick(host_id.clone(), cx);
-        });
-        let manage_badge = badge.clone();
-        let ask = cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
-            this.open_manage(&manage_badge, cx);
-        });
-
-        let mut cell = div()
-            .id(SharedString::from(format!(
-                "instance-badge-{}",
-                badge.host_id
-            )))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w_full()
-            .h(rems(BADGE_REM))
-            .cursor_pointer()
-            .on_click(click)
-            .on_mouse_down(MouseButton::Right, ask)
-            .tooltip(move |_window, cx| crate::hint::mic_tooltip(title.clone(), cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w(rems(BADGE_REM))
-                    .h(rems(BADGE_REM))
-                    // A rounded square, the shape the rail's session marks and
-                    // the topic tabs wear. The column is the same chrome, and
-                    // a circle among squares read as a widget from another
-                    // window (#3133).
-                    .rounded_md()
-                    .bg(rgb(wash))
-                    .border_1()
-                    .border_color(rgb(if selected { p.accent } else { ring }))
-                    .child(mark(badge, text, selected)),
-            )
-            // The dot is the only thing health changes, and it sits on the
-            // badge's shoulder so it never widens the cell.
-            .child(
-                div()
-                    .absolute()
-                    .bottom(rems(0.0625))
-                    .right(rems(0.5))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w(rems(0.5))
-                    .h(rems(0.5))
-                    .rounded_full()
-                    .bg(rgb(dot))
-                    .child(
-                        div()
-                            .text_size(rems(0.4375))
-                            .text_color(rgb(p.bg))
-                            .child(SharedString::from(health_mark(badge.health))),
-                    ),
-            );
-
-        // The selection bar is flush with the column's left edge, which is what
-        // makes "you are here" readable at a glance without a glow.
-        if selected {
-            cell = cell.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(rems(0.5))
-                    .w(rems(0.125))
-                    .h(rems(1.0))
-                    .rounded_full()
-                    .bg(rgb(p.accent)),
-            );
-        }
-
-        cell.into_any_element()
-    }
-
-    /// The warning mark: one faint `!` whose hover says what failed. Small on
-    /// purpose, because the window still works on whichever crab it holds.
-    fn error_mark(&self, error: SharedString) -> AnyElement {
-        let p = palette::current();
-        let title = error.clone();
-        div()
-            .id("instance-strip-error")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w_full()
-            .h(rems(1.5))
-            .tooltip(move |_window, cx| crate::hint::mic_tooltip(title.clone(), cx))
-            .child(
-                div()
-                    .text_size(rems(0.75))
-                    .text_color(rgb(p.warn))
-                    .child(SharedString::from("!")),
-            )
-            .into_any_element()
-    }
-
-    /// The column. Deliberately a `flex_col` of fixed-size cells with no
-    /// horizontal growth: the strip is the one column that never resizes.
-    fn column(&self, cx: &mut Context<Self>) -> Div {
-        let p = palette::current();
-        let selected = self.frame.selected.clone();
-        let mut children: Vec<AnyElement> = Vec::with_capacity(self.frame.badges.len() * 2 + 4);
-        children.push(self.workspace_mark(cx));
-        children.push(div().h(rems(0.625)).into_any_element());
-        for badge in &self.frame.badges {
-            let is_selected = selected.as_deref() == Some(badge.host_id.as_str());
-            children.push(self.badge(badge, is_selected, cx));
-            children.push(div().h(rems(0.5)).into_any_element());
-        }
-        children.push(self.add_mark(cx));
-        if let Some(error) = self.frame.error.clone() {
-            children.push(self.error_mark(error));
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .w_full()
-            .h_full()
-            .pt(rems(0.625))
-            .bg(rgb(p.bg))
-            .border_r_1()
-            .border_color(rgb(p.track))
-            .children(children)
-    }
 }
 
 impl Render for InstanceStrip {
+    /// No column of its own (#3178): the crabs are listed in the rail, under
+    /// its logo. The strip keeps the cards (pair, share, a crab's own card)
+    /// and their logic, and paints only the card that is up, over the whole
+    /// window. With no card it is an empty box of no size.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let column = self.column(cx);
+        let host = div().w(px(0.0)).h(px(0.0));
         match self.card_overlay(window, cx) {
-            Some(card) => column.child(card),
-            None => column,
+            Some(card) => host.child(card),
+            None => host,
         }
     }
 }
 
-/// The box the cached view is laid out in. A cached view is laid out as a ROOT,
-/// where `flex_1` sizes nothing, so the width is spelled out here and nowhere
-/// else: the reserved box and the drawn one cannot drift (#2805).
-pub(crate) fn strip_root_style() -> StyleRefinement {
-    let mut boxed = div()
+/// The square a crab wears in the rail's list, `box_rem` on a side.
+///
+/// Each crab wears its own hue, derived from its host id, so the list is
+/// recognisable before any label is read (upstream 6472af7b5). The wash and
+/// the ring are the same hue at two strengths; the glyph mixes with the
+/// palette's own text colour, which keeps it legible in the light theme too.
+/// A rounded square, the shape of the rail's session marks and the topic tabs
+/// (#3133). The accent belongs to the selection alone.
+pub(crate) fn badge_mark(badge: &StripBadge, selected: bool, box_rem: f32) -> AnyElement {
+    let p = palette::current();
+    let hue = tint_hue(badge_tint(&badge.host_id), &p);
+    let wash = gui_theme::mix(p.panel, hue, 30, 100);
+    let ring = gui_theme::mix(p.panel, hue, 62, 100);
+    let glyph = gui_theme::mix(hue, p.text, 40, 100);
+    let text = if selected { p.accent } else { glyph };
+    div()
+        .flex()
+        .flex_row()
         .flex_none()
-        .w(rems(STRIP_REM))
-        .h_full()
-        .min_w_0()
-        .min_h_0();
-    boxed.style().clone()
+        .items_center()
+        .justify_center()
+        .w(rems(box_rem))
+        .h(rems(box_rem))
+        .rounded_md()
+        .bg(rgb(wash))
+        .border_1()
+        .border_color(rgb(if selected { p.accent } else { ring }))
+        .child(mark(badge, text, selected, box_rem))
+        .into_any_element()
+}
+
+/// The colour of a crab's health dot: green up, red down, faint unknown.
+pub(crate) fn health_dot(health: Health) -> u32 {
+    let p = palette::current();
+    match health {
+        Health::Up { .. } => p.green,
+        Health::Down { .. } => p.red,
+        Health::Unknown => p.text_faint,
+    }
 }
 
 // ── The `+` card: pair a crab into this window, or hand this one out ────────
@@ -831,39 +659,9 @@ impl InstanceStrip {
         .detach();
     }
 
-    /// The `+` under the badges: the way a crab gets into the strip.
-    fn add_mark(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let click = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_pair(cx));
-        div()
-            .id("instance-strip-add")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w(rems(BADGE_REM))
-            .h(rems(BADGE_REM))
-            .rounded_full()
-            .cursor_pointer()
-            .border_1()
-            .border_color(rgb(p.track))
-            .hover(|d| d.bg(rgb(p.panel_hi)))
-            .on_click(click)
-            .tooltip(|_window, cx| {
-                crate::hint::mic_tooltip(SharedString::from("emparelhar um crab"), cx)
-            })
-            .child(
-                div()
-                    .text_size(rems(0.875))
-                    .text_color(rgb(p.text_muted))
-                    .child(SharedString::from("+")),
-            )
-            .into_any_element()
-    }
-
     /// The card, painted over the whole window.
     ///
-    /// The strip is a 56 px cached view, and the card must not be: it is
+    /// The strip has no box of its own, and the card must not need one: it is
     /// deferred and anchored at the window's origin in a box the size of the
     /// viewport, so the shared modal's scrim covers what it covers when the
     /// window mounts it at the root, without the window holding its state.
@@ -1853,12 +1651,12 @@ fn tint_hue(slot: usize, p: &palette::Palette) -> u32 {
 /// tabs pick from (`topic:`/`img:` names). Resolving it here, instead of
 /// storing two kinds of value, keeps one field in the store and one column on
 /// screen: a crab's icon and a topic's icon are the same pick (#3133).
-fn mark(badge: &StripBadge, text: u32, selected: bool) -> AnyElement {
-    if let Some(picture) = crate::topic_icons::tab_icon(&badge.glyph, BADGE_REM * 0.62) {
+fn mark(badge: &StripBadge, text: u32, selected: bool, box_rem: f32) -> AnyElement {
+    if let Some(picture) = crate::topic_icons::tab_icon(&badge.glyph, box_rem * 0.62) {
         return picture;
     }
     div()
-        .text_size(rems(0.6875))
+        .text_size(rems(box_rem * 0.34))
         .when(selected, |d| d.font_weight(gpui::FontWeight::BOLD))
         .text_color(rgb(text))
         .child(badge.glyph.clone())

@@ -733,6 +733,9 @@ pub(crate) struct Dashboard {
     /// Whether one of the strip's cards is up. The strip writes it, the
     /// overlay stack reads it, so the card owns the keyboard (#3133).
     pub(crate) instance_card: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The rail's list of crabs is unfolded under its logo (#3178). Only
+    /// ever true with `remote_crabs` on.
+    pub(crate) crabs_open: bool,
     /// `[gui] remote_crabs`: whether the strip is drawn and its crabs probed.
     /// Read from this machine's config when the window opens and on every
     /// reload, because it is a window preference, never the held crab's.

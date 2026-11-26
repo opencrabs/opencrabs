@@ -715,6 +715,7 @@ pub(crate) fn run() {
                         instances: instances::Instances::default(),
                         instance_strip,
                         instance_card,
+                        crabs_open: false,
                         remote_crabs: Config::current().gui.remote_crabs,
                         instance_error: None,
                         instance_epoch: 0,

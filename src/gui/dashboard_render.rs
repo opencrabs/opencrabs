@@ -2913,10 +2913,11 @@ impl Render for Dashboard {
             .capture_any_mouse_up(cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
                 this.rail_swipe = None;
             }));
-        // The instance strip is the outermost column: it picks the crab, the
-        // rail lists that crab's sessions. Added first so it sits on the far
-        // left, and drawn on every screen, because which crab you are talking
-        // to is not a chat-only fact.
+        // The instance strip has no column (#3178): the crabs are listed in
+        // the rail under its logo. Its entity is mounted, with no box of its
+        // own, only so the card that is up (pair, share, a crab's own card)
+        // paints over the window, on every screen, and only with
+        // `[gui] remote_crabs` on.
         if let Some(strip) = self.instance_strip_element(cx) {
             root = root.child(strip);
         }
