@@ -97,7 +97,7 @@ pub fn strip_embedded_compaction(content: &str) -> Option<String> {
     // semantics the find had.
     let (head, _) = content.split_once(COMPACTION_BANNER)?;
     let head = head.trim_end();
-    Some(format!("{head}\n\n[compaction summary hidden]"))
+    Some(head.to_string())
 }
 
 #[cfg(test)]
@@ -113,9 +113,9 @@ mod embedded_compaction_tests {
         let stripped = strip_embedded_compaction(row).expect("the banner is embedded");
         assert_eq!(
             stripped,
-            "what the actual fuck\n\n[compaction summary hidden]"
+            "what the actual fuck"
         );
-        assert!(!stripped.contains("scaffold lines"));
+        assert!(!stripped.contains("[compaction summary hidden]"));
     }
 
     #[test]
