@@ -18,15 +18,19 @@ fn item_body<'a>(src: &'a str, header: &str) -> &'a str {
     let start = src
         .find(header)
         .unwrap_or_else(|| panic!("{header} not found"));
-    let open = start + src[start..].find('{').expect("an opening brace");
+    let rest = src
+        .get(start..)
+        .expect("a header starts on a char boundary");
+    let open = start + rest.find('{').expect("an opening brace");
+    let body = src.get(open..).expect("a brace is a char boundary");
     let mut depth = 0usize;
-    for (i, c) in src[open..].char_indices() {
+    for (i, c) in body.char_indices() {
         match c {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return &src[open..open + i + 1];
+                    return body.get(..=i).expect("a brace is a char boundary");
                 }
             }
             _ => {}
