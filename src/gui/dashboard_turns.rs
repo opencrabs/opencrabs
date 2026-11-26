@@ -1819,6 +1819,15 @@ impl Dashboard {
                     if let Some(sid) = self.chat_state.session() {
                         match transcript::turn_from_live(&self.turn.live, None) {
                             Some(mut turn) => {
+                                // A reload that ran mid-turn already installed
+                                // the exchange's rows; the append below plus
+                                // the live clear would render both copies the
+                                // moment the answer landed (#3179). The card's
+                                // copy wins, the persisted twin yields.
+                                transcript::drop_live_twins(
+                                    &mut self.chat_state.transcript.turns,
+                                    &self.turn.live,
+                                );
                                 // The checklist this turn finished is a row in
                                 // the ledger, not something the card painted,
                                 // so the append has to carry it: without it the
