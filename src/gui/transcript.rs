@@ -780,7 +780,17 @@ impl LiveTurn {
         // the answer buffer, and the card said the paragraph while the bubble
         // under the card said it again the moment the turn settled.
         if let Some((start, end)) = find_stream_copy(&self.stream, text) {
-            let kept = format!("{}{}", &self.stream[..start], &self.stream[end..]);
+            // `get` hands back None unless both ends land on a char boundary,
+            // so a cut that cannot land mid-character drops the copy instead
+            // of panicking (#3179). The byte-slice ratchet wants the same
+            // thing: no `str[a..b]` on a live buffer.
+            let mut kept = String::with_capacity(self.stream.len());
+            if let Some(head) = self.stream.get(..start) {
+                kept.push_str(head);
+            }
+            if let Some(tail) = self.stream.get(end..) {
+                kept.push_str(tail);
+            }
             self.stream = kept.trim().to_string();
         }
         self.push_narration_entry(text);
@@ -11333,8 +11343,8 @@ mod tests {
             let (start, end) = find_stream_copy("draft kept\n\ncopied text\nmore", "copied text")
                 .expect("plain copy is found");
             assert_eq!(
-                &"draft kept\n\ncopied text\nmore"[start..end],
-                "copied text"
+                "draft kept\n\ncopied text\nmore".get(start..end),
+                Some("copied text")
             );
         }
 
@@ -11345,7 +11355,7 @@ mod tests {
             let haystack = "kept part\nwrapped copy\nstill more";
             let (start, end) =
                 find_stream_copy(haystack, "wrapped\ncopy").expect("line-break mismatch found");
-            assert_eq!(&haystack[start..end], "wrapped copy");
+            assert_eq!(haystack.get(start..end), Some("wrapped copy"));
         }
 
         #[test]
