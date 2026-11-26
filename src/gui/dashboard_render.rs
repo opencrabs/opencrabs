@@ -2530,16 +2530,6 @@ impl Render for Dashboard {
                     if let Some(bar) = topic_top {
                         session = session.child(central(bar, centred_chat, chat_measure_px));
                     }
-                    // "Is it still going?" at the top of the conversation, where
-                    // a long scroll cannot hide it. The chat screen gave up its
-                    // title row in #2596, and the plan strip sits under the
-                    // transcript, so neither answers the question while the work
-                    // is running. An idle session draws nothing at all, so the
-                    // card keeps its shape until there is something to say.
-                    if !split_draws_its_own && let Some(line) = self.work_line() {
-                        session =
-                            session.child(central(work_bar(line), centred_chat, chat_measure_px));
-                    }
                     session = session.child(middle);
                     // The hint, the offers and the live plan card are
                     // rows of the conversation now (#3139): they are built
@@ -3820,41 +3810,7 @@ impl Render for Dashboard {
 }
 
 impl Dashboard {
-    /// One line saying where the open session's work stands, or `None` when it
-    /// has nothing to report.
-    ///
-    /// It reads the same `PlanStripState` the strip above the composer reads,
-    /// refreshed once per frame at the top of the render, so the bar and the
-    /// strip can never disagree about the same plan. No second lookup, no
-    /// second clock.
-    fn work_line(&self) -> Option<SharedString> {
-        self.plan.progress_label().map(SharedString::from)
-    }
-}
-
-/// The work bar: one slim line at the top of the chat column.
-///
-/// `flex_none` so it never takes room from the conversation, and the same
-/// panel colour the rail's chips use, so "work in flight" reads the same
-/// wherever it is drawn. It is only ever built when there is a line to show.
-fn work_bar(line: SharedString) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .flex_none()
-        .w_full()
-        .px_3()
-        .py_1()
-        .rounded(px(8.0))
-        .bg(rgb(palette::current().panel))
-        .text_xs()
-        .text_color(rgb(palette::current().teal))
-        .child(line)
-        .into_any_element()
-}
-
-/// The facts the hint row is decided from, read off state the app already
+    /// The facts the hint row is decided from, read off state the app already
 /// keeps for its own gauge, footer and update badge.
 ///
 /// Nothing here is bookkeeping kept only for the hint: `ctx_tokens` and
