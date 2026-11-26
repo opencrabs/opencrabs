@@ -4677,7 +4677,7 @@ pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     // the sentence the turn is sending RIGHT NOW is what the card shows, and
     // the paragraph it already owns is what it falls back to.
     live.pending()
-        .or_else(|| live.narration().last().copied())
+        .or_else(|| live.narration().last())
         .map(collapsed_paragraph)
         .filter(|text| !text.is_empty())
 }
