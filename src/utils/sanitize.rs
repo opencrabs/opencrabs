@@ -892,6 +892,15 @@ pub fn hoist_reasoning_blocks(content: &str) -> (String, Option<String>) {
 /// TUI/CLI replay paths keep them, since there the content drives
 /// human-visible history.
 ///
+/// Strip HTML comment markers (`<!-- tools-v2: ... -->`, `<!-- reasoning -->
+/// ...`) from display text. Thin pub wrapper over
+/// `AgentService::strip_html_comments` so the desktop bin can read the same
+/// all-roles rule the TUI applies (tui/render/panes.rs:271-277) without
+/// reaching into the crate-private core.
+pub fn strip_comment_markers(text: &str) -> String {
+    crate::brain::agent::service::AgentService::strip_html_comments(text)
+}
+
 /// An unpaired open marker strips everything to the end of the content (a
 /// truncated write must not leak the tail back into context). Content outside
 /// flagged sections passes through untouched.

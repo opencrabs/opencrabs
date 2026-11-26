@@ -1401,6 +1401,15 @@ fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {
         } else {
             m.role.as_str()
         };
+        // The TUI strips tool ledgers and reasoning markers for every role
+        // (tui/render/panes.rs:271-277); the desktop must read the same rule.
+        // A queued user row can carry a glued `<!-- tools-v2: ... -->` tail
+        // from a mid-turn drain, and without this it paints raw JSON.
+        let content = if content.contains("<!--") {
+            opencrabs::utils::strip_comment_markers(&content)
+        } else {
+            content
+        };
         blocks.push(Block::Msg {
             role: role.to_string(),
             content: content.clone(),

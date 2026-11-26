@@ -111,10 +111,7 @@ mod embedded_compaction_tests {
         // not.
         let row = "what the actual fuck [CONTEXT COMPACTION — DELTA SEGMENT. More\nscaffold lines\nand more";
         let stripped = strip_embedded_compaction(row).expect("the banner is embedded");
-        assert_eq!(
-            stripped,
-            "what the actual fuck"
-        );
+        assert_eq!(stripped, "what the actual fuck");
         assert!(!stripped.contains("[compaction summary hidden]"));
     }
 
