@@ -15,6 +15,10 @@ impl Dashboard {
     /// through to the agent: a command the window cannot run gets one line,
     /// because a model asked to answer `/usage` writes a paragraph about
     /// usage instead of opening the ledger (#2374).
+    ///
+    /// One exception, and it is not a screen command (#3198): a slash that
+    /// names a skill or a user command IS a prompt, so it goes out as the
+    /// turn those lists already send. `/usage` still never reaches the model.
     pub(crate) fn run_command(
         &mut self,
         outcome: commands::Outcome,
@@ -27,6 +31,21 @@ impl Dashboard {
         let (action, arg) = match outcome {
             commands::Outcome::Run(action) => (action, None),
             commands::Outcome::RunWith(action, arg) => (action, Some(arg)),
+            // Skills and user commands are prompts, not screens (#3198): the
+            // palette and the skills list already run both, so the same
+            // slash typed here gets the same turn. The #2374 rule holds for
+            // everything else: only a name that IS a prompt reaches the
+            // agent, a screen command the window cannot run keeps its line.
+            commands::Outcome::Unknown { typed, suggestion } => {
+                if !self.run_prompt_command(&typed, cx) {
+                    let outcome = commands::Outcome::Unknown { typed, suggestion };
+                    if let Some(line) = commands::message(&outcome) {
+                        self.turn.live.notices.push(line);
+                        cx.notify();
+                    }
+                }
+                return;
+            }
             other => {
                 if let Some(line) = commands::message(&other) {
                     self.turn.live.notices.push(line);
@@ -327,5 +346,75 @@ impl Dashboard {
             .push("Operation cancelled.".to_string());
         logging::info("turn cancelled by /stop");
         cx.notify();
+    }
+
+    /// A slash that names a prompt runs as that prompt (#3198).
+    ///
+    /// A skill resolves exactly as the skills list does: `skills_view::prompt`,
+    /// so a `review_gate` skill carries its reminder into the turn, with the
+    /// same "Running" line. A user command from `commands.toml` resolves the
+    /// way the command palette does: the slash line itself goes out and the
+    /// agent answers it. Returns false when neither list knows the name, so
+    /// the caller can fall back to the miss line.
+    fn run_prompt_command(&mut self, typed: &str, cx: &mut Context<Self>) -> bool {
+        if let Some(prompt) = skill_prompt(typed) {
+            self.turn.live.notices.push(format!("Running {typed}"));
+            self.send_message(prompt, cx);
+            return true;
+        }
+        if user_command_exists(typed) {
+            self.send_message(typed.to_string(), cx);
+            return true;
+        }
+        false
+    }
+}
+
+/// The prompt behind a slash that names a skill, or `None`.
+///
+/// Pure and disk-backed, so the parity test walks every skill the home holds
+/// and the composer cannot drift from the skills list (#3198).
+fn skill_prompt(typed: &str) -> Option<String> {
+    opencrabs::brain::skills::load_all_skills()
+        .into_iter()
+        .find(|skill| skill.slash_name == typed)
+        .map(|skill| skills_view::prompt(&skill))
+}
+
+/// Whether `commands.toml` holds a command this slash names.
+///
+/// Pure lookup, same registry the palette and the `/help` reference read.
+fn user_command_exists(typed: &str) -> bool {
+    let brain_path = opencrabs::brain::BrainLoader::resolve_path();
+    opencrabs::brain::CommandLoader::from_brain_path(&brain_path)
+        .load()
+        .iter()
+        .any(|command| command.name == typed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrabs::config::profile::with_home_override;
+
+    /// Every skill slash the home holds resolves through the composer's
+    /// lookup, and no built-in screen name is shadowed by one (#3198).
+    #[test]
+    fn every_skill_slash_resolves_in_the_composer() {
+        let home = tempfile::tempdir().expect("temp home");
+        with_home_override(home.path().to_path_buf(), || {
+            let skills = opencrabs::brain::skills::load_all_skills();
+            assert!(!skills.is_empty(), "the shipped skills must load");
+            for skill in &skills {
+                assert!(
+                    skill_prompt(&skill.slash_name).is_some(),
+                    "composer must run {} like the skills list",
+                    skill.slash_name
+                );
+            }
+            // Built-ins keep their screens: a skill never shadows them.
+            assert!(skill_prompt("/usage").is_none());
+            assert!(skill_prompt("/models").is_none());
+        });
     }
 }
