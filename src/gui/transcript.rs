@@ -8285,7 +8285,10 @@ mod tests {
         );
 
         let user = row("user", "<!-- reasoning --> is literal user text", 2);
-        assert_eq!(reply_text(&user), user.content);
+        // The user row runs the same all-roles ledger strip the terminal
+        // applies (#3190): the marker is never visible text, so the reply
+        // quote carries only the words outside it.
+        assert_eq!(reply_text(&user), "is literal user text");
     }
 
     #[test]

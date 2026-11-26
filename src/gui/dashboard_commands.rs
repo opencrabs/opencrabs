@@ -374,7 +374,7 @@ impl Dashboard {
 ///
 /// Pure and disk-backed, so the parity test walks every skill the home holds
 /// and the composer cannot drift from the skills list (#3198).
-fn skill_prompt(typed: &str) -> Option<String> {
+pub(crate) fn skill_prompt(typed: &str) -> Option<String> {
     opencrabs::brain::skills::load_all_skills()
         .into_iter()
         .find(|skill| skill.slash_name == typed)
@@ -384,37 +384,10 @@ fn skill_prompt(typed: &str) -> Option<String> {
 /// Whether `commands.toml` holds a command this slash names.
 ///
 /// Pure lookup, same registry the palette and the `/help` reference read.
-fn user_command_exists(typed: &str) -> bool {
+pub(crate) fn user_command_exists(typed: &str) -> bool {
     let brain_path = opencrabs::brain::BrainLoader::resolve_path();
     opencrabs::brain::CommandLoader::from_brain_path(&brain_path)
         .load()
         .iter()
         .any(|command| command.name == typed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use opencrabs::config::profile::with_home_override;
-
-    /// Every skill slash the home holds resolves through the composer's
-    /// lookup, and no built-in screen name is shadowed by one (#3198).
-    #[test]
-    fn every_skill_slash_resolves_in_the_composer() {
-        let home = tempfile::tempdir().expect("temp home");
-        with_home_override(home.path().to_path_buf(), || {
-            let skills = opencrabs::brain::skills::load_all_skills();
-            assert!(!skills.is_empty(), "the shipped skills must load");
-            for skill in &skills {
-                assert!(
-                    skill_prompt(&skill.slash_name).is_some(),
-                    "composer must run {} like the skills list",
-                    skill.slash_name
-                );
-            }
-            // Built-ins keep their screens: a skill never shadows them.
-            assert!(skill_prompt("/usage").is_none());
-            assert!(skill_prompt("/models").is_none());
-        });
-    }
 }

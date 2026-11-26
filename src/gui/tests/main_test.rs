@@ -906,14 +906,13 @@ fn every_paint_hands_over_the_turn_the_window_holds() {
     // rewrites one of those entries (#2925), and the body that paints it.
     // A split pane paints from its own `PaneView::live`, and the Themes
     // preview leaf the centered modal replaced is gone (#2619).
-    // The fifth is the append, not a paint (#3032): the turn that just
-    // finished is converted to a transcript row from the same live card,
-    // so the reader sees it without a refetch and without a second turn
-    // being read anywhere.
+    // The finished turn is NOT a handover anymore (#3190): the Done path
+    // reloads the ledger rows instead of appending from the live card, so
+    // the fifth read the old append held is gone by design.
     assert_eq!(
         production.matches("&self.turn.live,").count(),
-        5,
-        "the attachment scan, the live action rows, the edit sequence, the chat body and the finished turn's append all read the window's turn"
+        4,
+        "the attachment scan, the live action rows, the edit sequence and the chat body all read the window's turn"
     );
     assert_eq!(
         production.matches("swap_visible_turn(").count(),
@@ -4204,8 +4203,8 @@ fn a_user_row_runs_the_all_roles_ledger_strip() {
         "the user arm strips comment markers before pushing the block"
     );
     assert!(
-        src.contains("pub fn strip_comment_markers"),
-        "the wrapper is the shared pub entry the desktop reads"
+        src.contains("opencrabs::utils::strip_comment_markers"),
+        "the user arm calls the shared wrapper, not a private copy"
     );
 }
 
