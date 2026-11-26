@@ -334,7 +334,7 @@ pub(crate) fn command_popup_view(rows: &[(String, String)], selected: usize) -> 
     for (offset, row) in rows[window.clone()].iter().enumerate() {
         let picked = window.start + offset == selected;
         let description = slash::clipped(&row.1, 52).to_string();
-        let mut row = div()
+        let mut entry = div()
             .flex()
             .flex_row()
             .items_center()
@@ -342,7 +342,7 @@ pub(crate) fn command_popup_view(rows: &[(String, String)], selected: usize) -> 
             .px_1()
             .rounded(px(4.0));
         if picked {
-            row = row.bg(rgb(palette::current().panel_hi));
+            entry = entry.bg(rgb(palette::current().panel_hi));
         }
         let name_color = if picked {
             palette::current().amber
@@ -350,19 +350,20 @@ pub(crate) fn command_popup_view(rows: &[(String, String)], selected: usize) -> 
             palette::current().text
         };
         col = col.child(
-            row.child(
-                div()
-                    .w(px(112.))
-                    .text_xs()
-                    .text_color(rgb(name_color))
-                    .child(SharedString::from(row.0.clone())),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(palette::current().text_muted))
-                    .child(SharedString::from(description)),
-            ),
+            entry
+                .child(
+                    div()
+                        .w(px(112.))
+                        .text_xs()
+                        .text_color(rgb(name_color))
+                        .child(SharedString::from(row.0.clone())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(description)),
+                ),
         );
     }
     col.child(
@@ -372,7 +373,7 @@ pub(crate) fn command_popup_view(rows: &[(String, String)], selected: usize) -> 
             .child(SharedString::from(format!(
                 "{}/{} · ↑↓ select · tab complete · enter run",
                 selected + 1,
-                names.len()
+                rows.len()
             ))),
     )
 }
