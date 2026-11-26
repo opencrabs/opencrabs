@@ -417,7 +417,13 @@ impl Dashboard {
                     }
                     if self.models_query.text() != before {
                         self.models_index = 0;
-                        query_changed = true;
+                        // The wizard keeps its own filter in sync. This path
+                        // returns before the shared tail below, so the sync
+                        // happens here instead of through `query_changed`.
+                        if onboarding && let Some(ob) = self.onboard.as_mut() {
+                            ob.wizard.ps.model_filter = self.models_query.text().to_string();
+                            ob.wizard.ps.selected_model = 0;
+                        }
                     }
                     return true;
                 }
