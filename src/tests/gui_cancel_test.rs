@@ -62,6 +62,16 @@ fn cancelled_arm() -> &'static str {
         .expect("the settle arm ends before the revert arm")
 }
 
+/// A source pin is about the call, not the line layout. There is no
+/// `rustfmt.toml`, so `chain_width` is the default 60% of `max_width`: a chain
+/// longer than 60 columns is always broken onto one line per link, and a pin
+/// that spells the call out as it happened to be formatted then fails on a
+/// reformat that changed no behaviour (#3221). Both sides are compared with
+/// whitespace removed.
+fn layout_free(src: &str) -> String {
+    src.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// `ctrl_c_press`, from its signature to the repaint that closes it.
 fn ctrl_c_press_body() -> &'static str {
     let start = DASHBOARD_NAV
@@ -290,19 +300,23 @@ fn gui_cancel_stop_leaves_the_chat_leaves_turn_alone_from_a_pane() {
 /// Nothing was deleted; the render just had no owner for them.
 #[test]
 fn gui_cancel_arms_the_settle_handshake_so_the_exchange_reloads() {
-    let arm = cancelled_arm();
+    // The call, spelled once: `layout_free` drops the whitespace rustfmt adds
+    // when it breaks the chain, so the pin holds either way (#3221).
+    const SETTLE_CALL: &str = "self.turn.settle.begin_after_stop(self.chat_state.row_total());";
+
+    let arm = layout_free(cancelled_arm());
     assert!(
-        arm.contains("self.turn.settle.begin_after_stop(self.chat_state.row_total());"),
+        arm.contains(&layout_free(SETTLE_CALL)),
         "the cancelled arm must arm the settle handshake, or the exchange stays \
          hidden until a session switch (#3216)"
     );
     assert!(
-        arm.contains("self.reload_transcript(session, cx);"),
+        arm.contains(&layout_free("self.reload_transcript(session, cx);")),
         "the cancelled arm must read the ledger on a budget, not leave the \
          exchange undrawn (#3216)"
     );
     assert!(
-        !arm.contains("No reload on purpose"),
+        !arm.contains(&layout_free("No reload on purpose")),
         "the old no-reload comment described the bug, not the behaviour (#3216)"
     );
 }
