@@ -8969,11 +8969,17 @@ mod tests {
             );
             for (_, line) in live_card_lines(&live) {
                 if let LiveCardLine::Pending(text) | LiveCardLine::Narration(text) = line {
-                    assert!(!text.contains("<<"), "card painted {text:?} from {stream:?}");
+                    assert!(
+                        !text.contains("<<"),
+                        "card painted {text:?} from {stream:?}"
+                    );
                 }
             }
             let preview = collapsed_narration(&live).unwrap_or_default();
-            assert!(!preview.contains("<<"), "preview painted {preview:?} from {stream:?}");
+            assert!(
+                !preview.contains("<<"),
+                "preview painted {preview:?} from {stream:?}"
+            );
         }
     }
 
