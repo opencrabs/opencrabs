@@ -7,6 +7,7 @@
 
 mod composer_orb_test;
 mod composer_prompt_test;
+mod command_palette_test;
 // The bang operator's built-in editor (#3163), read as source text.
 mod editor_dialog_test;
 mod instance_glyph_test;
