@@ -226,17 +226,29 @@ pub(crate) fn run() {
     // drifts to whatever surface spoke last, so it is rarely one of the panes,
     // and letting it pick sent every restart back to the plain chat. The
     // terminal has always restored its tree this way; the window now agrees.
+    // Which conversations the ledger still holds (#3197). The rail is capped at
+    // RAIL_LIMIT rows, so it cannot answer that: with more sessions than the
+    // cap, the chat the layout recorded or the pointer the last surface wrote
+    // can sit outside the newest page, and the launch would treat a live
+    // conversation as deleted and open the newest instead. A read that fails
+    // falls back to the rail's page, which is the old behaviour, never to an
+    // empty set that would blank the window.
+    let known: std::collections::HashSet<Uuid> =
+        futures::executor::block_on(sessions::load_live_session_ids(backend.clone()))
+            .unwrap_or_else(|e| {
+                logging::error(&format!("live session ids load: {e}"));
+                sessions_state.items.iter().map(|item| item.id).collect()
+            })
+            .into_iter()
+            .collect();
     let initial_session = saved_layout
         .as_ref()
-        .and_then(|saved| {
-            let known: std::collections::HashSet<Uuid> =
-                sessions_state.items.iter().map(|item| item.id).collect();
-            layout_store::boot_session(saved, &known)
-        })
+        .and_then(|saved| layout_store::boot_session(saved, &known))
         .or_else(|| {
             pick_initial_session(
                 &sessions_state.items,
                 opencrabs::utils::last_session::read(),
+                &known,
             )
         });
     let initial_transparency =

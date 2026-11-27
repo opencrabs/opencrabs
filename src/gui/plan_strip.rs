@@ -17,7 +17,7 @@ use crate::backend_glue::Backend;
 use crate::palette;
 use crate::transcript::{
     ClickHandler, MESSAGE_RADIUS, SMALL_TEXT_SIZE, SelectionContext, message_card_surface,
-    selectable_styled_text, small_style,
+    selectable_styled_text, small_bold_style, small_style,
 };
 use opencrabs::ui_core::card::{glass_fill, session_edge};
 use opencrabs::ui_core::plan_history::{COMPLETED_PLAN_FOOTER, CompletedPlanView};
@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use gpui::{
-    Div, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*, px, relative, rgb,
-    rgba,
+    Div, Font, FontWeight, MouseButton, SharedString, Stateful, TextRun, Window, div, prelude::*,
+    px, relative, rgb, rgba,
 };
 use opencrabs::tui::plan::{PlanDocument, PlanStatus, PlanTask, TaskStatus};
 
@@ -155,7 +155,7 @@ impl PlanStripState {
             // As wide as the sentence, no wider (#3124): the row is the whole
             // card, so stretching it to the column paints a slab of empty
             // surface behind eight words.
-            let width = card_width([line_width(window, &text, SMALL_TEXT_SIZE)]);
+            let width = card_width([line_width(window, &text, card_text_size(window))]);
             div()
                 .flex()
                 .flex_row()
@@ -201,7 +201,7 @@ impl PlanStripState {
         // the bottom. Anything narrower would cut the row it was measured
         // from; anything wider is surface the card never fills.
         let mut widths = vec![if plan.tasks.is_empty() {
-            line_width(window, &head, SMALL_TEXT_SIZE)
+            line_width(window, &head, card_text_size(window))
         } else {
             header_width(window, plan, &head)
         }];
@@ -209,7 +209,7 @@ impl PlanStripState {
             widths.push(task_row_width(window, task));
         }
         for (_, line) in &tail {
-            widths.push(line_width(window, line, SMALL_TEXT_SIZE));
+            widths.push(line_width(window, line, card_text_size(window)));
         }
         if actions.is_some() {
             widths.push(
@@ -289,16 +289,20 @@ impl PlanStripState {
         // has to budget for both. The wall-of-panes count keeps its compact
         // shape: no track there, the click expands it.
         let percent = progress(plan).2;
-        let percent_width = line_width(window, &format!("{percent}%"), SMALL_TEXT_SIZE);
+        // The pane's rows paint at `text_xs` too, so they are budgeted at the
+        // size that resolves to (#3197). Measuring them at the fixed small size
+        // left the track and the percentage short of room on a zoomed window.
+        let size = card_text_size(window);
+        let percent_width = line_width(window, &format!("{percent}%"), size);
         let track_wide = |line: &str, lead: f32, wide: bool| {
             if wide {
-                line_width(window, line, SMALL_TEXT_SIZE)
+                line_width(window, line, size)
                     + lead
                     + PROGRESS_TRACK_WIDTH
                     + ROW_GAP
                     + percent_width
             } else {
-                line_width(window, line, SMALL_TEXT_SIZE) + lead
+                line_width(window, line, size) + lead
             }
         };
         // The pane card is as wide as its longest line (#3124). A pane is the
@@ -388,6 +392,12 @@ impl PlanStripState {
             let row = div()
                 .flex()
                 .flex_row()
+                // The track is 6 points tall and the type is taller, so without
+                // this the bar sits at the top of the row while the percentage
+                // box stretches around it, and a narrow pane reads as a bar on
+                // one line and a count below it (#3197). The full card's header
+                // row has centred its parts since #2496.
+                .items_center()
                 .w_full()
                 .min_w_0()
                 .when(index == 0, |d| {
@@ -706,7 +716,9 @@ pub(crate) fn progress_bar_view(percent: usize, colour: u32) -> Div {
 
 /// The header row of a plan card: the line the caller wrote, then the bar and
 /// the percentage at the trailing edge (#2496). The title takes the slack and
-/// cuts, so a long plan name never pushes the metrics out of the card.
+/// cuts, so a long plan name never pushes the metrics out of the card, and it
+/// carries bold weight (#3193): the card leads with its title, and plain small
+/// muted text read as a caption rather than as the header.
 fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
     let (_, _, percent) = progress(plan);
     div()
@@ -723,6 +735,7 @@ fn progress_header_row(plan: &PlanDocument, text: String) -> Div {
                 .overflow_hidden()
                 .truncate()
                 .text_xs()
+                .font_weight(FontWeight::BOLD)
                 .text_color(rgb(palette::current().text_muted))
                 .child(SharedString::from(text)),
         )
@@ -758,7 +771,9 @@ fn task_row(task: &PlanTask) -> Div {
                 .truncate()
                 .text_xs()
                 .text_color(rgb(if matches!(task.status, TaskStatus::InProgress) {
-                    palette::current().text
+                    // Cyan (#3193): the row in flight is the one thing the eye
+                    // hunts for, and plain body text drowned it into the list.
+                    palette::current().teal
                 } else {
                     palette::current().text_muted
                 }))
@@ -874,7 +889,7 @@ pub fn completed_plan_card(
         .bg(glass_fill(message_card_surface()))
         .child(selectable_styled_text(
             format!("\u{2611} {}", plan.header()),
-            small_style(SMALL_TEXT_SIZE, palette::current().teal),
+            small_bold_style(SMALL_TEXT_SIZE, palette::current().teal),
             Vec::new(),
             &[],
             selection,
@@ -937,6 +952,17 @@ const CARD_SLACK: f32 = 6.0;
 /// rows of small type with the gaps between them (#3124).
 const PANE_SCROLL_HEIGHT: f32 = 160.0;
 
+/// The size the card's small type actually paints at (#3197).
+///
+/// Every row in this file draws with `text_xs()`, which is `rems(0.75)` and not
+/// a constant: the paint size follows the window's rem, and the rem is the zoom
+/// knob. Measuring at the fixed [`SMALL_TEXT_SIZE`] was right at the default
+/// rem and short everywhere else, and a budget that is short squeezes a row
+/// inside a card that had width to spare.
+fn card_text_size(window: &Window) -> f32 {
+    f32::from(window.rem_size()) * 0.75
+}
+
 /// The width one line paints at, shaped by the live text system in the card's
 /// own family and size (#3124).
 ///
@@ -948,10 +974,25 @@ const PANE_SCROLL_HEIGHT: f32 = 160.0;
 /// falls back to the same per-character estimate `sessions::text_width` uses,
 /// which keeps the card placeable rather than collapsing it.
 fn line_width(window: &Window, text: &str, size: f32) -> f32 {
+    shaped_width(window, text, size, window.text_style().font())
+}
+
+/// The width one line paints at in bold (#3197). The card's header carries
+/// `FontWeight::BOLD`, and a bold run is wider than the regular one it was
+/// being measured with, so the budget came up short by that difference on the
+/// one row that decides the card's width.
+fn bold_line_width(window: &Window, text: &str, size: f32) -> f32 {
+    let mut font = window.text_style().font();
+    font.weight = FontWeight::BOLD;
+    shaped_width(window, text, size, font)
+}
+
+/// One run through the shaper, in the family and weight it will paint with.
+fn shaped_width(window: &Window, text: &str, size: f32, font: Font) -> f32 {
     let style = window.text_style();
     let run = TextRun {
         len: text.len(),
-        font: style.font(),
+        font,
         color: style.color,
         background_color: None,
         underline: None,
@@ -981,22 +1022,27 @@ fn card_width(rows: impl IntoIterator<Item = f32>) -> f32 {
 /// The width of a card's header row: the line the caller wrote, then the drawn
 /// track and the percentage at the trailing edge with the row's own 8 between
 /// them (#2496, #3124, #3131).
+///
+/// The title is shaped in bold because that is how `progress_header_row` paints
+/// it, and every part of the row is shaped at [`card_text_size`], the size
+/// `text_xs` actually draws at (#3197).
 fn header_width(window: &Window, plan: &PlanDocument, text: &str) -> f32 {
     let (_, _, percent) = progress(plan);
-    line_width(window, text, SMALL_TEXT_SIZE)
+    let size = card_text_size(window);
+    bold_line_width(window, text, size)
         + ROW_GAP
         + PROGRESS_TRACK_WIDTH
         + ROW_GAP
-        + line_width(window, &format!("{percent}%"), SMALL_TEXT_SIZE)
+        + line_width(window, &format!("{percent}%"), size)
 }
 
 /// The width of one task row: the status mark, the gap, then the numbered
-/// title.
+/// title. Both parts paint at `text_xs`, so both are measured at the size that
+/// resolves to (#3197).
 fn task_row_width(window: &Window, task: &PlanTask) -> f32 {
     let (mark, _) = task_mark(task);
-    line_width(window, mark, SMALL_TEXT_SIZE)
-        + ROW_GAP
-        + line_width(window, &task_line(task), SMALL_TEXT_SIZE)
+    let size = card_text_size(window);
+    line_width(window, mark, size) + ROW_GAP + line_width(window, &task_line(task), size)
 }
 
 /// The width of one approval chip: its label at the card's size, the padding
@@ -1005,6 +1051,9 @@ fn task_row_width(window: &Window, task: &PlanTask) -> f32 {
 /// The size has to be the one the chip draws with. Measuring at the answer's
 /// body size while the chip drew at the card's would budget a pixel per
 /// character of slack the label never needs, and the card is sized from this.
+/// The chip paints at a fixed `px(SMALL_TEXT_SIZE)` rather than `text_xs`, so
+/// it is the one row here that is measured at the constant and not at
+/// [`card_text_size`] (#3197).
 fn action_chip_width(window: &Window, label: &str) -> f32 {
     line_width(window, label, SMALL_TEXT_SIZE) + CHIP_PAD_X + CARD_EDGE
 }

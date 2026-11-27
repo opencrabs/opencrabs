@@ -1320,6 +1320,30 @@ impl SessionRepository {
             .context("Failed to list sessions")
     }
 
+    /// Every session id the ledger still holds, archived ones excluded.
+    ///
+    /// A session list is capped by whoever asks for it (the window's rail stops
+    /// at `RAIL_LIMIT`), so a page of sessions cannot answer "does this
+    /// conversation still exist". The launch asks exactly that about the saved
+    /// chat and the pointer, and with more sessions than the cap either can sit
+    /// outside the newest page (#3197). Existence is a different question from
+    /// a page, so it gets its own read.
+    pub async fn live_ids(&self) -> Result<Vec<Uuid>> {
+        self.pool
+            .get()
+            .await
+            .context("Failed to get connection")?
+            .interact(|conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT id FROM sessions WHERE archived_at IS NULL")?;
+                let rows = stmt.query_map([], |row| crate::db::models::uuid_col(row, "id"))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .map_err(interact_err)?
+            .context("Failed to list live session ids")
+    }
+
     /// List non-archived sessions
     pub async fn list_active(&self) -> Result<Vec<Session>> {
         self.pool

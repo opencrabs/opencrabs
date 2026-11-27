@@ -488,6 +488,59 @@ fn the_checklist_header_gives_the_title_the_slack() {
     );
 }
 
+/// #3193: the card leads with its title in bold and the task in flight is
+/// cyan. The selectable-text conversion (#2678) dropped the weight silently,
+/// and plain body text drowned the running row into the list, so both facts
+/// are pinned where a restyle cannot shed them again. `small_bold_style` is
+/// the weight-carrying style the completed card draws through, and its own
+/// body carries the weight in the style, not on the div.
+#[test]
+fn the_plan_card_leads_with_bold_and_the_running_task_is_cyan() {
+    let src = include_str!("../plan_strip.rs");
+    let header = src
+        .split("fn progress_header_row(plan: &PlanDocument, text: String) -> Div {")
+        .nth(1)
+        .and_then(|rest| rest.split("\nfn ").next())
+        .expect("the header row body");
+    assert!(
+        header.contains(".font_weight(FontWeight::BOLD)"),
+        "the card's title is bold"
+    );
+    let row = src
+        .split("fn task_row(task: &PlanTask) -> Div {")
+        .nth(1)
+        .and_then(|rest| rest.split("\nfn ").next())
+        .expect("the task row body");
+    let running = row
+        .split("TaskStatus::InProgress) {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("the running branch of the title's colour");
+    assert!(
+        running.contains("palette::current().teal"),
+        "the task in flight is cyan: {running:?}"
+    );
+    let transcript = include_str!("../transcript.rs");
+    let bold = transcript
+        .split("pub(crate) fn small_bold_style(size: f32, color: u32) -> TextStyle {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the bold style body");
+    assert!(
+        bold.contains("font_weight: gpui::FontWeight::BOLD"),
+        "the bold style carries its weight in the TextStyle"
+    );
+    let completed = src
+        .split("pub fn completed_plan_card(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the completed card body");
+    assert!(
+        completed.contains("small_bold_style(SMALL_TEXT_SIZE, palette::current().teal)"),
+        "the completed card's header draws through the bold style"
+    );
+}
+
 /// #2678: a finished plan's card is text the user reads, so each of its
 /// lines has to be a selectable segment, spelled exactly as `copy_text`
 /// spells it. Otherwise the only thing a drag can copy is the whole card.
@@ -607,5 +660,73 @@ fn a_split_draws_the_plan_once_and_the_hint_still_rides_the_chat() {
     assert!(
         plan.contains("editing_view("),
         "the plan card stands down in a split"
+    );
+}
+
+/// Every card measures the size its rows paint at (#3197).
+///
+/// The budget shaped text at the fixed `SMALL_TEXT_SIZE` in the regular weight,
+/// while the rows drew `text_xs` (which is `rems(0.75)`, so it follows the zoom
+/// knob) and the header drew bold. The budget came out short, the truncating
+/// title absorbed the whole deficit, and the bar and the count were crowded on
+/// a card that still had width to spare. One helper, one bold shaping call, and
+/// the chip the exception: it paints at a fixed pixel size, so it measures at
+/// the constant.
+#[test]
+fn every_card_measures_the_size_its_rows_paint_at() {
+    let src = include_str!("../plan_strip.rs");
+    let body_of = |anchor: &str, end: &str| -> String {
+        src.split(anchor)
+            .nth(1)
+            .and_then(|rest| rest.split(end).next())
+            .unwrap_or_else(|| panic!("missing {anchor:?}"))
+            .to_string()
+    };
+
+    let helper = body_of("fn card_text_size(", "\n}");
+    assert!(
+        helper.contains("rem_size()") && helper.contains("0.75"),
+        "the paint size is the rem times the text_xs factor, not a constant: {helper}"
+    );
+
+    let header = body_of("fn header_width(", "\nfn ");
+    assert!(
+        header.contains("bold_line_width("),
+        "the header title is measured in the weight it paints: {header}"
+    );
+    assert!(
+        header.contains("card_text_size(window)"),
+        "the header row is measured at the size it paints: {header}"
+    );
+
+    for (name, anchor, end) in [
+        ("task row", "fn task_row_width(", "\nfn "),
+        (
+            "pane row",
+            "pub fn pane_view(",
+            "/// What the approval card calls the plan",
+        ),
+    ] {
+        let body = body_of(anchor, end);
+        assert!(
+            body.contains("card_text_size(window)"),
+            "the {name} is measured at the size it paints: {body}"
+        );
+    }
+
+    let chip = body_of("fn action_chip_width(", "}\n");
+    assert!(
+        chip.contains("SMALL_TEXT_SIZE") && !chip.contains("card_text_size"),
+        "the approval chip paints at a fixed pixel size, so it keeps the \
+         constant: {chip}"
+    );
+
+    let pane = body_of(
+        "pub fn pane_view(",
+        "/// What the approval card calls the plan",
+    );
+    assert!(
+        pane.contains(".items_center()"),
+        "the pane row centres its track and its count on one line: {pane}"
     );
 }

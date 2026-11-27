@@ -1073,10 +1073,15 @@ fn ours_and_real(path: &std::path::Path) -> Option<std::fs::Metadata> {
 
 /// A short human label for a command (first meaningful token sequence), for the
 /// "running in the background" acknowledgement and the completion tag.
+///
+/// Long path arguments are folded to `anchor/…/file` before the cut, so the
+/// label names the work instead of the directories leading to it (#3204). The
+/// cut stays as the last resort for commands with no long path to fold.
 pub(crate) fn short_label(command: &str) -> String {
     let after_cd = crate::utils::command_label::command_label(command);
-    let label: String = after_cd.chars().take(60).collect();
-    if after_cd.chars().count() > 60 {
+    let folded = crate::utils::command_label::shrink_paths(&after_cd);
+    let label: String = folded.chars().take(60).collect();
+    if folded.chars().count() > 60 {
         format!("{label}…")
     } else {
         label

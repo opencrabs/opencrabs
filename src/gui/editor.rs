@@ -15,7 +15,7 @@ use crate::topic_icons::CRAB_ICONS;
 use crate::transcript;
 use crate::voice_input;
 use opencrabs::ui_core::card::glass_fill;
-use opencrabs::ui_core::commands::gui_completions;
+use opencrabs::ui_core::commands::{command_word, gui_completions, lookup_gui};
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
     Vertical, VerticalAction, input_history_down, input_history_up, record_input_history,
@@ -554,6 +554,15 @@ pub struct Editor {
     /// the first edit opens it again: without this, dismissing a popup whose
     /// content is still a bare command word would be impossible.
     command_dismissed: bool,
+    /// The slash rows the static table cannot carry: skills on disk and the
+    /// user's `commands.toml` entries, as `(name, description)` (#3199).
+    ///
+    /// Loaded once when the composer is built rather than per keystroke: the
+    /// list is recomputed on every edit, and neither source changes while the
+    /// field has the keyboard. The skills list and the command palette already
+    /// merge these two; the popup read the static table alone, so a skill the
+    /// composer can run was missing from the list that offers it.
+    slash_runtime: Vec<(String, String)>,
     /// The emoji list under a `:query`: the row the arrows stand on, and whether
     /// Esc closed it for this draft (#2413).
     emoji_index: usize,
@@ -769,6 +778,56 @@ pub fn notice_expired(shown_at: Instant, now: Instant, ttl: Duration) -> bool {
     now.saturating_duration_since(shown_at) >= ttl
 }
 
+/// The slash rows only the runtime knows, as `(name, description)`: skills on
+/// disk first, then the user's `commands.toml` entries (#3199).
+///
+/// The skills list and the command palette already merge these two sources;
+/// the composer's popup read the static table alone, so a skill the composer
+/// can run was missing from the list that offers it.
+fn runtime_slash_rows() -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = opencrabs::brain::skills::load_all_skills()
+        .into_iter()
+        .map(|skill| (skill.slash_name, skill.description))
+        .collect();
+    let brain_path = opencrabs::brain::BrainLoader::resolve_path();
+    rows.extend(
+        opencrabs::brain::CommandLoader::from_brain_path(&brain_path)
+            .load()
+            .into_iter()
+            .map(|command| (command.name, command.description)),
+    );
+    // One row per name. A skill keeps the row when a user command spells the
+    // same slash, because the composer runs the skill first (#3198).
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|(name, _)| seen.insert(name.clone()));
+    rows
+}
+
+/// The popup's rows for the word being spelled: the static table first, then
+/// whatever the runtime adds, each carrying the description the popup prints
+/// (#3199).
+///
+/// Pure so the merge is a test rather than a window: the static names and the
+/// runtime rows are the only inputs, and a name already in the table keeps its
+/// table row, never a duplicate from disk.
+fn popup_rows(word: &str, runtime: &[(String, String)]) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = gui_completions(word)
+        .into_iter()
+        .map(|name| {
+            let description = lookup_gui(name)
+                .map(|command| command.description.to_string())
+                .unwrap_or_default();
+            (name.to_string(), description)
+        })
+        .collect();
+    for (name, description) in runtime {
+        if name.starts_with(word) && !rows.iter().any(|row| row.0 == *name) {
+            rows.push((name.clone(), description.clone()));
+        }
+    }
+    rows
+}
+
 impl Editor {
     /// A composer walking `history`, persisting every new entry to
     /// `history_path`. Every composer takes this path: the window hands its
@@ -803,6 +862,7 @@ impl Editor {
             is_selecting: false,
             command_index: 0,
             command_dismissed: false,
+            slash_runtime: runtime_slash_rows(),
             emoji_index: 0,
             emoji_dismissed: false,
             notice: None,
@@ -1402,15 +1462,14 @@ impl Editor {
     /// Derived from the content, not cached: the field is the only thing that
     /// edits text, so a cache would need a refresh call at every one of those
     /// sites and one missed site means a stale popup over the wrong draft.
-    pub fn command_popup(&self) -> Option<(Vec<&'static str>, usize)> {
+    pub fn command_popup(&self) -> Option<(Vec<(String, String)>, usize)> {
         if self.command_dismissed {
             return None;
         }
-        let names = gui_completions(&self.content);
-        if names.is_empty() {
-            return None;
-        }
-        Some((names.clone(), self.command_index.min(names.len() - 1)))
+        let word = command_word(&self.content)?;
+        let rows = popup_rows(word, &self.slash_runtime);
+        let last = rows.len().checked_sub(1)?;
+        Some((rows, self.command_index.min(last)))
     }
 
     /// Escape: close the list and keep the draft. The next edit reopens it,
@@ -1584,7 +1643,7 @@ impl Editor {
             }
             return;
         };
-        let Some(name) = names.get(index).copied() else {
+        let Some(name) = names.get(index).map(|row| row.0.clone()) else {
             return;
         };
         // The trailing space closes the list: the word is finished.
@@ -1997,15 +2056,15 @@ impl Editor {
         // not part of a command, so a draft carrying them goes out as text.
         let picked = if self.attachments.is_empty() && self.voice_draft.is_none() {
             self.command_popup()
-                .and_then(|(names, index)| names.get(index).copied())
+                .and_then(|(rows, index)| rows.get(index).map(|row| row.0.clone()))
         } else {
             None
         };
         if let Some(name) = picked {
-            self.remember(name);
+            self.remember(&name);
             self.clear_after_send(cx);
             cx.emit(EditorEvent::Sent(Outgoing {
-                text: name.to_string(),
+                text: name,
                 files: Vec::new(),
             }));
             return;
@@ -5787,5 +5846,69 @@ mod tests {
             ("hereand reply".to_string(), 4),
             "text after the caret is left exactly as typed, never respaced"
         );
+    }
+
+    /// The merge that feeds the popup: a runtime skill the table never carried
+    /// is offered with its own description, the static rows keep their table
+    /// descriptions, and a runtime name the table already carries is never
+    /// listed twice (#3199).
+    #[test]
+    fn the_popup_merges_the_table_with_the_runtime_rows() {
+        let runtime = vec![
+            ("/drop-release".to_string(), "Draft a release".to_string()),
+            ("/models".to_string(), "an impostor".to_string()),
+        ];
+        let rows = super::popup_rows("/dro", &runtime);
+        assert_eq!(
+            rows,
+            vec![("/drop-release".to_string(), "Draft a release".to_string(),)],
+            "a runtime skill the table never carried is offered"
+        );
+        let rows = super::popup_rows("/mode", &runtime);
+        assert_eq!(rows.len(), 1, "the table row wins, never a duplicate");
+        assert_ne!(rows[0].1, "an impostor", "the table description prints");
+        assert!(!rows[0].1.is_empty(), "the table description is real");
+    }
+
+    /// The word rule the popup and the table share: a draft stops being a
+    /// command word the moment the argument starts, so a name list is never
+    /// noise over an argument the user is already typing (#3199).
+    #[test]
+    fn a_command_word_ends_at_the_argument() {
+        assert_eq!(super::command_word("/dro"), Some("/dro"));
+        assert_eq!(super::command_word(" /dro"), Some("/dro"));
+        assert_eq!(super::command_word("/dro arg"), None);
+        assert_eq!(super::command_word("not a slash"), None);
+    }
+
+    /// A skill on disk and a `commands.toml` entry both reach the popup source
+    /// with their descriptions, exactly what the skills list and the command
+    /// palette offer (#3199).
+    #[test]
+    fn the_runtime_source_reads_skills_and_user_commands_from_disk() {
+        let home = tempfile::tempdir().expect("temp home");
+        let skills = home.path().join("skills").join("drop-release");
+        std::fs::create_dir_all(&skills).expect("skill dir");
+        std::fs::write(
+            skills.join("SKILL.md"),
+            "---\ndescription: Draft a release\n---\nbody\n",
+        )
+        .expect("skill file");
+        std::fs::write(
+            home.path().join("commands.toml"),
+            "[[commands]]\nname = \"/shipit\"\ndescription = \"Ship it fast\"\nprompt = \"ship\"\n",
+        )
+        .expect("commands file");
+        opencrabs::config::profile::with_home_override(home.path().to_path_buf(), || {
+            let rows = super::runtime_slash_rows();
+            assert!(
+                rows.contains(&("/drop-release".to_string(), "Draft a release".to_string())),
+                "the disk skill is offered: {rows:?}"
+            );
+            assert!(
+                rows.contains(&("/shipit".to_string(), "Ship it fast".to_string())),
+                "the commands.toml entry is offered: {rows:?}"
+            );
+        });
     }
 }

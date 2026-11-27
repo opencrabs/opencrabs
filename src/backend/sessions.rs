@@ -46,6 +46,30 @@ impl Op for LoadSessions {
     }
 }
 
+/// Every session id the ledger still holds, archived ones excluded (#3197).
+///
+/// [`LoadSessions`] stops at [`RAIL_LIMIT`], so a page of the rail cannot
+/// answer "does this conversation still exist": with more sessions than the
+/// cap, the chat the layout recorded or the pointer the last surface wrote can
+/// sit outside the newest page. The launch's boot pick asks exactly that, so
+/// existence gets its own read, uncapped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LiveSessionIds {}
+
+impl Op for LiveSessionIds {
+    const NAME: &'static str = "sessions.live_ids";
+    const SCOPE: Scope = Scope::Read;
+    type Reply = Vec<Uuid>;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let db = ctx.db().await?;
+        let repo = SessionRepository::new(db.pool().clone());
+        repo.live_ids()
+            .await
+            .map_err(|e| BackendError::Failed(format!("{e:#}")))
+    }
+}
+
 /// Rename a session or topic. The caller re-reads the rail afterwards.
 ///
 /// The write example: same door as the read, a `Manage` scope because it
@@ -749,6 +773,7 @@ impl Op for RailSnapshot {
 
 ops! {
     LoadSessions,
+    LiveSessionIds,
     RenameSession,
     RailLedgerSignature,
     LoadFavorites,
@@ -859,6 +884,15 @@ mod tests {
                 .create(&Message::new(session, "user".into(), text.into(), 1))
                 .await
                 .expect("message");
+        }
+
+        #[tokio::test]
+        async fn live_session_ids_has_parity() {
+            let gateway = Gateway::start().await;
+            let live = session(&gateway, "live").await;
+            let answer = parity!(gateway, LiveSessionIds {});
+            assert_eq!(answer["Ok"], serde_json::json!([live.id]), "{answer}");
+            forbidden!(gateway, LiveSessionIds {});
         }
 
         #[tokio::test]

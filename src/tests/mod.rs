@@ -240,6 +240,7 @@ pub mod composer_persistence_test;
 pub mod confidential_read_deny_test;
 pub mod config_alias_merge_test;
 pub mod config_backup_prune_test;
+pub mod config_builtin_model_migration_test;
 pub mod config_dotted_caps_test;
 pub mod config_freeze_class_test;
 pub mod config_guard_test;

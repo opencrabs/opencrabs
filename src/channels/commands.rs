@@ -2366,7 +2366,7 @@ async fn resolve_loose_pair(
         // A bare provider name is not a model reference, but it can still be
         // the whole answer: a provider offering exactly one model has nothing
         // to pick, so `/models opencrabs` means
-        // `/models opencrabs/deepseek-v4.1-flash` (#2782). Zero or several
+        // `/models opencrabs/combo` (#2782). Zero or several
         // models keep the prompt, because a guessed model is the failure this
         // path exists to avoid.
         if !crate::brain::provider::factory::is_known_provider_name(config, arg) {

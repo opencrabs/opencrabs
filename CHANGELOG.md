@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.6.1] - 2026-11-27
+
+754 commits since v0.6.0, 7 contributors. 438 files changed, +71,810 / -15,365 lines.
+
+This release teaches the window to talk and listen: voice messages land end to end in the desktop app, the Seeker grows a calculator and a liquid glass renderer, and crabs connect to crabs through the instance rail. The terminal gets a hint row, background tasks become visible and stoppable, and compaction stops eating turn markers.
+
+### ✨ Features
+
+- `344a15c20` **Voice messages in the window, end to end (#3044)**: record from the composer microphone, hear it back, and answer aloud. The composer turns into the recording block (#3092), the player is the orb (#3092), every preview carries a seekable waveform (#3054), a voice note folds its transcript behind a toggle (#3111) and lands with the project it belongs to (#3114), and a turn answers aloud only for its own voice input (#3096)
+- `fe74e780b` **The Seeker is liquid glass (#3044, #3050)**: a procedural glass renderer for the recording orb, animated by the voice wave, with depth, rim and horizon layers
+- `b7be32b81` **The Seeker evaluates a typed sum (#3066)**: a calculator with the answer printed above every row, copy on both surfaces, and operators documented
+- `0b2900d5e` **The instance rail: connect crabs to crabs (#2873, #2874, #2875)**: pair one OpenCrabs window to another from the rail's mark, hand a crab across, and read the remote transcript in place. A2A gains `session/list`, `session/transcript` and `tasks/list`; a pairing code can mint a session shorter than 30 days (#2873); a resend with the same messageId answers with the first task (#2874); the public tunnel dials the address the gateway listens on and records the host
+- `3f8ffec7b` **A hint row under the composer, on both surfaces (#2279)**: the card rides on the composer and names the task (#3102), the follow-up offer becomes a card the arrows can walk (#3101), a dismissed hint stays hidden for seven days (#3120, #3122), and the hint lines speak in the app's voice (#3124)
+- `837490737` **Markdown renders on every prose surface, not just answers**
+- `1b3f68645` / `00d0aad02` **Background tasks are visible and stoppable (#2940)**: `/tasks` lists them with their output on both frontends, the strip opens into a list, a detail view and a cancel, and each task carries a readable label
+- `070d73680` **`cmd/ctrl+1..9` jumps to the nth topic and session (#3166)**
+- `cc0c7d9d4` **The bang operator opens editors in the window (#3163)**: the editor dialog previews rich text and edits raw with mouse and scroll
+- `a14f1bb9a` **The window hot-reloads `config.toml` instead of needing a restart (#3040)**: one reload pass that both front ends call
+- `3e58b8923` **The Telegram bot menu surfaces the TUI command set (#3165)**: `/channels`, `/voice` and `/image` join the TUI-only reply set
+- `daa9b80eb` **WhatsApp sends a table as a rich response instead of pipe characters (#2927)**
+- `6885697e8` **The model picker carries a scope and all-sessions asks first (#3035)**; a typed custom model id stays with the selected provider (#3180, #3185) and gets a visible label and rule
+- `ac6ea8292` **The follow-up offer becomes a card the arrows can walk (#3101)**
+- `daa6fe0f9` **Session titles record who chose them (#2956)**
+- `c678d90b6` **`opencrabs doctor` reports loaded service labels and lock owners (#2838)**
+- `822c0cfe6` **Dead plan files retire to archive at startup (#3107)**
+- `dd0407b8e` **A long prompt folds to its opening lines and opens the rest as a document (#3064)**
+- `ea3d9d31a` **Middle-click transcript auto-scroll (#2964)**
+- `9a0da36ad` **The Help Center lists the commands it never printed (#3048)**
+
+### 🔧 Fixes
+
+- `60f3db286` **A MaxTokens cut counts as a failed summariser attempt (#3172)**: a summary-less truncation is reported (#3173), the section 0 directive no longer leaks past the strip (#3167), and `/clear` markers survive summary replay (#3170)
+- `891ea8bc9` **Every `AgentResponse` carries a coherent provider/model pair, validated at session-row write (#3177)**: the fallback and retry paths can no longer stamp a mismatched identity
+- `6c3faabe0` **The primary provider is re-probed after a hard failure (#3081)**
+- `dca95ca73` **Gemini fetches the live model catalogue on every surface (#3176, #3149)**, resolving the default model from the live list
+- `87ad56999` **The claude CLI bridge ignores unknown event types instead of warning on each one (#3088)**
+- `c43903093` **A user row runs the same ledger strip the terminal applies (#3190)**: glued tool JSON no longer paints in the conversation
+- `67cac9f10` **The settled context footer reads the same token identity as the live counter (#3196)**
+- `251a6ef0d` **The plan card measures at the size its rows paint (#3197)**
+- `e0a9ea420` **The composer slash popup lists runtime skills and user commands (#3199)** and runs them as slash prompts (#3198)
+- `ebc61a350` **The built-in provider sends the `combo` model id (#3203)**: the shipped example, the onboarding catalogue and the preamble carry it, and a startup migration moves an existing `config.toml` off the legacy `deepseek-v4.1-flash` name while the proxy keeps answering both
+- `8e28facb3` **`combo` is priced at the DeepSeek V4.1 Flash card (#3203)**, so a turn on the free built-in provider shows a cost in `/usage` instead of reading as an estimate
+- `441f76020` **A single-pane restart opens the conversation the window was showing (#3200)**
+- `d7a6a1f36` **The provider pin rebuilds from config on fallback (#3189)** and self-healing alerts normalize their dashes
+- The black-chat family is fixed at its roots: rows size by pane (#2981), the transcript caps instead of wrapping, blank tails drop, a failed read keeps the rows it could not replace, and a snap returns when the box is above the rows
+- `8dbfb4bd4` **WhatsApp keys one conversation on one chat id across PN and LID (#2928)**
+- `999206e31` **The notify queue retires the row a marked redelivery came from (#3175)** and stamps queue age on a redelivered push (#2926)
+- Profile and daemon locks behave: a preempted daemon holding only the instance lock is not a rival (#2835), one installer and one label per profile (#2837), service commands act on every label a profile can own (#2834)
+- The models picker folds separators so `qwen ambassador` finds `Qwen-Ambassador` (#3182), the selected tile stays pinned under a filter (#3183), `N more` rows page the selection on click (#3184), and the wizard filter syncs inline (#3186)
+- `e913c06ce` **`url` bumps to 2.5.9 for RUSTSEC-2026-0592 (#3147)**
+- `8bd8e495e` **Channels report why they are idle and when their task dies (#2933)**
+- `b8f9b64f6` **The composer and the terminal walk the history the same way (#3188)**, and a pasted block stays one history entry (#3187)
+- `5f975c575` **A `/cd` moves a whole project and answers in its own chat (#3036)**, off the UI thread
+- `f9eaa200a` **A window restart hands a channel turn back to its chat (#3025)**
+
+### 📖 Documentation
+
+- `87dac90df` README: macOS install covers Gatekeeper quarantine (#3045)
+- `aa984d26a` README: voice messages in the window (#3044)
+- `6f79bf068` README: the task list, the detail view and `/tasks` (#2940)
+- `7f6f065b5` README: the Split Panes row says Alt+Tab, not Tab
+- `e8be3c797` / `39da7c33d` A2A docs: the bearer we ship, the OAuth we do not (#2875), and the send tool says when a message did not arrive (#2874)
+- `580768bcc` / `de09fe657` claude CLI docs: the measured #3088 fixture shape and its provenance
+- `b2c834bf6` The `/clear` doc names provider fallback as a reason to clear (#3125)
+- `6cf615f91` The start guide says when the daily log file actually exists (#2933)
+- `812c8826a` README: the instance rail, the digit jump chord and the A2A session methods
+
+### 🧹 Miscellaneous
+
+- `7a57ee79c` The release workflow publishes the Windows PDB sidecar so panic reports can name frames (#3134)
+- `623f97e3f` The packaged crate fits back under the 10 MB crates.io budget (#3136), checked by a new CI weigh step
+- `842a041f0` The advisory GUI boot job is gated on lint and audit (#3137)
+- `00d0aad02` / `5bbd898b2` The Windows slice carries its results into the job summary and gets its own cap (#2944)
+- `ba7a1a0a0` `rust-cache` keys on `Cargo.lock` so profile edits stop rebuilding the world (#3135)
+- `2c1b0971c` / `5a5cf94f1` The test-only profile is retired; every leg runs `ci` (#2934)
+- `ac4825099` The linux-amd64 prerelease links with thin LTO (#3080)
+- `3fd8e5a76` / `7ea143bcc` One shared reqwest client: the CA bundle loads once and every caller borrows it (#3038, #2843)
+- `ab69a042d` / `6410169f1` An idle rail stops repainting, and a busy lane grows instead of queueing panes (#2842, #3033)
+- `668d29f4c` A finished turn joins the transcript instead of refetching it (#3032)
+- The bulk of the window: split panes, transcript reload, plan cards, the Seeker field and the orb carry 400+ test, style and refactor commits keeping the byte-slice ratchet and the window scans honest
+
+### 👥 Contributors
+
+7 contributors this release:
+
+- @adolfousier (Adolfo Usier)
+- @loonix (Daniel Carneiro)
+- @moneyacademyKE (Moe)
+- @adi805 (Syafriadi)
+- @spinecki (spinecki)
+- @reqhald (reqhald)
+- @AyhamJo7 (iQuantum)
+
+### 📊 Stats
+
+- 754 commits since v0.6.0
+- 438 files changed, +71,810 / -15,365 lines
+- 13,214 tests (13,214 passed, 0 failed, 34 ignored)
+
+
 ## [0.6.0] - 2026-11-14
 
 925 commits since v0.5.15, 6 contributors. 654 files changed, +127,903 / -5,765 lines.
@@ -9955,3 +10056,4 @@ fixes.
 [0.5.14]: https://github.com/opencrabs/opencrabs/compare/v0.5.13...v0.5.14
 [0.5.15]: https://github.com/opencrabs/opencrabs/compare/v0.5.14...v0.5.15
 [0.6.0]: https://github.com/opencrabs/opencrabs/compare/v0.5.15...v0.6.0
+[0.6.1]: https://github.com/opencrabs/opencrabs/compare/v0.6.0...v0.6.1

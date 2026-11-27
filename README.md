@@ -666,7 +666,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | **Live Settings** | Agent can read/write `config.toml` at runtime; Settings TUI screen (press `S`) shows current config; approval policy persists across restarts. Default: auto-approve (use `/approve` to change) |
 | **Web Search** | DuckDuckGo (built-in, no key needed) + EXA AI (neural, free via MCP) by default; Brave Search optional (key in `keys.toml`) |
 | **Debug Logging** | `--debug` flag or `debug_logs = true` in config enables file logging; config toggle hot-reloads live without restart; `DEBUG_LOGS_LOCATION` env var for custom log directory |
-| **Agent-to-Agent (A2A)** | HTTP gateway implementing A2A Protocol RC v1.0 — peer-to-peer agent communication via JSON-RPC 2.0. Supports `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel`. Built-in `a2a_send` tool lets the agent proactively call remote A2A agents. Optional Bearer token auth. Includes multi-agent debate (Bee Colony) with confidence-weighted consensus. Task persistence across restarts |
+| **Agent-to-Agent (A2A)** | HTTP gateway implementing A2A Protocol RC v1.0 — peer-to-peer agent communication via JSON-RPC 2.0. Supports `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel`, `session/list`, `session/transcript`, `tasks/list`. Built-in `a2a_send` tool lets the agent proactively call remote A2A agents. Optional Bearer token auth. Includes multi-agent debate (Bee Colony) with confidence-weighted consensus. Task persistence across restarts |
 | **Profiles** | Run multiple isolated instances from the same installation. Each profile gets its own config, keys, memory, sessions, and database. Create with `opencrabs profile create <name>`, switch with `-p <name>`. Migrate config between profiles with `profile migrate`. Export/import for sharing. Token-lock isolation prevents two profiles from using the same bot credential |
 
 ### CLI
@@ -1347,7 +1347,7 @@ The CLI `migrate` command currently supports OpenClaw and Hermes. For everything
 | Provider | Auth | Models | Streaming | Tools | Notes |
 |----------|------|--------|-----------|-------|-------|
 | **Xiaomi (MiMo)** | API key | mimo-v2.5-pro (1M ctx), v2-pro, v2.5, omni, flash | ✅ | ✅ | OpenAI-compatible. Get a key at platform.xiaomimimo.com. MiMo v2.5 is multimodal (native vision) |
-| [OpenCrabs (built in)](#opencrabs-built-in) | Automatic (install token, no key to paste) | deepseek-v4.1-flash (200k ctx, multimodal) | ✅ | ✅ | Set up on first run with no account. No charge and no usage caps during the experimental phase |
+| [OpenCrabs (built in)](#opencrabs-built-in) | Automatic (install token, no key to paste) | combo (200k ctx, multimodal) | ✅ | ✅ | Set up on first run with no account. No charge and no usage caps during the experimental phase |
 | [Anthropic Claude](#anthropic-claude) | API key | Claude Opus 4.6, Sonnet 4.5, Haiku 4.5+ | ✅ | ✅ | Cost tracking, automatic retry |
 | [OpenAI](#openai) | API key | GPT-5 Turbo, GPT-5 | ✅ | ✅ | |
 | [GitHub Copilot](#github-copilot) | OAuth | GPT-4o, Claude Sonnet 4+ | ✅ | ✅ | Uses your Copilot subscription — no API charges |
@@ -1473,7 +1473,7 @@ Model list is **fetched live** from the OpenRouter API during onboarding and via
 OpenCrabs ships its own provider, so a new install can chat without creating an account or pasting a key.
 
 **What you get on a fresh install**
-- **Chat model:** `deepseek-v4.1-flash`, 200k context window. The window is fixed at 200k on this provider: the endpoint is free and serves one model, so `context_window` is not honoured here.
+- **Chat model:** `combo`, 200k context window. The window is fixed at 200k on this provider: the endpoint is free and serves one model id, so `context_window` is not honoured here. The older `deepseek-v4.1-flash` name still answers on the same endpoint for clients built before the rename, and an upgraded install is moved onto `combo` on its next start.
 - **Vision:** `vision_model` is set to the same model, so attached images work on day 0.
 - **Image generation:** on by default for fresh installs through `gemini-2.5-flash-image`, which is image-only and never offered as a chat model. Existing installs set `generation_model` on `[providers.opencrabs]` to get it (see [Image Generation & Vision](#-image-generation--vision)).
 - **Voice (in):** transcription works on day 0. The built-in provider answers no `/v1/audio/*` route, so the shipped config sets `stt_model = "qwen3.8-omni-flash"` and the audio is sent as an `input_audio` part on `/v1/chat/completions` alongside the transcription instruction. An engine you configure yourself (Groq, an [OI]-compatible endpoint, Voicebox, local whisper.cpp) stays available, and the active provider's route is the primary one.
@@ -1490,8 +1490,8 @@ OpenCrabs ships its own provider, so a new install can chat without creating an 
 ```toml
 [providers.opencrabs]
 enabled = false                       # chosen through onboarding, not by hand
-default_model = "deepseek-v4.1-flash"
-models = ["deepseek-v4.1-flash"]
+default_model = "combo"
+models = ["combo"]
 # context_window is not honoured here: the built-in endpoint is free and fixed
 # at 200k, so any value set in this section is ignored.
 vision_model = "deepseek-v4.1-flash"       # vision on day 0, same endpoint
@@ -2106,7 +2106,7 @@ port = 18790          # Gateway port
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/.well-known/agent.json` | GET | Agent Card — discover skills, capabilities, supported content types |
-| `/a2a/v1` | POST | JSON-RPC 2.0 — `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel` |
+| `/a2a/v1` | POST | JSON-RPC 2.0 — `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel`, `session/list`, `session/transcript`, `tasks/list` |
 | `/a2a/health` | GET | Health check |
 
 ### Authentication
@@ -2219,6 +2219,10 @@ OpenCrabs supports multi-agent structured debate via the **Bee Colony** protocol
 - **CORS locked down** — no cross-origin requests unless `allowed_origins` is explicitly set
 - **Task persistence** — active tasks survive restarts via SQLite
 - For public exposure, use `opencrabs connect` below (managed tunnel + pairing), or a reverse proxy (nginx/Caddy) with TLS + the `api_key` auth
+
+### The instance rail: another window's crab, read in place
+
+The window can also drive another OpenCrabs window, not only its own crab. A 56 px strip of paired crabs sits at the far left of the dashboard, opened from the rail's mark: probes run every five seconds in the background and show which crabs answer, and picking one hands the rail and the panel to that crab. The rail then lists the remote's sessions, a pick on one fetches `session/transcript` and draws the conversation read-only in place, and the composer sends `message/send` to the remote crab. `Esc` goes back to the local crab. Pairing rides the same `opencrabs connect` flow as [Remote Access](#-remote-access-connect--pairing-routes): the code mints a scoped `ocpair_` session token, and `--ttl` can shorten its life (30 days by default, `--ttl 1h` for a guest), so a crab only ever holds the scopes its code carried.
 
 ---
 
@@ -2596,7 +2600,7 @@ A 10-step setup wizard covers the rest of the setup. On a fresh install it does 
 
 ### First Run
 
-On a fresh install there is no setup step for the LLM. The session runs on the built-in OpenCrabs provider with `deepseek-v4.1-flash`, and the first screen goes straight to chat.
+On a fresh install there is no setup step for the LLM. The session runs on the built-in OpenCrabs provider with `combo`, and the first screen goes straight to chat.
 
 - The welcome names what is already set (provider, model, vision, transcription, image generation) and asks only about what is still missing: your profile in `USER.md` and text to speech. Answer what you want and skip the rest.
 - To use another provider, type `/models`, or run `/onboard` and choose Advanced. On a first run, Advanced preselects OpenCrabs with its key and model already filled in, and you can pick any other provider instead.
@@ -4241,6 +4245,7 @@ Any tool on your `$PATH` works. If it runs in your terminal, OpenCrabs can use i
 | `Mouse click` | Inside the input box: move the cursor to the click, on any line, including wrapped lines and a box that has scrolled. On a URL or an existing file path: open it in the default app (browser, Finder/Explorer, `xdg-open`). Elsewhere: expand/collapse blocks and select messages; click-drag still selects text to copy |
 | `F12` | Toggle mouse capture: off gives native terminal drag-select and copy (browser-style), on restores in-app click, right-click, and scroll. Works even inside dialogs |
 | `Escape` | Clear input / close overlay |
+| `Cmd/Ctrl+1..9` (window) | Jump to the nth row of what the dashboard is showing: the open conversation's topics win when it has any, the session list otherwise, and with the side list open the chord aims at its rows. `1` opens All, `0` the tenth. The key is consumed even when the position lands past the list's end, so it is never a digit |
 
 ### Chat Mode
 
@@ -5374,8 +5379,8 @@ cargo build --release
 # Small release build
 cargo build --profile release-small
 
-# Run tests (12,611 tests: 1,301 test files under src/tests/, where tests
-# belong, beside 206 inline #[cfg(test)] blocks in 130 files);
+# Run tests (13,214 tests: 1,350 test files under src/tests/, where tests
+# belong, beside 238 inline #[cfg(test)] blocks in 162 files);
 # 34 slower ones are #[ignore]d to keep the default
 # run fast: profile tests that touch ~/.opencrabs, browser end-to-end
 # tests, and opencode provider tests. Opt in with

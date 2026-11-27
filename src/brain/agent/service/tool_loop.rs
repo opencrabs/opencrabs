@@ -8195,6 +8195,11 @@ impl AgentService {
                     .create_message(session_id, "assistant".to_string(), String::new())
                     .await
                     .map_err(AgentError::db)?;
+                // Retarget the CLI live persister at the fresh row. Without
+                // this, streamed segments after the drain append into the
+                // stale row (previously the user's continuation row), gluing
+                // raw tools-v2 JSON onto user-visible history (#3190).
+                *cli_persist_msg_id.lock().unwrap_or_else(|e| e.into_inner()) = assistant_db_msg.id;
             }
         }
 

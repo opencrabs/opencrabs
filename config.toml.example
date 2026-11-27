@@ -26,11 +26,13 @@
 # ========================================
 # No key to type. Onboarding asks the inference proxy for an install token and
 # stores it in keys.toml ([providers.opencrabs] api_key). Enable it by choosing
-# OpenCrabs in onboarding, not by hand. The proxy serves one model today.
+# OpenCrabs in onboarding, not by hand. The proxy serves one model id today,
+# `combo`; the older `deepseek-v4.1-flash` name stays accepted there for clients
+# built before the rename.
 [providers.opencrabs]
 enabled = false
-default_model = "deepseek-v4.1-flash"
-models = ["deepseek-v4.1-flash"]
+default_model = "combo"
+models = ["combo"]
 # context_window is not honoured here: the built-in endpoint is free and fixed
 # at 200k, so any value set in this section is ignored.
 vision_model = "deepseek-v4.1-flash"  # Multimodal: attached images work on day 0

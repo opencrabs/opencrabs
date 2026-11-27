@@ -175,8 +175,10 @@ output.
 | wire name | type | scope | what it does |
 |---|---|---|---|
 | `sessions.load` | `LoadSessions` | `a2a:read` | the rail's sessions, newest first, at most 200 rows; params `{}`, reply a list of session rows |
+| `sessions.live_ids` | `LiveSessionIds` | `a2a:read` | every session id the ledger still holds, archived excluded, uncapped, for the launch's boot pick; params `{}`, reply a list of ids |
 | `sessions.rename` | `RenameSession` | `a2a:manage` | rename a session or topic; params `{"id", "title"}`, reply `null` |
 | `session_ops.clear_messages` | `ClearMessages` | `a2a:manage` | delete one session's messages, keep the session; params `{"session_id"}`, reply `null` |
+| `session_ops.pin_fallback_provider` | `PinFallbackProvider` | `a2a:admin` | make a sticky fallback stick (#3189): write the pair to the session row and rebuild the service's pin from config; params `{"session_id", "provider", "model"}`, reply the lines of the steps that failed |
 | `turn.approval_answer` | `ApprovalAnswer` | `a2a:manage` | answer one `approval_requested`; params `{"session_id", "request_id", "approved", "always"}`, reply `true` if a waiting tool took it |
 | `turn.cancel` | `TurnCancel` | `a2a:send` | stop the remote turn on a session; params `{"session_id"}`, reply `true` if one was running |
 | `settings.load` | `SettingsLoad` | `a2a:admin` | the settings modal's rows read from the crab's config; params `{}`, reply `{"values", "credentials"}`, a credential only `{"section", "label", "configured"}`, never a key |

@@ -56,12 +56,15 @@ fn settings_slash_command_opens_the_existing_modal() {
         ),
         (GUI_COMMAND_DISPATCH, "self.toggle_settings(cx);"),
         (GUI_FINDER, "slash::gui_commands()"),
-        (GUI_COMPOSER_VIEW, "slash::lookup_gui(name)"),
+        (GUI_COMPOSER_VIEW, "command_popup_view("),
     ] {
         assert!(source.contains(needle), "missing window wiring: {needle}");
     }
+    // #3199 merged the static table with runtime rows in editor::popup_rows
+    // and the composer paints the merged rows, so the pin follows the merge
+    // instead of the old per-row lookup that no longer exists.
     assert!(
-        GUI_EDITOR.contains("gui_completions(&self.content)"),
+        GUI_EDITOR.contains("gui_completions(word)"),
         "the composer must autocomplete /settings"
     );
 }

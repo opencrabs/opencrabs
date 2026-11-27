@@ -1715,6 +1715,57 @@ impl Dashboard {
                         .push(crate::live_fold::retry_notice(attempt, max, &reason));
                     cx.notify();
                 }
+                // Sticky fallback (#3189). The service already swapped the
+                // provider for the session before emitting this, so the GUI's
+                // job is visibility and stickiness: a notice line on the card,
+                // the new pair written to the session row (cache and DB), and
+                // the in-memory pin rebuilt from config so the next turn does
+                // not re-walk the failing primary. Mirrors the TUI handler at
+                // `tui/app/state.rs` `TuiEvent::ProviderSwitched`.
+                agent_bridge::TurnEvent::ProgressFor(
+                    sid,
+                    ProgressEvent::ProviderSwitched {
+                        from_name: _,
+                        from_model: _,
+                        to_name,
+                        to_model,
+                        reason,
+                    },
+                    _,
+                ) => {
+                    self.turn
+                        .live
+                        .notices
+                        .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
+                    // The row and the pin are the crab's: the session row
+                    // takes the new pair (the rail's footer follows it on the
+                    // next fetch) and the in-memory pin is rebuilt from
+                    // config, or the next turn re-walks the dead primary: the
+                    // agent's own swap reuses the fallback Arc, which still
+                    // carries the failing primary internally. Same two steps
+                    // the TUI takes at `tui/app/state.rs` (ProviderSwitched).
+                    agent_bridge::spawn_pin_fallback_provider(
+                        self.backend.clone(),
+                        sid,
+                        to_name,
+                        to_model,
+                    );
+                    cx.notify();
+                }
+                // Self-healing fired: config recovery, emergency compaction,
+                // truncation. The message is already user-readable, so it
+                // lands in the amber notice block as-is.
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::SelfHealingAlert { message },
+                    _,
+                ) => {
+                    self.turn.live.notices.push(format!(
+                        "🔧 {}",
+                        opencrabs::utils::sanitize::normalize_dashes(&message)
+                    ));
+                    cx.notify();
+                }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;
                 // nothing to draw live yet. The follow-up offer is already
@@ -1727,7 +1778,6 @@ impl Dashboard {
                     context_tokens,
                     tokens_per_second,
                     voice,
-                    completed_plan,
                 } => {
                     // The card's live line belongs to this turn (#2718), so
                     // it retires with it: the preview under it is the ledger's
@@ -1838,7 +1888,7 @@ impl Dashboard {
                     // from the log (chunks=0 means the provider never
                     // streamed, not that the window failed to draw).
                     logging::info(&format!(
-                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), appending to the transcript",
+                        "turn done ({} chars, {} chunks, {} bytes, first {:?}, {}s elapsed, {:.2}s active, {} tok, rate {:.1} tok/s, service {:?}), reloading the rows",
                         content.len(),
                         self.turn.live.chunks,
                         self.turn.live.chunk_bytes,
@@ -1877,60 +1927,18 @@ impl Dashboard {
                             spoken,
                         );
                     }
-                    // The finished turn joins the list as it stands (#3032).
-                    // The card has been painting this exchange all along, so
-                    // refetching the window and rebuilding every turn only
-                    // proved what this state already holds: a thread, a fresh
-                    // runtime, its own DB connection and a 200-row read, once
-                    // per turn, 1:1 with the turns themselves. The reload is
-                    // kept for the reads that need the rows, which is a
-                    // resumed task with no question of its own and the settle
-                    // path that proves a slow write landed.
-                    //
-                    // `rows` stays behind by one on purpose: the turn's row id
-                    // only exists once a read returns it, and inventing one
-                    // would put an id in the copy order that no row carries.
-                    // That is the state the live card was already in, and the
-                    // next reload reconciles it.
+                    // The completion is drawn once, from the rows (#3190).
+                    // The card painted this exchange while it ran; installing
+                    // a turn built from the live copy on top of the persisted
+                    // twin is what painted the same answer twice until a
+                    // session switch dropped one. The reload reads the rows,
+                    // keeps the card up until the settle test says the write
+                    // landed, then takes the card down with its metrics
+                    // attached, and the finished checklist arrives with the
+                    // rows as the `plan_completed` row the ledger holds
+                    // (#3142).
                     if let Some(sid) = self.chat_state.session() {
-                        match transcript::turn_from_live(&self.turn.live, None) {
-                            Some(mut turn) => {
-                                // The checklist this turn finished is a row in
-                                // the ledger, not something the card painted,
-                                // so the append has to carry it: without it the
-                                // card only came back on the next reload, and a
-                                // conversation that finishes a plan and keeps
-                                // talking never had one (#3142).
-                                if let Some(block) = completed_plan
-                                    .as_deref()
-                                    .and_then(transcript::completed_plan_block)
-                                {
-                                    turn.blocks.push(block);
-                                }
-                                logging::info(&format!(
-                                    "turn appended: {} blocks, anchor {}",
-                                    turn.blocks.len(),
-                                    turn.anchor
-                                ));
-                                self.chat_state.transcript.turns.push(turn);
-                                // The numbers recorded at `Done` belong to the
-                                // turn that just went on the list (#2324).
-                                self.attach_pending_metrics(sid);
-                                // No read compares a total against these, so
-                                // they must not outlive the turn: a stale
-                                // expectation would turn the next reload's
-                                // first short read into a phantom retry
-                                // (#2705).
-                                self.turn.settle.expect = None;
-                                self.turn.settle.retries = 0;
-                                self.turn.settle.deadline = None;
-                                self.turn.settle.rechecks = 0;
-                                self.turn.live.clear();
-                            }
-                            // Nothing to append from, so the rows are the only
-                            // record of this turn.
-                            None => reload = Some(sid),
-                        }
+                        reload = Some(sid);
                     }
                 }
                 agent_bridge::TurnEvent::Failed { session, text } => {

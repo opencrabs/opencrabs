@@ -605,7 +605,8 @@ pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
         )
 }
 
-/// The rail's session list, through the backend (`LoadSessions`).
+/// The rail's session list, through the backend (`LoadSessions`), capped at
+/// `opencrabs::backend::sessions::RAIL_LIMIT` rows by the op itself.
 ///
 /// Locally the op runs on its own `spawn_worker` lane: a 4 MB thread with a
 /// current-thread runtime, the shape this load always had. `Ctx::db` runs
@@ -614,6 +615,24 @@ pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
 pub async fn load_sessions(backend: crate::backend_glue::Backend) -> Result<Vec<Session>, String> {
     backend
         .call(opencrabs::backend::sessions::LoadSessions {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+/// Every session id the ledger still holds, for the launch's boot pick
+/// (#3197), through the backend (`LiveSessionIds`).
+///
+/// The rail is capped at `RAIL_LIMIT` rows, so it cannot answer "does this
+/// conversation still exist": with more sessions than the cap, the chat the
+/// layout recorded or the pointer the last surface wrote can sit outside the
+/// newest page, and the launch would treat a live conversation as deleted and
+/// open the newest instead. Existence gets its own read, same door as
+/// [`load_sessions`].
+pub async fn load_live_session_ids(
+    backend: crate::backend_glue::Backend,
+) -> Result<Vec<uuid::Uuid>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LiveSessionIds {})
         .await
         .map_err(opencrabs::backend::BackendError::into_message)
 }

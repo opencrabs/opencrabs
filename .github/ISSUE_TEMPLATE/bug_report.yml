@@ -92,7 +92,7 @@ body:
     attributes:
       label: Provider and model
       description: Which provider and model was active. Behaviour can differ per model, so this matters.
-      placeholder: opencrabs/deepseek-v4.1-flash
+      placeholder: opencrabs/combo
 
   - type: textarea
     id: logs

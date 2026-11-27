@@ -83,6 +83,16 @@ entries = [
   { prefix = "gemini-1.5-flash",   input_per_m = 0.075, output_per_m = 0.30  },
 ]
 
+[providers.opencrabs]
+entries = [
+  # `combo` is the built-in provider's chat id, not a vendor model: the proxy
+  # picks the upstream per request, so no single vendor card stands behind it.
+  # It is priced at the DeepSeek V4.1 Flash card below on purpose, so a turn on
+  # the free built-in provider shows a cost in /usage instead of falling to the
+  # unknown-model default. Update this row when that card changes.
+  { prefix = "combo",               input_per_m = 0.15,  output_per_m = 0.60,  cache_read_per_m = 0.003 },
+]
+
 [providers.deepseek]
 entries = [
   # DeepSeek V4.1 Flash / V4 Pro, first-party list. DeepSeek bills peak hours

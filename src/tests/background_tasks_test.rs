@@ -90,6 +90,45 @@ fn short_label_takes_the_command_after_cd() {
     assert_eq!(short_label("cargo build"), "cargo build");
 }
 
+#[test]
+fn short_label_names_the_script_not_its_directories() {
+    // The label a detached task shows on every surface. Before #3204 it read
+    // `bash "$HOME/.opencrabs/projects/opencrabs/files/gate-combo.sh"`, which
+    // names nothing about the work.
+    assert_eq!(
+        short_label("bash \"$HOME/.opencrabs/projects/opencrabs/files/gate-combo.sh\""),
+        "bash \"~/…/gate-combo.sh\""
+    );
+}
+
+#[test]
+fn short_label_cuts_an_inline_heredoc_at_its_script_path() {
+    // A heredoc launch carries the whole script body inside the command
+    // string (#3204): the label must keep the file the script lands in and
+    // drop the body, or it prints code instead of naming the task.
+    let command = "cat > ~/.opencrabs/projects/opencrabs/files/gate-combo-watch2.sh <<'EOF'\n#!/bin/bash\nLOG=\"x\"\nEOF\nbash \"$HOME/.opencrabs/projects/opencrabs/files/gate-combo-watch2.sh\"";
+    assert_eq!(short_label(command), "cat > ~/…/gate-combo-watch2.sh");
+}
+
+#[test]
+fn short_label_cuts_a_heredoc_after_a_multibyte_char() {
+    // The cut runs in char space, never byte space: a multibyte char before
+    // the marker must not panic or corrupt the head (#3204).
+    let command =
+        "echo café > ~/.opencrabs/projects/opencrabs/files/gate.sh <<'EOF'\nbody\nEOF\nbash run.sh";
+    assert_eq!(short_label(command), "echo café > ~/…/gate.sh");
+}
+
+#[test]
+fn short_label_keeps_a_quoted_shift_that_is_not_a_heredoc() {
+    // Quote-aware: `<<` inside a literal string is data, not a heredoc
+    // marker, so the label keeps the whole command.
+    assert_eq!(
+        short_label("echo \"a << b\" && cargo build"),
+        "echo \"a << b\"; cargo build"
+    );
+}
+
 #[tokio::test]
 // The test_guard serializes suites touching the process-global parked-queue
 // state; holding it across the polling `.await`s below is the entire point —

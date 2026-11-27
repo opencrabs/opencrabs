@@ -310,16 +310,19 @@ pub(crate) fn emoji_popup_view(items: &[editor::EmojiRow], selected: usize) -> D
     col
 }
 
-/// The slash-command list above the input: the one table the terminal reads
-/// too, narrowed to what the draft is spelling.
+/// The slash-command list above the input: the table the terminal reads plus
+/// the runtime rows (#3199), narrowed to what the draft is spelling.
+///
+/// Each row carries `(name, description)`: the static commands' descriptions
+/// come from the table, the skills and `commands.toml` rows bring their own.
 ///
 /// Only the visible window is built, eight rows at most, and it slides once
 /// the selection walks past the last of them. Descriptions are clipped here
-/// rather than in the table, because the same strings are printed in full by
+/// rather than at the source, because the same strings are printed in full by
 /// the terminal's `/help`.
-pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div {
+pub(crate) fn command_popup_view(rows: &[(String, String)], selected: usize) -> Div {
     const VISIBLE: usize = 8;
-    let window = popup_window(names.len(), selected, VISIBLE);
+    let window = popup_window(rows.len(), selected, VISIBLE);
     let mut col = div()
         .flex()
         .flex_col()
@@ -329,13 +332,10 @@ pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div
         .border_1()
         .border_color(rgb(palette::current().panel_hi))
         .bg(rgb(palette::current().panel));
-    for (offset, name) in names[window.clone()].iter().enumerate() {
+    for (offset, row) in rows[window.clone()].iter().enumerate() {
         let picked = window.start + offset == selected;
-        let description = match slash::lookup_gui(name) {
-            Some(cmd) => slash::clipped(cmd.description, 52).to_string(),
-            None => String::new(),
-        };
-        let mut row = div()
+        let description = slash::clipped(&row.1, 52).to_string();
+        let mut entry = div()
             .flex()
             .flex_row()
             .items_center()
@@ -343,7 +343,7 @@ pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div
             .px_1()
             .rounded(px(4.0));
         if picked {
-            row = row.bg(rgb(palette::current().panel_hi));
+            entry = entry.bg(rgb(palette::current().panel_hi));
         }
         let name_color = if picked {
             palette::current().amber
@@ -351,19 +351,20 @@ pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div
             palette::current().text
         };
         col = col.child(
-            row.child(
-                div()
-                    .w(px(112.))
-                    .text_xs()
-                    .text_color(rgb(name_color))
-                    .child(SharedString::from(*name)),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(palette::current().text_muted))
-                    .child(SharedString::from(description)),
-            ),
+            entry
+                .child(
+                    div()
+                        .w(px(112.))
+                        .text_xs()
+                        .text_color(rgb(name_color))
+                        .child(SharedString::from(row.0.clone())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette::current().text_muted))
+                        .child(SharedString::from(description)),
+                ),
         );
     }
     col.child(
@@ -373,7 +374,7 @@ pub(crate) fn command_popup_view(names: &[&'static str], selected: usize) -> Div
             .child(SharedString::from(format!(
                 "{}/{} · ↑↓ select · tab complete · enter run",
                 selected + 1,
-                names.len()
+                rows.len()
             ))),
     )
 }

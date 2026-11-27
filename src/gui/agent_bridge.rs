@@ -97,13 +97,6 @@ pub enum TurnEvent {
         /// the next TYPED turn of that conversation was answered aloud. A turn
         /// can only speak for itself.
         voice: bool,
-        /// The checklist this turn finished, when it finished one (#3142).
-        /// The tool loop writes that row at settle and hands the record back
-        /// with the response, the same way the terminal gets it. The window
-        /// builds its finished turn from live state (#3032), which holds no
-        /// rows, so the card has to travel on the event or the conversation
-        /// loses it the moment the plan completes.
-        completed_plan: Option<Box<opencrabs::db::models::Message>>,
     },
     /// The turn failed; carries the user-facing message the channels use
     /// and the session it belonged to, for the same reason as `Done` (#2614).
@@ -1092,7 +1085,6 @@ pub fn spawn_turn(
                     context_tokens: response.context_tokens,
                     tokens_per_second: response.tokens_per_second,
                     voice: response.voice,
-                    completed_plan: response.completed_plan.map(Box::new),
                 },
                 // The stop dropped the turn where it stood (#2657): no Done
                 // and no Failed will come, so this is what settles the card.
@@ -1160,7 +1152,6 @@ fn spawn_resume(
                         context_tokens: response.context_tokens,
                         tokens_per_second: response.tokens_per_second,
                         voice: response.voice,
-                        completed_plan: response.completed_plan.map(Box::new),
                     }
                 }
                 // It answered nobody, so it is not a delivered resume; the
@@ -1897,6 +1888,36 @@ pub fn spawn_record_turn_stopped(
     );
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn stopped thread: {e}"));
+    }
+}
+
+/// Make the service's sticky fallback stick on the crab that ran the turn
+/// (#3189): the session row takes the new pair and the in-memory pin is
+/// rebuilt from config (`PinFallbackProvider`). The card's notice is the live
+/// signal; this only logs what failed.
+pub fn spawn_pin_fallback_provider(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    provider: String,
+    model: String,
+) {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::PinFallbackProvider {
+            session_id,
+            provider,
+            model,
+        },
+        |result| match result {
+            Ok(errors) => {
+                for line in &errors {
+                    crate::logging::error(line);
+                }
+            }
+            Err(e) => crate::logging::error(&format!("provider swap: {}", e.into_message())),
+        },
+    );
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("provider swap thread: {e}"));
     }
 }
 

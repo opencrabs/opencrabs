@@ -718,6 +718,11 @@ impl Config {
             changed = true;
         }
 
+        // ── Migration 7: built-in provider chat model id (#3203) ──
+        if Self::migrate_builtin_model_value(&mut doc) {
+            changed = true;
+        }
+
         if !changed {
             // Migration 3: inject commented subagent defaults into [agent] section
             // Uses text-level injection (comments can't survive toml::Value round-trip)
@@ -792,6 +797,11 @@ impl Config {
         // says they are gone.
         Self::migrate_notification_flags_edit(&mut edit_doc);
 
+        // Migration 7: built-in provider chat model id (#3203). Written here
+        // as well as on the value pass: this branch is the one that reaches
+        // disk, and the value-pass edits never touch the file.
+        Self::migrate_builtin_model_edit(&mut edit_doc);
+
         Self::backup_config(path, 7);
         if crate::config::types::io::atomic_write(path, &edit_doc.to_string()).is_ok() {
             tracing::info!(
@@ -820,6 +830,79 @@ impl Config {
             && let Err(e) = crate::config::types::io::atomic_write(path, &injected)
         {
             tracing::warn!("Config migration: failed to inject plan-mode defaults: {e}");
+        }
+    }
+
+    /// The chat model the built-in provider shipped before the proxy renamed
+    /// it, and the id the proxy publishes now (#3203).
+    const LEGACY_BUILTIN_MODEL: &'static str = "deepseek-v4.1-flash";
+    const BUILTIN_MODEL: &'static str = "combo";
+
+    /// Move `[providers.opencrabs]` off the legacy chat model.
+    ///
+    /// Only the shipped default moves: a `default_model` that still names the
+    /// legacy id, and a `models` list holding nothing but it. A user who pinned
+    /// another model keeps it, and the proxy still accepts the legacy id for
+    /// clients built before the rename, so a config this never reaches keeps
+    /// working.
+    fn migrate_builtin_model_value(doc: &mut toml::Value) -> bool {
+        let legacy = Self::LEGACY_BUILTIN_MODEL;
+        let Some(providers) = doc.get_mut("providers").and_then(|p| p.as_table_mut()) else {
+            return false;
+        };
+        let Some(section) = providers
+            .get_mut("opencrabs")
+            .and_then(|o| o.as_table_mut())
+        else {
+            return false;
+        };
+        let mut changed = false;
+        if section.get("default_model").and_then(|v| v.as_str()) == Some(legacy) {
+            let combo = toml::Value::String(Self::BUILTIN_MODEL.to_string());
+            section.insert("default_model".to_string(), combo);
+            changed = true;
+        }
+        if let Some(models) = section.get("models").and_then(|v| v.as_array()) {
+            let legacy_only = models.len() == 1 && models[0].as_str() == Some(legacy);
+            if legacy_only {
+                let combo = toml::Value::String(Self::BUILTIN_MODEL.to_string());
+                section.insert("models".to_string(), toml::Value::Array(vec![combo]));
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The same move on the format-preserving document, which is the one that
+    /// reaches disk.
+    fn migrate_builtin_model_edit(doc: &mut toml_edit::DocumentMut) {
+        let legacy = Self::LEGACY_BUILTIN_MODEL;
+        let Some(providers) = doc.get_mut("providers").and_then(|p| p.as_table_mut()) else {
+            return;
+        };
+        let Some(section) = providers
+            .get_mut("opencrabs")
+            .and_then(|o| o.as_table_mut())
+        else {
+            return;
+        };
+        if section.get("default_model").and_then(|v| v.as_str()) == Some(legacy) {
+            section.insert(
+                "default_model",
+                toml_edit::Item::Value(toml_edit::Value::from(Self::BUILTIN_MODEL)),
+            );
+        }
+        let models_are_legacy = section
+            .get("models")
+            .and_then(|v| v.as_array())
+            .is_some_and(|m| m.len() == 1 && m.get(0).and_then(|v| v.as_str()) == Some(legacy));
+        if models_are_legacy {
+            let mut models = toml_edit::Array::new();
+            models.push(Self::BUILTIN_MODEL);
+            section.insert(
+                "models",
+                toml_edit::Item::Value(toml_edit::Value::Array(models)),
+            );
         }
     }
 

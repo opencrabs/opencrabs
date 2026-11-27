@@ -290,6 +290,75 @@ impl Op for SwitchModel {
     }
 }
 
+/// Make a sticky fallback stick (#3189): the service already swapped the
+/// session onto `provider`/`model` when its primary failed, and announced it
+/// with `ProgressEvent::ProviderSwitched`. This writes the new pair to the
+/// session row, so the rail and the next launch read it, and rebuilds the
+/// in-memory pin from the crab's config: the agent's own swap reuses the
+/// fallback chain, which still carries the failing primary inside, so without
+/// the rebuild the next turn walks the dead primary again. The same two steps
+/// the terminal takes on `TuiEvent::ProviderSwitched`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinFallbackProvider {
+    /// The session the service switched.
+    pub session_id: Uuid,
+    /// The provider it switched to.
+    pub provider: String,
+    /// The model it switched to.
+    pub model: String,
+}
+
+impl Op for PinFallbackProvider {
+    const NAME: &'static str = "session_ops.pin_fallback_provider";
+    const SCOPE: Scope = Scope::Admin;
+    /// Each step that failed, as the line the window logs.
+    type Reply = Vec<String>;
+
+    async fn run(self, ctx: &Ctx) -> Result<Self::Reply, BackendError> {
+        let PinFallbackProvider {
+            session_id,
+            provider,
+            model,
+        } = self;
+        let mut errors = Vec::new();
+        let db = ctx.db().await?;
+        let sessions = SessionService::new(ServiceContext::new(db.pool().clone()));
+        match sessions.get_session(session_id).await {
+            Ok(Some(mut row)) => {
+                row.provider_name = Some(provider.clone());
+                row.model = Some(model.clone());
+                if let Err(e) = sessions.update_session(&row).await {
+                    errors.push(format!(
+                        "persist provider swap to session {session_id}: {e}"
+                    ));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => errors.push(format!("read session {session_id}: {e}")),
+        }
+        // The pin lives in the running service. A crab without one has no pin
+        // to rebuild, and the row above is already what its next boot reads.
+        if let Ok(service) = ctx.service() {
+            match crate::config::Config::load() {
+                Ok(config) => {
+                    match crate::brain::provider::create_provider_by_name(&config, &provider).await
+                    {
+                        Ok(rebuilt) => {
+                            service.swap_provider_for_session(session_id, rebuilt, model);
+                            tracing::info!(
+                                "[ProviderSwitched] rebuilt pinned provider for session {session_id} → {provider}"
+                            );
+                        }
+                        Err(e) => errors.push(format!("rebuild provider {provider}: {e}")),
+                    }
+                }
+                Err(e) => errors.push(format!("rebuild provider {provider}: config: {e}")),
+            }
+        }
+        Ok(errors)
+    }
+}
+
 /// How many sessions a scope-all pick of `pair` would change (#3035). A read:
 /// the switch itself still goes through [`SwitchModel`]. A pair without a `/`
 /// or a count that fails answers 0, as the window always did.
@@ -703,6 +772,7 @@ ops! {
     SessionFiles,
     PlanPath,
     SwitchModel,
+    PinFallbackProvider,
     ScopeCount,
     UndoLastTurn,
     RecordTurnStopped,
@@ -1057,6 +1127,37 @@ mod tests {
                 gateway,
                 ScopeCount {
                     pair: "p/new".into()
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn pin_fallback_provider_has_parity() {
+            let gateway = booted().await;
+            let chat = session(&gateway).await;
+            let answer = parity!(
+                gateway,
+                PinFallbackProvider {
+                    session_id: chat.id,
+                    provider: "no-such-provider".into(),
+                    model: "no-such-model".into(),
+                }
+            );
+            assert!(answer["Ok"].is_array(), "{answer}");
+            let db = gateway.ctx.db().await.expect("db");
+            let row = SessionRepository::new(db.pool().clone())
+                .find_by_id(chat.id)
+                .await
+                .expect("read back")
+                .expect("the row is still there");
+            assert_eq!(row.provider_name.as_deref(), Some("no-such-provider"));
+            assert_eq!(row.model.as_deref(), Some("no-such-model"));
+            forbidden!(
+                gateway,
+                PinFallbackProvider {
+                    session_id: chat.id,
+                    provider: "other".into(),
+                    model: "other".into(),
                 }
             );
         }

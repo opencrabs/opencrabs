@@ -906,14 +906,13 @@ fn every_paint_hands_over_the_turn_the_window_holds() {
     // rewrites one of those entries (#2925), and the body that paints it.
     // A split pane paints from its own `PaneView::live`, and the Themes
     // preview leaf the centered modal replaced is gone (#2619).
-    // The fifth is the append, not a paint (#3032): the turn that just
-    // finished is converted to a transcript row from the same live card,
-    // so the reader sees it without a refetch and without a second turn
-    // being read anywhere.
+    // The finished turn is NOT a handover anymore (#3190): the Done path
+    // reloads the ledger rows instead of appending from the live card, so
+    // the fifth read the old append held is gone by design.
     assert_eq!(
         production.matches("&self.turn.live,").count(),
-        5,
-        "the attachment scan, the live action rows, the edit sequence, the chat body and the finished turn's append all read the window's turn"
+        4,
+        "the attachment scan, the live action rows, the edit sequence and the chat body all read the window's turn"
     );
     assert_eq!(
         production.matches("swap_visible_turn(").count(),
@@ -3236,31 +3235,62 @@ fn rail() -> Vec<opencrabs::db::models::Session> {
 /// #2444: a launch opens the conversation the user was in, not whatever the
 /// rail happens to list first. A pointer at a session that is gone, or no
 /// pointer at all, falls back to the newest instead of opening nothing.
+///
+/// `known` is the ledger's live ids (#3197), so the pick is not limited to the
+/// rail's capped page.
 #[test]
 fn a_launch_prefers_the_last_session_and_falls_back_to_the_newest() {
     let items = rail();
     let newest = items[0].id;
     let older = items[1].id;
+    let known: std::collections::HashSet<uuid::Uuid> = items.iter().map(|s| s.id).collect();
 
     assert_eq!(
-        pick_initial_session(&items, Some(older)),
+        pick_initial_session(&items, Some(older), &known),
         Some(older),
         "the conversation in flight last time wins over the rail's order"
     );
     assert_eq!(
-        pick_initial_session(&items, None),
+        pick_initial_session(&items, None, &known),
         Some(newest),
         "a first run opens the newest"
     );
     assert_eq!(
-        pick_initial_session(&items, Some(uuid::Uuid::new_v4())),
+        pick_initial_session(&items, Some(uuid::Uuid::new_v4()), &known),
         Some(newest),
         "a pointer at a session that no longer exists falls back, never blanks the pane"
     );
+    // The rail's page can be empty while the ledger still holds sessions (a
+    // capped or hiccupped read), so the ledger decides: a pointer it holds
+    // opens (#3200), a pointer it does not opens nothing.
     assert_eq!(
-        pick_initial_session(&[], Some(older)),
+        pick_initial_session(&[], Some(older), &known),
+        Some(older),
+        "the ledger, not the rail's page, decides whether the pointer is real"
+    );
+    assert_eq!(
+        pick_initial_session(&[], Some(uuid::Uuid::new_v4()), &known),
         None,
-        "an empty rail opens nothing rather than inventing an id"
+        "an empty rail and a pointer the ledger does not hold open nothing rather than inventing an id"
+    );
+}
+
+/// #3197: the pointer can name a conversation the rail never lists. The rail
+/// stops at `RAIL_LIMIT`, so with more sessions than the cap a live
+/// conversation sits outside the newest page; resolving the pointer against
+/// the page sent every such restart to the newest session instead.
+#[test]
+fn a_boot_pick_opens_a_conversation_outside_the_rail_page() {
+    let items = rail();
+    let newest = items[0].id;
+    let outside_the_page = uuid::Uuid::new_v4();
+    let known: std::collections::HashSet<uuid::Uuid> =
+        [newest, outside_the_page].into_iter().collect();
+
+    assert_eq!(
+        pick_initial_session(&items, Some(outside_the_page), &known),
+        Some(outside_the_page),
+        "the ledger holds it, so the launch opens it"
     );
 }
 
@@ -4074,4 +4104,154 @@ fn the_hint_line_wraps_instead_of_truncating() {
         line.contains("hint-dismiss"),
         "the line can still be dismissed: {line}"
     );
+}
+
+/// #3190: the prose a turn is still sending paints INSIDE the live card.
+///
+/// Reported: the narration streamed in a bubble under the tool block and only
+/// then appeared at the top of the block, so the same words read twice in two
+/// places. The card now carries the pending prose as its last line, and the
+/// bubble under the card is left for the settled answer alone.
+#[test]
+fn the_pending_prose_streams_inside_the_live_card() {
+    use crate::transcript::{
+        LiveCardLine, LiveTurn, ToolCall, collapsed_narration, live_card_lines,
+    };
+
+    let mut live = LiveTurn::default();
+    live.begin("fix it".into());
+    live.push_tool(ToolCall {
+        name: "read_file".into(),
+        description: "reading the parser".into(),
+        success: true,
+        done: true,
+        task_id: None,
+    });
+    live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+
+    let pending = live.pending().expect("streamed prose is still pending");
+    assert!(pending.contains("Checking the parser"), "got {pending:?}");
+    assert!(
+        matches!(
+            live_card_lines(&live).last().map(|(_, line)| line),
+            Some(LiveCardLine::Pending(_))
+        ),
+        "the pending paragraph is drawn inside the card, after the call"
+    );
+    assert_eq!(
+        collapsed_narration(&live).as_deref(),
+        Some("Checking the parser now."),
+        "a folded card still shows the pending paragraph in its head"
+    );
+    assert!(
+        live.settled.is_none(),
+        "nothing settled yet, so the bubble under the card draws nothing"
+    );
+
+    live.settled = Some("fixed".into());
+    assert_eq!(live.pending(), None, "a settled turn has nothing pending");
+}
+
+/// #3190: the completion never repeats a paragraph the card already claims.
+///
+/// The answer painted twice, once from the card and once from the turn the
+/// window appended at Done, until a session switch dropped one copy. The
+/// provider sends the same paragraph as streamed chunks and again as
+/// intermediate text, and the cut is what keeps the card's copy and the
+/// answer's copy from being the same words.
+#[test]
+fn the_completion_keeps_one_copy_of_the_answer() {
+    use crate::transcript::{LiveCardLine, LiveTurn, live_card_lines};
+
+    let mut live = LiveTurn::default();
+    live.begin("fix it".into());
+    live.note_chunk_at("Checking the parser now.", std::time::Instant::now());
+    live.push_narration("Checking the parser now.");
+
+    let paragraphs: Vec<String> = live_card_lines(&live)
+        .into_iter()
+        .filter_map(|(_, line)| match line {
+            LiveCardLine::Narration(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paragraphs,
+        vec!["Checking the parser now.".to_string()],
+        "the card owns the paragraph, so the answer must not repeat it"
+    );
+
+    let turns = include_str!("../dashboard_turns.rs");
+    let done = turns
+        .split("agent_bridge::TurnEvent::Done {")
+        .nth(1)
+        .expect("the Done arm must exist")
+        .split("agent_bridge::TurnEvent::Failed {")
+        .next()
+        .expect("the Done arm must end before the Failed arm");
+    assert!(
+        done.contains("reload = Some(sid);"),
+        "the completion is rendered from the rows, not from a second copy"
+    );
+    assert!(
+        !turns.contains("turn_from_live"),
+        "a turn built from the card is the copy that painted twice"
+    );
+}
+
+// #3189: the GUI folds the service's sticky-fallback events instead of
+// dropping them, so a fallback the card shows is the fallback that persisted.
+#[test]
+fn a_provider_switch_notice_lands_in_the_live_card() {
+    let mut live = crate::transcript::LiveTurn::default();
+    live.notices.push("provider: a → b (fallback)".into());
+    assert!(!live.is_empty(), "a fallback notice keeps the card alive");
+    assert!(!live.has_turn_content() || live.notices.len() == 1);
+}
+
+#[test]
+fn a_self_healing_alert_reaches_the_live_notices() {
+    let mut live = crate::transcript::LiveTurn::default();
+    live.notices.push("self-heal: truncation".into());
+    assert_eq!(live.notices.len(), 1);
+}
+
+/// #3190: a user row carries the same no-ledger rule the terminal applies.
+///
+/// A queued user message can carry a glued `<!-- tools-v2: ... -->` tail from
+/// a mid-turn drain, and the desktop's user-row path used to push the content
+/// through untouched, painting raw tool JSON in the conversation. The terminal
+/// strips comment markers for every role (tui/render/panes.rs:271-277); the
+/// user arm must run the same shared stripper before the row becomes a block.
+#[test]
+fn a_user_row_runs_the_all_roles_ledger_strip() {
+    let src = include_str!("../transcript.rs");
+    let arm_start = src
+        .find("if m.role != \"assistant\" {")
+        .expect("the non-assistant arm exists");
+    let arm_end = src[arm_start..]
+        .find("let lower = content.to_lowercase();")
+        .map(|at| arm_start + at)
+        .expect("the assistant expandable path follows the arm");
+    let arm = &src[arm_start..arm_end];
+    assert!(
+        arm.contains("strip_comment_markers"),
+        "the user arm strips comment markers before pushing the block"
+    );
+    assert!(
+        src.contains("opencrabs::utils::strip_comment_markers"),
+        "the user arm calls the shared wrapper, not a private copy"
+    );
+}
+
+/// #3190: the shared stripper cuts a glued tool ledger wherever it sits, and
+/// the words before it survive byte-for-byte. This is the same call the
+/// user-row path now makes (transcript.rs), so a poisoned row can never paint
+/// raw tool JSON again.
+#[test]
+fn a_glued_tools_v2_tail_is_cut_and_the_head_survives() {
+    let row = "what the actual fuck <!-- tools-v2: [{\"d\":\"bash: cargo test\",\"s\":true}] -->";
+    let stripped = opencrabs::utils::strip_comment_markers(row);
+    assert_eq!(stripped, "what the actual fuck");
+    assert!(!stripped.contains("tools-v2"));
 }

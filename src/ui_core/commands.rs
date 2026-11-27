@@ -395,17 +395,32 @@ fn completions_from(
     draft: &str,
     commands: impl Iterator<Item = &'static SlashCommand>,
 ) -> Vec<&'static str> {
-    // Leading space is indentation the user cannot see, so it is trimmed. A
-    // space anywhere after the slash is the argument boundary, and a name list
-    // there is noise: `/usage ` is finished, `/us` is not.
-    let word = draft.trim_start();
-    if !word.starts_with('/') || word.chars().any(char::is_whitespace) {
+    let Some(word) = command_word(draft) else {
         return Vec::new();
-    }
+    };
     commands
         .map(|cmd| cmd.name)
         .filter(|name| name.starts_with(word))
         .collect()
+}
+
+/// The command word a draft is still spelling, or `None` once the draft is not
+/// one.
+///
+/// Leading space is indentation the user cannot see, so it is trimmed. A space
+/// anywhere after the slash is the argument boundary, and a name list there is
+/// noise: `/usage ` is finished, `/us` is not.
+///
+/// Shared with the window's composer, which completes the same word against
+/// the runtime skills and user commands the static table does not carry
+/// (#3199). Two spellings of this rule would let one surface offer a name the
+/// other has already stopped matching.
+pub fn command_word(draft: &str) -> Option<&str> {
+    let word = draft.trim_start();
+    if !word.starts_with('/') || word.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(word)
 }
 
 /// A description cut to a column budget, never mid-character.

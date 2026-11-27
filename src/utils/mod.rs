@@ -60,7 +60,9 @@ pub use internal_message::{
 };
 pub use prompt_analyzer::PromptAnalyzer;
 pub use retry::{RetryConfig, RetryableError, retry, retry_with_check};
-pub use sanitize::{redact_secrets, redact_secrets_scoped, redact_tool_input};
+pub use sanitize::{
+    redact_secrets, redact_secrets_scoped, redact_tool_input, strip_comment_markers,
+};
 pub use string::{
     format_ctx_footer, prefix_before_last_char, strip_ctx_footer, truncate_chars, truncate_str,
     truncate_str_tail,

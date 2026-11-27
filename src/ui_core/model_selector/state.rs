@@ -200,7 +200,7 @@ pub const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         id: "opencrabs",
         name: "OpenCrabs",
-        models: &["deepseek-v4.1-flash"],
+        models: &["combo"],
         key_label: "",
         help_lines: &[
             "Built in: no account or key needed",

@@ -157,7 +157,12 @@ impl CrabWindows {
 /// Whether a snapshot holds anything worth restoring. A tree, a frame and a
 /// recorded rail are each enough on their own; an empty file is not.
 fn holds_something(saved: &SavedLayout) -> bool {
-    saved.panes.is_some() || saved.window.is_some() || saved.rail_open.is_some()
+    saved.panes.is_some()
+        || saved.window.is_some()
+        || saved.rail_open.is_some()
+        // The chat alone is worth restoring: a window with one pane writes no
+        // tree, and that chat is what the next launch has to open (#3197).
+        || saved.chat.is_some()
 }
 
 /// Read a snapshot. `None` when the file is absent, corrupt, from another
@@ -208,7 +213,9 @@ pub fn save(
     rail_open: bool,
 ) {
     let split = panes.is_some_and(|tree| tree.leaves().len() > 1);
-    if !split && window.is_none() && rail_open {
+    // A file that names the chat is worth keeping even with no tree, no frame
+    // and an open rail: the chat is what the next launch opens (#3197).
+    if !split && window.is_none() && rail_open && chat.is_none() {
         discard(path);
         return;
     }
@@ -234,8 +241,19 @@ pub fn save(
 /// tree can agree with it. Then the caret leaf, for files written before the
 /// chat was recorded. Then the first leaf the ledger still holds. `None` when
 /// no leaf survives, and the launch falls back to its normal pick.
+///
+/// A window with no split writes no tree (#2675): one pane is the plain chat.
+/// The chat field is written on every switch either way, so it still names the
+/// conversation the window was showing, and returning early on the missing
+/// tree is what sent every single-pane restart to the shared pointer (#3197).
 pub fn boot_session(saved: &SavedLayout, known: &HashSet<Uuid>) -> Option<Uuid> {
-    let leaves = saved.panes.as_ref()?.leaves();
+    let Some(tree) = saved.panes.as_ref() else {
+        return [saved.chat, saved.focus]
+            .into_iter()
+            .flatten()
+            .find(|id| known.contains(id));
+    };
+    let leaves = tree.leaves();
     for id in [saved.chat, saved.focus].into_iter().flatten() {
         if leaves.contains(&id) && known.contains(&id) {
             return Some(id);
@@ -389,7 +407,18 @@ mod tests {
             None,
             true,
         );
-        assert!(!file.exists(), "back to one pane removes it");
+        assert!(
+            file.exists(),
+            "one pane writes no tree, but the chat it was showing is kept (#3197)"
+        );
+        let saved = load(&file).expect("the file reads back");
+        assert!(saved.panes.is_none(), "no tree for a single pane");
+        assert_eq!(saved.chat, Some(left), "the conversation survives");
+        save(&file, None, None, None, None, true);
+        assert!(
+            !file.exists(),
+            "nothing to restore at all: no tree, no chat, no frame, rail open"
+        );
     }
 
     #[test]

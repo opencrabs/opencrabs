@@ -11,18 +11,24 @@
 //! The plan file archives at settle, so the live strip goes away at the same
 //! moment. Without the row the plan left the screen entirely.
 //!
+//! #3190 removed the append altogether: the finished turn is read back from the
+//! rows, so the checklist rides in on the `plan_completed` row that the ledger
+//! writes before the tool loop hands the turn over.
+//!
 //! GPUI has no headless render harness here, so these are source pins, the same
 //! shape as `gui_turn_append_3032_test.rs`: they hold the route the record
 //! takes, not the paint.
 
 const BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
-const TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
+const LEDGER: &str = include_str!("../services/message.rs");
 
-/// The settle event carries the row. Without the field the window has no way
-/// to learn that this turn finished a plan.
+/// #3142 first carried the checklist on the settle event. #3190 removed that
+/// copy: the row is in the ledger before the turn settles, and the reload reads
+/// it back, so a second channel on the event is the duplication bug again.
+/// These pins hold the removal in place.
 #[test]
-fn the_settle_event_carries_the_completed_plan_row() {
+fn the_settle_event_carries_no_completed_plan_copy() {
     let done = BRIDGE
         .split("pub enum TurnEvent {")
         .nth(1)
@@ -31,57 +37,53 @@ fn the_settle_event_carries_the_completed_plan_row() {
         .next()
         .expect("the Done arm must end before the Failed arm");
     assert!(
-        done.contains("completed_plan: Option<Box<opencrabs::db::models::Message>>,"),
-        "Done must carry the checklist row the tool loop handed back"
+        !done.contains("completed_plan"),
+        "Done must not carry a checklist copy: the ledger row is the only one"
     );
 }
 
-/// Both places that report a finished turn fill the field from the response.
-/// A resumed turn re-runs a parked prompt, so it settles through the second
-/// site, and a field filled at one site only would leave that turn empty.
+/// Both places that report a finished turn fill no field from the response.
+/// The checklist reaches the screen through the reload of the row the ledger
+/// writes at settle, on the sent turn and the resumed turn alike.
 #[test]
-fn both_settle_sites_fill_the_field_from_the_response() {
-    let filled = BRIDGE
-        .matches("completed_plan: response.completed_plan.map(Box::new),")
-        .count();
+fn no_settle_site_copies_the_checklist_from_the_response() {
+    let filled = BRIDGE.matches("completed_plan").count();
     assert_eq!(
-        filled, 2,
-        "the sent turn and the resumed turn both report their own checklist"
+        filled, 0,
+        "agent_bridge must not route the checklist outside the ledger row"
     );
 }
 
-/// The append puts the block on the turn. The card is built by one function,
-/// shared with the reload path, so the two paths cannot drift apart.
+/// The checklist is a row, and the reload is what reads it. The row is written
+/// to the ledger before the turn settles, so the read that draws the answer
+/// finds the card in the same window.
 #[test]
-fn the_append_pushes_the_card_onto_the_finished_turn() {
+fn the_checklist_is_written_to_the_ledger_before_the_turn_settles() {
     assert!(
-        TURNS.contains(".and_then(transcript::completed_plan_block)"),
-        "the Done arm must decode the row it was handed"
+        LEDGER.contains("PLAN_COMPLETED_ROLE"),
+        "the ledger must be able to record a finished checklist"
     );
-    assert!(
-        TURNS.contains("turn.blocks.push(block);"),
-        "the decoded card must join the turn before it goes on the list"
-    );
-    let append = TURNS
-        .split("match transcript::turn_from_live(&self.turn.live, None) {")
+    let rows = TRANSCRIPT
+        .split("fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {")
         .nth(1)
-        .expect("the append must build from the card that painted the turn");
-    let push = append
-        .find("turn.blocks.push(block);")
-        .expect("the card must be pushed");
-    let listed = append
-        .find("self.chat_state.transcript.turns.push(turn);")
-        .expect("the turn must go on the list");
+        .expect("the row expander must exist");
+    let role_arm = rows
+        .split("if m.role == PLAN_COMPLETED_ROLE {")
+        .nth(1)
+        .expect("the expander must have a checklist arm")
+        .split("return blocks;")
+        .next()
+        .expect("the arm must return");
     assert!(
-        push < listed,
-        "the card has to be on the turn before the turn is listed"
+        role_arm.contains("completed_plan_block(m)"),
+        "the reload must decode the row through the shared function"
     );
 }
 
-/// One decoder, two callers. The reload path reads the same row, so a second
-/// copy of the decode is how the two paths would come to disagree.
+/// One decoder. A second copy of the decode is how the two paths would come to
+/// disagree, and the append that used to carry its own is gone (#3190).
 #[test]
-fn the_reload_path_and_the_append_path_share_one_decoder() {
+fn one_decoder_serves_the_reload() {
     let decoder = TRANSCRIPT
         .split("pub fn completed_plan_block(message: &Message) -> Option<Block> {")
         .nth(1)
@@ -98,24 +100,9 @@ fn the_reload_path_and_the_append_path_share_one_decoder() {
         decoder.contains("CompletedPlanPayload::from_message(message)?"),
         "a malformed row must decode to nothing rather than paint raw JSON"
     );
-
-    let rows = TRANSCRIPT
-        .split("fn row_blocks(m: &Message, forward: Option<ForwardMark>) -> Vec<Block> {")
-        .nth(1)
-        .expect("the row expander must exist");
-    let role_arm = rows
-        .split("if m.role == PLAN_COMPLETED_ROLE {")
-        .nth(1)
-        .expect("the expander must have a checklist arm")
-        .split("return blocks;")
-        .next()
-        .expect("the arm must return");
+    let decode_calls = TRANSCRIPT.matches("completed_plan_block(m)").count();
     assert!(
-        role_arm.contains("completed_plan_block(m)"),
-        "the reload must decode through the shared function"
-    );
-    assert!(
-        !role_arm.contains("CompletedPlanView::new"),
-        "a second decode in the expander is how the two paths drift"
+        decode_calls >= 1,
+        "the reload has to call the decoder it keeps"
     );
 }
