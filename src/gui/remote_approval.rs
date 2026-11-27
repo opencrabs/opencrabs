@@ -33,8 +33,9 @@ use crate::agent_bridge::TurnEvent;
 use crate::dashboard_state::Dashboard;
 use crate::{palette, transcript};
 
-/// The longest args line the card prints, in characters.
-pub(crate) const SUMMARY_CHARS: usize = 160;
+/// The most of a tool's input the card prints, in characters. Past it the
+/// card says how much it left out, so nothing is hidden without a word.
+pub(crate) const INPUT_CHARS: usize = 4000;
 
 /// One tool waiting for a yes or a no on a remote crab.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,8 +44,8 @@ pub(crate) struct PendingApproval {
     pub(crate) request_id: Uuid,
     /// The tool that wants to run.
     pub(crate) tool_name: String,
-    /// One line of what the model gave the tool.
-    pub(crate) summary: String,
+    /// Everything the model gave the tool, as the card prints it.
+    pub(crate) input: String,
     /// When the crab stops waiting and denies the tool. The event carries no
     /// deadline, so it is the crab's own wait counted from the moment the
     /// request reached this window.
@@ -73,7 +74,7 @@ pub(crate) fn from_event(event: &Event, now: Instant) -> Option<(Uuid, PendingAp
         PendingApproval {
             request_id: *request_id,
             tool_name: tool_name.clone(),
-            summary: summarize(tool_input),
+            input: describe(tool_input),
             deadline: now + APPROVAL_TIMEOUT,
             sending: false,
             refusal: None,
@@ -81,37 +82,24 @@ pub(crate) fn from_event(event: &Event, now: Instant) -> Option<(Uuid, PendingAp
     ))
 }
 
-/// One line of a tool's input: the field that says what the call does when
-/// there is one (a command, a path, a url, a query), the compact JSON
-/// otherwise, cut at [`SUMMARY_CHARS`] on a character boundary.
-pub(crate) fn summarize(input: &Value) -> String {
-    const TELLING: &[&str] = &[
-        "command",
-        "cmd",
-        "path",
-        "file_path",
-        "url",
-        "query",
-        "pattern",
-    ];
-    let telling = input.as_object().and_then(|map| {
-        TELLING
-            .iter()
-            .find_map(|key| map.get(*key).and_then(Value::as_str))
-    });
-    let raw = match telling {
-        Some(text) => text.to_string(),
-        None if input.is_null() => String::new(),
-        None => input.to_string(),
-    };
-    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = flat.chars();
-    let short: String = chars.by_ref().take(SUMMARY_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{short}…")
-    } else {
-        short
+/// A tool's whole input as the card prints it: every field, pretty JSON, so
+/// a newline inside a command reads as `\n` and no field can hide behind
+/// another. Cut at [`INPUT_CHARS`] on a character boundary, with a line
+/// saying how many characters were left out.
+pub(crate) fn describe(input: &Value) -> String {
+    if input.is_null() {
+        return String::new();
     }
+    let full = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+    let total = full.chars().count();
+    if total <= INPUT_CHARS {
+        return full;
+    }
+    let kept: String = full.chars().take(INPUT_CHARS).collect();
+    format!(
+        "{kept}\n[{} more characters not shown]",
+        total - INPUT_CHARS
+    )
 }
 
 /// The session a settle of the turn in `event` ends, if it is one: a finished,
@@ -273,7 +261,7 @@ pub(crate) struct CardActions {
     pub(crate) deny: transcript::ClickHandler,
 }
 
-/// The card: the tool, its args, the time left, and Approve, Allow for this
+/// The card: the tool, its whole input, the time left, and Approve, Allow for this
 /// turn and Deny. While an answer is on its way the buttons give way to a
 /// line saying so; a refusal is printed above them.
 pub(crate) fn card(
@@ -305,12 +293,14 @@ pub(crate) fn card(
                 .text_color(rgb(p.text_normal))
                 .child(SharedString::from(title)),
         );
-    if !approval.summary.is_empty() {
+    if !approval.input.is_empty() {
         col = col.child(
             div()
+                .w_full()
+                .min_w_0()
                 .text_xs()
                 .text_color(rgb(p.text_muted))
-                .child(SharedString::from(approval.summary.clone())),
+                .child(SharedString::from(approval.input.clone())),
         );
     }
     if more > 0 {

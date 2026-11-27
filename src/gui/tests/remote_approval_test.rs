@@ -18,8 +18,8 @@ use crate::agent_bridge::TurnEvent;
 use crate::backend_glue::Backend;
 use crate::backend_remote::{refreshes_cache, to_turn_event};
 use crate::remote_approval::{
-    Approvals, PendingApproval, SUMMARY_CHARS, Settled, ends_turn, from_event, settled_event,
-    summarize,
+    Approvals, INPUT_CHARS, PendingApproval, Settled, describe, ends_turn, from_event,
+    settled_event,
 };
 
 /// How many kinds `Event` has. [`ordinal`] has no wildcard, so a new kind
@@ -139,7 +139,11 @@ fn an_approval_request_becomes_a_card_for_its_session() {
             assert_eq!(got, session);
             assert_eq!(approval.request_id, request);
             assert_eq!(approval.tool_name, "bash");
-            assert_eq!(approval.summary, "ls -la /tmp");
+            assert_eq!(
+                approval.input,
+                serde_json::to_string_pretty(&serde_json::json!({"command": "ls -la /tmp"}))
+                    .expect("encode")
+            );
             assert!(!approval.sending);
             assert!(approval.refusal.is_none());
             assert!(approval.deadline >= before + APPROVAL_TIMEOUT);
@@ -158,26 +162,56 @@ fn no_other_event_is_read_as_an_approval() {
     }
 }
 
+/// The card shows every field of the input, not one picked by name: a call
+/// whose `command` looks harmless cannot hide what another field does.
 #[test]
-fn the_args_line_is_short_and_one_line() {
-    assert_eq!(summarize(&serde_json::json!({"path": "a/b.rs"})), "a/b.rs");
-    assert_eq!(summarize(&serde_json::Value::Null), "");
-    assert_eq!(
-        summarize(&serde_json::json!({"command": "echo a\n  echo b"})),
-        "echo a echo b"
+fn the_card_shows_every_field_of_the_input() {
+    let input = serde_json::json!({
+        "command": "ls",
+        "path": "/etc",
+        "env": {"LD_PRELOAD": "/tmp/x.so"},
+    });
+    let shown = describe(&input);
+    for part in [
+        "\"command\"",
+        "\"ls\"",
+        "\"path\"",
+        "/etc",
+        "LD_PRELOAD",
+        "/tmp/x.so",
+    ] {
+        assert!(shown.contains(part), "{part} missing from {shown}");
+    }
+    assert_eq!(describe(&serde_json::Value::Null), "");
+}
+
+/// A newline inside a command stays visible as an escape instead of being
+/// folded into a space that reads as one harmless line.
+#[test]
+fn a_newline_in_the_input_is_not_folded_away() {
+    let shown = describe(&serde_json::json!({"command": "echo a\nrm -rf ~"}));
+    assert!(shown.contains("echo a\\nrm -rf ~"), "{shown}");
+}
+
+/// A cut is said out loud, with how much was left out.
+#[test]
+fn a_cut_input_says_how_much_it_left_out() {
+    let long = "é".repeat(INPUT_CHARS + 10);
+    let shown = describe(&serde_json::json!({ "command": long }));
+    let full =
+        serde_json::to_string_pretty(&serde_json::json!({ "command": long })).expect("encode");
+    let left = full.chars().count() - INPUT_CHARS;
+    assert!(
+        shown.ends_with(&format!("\n[{left} more characters not shown]")),
+        "{shown}"
     );
-    assert_eq!(summarize(&serde_json::json!({"n": 1})), r#"{"n":1}"#);
-    let long = "é".repeat(SUMMARY_CHARS + 10);
-    let cut = summarize(&serde_json::json!({ "command": long }));
-    assert_eq!(cut.chars().count(), SUMMARY_CHARS + 1);
-    assert!(cut.ends_with('…'));
 }
 
 fn pending(request_id: Uuid, now: Instant) -> PendingApproval {
     PendingApproval {
         request_id,
         tool_name: "bash".into(),
-        summary: "ls".into(),
+        input: "{}".into(),
         deadline: now + APPROVAL_TIMEOUT,
         sending: false,
         refusal: None,
