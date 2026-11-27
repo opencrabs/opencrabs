@@ -8,9 +8,9 @@ use crate::brain::agent::service::ProgressEvent;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, TaskSource, claude_completion_message,
-    claude_needs_survival_delivery, claude_task_label, claude_task_output,
+    claude_needs_survival_delivery, claude_task_label, claude_task_output, claude_task_output_in,
     clear_claude_mirrors_for_session, completion_message, format_elapsed, output_tail, short_label,
-    tail_lines,
+    tail_lines, transcript_line,
 };
 // `run_detached`'s tests drive shell job control (`&`), so they are unix-only.
 #[cfg(unix)]
@@ -911,6 +911,101 @@ fn a_claude_task_output_reached_through_a_link_is_refused() {
     // A directory named like an output file is not one.
     std::fs::create_dir_all(tasks.join("folder.output")).expect("dir as file");
     assert_eq!(claude_task_output(temp.path(), "folder"), None);
+}
+
+/// A task the `Agent` tool spawned has no output file: the CLI makes
+/// `tasks/<id>.output` a link to the sub-agent's transcript in its projects
+/// tree. The card used to say "no output available" for every such task.
+/// The transcript is found by rebuilding its path from the slug and session,
+/// never by following the link.
+#[cfg(unix)]
+#[test]
+fn a_sub_agent_task_output_is_its_transcript_in_the_projects_tree() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let projects = tempfile::tempdir().expect("projects dir");
+    let slug = "-home-someone-project";
+    let sid = "5e331c58-6637-48c0-b830-9e4856dbb80a";
+    let agents = projects.path().join(slug).join(sid).join("subagents");
+    std::fs::create_dir_all(&agents).expect("subagents dir");
+    let transcript = agents.join("agent-abc1860b5ed86cfc0.jsonl");
+    std::fs::write(&transcript, "{}\n").expect("write transcript");
+    let tasks = temp.path().join("claude-1000").join(slug).join(sid).join("tasks");
+    std::fs::create_dir_all(&tasks).expect("task dir");
+    std::os::unix::fs::symlink(&transcript, tasks.join("abc1860b5ed86cfc0.output"))
+        .expect("link like the CLI does");
+
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(projects.path()), "abc1860b5ed86cfc0"),
+        Some(transcript)
+    );
+    // Without the projects tree the link is refused, as it always was.
+    assert_eq!(claude_task_output(temp.path(), "abc1860b5ed86cfc0"), None);
+}
+
+/// The projects tree does not open a door around the link guard: a planted
+/// link whose rebuilt transcript does not exist is still nothing, whatever
+/// the link itself points at.
+#[cfg(unix)]
+#[test]
+fn a_planted_link_without_a_real_transcript_is_still_refused() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let projects = tempfile::tempdir().expect("projects dir");
+    let secret = temp.path().join("secret.txt");
+    std::fs::write(&secret, "token\n").expect("write secret");
+    let tasks = temp.path().join("claude-1000").join("cwd").join("session").join("tasks");
+    std::fs::create_dir_all(&tasks).expect("task dir");
+    std::os::unix::fs::symlink(&secret, tasks.join("linked.output")).expect("link file");
+
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(projects.path()), "linked"),
+        None
+    );
+
+    // A transcript that is itself a link is not one either.
+    let agents = projects.path().join("cwd").join("session").join("subagents");
+    std::fs::create_dir_all(&agents).expect("subagents dir");
+    std::os::unix::fs::symlink(&secret, agents.join("agent-linked.jsonl")).expect("link");
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(projects.path()), "linked"),
+        None
+    );
+}
+
+#[test]
+fn a_transcript_record_reads_as_what_the_agent_does() {
+    let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Merge done."}]}}"#;
+    assert_eq!(transcript_line(text).as_deref(), Some("Merge done."));
+
+    let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status\ngit log"}}]}}"#;
+    assert_eq!(transcript_line(tool).as_deref(), Some("> Bash: git status"));
+
+    let described = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"x","description":"Show status"}}]}}"#;
+    assert_eq!(transcript_line(described).as_deref(), Some("> Bash: Show status"));
+
+    for quiet in [
+        r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"secret dump"}]}}"#,
+        r#"{"type":"api-request"}"#,
+        "not json",
+    ] {
+        assert_eq!(transcript_line(quiet), None, "{quiet}");
+    }
+}
+
+#[test]
+fn a_transcript_tail_is_drawn_as_lines_not_json() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent-x.jsonl");
+    let body = [
+        r#"{"type":"user","message":{"content":"brief"}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a/b.rs"}}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"fn main"}]}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looks fine."}]}}"#,
+    ]
+    .join("\n");
+    std::fs::write(&path, body).expect("write transcript");
+
+    assert_eq!(output_tail(&path, 8), "> Read: /a/b.rs\nLooks fine.");
 }
 
 #[test]
