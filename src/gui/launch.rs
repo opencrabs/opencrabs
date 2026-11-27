@@ -6,17 +6,22 @@
 
 use super::*;
 
-/// The conversation a launch opens: the one the user was in last time when it
-/// is still on the rail, else the newest. Pure, so the choice is testable
+/// The conversation a launch opens: the one the user was in last time when the
+/// ledger still holds it, else the newest. Pure, so the choice is testable
 /// without a window. A pointer at a session that was deleted (or a first run
 /// with no pointer at all) falls back to the rail's order, which is newest
 /// first (#2444).
+///
+/// `known` is every live id in the ledger, not the rail's page: the rail is
+/// capped, so a conversation outside the newest page is still real and must
+/// open instead of the newest (#3197).
 pub(crate) fn pick_initial_session(
     items: &[opencrabs::db::models::Session],
     last: Option<Uuid>,
+    known: &std::collections::HashSet<Uuid>,
 ) -> Option<Uuid> {
     match last {
-        Some(id) if items.iter().any(|s| s.id == id) => Some(id),
+        Some(id) if known.contains(&id) => Some(id),
         _ => items.first().map(|s| s.id),
     }
 }

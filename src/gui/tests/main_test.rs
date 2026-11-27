@@ -3235,31 +3235,54 @@ fn rail() -> Vec<opencrabs::db::models::Session> {
 /// #2444: a launch opens the conversation the user was in, not whatever the
 /// rail happens to list first. A pointer at a session that is gone, or no
 /// pointer at all, falls back to the newest instead of opening nothing.
+///
+/// `known` is the ledger's live ids (#3197), so the pick is not limited to the
+/// rail's capped page.
 #[test]
 fn a_launch_prefers_the_last_session_and_falls_back_to_the_newest() {
     let items = rail();
     let newest = items[0].id;
     let older = items[1].id;
+    let known: std::collections::HashSet<uuid::Uuid> = items.iter().map(|s| s.id).collect();
 
     assert_eq!(
-        pick_initial_session(&items, Some(older)),
+        pick_initial_session(&items, Some(older), &known),
         Some(older),
         "the conversation in flight last time wins over the rail's order"
     );
     assert_eq!(
-        pick_initial_session(&items, None),
+        pick_initial_session(&items, None, &known),
         Some(newest),
         "a first run opens the newest"
     );
     assert_eq!(
-        pick_initial_session(&items, Some(uuid::Uuid::new_v4())),
+        pick_initial_session(&items, Some(uuid::Uuid::new_v4()), &known),
         Some(newest),
         "a pointer at a session that no longer exists falls back, never blanks the pane"
     );
     assert_eq!(
-        pick_initial_session(&[], Some(older)),
+        pick_initial_session(&[], Some(older), &known),
         None,
         "an empty rail opens nothing rather than inventing an id"
+    );
+}
+
+/// #3197: the pointer can name a conversation the rail never lists. The rail
+/// stops at `RAIL_LIMIT`, so with more sessions than the cap a live
+/// conversation sits outside the newest page; resolving the pointer against
+/// the page sent every such restart to the newest session instead.
+#[test]
+fn a_boot_pick_opens_a_conversation_outside_the_rail_page() {
+    let items = rail();
+    let newest = items[0].id;
+    let outside_the_page = uuid::Uuid::new_v4();
+    let known: std::collections::HashSet<uuid::Uuid> =
+        [newest, outside_the_page].into_iter().collect();
+
+    assert_eq!(
+        pick_initial_session(&items, Some(outside_the_page), &known),
+        Some(outside_the_page),
+        "the ledger holds it, so the launch opens it"
     );
 }
 

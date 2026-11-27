@@ -607,6 +607,46 @@ pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
 /// The hard cap so a long history cannot make the rail unbounded.
 const RAIL_LIMIT: usize = 200;
 
+/// Every session id the ledger still holds, for the launch's boot pick (#3197).
+///
+/// The rail is capped at [`RAIL_LIMIT`] rows, so it cannot answer "does this
+/// conversation still exist": with more sessions than the cap, the chat the
+/// layout recorded or the pointer the last surface wrote can sit outside the
+/// newest page, and the launch would treat a live conversation as deleted and
+/// open the newest instead. Existence gets its own read, same thread shape as
+/// [`load_sessions`].
+pub async fn load_live_session_ids(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
+    let spawned = std::thread::Builder::new()
+        .name("live-ids-fetch".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(rt) => rt
+                    .block_on(async {
+                        let db = Database::connect(&db_path).await?;
+                        let repo = SessionRepository::new(db.pool().clone());
+                        repo.live_ids().await
+                    })
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("tokio runtime failed: {e}")),
+            };
+            let _ = tx.send(result);
+        });
+    match spawned {
+        Ok(_) => match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("live session ids fetch thread dropped its result".into()),
+        },
+        Err(e) => Err(format!(
+            "live session ids fetch thread failed to spawn: {e}"
+        )),
+    }
+}
+
 /// Fetch the real session list on a thread with a real stack, same shape as
 /// `load_view` in `main.rs`: tokio current-thread runtime on a 4 MB thread,
 /// result over a oneshot. `Database::connect` runs pragmas only, never
