@@ -10,6 +10,9 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::remote::pairing::{GUEST_TTL_SECS, PairingStore, TOKEN_TTL_SECS, parse_ttl};
+use crate::remote::routes::{
+    AnnouncedRoute, collect_interfaces, reachable_through_bind, select_advertised_routes,
+};
 use crate::remote::scopes::{SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND};
 use crate::remote::tunnel::{self, TunnelSpec};
 
@@ -50,6 +53,7 @@ pub fn cmd_connect(
     stop: bool,
     list_sessions: bool,
     revoke: Option<&str>,
+    no_tunnel: bool,
 ) -> Result<()> {
     let state_dir = tunnel::default_state_dir();
     let store = PairingStore::new(PairingStore::default_path());
@@ -149,6 +153,31 @@ pub fn cmd_connect(
         None => TOKEN_TTL_SECS,
     };
 
+    // Direct addresses first: a lan or tailnet address the gateway is bound
+    // to survives a restart, a quick tunnel URL does not. Pairing at a fixed
+    // address is what saves the client from pasting a new URL every time
+    // cloudflared comes back up with another hostname.
+    let direct = direct_routes(&collect_interfaces(), &config.a2a.bind, port);
+
+    if no_tunnel {
+        if direct.is_empty() {
+            anyhow::bail!(
+                "--no-tunnel needs an address another machine can reach, and the gateway \
+                 is bound to '{}'. Bind [a2a].bind to a LAN or tailnet address (or 0.0.0.0), \
+                 or drop --no-tunnel to open a quick tunnel.",
+                config.a2a.bind
+            );
+        }
+        let code = store
+            .mint_code_with_ttl(&scope_list, session_ttl)
+            .context("mint pairing code")?;
+        println!("Pair at a fixed address (no tunnel started):");
+        print_direct(&direct);
+        println!();
+        print_code(&code, &scope_list, ttl, session_ttl);
+        return Ok(());
+    }
+
     // A running tunnel for THIS port is reused — `connect` means "make me
     // reachable and give me a code", not "start a second tunnel". A tunnel
     // bound to a different port is a conflict the caller must resolve.
@@ -192,25 +221,19 @@ pub fn cmd_connect(
 
     let url = state.url.trim_end_matches('/');
     println!();
+    if !direct.is_empty() {
+        println!("Pair at a fixed address when the other machine can reach it (preferred):");
+        print_direct(&direct);
+        println!();
+    }
     println!("✔ Tunnel up (pid {})", state.pid);
     // The recorded host, like `--status`: the arrow says where cloudflared
     // dials, and a literal here named loopback for a tunnel pointed at a
     // tailnet address (2026-11-21).
     println!("  URL:   {url}  →  {}:{port}", state.origin_host);
+    println!("  (a quick tunnel gets a new hostname every time it restarts)");
     println!();
-    println!("Pairing code (single use, 5 min):  {code}");
-    println!("Scopes granted: {}", scope_list.join(" "));
-    match ttl {
-        Some(_) => println!(
-            "Token lifetime: {} (revocable with --revoke)",
-            human_ttl(session_ttl)
-        ),
-        None => println!(
-            "Token lifetime: {} (revocable with --revoke; --ttl {} for a guest)",
-            human_ttl(session_ttl),
-            human_ttl(GUEST_TTL_SECS)
-        ),
-    }
+    print_code(&code, &scope_list, ttl, session_ttl);
     println!();
     println!("From the remote machine, pair with:");
     println!(
@@ -227,6 +250,42 @@ pub fn cmd_connect(
     );
     println!("Log:     {}", state_dir.join("tunnel.log").display());
     Ok(())
+}
+
+/// The lan and tailnet routes a gateway bound to `bind` on `port` answers
+/// at, most local first. Empty for a loopback bind.
+fn direct_routes(
+    ifaces: &[crate::remote::routes::Iface],
+    bind: &str,
+    port: u16,
+) -> Vec<AnnouncedRoute> {
+    select_advertised_routes(&reachable_through_bind(ifaces, bind), port, None)
+}
+
+fn print_direct(routes: &[AnnouncedRoute]) {
+    for r in routes {
+        let kind = serde_json::to_value(r.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        println!("  {:<8} {}", kind, r.url);
+    }
+}
+
+fn print_code(code: &str, scope_list: &[String], ttl: Option<&str>, session_ttl: u64) {
+    println!("Pairing code (single use, 5 min):  {code}");
+    println!("Scopes granted: {}", scope_list.join(" "));
+    match ttl {
+        Some(_) => println!(
+            "Token lifetime: {} (revocable with --revoke)",
+            human_ttl(session_ttl)
+        ),
+        None => println!(
+            "Token lifetime: {} (revocable with --revoke; --ttl {} for a guest)",
+            human_ttl(session_ttl),
+            human_ttl(GUEST_TTL_SECS)
+        ),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -290,6 +349,27 @@ mod tests {
         assert!(parse_scopes("admin").is_err());
         assert!(parse_scopes("").is_err());
         assert!(parse_scopes("read,delete-everything").is_err());
+    }
+
+    #[test]
+    fn direct_routes_are_empty_for_a_loopback_gateway() {
+        use crate::remote::routes::Iface;
+        let machine = vec![
+            Iface {
+                name: "eth0".into(),
+                ipv4: std::net::Ipv4Addr::new(192, 168, 1, 185),
+            },
+            Iface {
+                name: "tailscale0".into(),
+                ipv4: std::net::Ipv4Addr::new(100, 118, 255, 80),
+            },
+        ];
+        assert!(direct_routes(&machine, "127.0.0.1", 18799).is_empty());
+        let tailnet: Vec<String> = direct_routes(&machine, "100.118.255.80", 18799)
+            .into_iter()
+            .map(|r| r.url)
+            .collect();
+        assert_eq!(tailnet, vec!["http://100.118.255.80:18799"]);
     }
 
     #[test]

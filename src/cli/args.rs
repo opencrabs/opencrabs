@@ -187,6 +187,11 @@ pub enum Commands {
         #[arg(long, default_value = "connect-cli")]
         label: String,
 
+        /// Pair at this machine's LAN or tailnet address only, without a
+        /// quick tunnel. Needs [a2a].bind on an address other machines reach.
+        #[arg(long)]
+        no_tunnel: bool,
+
         /// Show the running tunnel instead of starting one
         #[arg(long)]
         status: bool,
@@ -849,6 +854,7 @@ pub async fn run() -> Result<()> {
             stop,
             list_sessions,
             revoke,
+            no_tunnel,
         }) => connect::cmd_connect(
             &config,
             port,
@@ -859,6 +865,7 @@ pub async fn run() -> Result<()> {
             stop,
             list_sessions,
             revoke.as_deref(),
+            no_tunnel,
         ),
         Some(Commands::Routes { operation }) => routes::cmd_routes(operation).await,
         Some(Commands::DropAgent { port, roots }) => crate::utils::drop_agent::serve(port, roots),
