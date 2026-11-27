@@ -66,6 +66,16 @@ pub enum ProviderError {
     #[error("Request timed out after {0}s")]
     Timeout(u64),
 
+    /// The stream opened but the provider never emitted a single chunk before
+    /// the prefill clock expired (#3213). Distinct from `StreamError` (a
+    /// stream that had started and then broke) and from `Timeout` (the send
+    /// never produced headers): here the connection is open and the request
+    /// is accepted, the server just has not begun answering. Retryable with
+    /// a backoff scaled to the budget that expired, chosen by
+    /// `stream_retry_backoff`.
+    #[error("No first token after {budget_secs}s: the provider accepted the request but never started answering")]
+    PrefillTimeout { budget_secs: u64 },
+
     /// Thinking-loop timeout (#890): model streamed for N seconds without
     /// emitting a tool call AND without delivering any content. Retryable with
     /// phantom enforcement.
@@ -220,6 +230,7 @@ impl ProviderError {
             ProviderError::HttpError(_)
             | ProviderError::RateLimitExceeded(_)
             | ProviderError::Timeout(_)
+            | ProviderError::PrefillTimeout { .. }
             | ProviderError::ThinkingLoopTimeout(_)
             // A stream that broke mid-flight ("connection closed before message
             // completed", the SSE socket dropping, a partial body) is a
@@ -454,9 +465,67 @@ pub fn short_error_reason(err: &ProviderError) -> String {
         ProviderError::InvalidApiKey => "missing/invalid API key".to_string(),
         ProviderError::ModelNotFound(_) => "model not found".to_string(),
         ProviderError::Timeout(_) => "timeout".to_string(),
+        ProviderError::PrefillTimeout { budget_secs } => {
+            format!("no first token after {budget_secs}s")
+        }
         ProviderError::StreamError(_) => "stream error".to_string(),
         ProviderError::HttpError(_) => "connection error".to_string(),
         _ => "transient error".to_string(),
+    }
+}
+
+/// How long to wait before re-sending a request that just failed, decided by
+/// FAILURE CLASS (#3213).
+///
+/// The old behaviour was one shared default: the transport ladder
+/// (500ms → 1s → 2s → 4s → 8s) or, on the provider send path, the 1s
+/// `RetryConfig` default. Both are sized for a blip - a refused connection,
+/// a 5xx, a rate limit - where one second later is a different moment on
+/// the same server.
+///
+/// A prefill cut is not that. The request was accepted, the connection is
+/// open, and the server has not begun answering: the upstream is cold or
+/// the proxy is still routing. Re-posting the SAME body one second later
+/// lands in the same queue position and pays the cold start again - the
+/// receipt is the 2026-11-22 turn that waited 120s for a first token and
+/// resent 1099ms later.
+///
+/// So the wait for that class scales with the budget that just expired: a
+/// quarter of it, floored at 10s and capped at 30s per attempt, doubling
+/// per attempt up to 60s. Every other class keeps its current schedule,
+/// and a server-declared `Retry-After` still wins over everything, so a
+/// 429 keeps its own hint.
+pub fn stream_retry_backoff(err: &ProviderError, attempt: u32) -> std::time::Duration {
+    use std::time::Duration;
+
+    // A declared wait always wins over any ladder (#3213 keeps this
+    // intact): a 429 that says "7 seconds" gets 7 seconds, whichever
+    // class the error otherwise belongs to. Already clamped by
+    // `RetryableError::retry_after` so a pathological hint cannot stall
+    // a turn.
+    if let Some(declared) = <ProviderError as crate::utils::retry::RetryableError>::retry_after(err)
+    {
+        return declared;
+    }
+
+    match err {
+        ProviderError::PrefillTimeout { budget_secs } => {
+            const FLOOR: Duration = Duration::from_secs(10);
+            const PER_ATTEMPT_CAP: Duration = Duration::from_secs(30);
+            const TOTAL_CAP: Duration = Duration::from_secs(60);
+            let quarter = Duration::from_secs(budget_secs / 4);
+            let base = quarter.clamp(FLOOR, PER_ATTEMPT_CAP);
+            // Doubling is bounded so a run of cuts cannot stretch the
+            // ladder past 60s per wait.
+            let scaled = base.saturating_mul(1u32 << (attempt.saturating_sub(1)).min(2));
+            scaled.min(TOTAL_CAP)
+        }
+        // Unchanged transport ladder: 500ms → 1s → 2s → 4s → 8s. Shift is
+        // bounded so attempts past five cannot overflow the multiply.
+        _ => {
+            let shift = attempt.saturating_sub(1).min(4);
+            Duration::from_millis(500u64.saturating_mul(1u64 << shift))
+        }
     }
 }
 

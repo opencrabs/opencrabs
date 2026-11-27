@@ -670,14 +670,13 @@ impl AgentService {
         //   * after the first chunk: unchanged `stream_idle_timeout`. Once
         //     tokens are flowing, a stall really is a dropped stream.
         //
-        // Known gap (#3213): when the first-token clock DOES expire, the retry
-        // that follows starts its backoff from 1s (`RetryConfig::default`, also
-        // in the tool loop's chain) and re-posts this exact body to the same
-        // server. That is the second half of the 2026-11-22 receipt, where the
-        // retry went out 1099ms after a 120s wait. The clock below is the half
-        // this change owns; the backoff is tracked separately because it is
-        // shared with every other failure class and must not be stretched for a
-        // 429 or a 5xx.
+        // Known gap (#3213), CLOSED alongside this clock split: when the
+        // first-token clock DOES expire, the retry that follows no longer
+        // starts its backoff from 1s. The cut below returns the typed
+        // `ProviderError::PrefillTimeout`, and the retry chains pick their
+        // wait from `error::stream_retry_backoff`, which scales the delay
+        // to the budget that just expired for this class while 429/5xx
+        // keep their schedules and their `Retry-After` hints.
         let prefill_timeout = {
             let endpoint = crate::brain::agent::service::helpers::handshake_timeout_for(
                 is_cli,
@@ -687,6 +686,10 @@ impl AgentService {
                 .max(stream_idle_timeout)
                 .max(std::time::Duration::from_secs(120))
         };
+        // #3213: set when the loop's LAST cut happened before any chunk
+        // arrived, so the post-loop return can hand the retry chain the
+        // typed `PrefillTimeout` instead of a bare stop_reason=None.
+        let mut prefill_cut = false;
 
         // --- Thinking-loop guard (#890, scoped and disarming per #1690) ---
         // If the model streams for `thinking_loop_timeout_secs` without
@@ -808,6 +811,11 @@ impl AgentService {
                                      (stop_reason=None → will retry).",
                                     prefill_timeout.as_secs()
                                 );
+                                // #3213: remember the failure class so the
+                                // post-loop return tells the retry chain this
+                                // was a prefill cut, which is what lets it pick
+                                // a scaled wait instead of the 1s default.
+                                prefill_cut = true;
                             }
                             break; // stop_reason stays None → triggers retry in tool_loop
                         }
@@ -1329,6 +1337,29 @@ impl AgentService {
                     reasoning: None,
                 },
             );
+        }
+
+        // #3213: a stream that was cut before producing ANY chunk is a
+        // prefill cut, not a dropped stream. Return it typed so the retry
+        // chains can pick the wait that fits this class (`stream_retry_backoff`
+        // scales to the budget that expired) instead of the 1s default sized
+        // for a connection blip. Checked before the premature-termination
+        // branch because that one only fires when blocks were accumulated,
+        // which a prefill cut by definition never did.
+        if prefill_cut && block_states.is_empty() {
+            crate::config::health::record_failure(
+                &failure_attribution_name(provider.as_ref()),
+                &crate::brain::provider::ProviderError::PrefillTimeout {
+                    budget_secs: prefill_timeout.as_secs(),
+                },
+            );
+            tracing::warn!(
+                "⏱️ Prefill cut after {}s with no content — returning PrefillTimeout (#3213)",
+                prefill_timeout.as_secs()
+            );
+            return Err(crate::brain::provider::ProviderError::PrefillTimeout {
+                budget_secs: prefill_timeout.as_secs(),
+            });
         }
 
         // Detect premature stream termination — if we accumulated blocks

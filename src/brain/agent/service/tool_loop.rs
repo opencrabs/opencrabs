@@ -3038,6 +3038,205 @@ impl AgentService {
                         }
                     }
                 }
+                // #3213: a prefill cut is its own failure class. The request
+                // was accepted and the connection stayed open; the server just
+                // never started answering. Re-posting the same body one second
+                // later lands in the same queue position and pays the warm-up
+                // again (receipt: 2026-11-22, 120s wait then a resend 1099ms
+                // later), so the wait here comes from `stream_retry_backoff`,
+                // which scales to the budget that just expired for this class
+                // and leaves 429/5xx and their `Retry-After` hints untouched.
+                // Sits above the StreamError/Timeout arm because this is a
+                // distinct type and must not be flattened back into either.
+                Err(e @ crate::brain::provider::ProviderError::PrefillTimeout { .. }) => {
+                    let err_msg = e.to_string();
+                    tracing::warn!(
+                        "Prefill cut (#3213): {} — retrying up to {} times with a scaled wait",
+                        err_msg,
+                        MAX_STREAM_RETRIES
+                    );
+                    let primary_from_name = self.provider_name_for_session(session_id);
+                    let actual_model = {
+                        let p = self.provider_for_session(session_id);
+                        let supported = p.supported_models();
+                        if !supported.is_empty() && !supported.iter().any(|m| m == &model_name) {
+                            p.default_model().to_string()
+                        } else {
+                            model_name.clone()
+                        }
+                    };
+                    let provider_model_dim = format!("{}/{}", primary_from_name, actual_model);
+                    self.record_provider_feedback(
+                        session_id,
+                        "prefill_timeout",
+                        &provider_model_dim,
+                        Some(&err_msg),
+                    );
+
+                    let mut last_err = e;
+                    let mut succeeded = None;
+
+                    for attempt in 1..=MAX_STREAM_RETRIES {
+                        // /stop beats the retry budget (#1148): bail out
+                        // before spending another attempt.
+                        if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                            tracing::info!(
+                                "🛑 Prefill retry loop aborted — cancelled before attempt {attempt}"
+                            );
+                            return Err(AgentError::Cancelled);
+                        }
+
+                        // Failure-class-specific wait (#3213). A prefill cut
+                        // waited on a long prefill budget already; sleeping the
+                        // 500ms/1s transport ladder after it just re-enters the
+                        // queue that was still cold.
+                        let backoff =
+                            crate::brain::provider::error::stream_retry_backoff(&last_err, attempt);
+                        tracing::info!(
+                            "Prefill retry attempt {}/{} in {}s after: {}",
+                            attempt,
+                            MAX_STREAM_RETRIES,
+                            backoff.as_secs(),
+                            last_err
+                        );
+
+                        // Name the wait in the transparent retry notice so a
+                        // long scaled delay reads as deliberate recovery
+                        // instead of a hang.
+                        if let Some(ref cb) = progress_callback {
+                            cb(
+                                session_id,
+                                ProgressEvent::RetryAttempt {
+                                    attempt,
+                                    max: MAX_STREAM_RETRIES,
+                                    reason: format!(
+                                        "no first token after {}s — retrying in {}s",
+                                        match &last_err {
+                                            crate::brain::provider::ProviderError::PrefillTimeout {
+                                                budget_secs,
+                                            } => *budget_secs,
+                                            _ => 0,
+                                        },
+                                        backoff.as_secs()
+                                    ),
+                                },
+                            );
+                        }
+
+                        if !crate::brain::agent::service::helpers::cancellable_backoff(
+                            cancel_token.as_ref(),
+                            backoff,
+                        )
+                        .await
+                        {
+                            tracing::info!(
+                                "🛑 Prefill retry loop aborted — cancelled during backoff"
+                            );
+                            return Err(AgentError::Cancelled);
+                        }
+
+                        // Rebuild the same request shape the transport-retry
+                        // arm builds: identical body, no history mutation.
+                        let mut retry_req =
+                            LLMRequest::new(model_name.clone(), context.messages.clone())
+                                .with_max_tokens(self.request_max_tokens_for_session(session_id));
+                        retry_req.working_directory = Some(
+                            self.get_working_directory_for_session(session_id)
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                        retry_req.session_id = Some(session_id);
+                        if let Some(system) = &context.system_brain {
+                            retry_req = retry_req.with_system(system.clone());
+                        }
+                        if self.tool_registry.count() > 0 {
+                            retry_req =
+                                retry_req.with_tools(self.tool_schemas_for_session(session_id));
+                        }
+
+                        match self
+                            .stream_complete(
+                                session_id,
+                                retry_req,
+                                cancel_token.as_ref(),
+                                progress_callback.as_ref(),
+                                if is_cli_provider {
+                                    self.message_queue_callback.as_ref()
+                                } else {
+                                    None
+                                },
+                                if is_cli_provider {
+                                    Some(&queued_buf)
+                                } else {
+                                    None
+                                },
+                                false,
+                            )
+                            .await
+                        {
+                            Ok(resp) => {
+                                tracing::info!(
+                                    "Prefill retry {}/{} succeeded",
+                                    attempt,
+                                    MAX_STREAM_RETRIES
+                                );
+                                succeeded = Some(resp);
+                                break;
+                            }
+                            Err(retry_err) => {
+                                tracing::warn!(
+                                    "Prefill retry {}/{} failed: {}",
+                                    attempt,
+                                    MAX_STREAM_RETRIES,
+                                    retry_err
+                                );
+                                last_err = retry_err;
+                                // A retry that failed a different way keeps its
+                                // own class for the next wait: if it came back
+                                // as a rate limit or a dropped stream, the
+                                // `stream_retry_backoff` match falls through to
+                                // the unchanged ladder (and honours any
+                                // `Retry-After`).
+                            }
+                        }
+                    }
+
+                    if let Some(resp) = succeeded {
+                        resp
+                    } else {
+                        // All prefill retries spent. Report the chain state
+                        // like the transport arm does — the error, which
+                        // provider held it, and whether a fallback exists —
+                        // instead of handing back a bare error.
+                        tracing::warn!(
+                            "All {} prefill retries failed, checking for fallback provider",
+                            MAX_STREAM_RETRIES
+                        );
+                        if let Some(ref cb) = progress_callback {
+                            let active_name = self.provider_name_for_session(session_id);
+                            let err_snippet: String =
+                                last_err.to_string().chars().take(120).collect();
+                            cb(
+                                session_id,
+                                ProgressEvent::SelfHealingAlert {
+                                    message: format!(
+                                        "No first token on '{}/{}' after {} attempts: {}. {}",
+                                        active_name,
+                                        model_name,
+                                        MAX_STREAM_RETRIES,
+                                        err_snippet,
+                                        if self.has_fallback_provider() {
+                                            "Switching to fallback provider..."
+                                        } else {
+                                            "No fallback provider configured."
+                                        }
+                                    ),
+                                },
+                            );
+                        }
+                        return Err(AgentError::Provider(last_err));
+                    }
+                }
                 Err(e)
                     if matches!(
                         &e,
