@@ -641,6 +641,53 @@ impl AgentService {
             std::time::Duration::from_secs(20)
         };
 
+        // --- Pre-first-token wait (#3212) ---
+        // `stream_idle_timeout` above is sized for a MID-STREAM stall: silence
+        // between chunks that were already flowing. It is the wrong clock for
+        // the window before the first chunk, and that window is exactly where a
+        // turn that follows a long detached task lands. The request carries the
+        // whole history plus the tool output, and a proxy in front of an
+        // upstream has to route it and warm that upstream before it can emit a
+        // single token. A first-token gap there is a slow request, not a dead
+        // connection, so cutting it costs a duplicate send (the retry chain
+        // re-posts the same body) and buys a second full warm-up.
+        //
+        // Receipt for the wrong clock: 2026-11-22 session 00d3619d, log
+        // `opencrabs.2026-11-22` line 145650 onward. The stream started
+        // 16:04:43, `Stream idle timeout after 120s - no event received` fired
+        // at 16:07:15 with `0 output tokens`, and the retry went out 1099ms
+        // later. Nothing was broken: the provider had simply not started
+        // answering yet.
+        //
+        // So the two windows get separate clocks:
+        //   * before the first chunk: `handshake_timeout_for`, which is already
+        //     a per-endpoint decision (600s CLI, 90s local, 120s built-in
+        //     proxy, 60s cloud) and is the number sized for "how long may this
+        //     server take to start answering this endpoint". Taken as a floor
+        //     under `stream_idle_timeout` so the wait can never be stricter
+        //     than it was before this change, and never shorter than 120s,
+        //     which is the built-in endpoint's own prefill budget.
+        //   * after the first chunk: unchanged `stream_idle_timeout`. Once
+        //     tokens are flowing, a stall really is a dropped stream.
+        //
+        // Known gap (#3213): when the first-token clock DOES expire, the retry
+        // that follows starts its backoff from 1s (`RetryConfig::default`, also
+        // in the tool loop's chain) and re-posts this exact body to the same
+        // server. That is the second half of the 2026-11-22 receipt, where the
+        // retry went out 1099ms after a 120s wait. The clock below is the half
+        // this change owns; the backoff is tracked separately because it is
+        // shared with every other failure class and must not be stretched for a
+        // 429 or a 5xx.
+        let prefill_timeout = {
+            let endpoint = crate::brain::agent::service::helpers::handshake_timeout_for(
+                is_cli,
+                provider.base_url(),
+            );
+            endpoint
+                .max(stream_idle_timeout)
+                .max(std::time::Duration::from_secs(120))
+        };
+
         // --- Thinking-loop guard (#890, scoped and disarming per #1690) ---
         // If the model streams for `thinking_loop_timeout_secs` without
         // emitting a single tool call, the guard fires. Two things changed
@@ -734,16 +781,34 @@ impl AgentService {
                     // re-polling without a value loses no chunk.
                     continue;
                 }
-                result = tokio::time::timeout(stream_idle_timeout, stream.next()) => {
+                result = tokio::time::timeout(
+                    if last_delta_at.is_some() { stream_idle_timeout } else { prefill_timeout },
+                    stream.next(),
+                ) => {
                     match result {
                         Ok(Some(item)) => item,
                         Ok(None) => break, // Stream ended normally
                         Err(_elapsed) => {
-                            tracing::warn!(
-                                "⏱️ Stream idle timeout after {}s — no event received from provider. \
-                                 Treating as dropped stream (stop_reason=None → will retry).",
-                                stream_idle_timeout.as_secs()
-                            );
+                            // #3212: name WHICH window timed out. A cut before
+                            // any chunk arrived is the request never getting
+                            // started, and reading it as a mid-stream stall is
+                            // what made the 2026-11-22 incident look like a
+                            // dropped connection when the server had simply not
+                            // answered yet.
+                            if last_delta_at.is_some() {
+                                tracing::warn!(
+                                    "⏱️ Stream idle timeout after {}s — no event received from provider. \
+                                     Treating as dropped stream (stop_reason=None → will retry).",
+                                    stream_idle_timeout.as_secs()
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "⏱️ No first token after {}s — the provider never started this \
+                                     response (no chunk and no usage yet). Treating as a failed send \
+                                     (stop_reason=None → will retry).",
+                                    prefill_timeout.as_secs()
+                                );
+                            }
                             break; // stop_reason stays None → triggers retry in tool_loop
                         }
                     }

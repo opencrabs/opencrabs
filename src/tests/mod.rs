@@ -744,6 +744,7 @@ pub mod file_extract_test;
 pub mod footer_pair_coherence_test;
 pub mod force_default_test;
 pub mod handshake_timeout_test;
+pub mod stream_prefill_timeout_test;
 pub mod hashline_crlf_2227_test;
 pub mod hashline_test;
 pub mod icon_assets_test;
