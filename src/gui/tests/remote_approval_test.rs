@@ -394,3 +394,28 @@ fn a_second_request_waits_behind_the_first() {
     let (card, more) = approvals.shown(session, now).expect("shown");
     assert_eq!((card.request_id, more), (second, 0));
 }
+
+/// Line and paragraph separators break a line without being `\n`, so they
+/// are escaped like every other character that changes what is drawn.
+#[test]
+fn separators_that_break_a_line_are_escaped() {
+    let shown = visible("echo a\u{2028}rm -rf ~\u{2029}");
+    assert!(shown.contains("\\u{2028}"), "{shown}");
+    assert!(shown.contains("\\u{2029}"), "{shown}");
+}
+
+/// A huge input scrolls inside a bounded area, so Approve and Deny never
+/// leave the card.
+#[test]
+fn the_input_area_is_bounded_and_scrolls() {
+    let src = include_str!("../remote_approval.rs");
+    let card = &src[src.find("pub(crate) fn card(").expect("card")..];
+    assert!(
+        card.contains(".max_h(px(INPUT_MAX_HEIGHT))"),
+        "input area is unbounded"
+    );
+    assert!(
+        card.contains(".overflow_y_scroll()"),
+        "input area does not scroll"
+    );
+}

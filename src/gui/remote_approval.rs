@@ -34,6 +34,10 @@ use crate::agent_bridge::TurnEvent;
 use crate::dashboard_state::Dashboard;
 use crate::{palette, transcript};
 
+/// The tallest the tool input gets on the card, in pixels. Past it the
+/// input scrolls, so the buttons stay on screen.
+pub(crate) const INPUT_MAX_HEIGHT: f32 = 240.0;
+
 /// One tool waiting for a yes or a no on a remote crab.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PendingApproval {
@@ -123,12 +127,16 @@ fn hides(c: char) -> bool {
                 | '\u{200b}'..='\u{200f}'
                 | '\u{202a}'..='\u{202e}'
                 | '\u{2060}'..='\u{206f}'
+                | '\u{2028}'
+                | '\u{2029}'
                 | '\u{3164}'
                 | '\u{fe00}'..='\u{fe0f}'
                 | '\u{feff}'
                 | '\u{ffa0}'
                 | '\u{fff9}'..='\u{fffb}'
-                | '\u{e0000}'..='\u{e007f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
         )
 }
 
@@ -325,9 +333,14 @@ pub(crate) fn card(
         );
     if !approval.input.is_empty() {
         col = col.child(
+            // Bounded and scrollable: a huge input is read whole without
+            // pushing Approve and Deny off the card.
             div()
+                .id("remote-approval-input")
                 .w_full()
                 .min_w_0()
+                .max_h(px(INPUT_MAX_HEIGHT))
+                .overflow_y_scroll()
                 .text_xs()
                 .text_color(rgb(p.text_muted))
                 .child(SharedString::from(approval.input.clone())),
