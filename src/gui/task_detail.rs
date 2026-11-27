@@ -49,6 +49,10 @@ pub(crate) struct TaskDetail {
     pub(crate) session: Uuid,
     pub(crate) task: Uuid,
     pub(crate) label: String,
+    /// The full command as handed to the shell, printed above the output so a
+    /// reader can see what the strip only had room to name (#3207). `None`
+    /// for a mirrored cli task, which never handed us a command.
+    pub(crate) command: Option<String>,
     pub(crate) tag: &'static str,
     /// Whether this process spawned the task and can therefore stop it.
     pub(crate) ours: bool,
@@ -83,6 +87,7 @@ impl TaskDetail {
         session: Uuid,
         task: Uuid,
         label: String,
+        command: Option<String>,
         tag: &'static str,
         ours: bool,
         secs: u64,
@@ -92,6 +97,7 @@ impl TaskDetail {
             session,
             task,
             label,
+            command,
             tag,
             ours,
             started: now.checked_sub(Duration::from_secs(secs)).unwrap_or(now),
@@ -333,7 +339,32 @@ pub(crate) fn detail_modal(
             .into_any_element()
     };
 
-    let mut body = div().flex().flex_col().gap_2().w_full().min_w_0().child(
+    let mut body = div().flex().flex_col().gap_2().w_full().min_w_0();
+    // What the strip only had room to name (#3207). Wrapped mono text, capped
+    // so an inline-heredoc launch cannot push the output off the card, and
+    // scrollable once it outgrows the cap.
+    if let Some(command) = detail.command.as_ref() {
+        body = body.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .max_h(px(120.0))
+                .overflow_y_scroll()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(pal.panel_hi))
+                .font_family(fonts::current_mono())
+                .text_xs()
+                .text_color(rgb(pal.text_normal))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .child(SharedString::from(command.clone())),
+                ),
+        );
+    }
+    body = body.child(
         div()
             .id("task-detail-output")
             .flex()
@@ -403,6 +434,7 @@ mod tests {
             Uuid::new_v4(),
             Uuid::new_v4(),
             "cargo build".into(),
+            None,
             "detached",
             ours,
             5,

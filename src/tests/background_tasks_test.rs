@@ -121,12 +121,69 @@ fn short_label_cuts_a_heredoc_after_a_multibyte_char() {
 
 #[test]
 fn short_label_keeps_a_quoted_shift_that_is_not_a_heredoc() {
-    // Quote-aware: `<<` inside a literal string is data, not a heredoc
-    // marker, so the label keeps the whole command.
+    // Quote-aware (#3204): `<<` inside a literal string is data, not a marker,
+    // so nothing is cut at the quote and the label still names the payload
+    // statement. A broken scan would have sliced the command at the quote and
+    // labelled it `echo "a` instead.
+    assert_eq!(short_label("echo \"a << b\" && cargo build"), "cargo build");
+}
+
+#[test]
+fn short_label_names_the_payload_of_a_compound_command() {
+    // The strip is a status line, not a command line (#3207). A compound
+    // command spends its width on preparation (`export`, `rm`) and a farewell
+    // (`echo`, `exit`) unless the label keeps only the statement that runs.
     assert_eq!(
-        short_label("echo \"a << b\" && cargo build"),
-        "echo \"a << b\"; cargo build"
+        short_label("export PATH=\"/x/bin:$PATH\"; rm -f out/render.log; ./rebuild.sh"),
+        "./rebuild.sh"
     );
+    // The farewell carries arguments in practice, so the skip matches its
+    // first word: an exact-match test labelled this whole run `exit $code`.
+    assert_eq!(
+        short_label("bash ~/gate.sh; code=$?; echo \"EXIT=$code\"; exit $code"),
+        "bash ~/gate.sh"
+    );
+}
+
+#[test]
+fn a_command_that_is_only_preparation_still_renders() {
+    // Nothing survives the filter, so the label falls back to the whole
+    // command: a row must never print as empty (#3207).
+    assert_eq!(short_label("export PATH=/x:$PATH"), "export PATH=/x:$PATH");
+    assert_eq!(short_label("FOO=1"), "FOO=1");
+}
+
+#[tokio::test]
+async fn a_detached_row_carries_its_full_command_and_a_mirror_carries_none() {
+    let mgr = Arc::new(BackgroundTaskManager::new());
+    let sid = Uuid::new_v4();
+    // Lives long enough that the row cannot be gone before it is read: the
+    // command fails instantly if it names a script that is not there.
+    let command = "sleep 5; echo \"EXIT=$?\"; exit 0";
+
+    Arc::clone(&mgr).spawn_command(
+        sid,
+        std::env::temp_dir(),
+        short_label(command),
+        command.to_string(),
+        None,
+    );
+    let rows = mgr.running_tasks(sid);
+    assert_eq!(
+        rows[0].command.as_deref(),
+        Some(command),
+        "the row keeps the command uncut, so the detail view can print what the strip cut"
+    );
+    let _ = mgr.cancel(sid, rows[0].task_id);
+
+    // A mirrored cli task never handed us a command, so it has none to print.
+    mgr.mirror_started_claude(sid, "b1", Some("Build the thing"));
+    let mirrored = mgr
+        .running_tasks(sid)
+        .into_iter()
+        .find(|t| matches!(t.source, TaskSource::Claude { .. }))
+        .expect("the mirror row is there");
+    assert_eq!(mirrored.command, None);
 }
 
 #[tokio::test]

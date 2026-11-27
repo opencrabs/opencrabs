@@ -51,6 +51,13 @@ pub struct RunningTask {
     pub task_id: Uuid,
     /// Short label for the command, e.g. `cargo test`.
     pub label: String,
+    /// The full command as handed to the shell, when this process knows it.
+    ///
+    /// The label is cut for display (#3204), so a surface that wants to show
+    /// what is actually running needs the uncut text; the detail modal prints
+    /// it in full. `None` for mirrored external tasks, whose command belongs
+    /// to the spawning CLI and was never handed to us.
+    pub command: Option<String>,
     /// When it was spawned, for the elapsed time a surface displays.
     pub started: std::time::Instant,
     /// The turn's progress callback, kept alive past the turn that spawned
@@ -250,6 +257,7 @@ impl BackgroundTaskManager {
             RunningTask {
                 task_id,
                 label: label.to_string(),
+                command: None,
                 started: std::time::Instant::now(),
                 progress,
                 source: TaskSource::Mirror,
@@ -346,6 +354,7 @@ impl BackgroundTaskManager {
             RunningTask {
                 task_id: Uuid::new_v4(),
                 label,
+                command: None,
                 started: std::time::Instant::now(),
                 progress: None,
                 source: TaskSource::Claude { id: id.to_string() },
@@ -417,6 +426,7 @@ impl BackgroundTaskManager {
             RunningTask {
                 task_id,
                 label: label.clone(),
+                command: Some(command.clone()),
                 started: std::time::Instant::now(),
                 progress: progress.clone(),
                 source: TaskSource::Detached,
@@ -1071,15 +1081,69 @@ fn ours_and_real(path: &std::path::Path) -> Option<std::fs::Metadata> {
     Some(meta)
 }
 
+/// The last real statement of a compound command, if it has one.
+///
+/// A detached launch usually carries preparation before the work (`export
+/// PATH=…; rm -f old.log; ./rebuild.sh`) and often a farewell after it
+/// (`…; echo EXIT=$?`). The strip has one line, and the only part of it that
+/// says what is RUNNING is the payload statement: the first cut spent the
+/// whole field on `export` and never reached the script (#3207).
+///
+/// Preparation to skip: variable assignments (`export FOO=bar`, `FOO=bar`),
+/// `set` flag lines, and bare directory changes anywhere before the payload.
+/// Farewells to skip: a trailing `echo`, `exit`, `true`, `false` or `:`,
+/// matched on the first word so `exit $code` and `echo "EXIT=$code" >> log`
+/// count as the farewells they are. A single-statement command returns
+/// unchanged, and a command that is nothing but preparation keeps it, because
+/// something must render.
+fn payload_statement(segments: &[String]) -> Option<&str> {
+    let is_prep = |s: &str| {
+        let bare = s.trim_start();
+        bare == "set"
+            || bare.starts_with("set ")
+            || bare.starts_with("export ")
+            || (!bare.is_empty()
+                && !bare.contains(' ')
+                && bare.contains('=')
+                && !bare.starts_with('-'))
+    };
+    let is_farewell = |s: &str| {
+        // Match the first WORD, not the whole segment: a farewell carries
+        // arguments in practice (`exit $code`, `echo "EXIT=$code" >> log`),
+        // and an exact-match test let both through as if they were the
+        // payload, which labelled a gate run `exit $code` (#3207).
+        matches!(
+            s.split_whitespace().next().unwrap_or_default(),
+            "echo" | "exit" | "true" | "false" | ":"
+        )
+    };
+    let mid: Vec<&str> = segments
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !is_prep(s) && !is_farewell(s))
+        .collect();
+    if mid.is_empty() {
+        return None;
+    }
+    Some(mid[mid.len() - 1])
+}
+
 /// A short human label for a command (first meaningful token sequence), for the
 /// "running in the background" acknowledgement and the completion tag.
 ///
-/// Long path arguments are folded to `anchor/…/file` before the cut, so the
-/// label names the work instead of the directories leading to it (#3204). The
-/// cut stays as the last resort for commands with no long path to fold.
+/// A compound command labels its PAYLOAD statement, the one that actually
+/// runs, rather than its preparation (#3207): `export PATH=…; rm -f x.log;
+/// ./rebuild.sh` spent the whole field on `export` and never named the
+/// script. Single-statement commands are unchanged. Long path arguments are
+/// folded to `anchor/…/file` before the cut (#3204), and the cut stays as the
+/// last resort for a payload with no long path to fold.
 pub(crate) fn short_label(command: &str) -> String {
     let after_cd = crate::utils::command_label::command_label(command);
-    let folded = crate::utils::command_label::shrink_paths(&after_cd);
+    let folded = match payload_statement(&after_cd.split("; ").collect::<Vec<_>>()) {
+        Some(payload) => payload.to_string(),
+        None => after_cd,
+    };
+    let folded = crate::utils::command_label::shrink_paths(&folded);
     let label: String = folded.chars().take(60).collect();
     if folded.chars().count() > 60 {
         format!("{label}…")

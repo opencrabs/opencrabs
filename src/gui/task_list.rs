@@ -80,17 +80,26 @@ pub(crate) fn hint_text(focused: bool, selected_ours: Option<bool>) -> &'static 
     }
 }
 
-/// How much of the oldest task's name the collapsed strip prints. The window
-/// has the composer's whole width for it, where the terminal's border title
-/// has 28 columns, and a description cut at 28 said too little to tell two
-/// tasks apart.
-pub(crate) const STRIP_LABEL_CHARS: usize = 64;
+/// How much of the oldest task's name the collapsed strip prints.
+///
+/// The strip is a status line, not a command line: it exists to say WHAT is
+/// running and for HOW LONG in as little width as possible (#3207), which
+/// matters most in split panes where several strips share one column. The
+/// label that reaches it is already the payload statement with its paths
+/// folded, so 32 characters name the work; the full command lives in the
+/// detail modal, one click away.
+pub(crate) const STRIP_LABEL_CHARS: usize = 32;
 
 /// One running task, as the card prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskRow {
     pub(crate) id: Uuid,
     pub(crate) label: String,
+    /// The full command as handed to the shell, when this process spawned it.
+    /// The label is cut for the strip (#3207), so this is what the detail
+    /// modal prints in full. `None` for mirrored cli tasks, whose command was
+    /// never ours.
+    pub(crate) command: Option<String>,
     pub(crate) tag: &'static str,
     pub(crate) secs: u64,
     /// Whether this process spawned the task and can therefore stop it. A

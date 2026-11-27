@@ -2276,6 +2276,7 @@ impl Dashboard {
                 secs: t.started.elapsed().as_secs(),
                 ours: t.cancel.is_some(),
                 label: t.label,
+                command: t.command,
             })
             .collect()
     }
@@ -2495,7 +2496,13 @@ impl Dashboard {
         // can carry whatever the user typed into it.
         logging::info(&format!("task detail: opened {task}"));
         self.task_detail = Some(task_detail::TaskDetail::new(
-            session, task, row.label, row.tag, row.ours, row.secs,
+            session,
+            task,
+            row.label,
+            row.command,
+            row.tag,
+            row.ours,
+            row.secs,
         ));
         // A fresh handle: the last view's offset belongs to another output.
         self.task_detail_scroll = ScrollHandle::new();
