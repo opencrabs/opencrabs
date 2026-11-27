@@ -3260,10 +3260,18 @@ fn a_launch_prefers_the_last_session_and_falls_back_to_the_newest() {
         Some(newest),
         "a pointer at a session that no longer exists falls back, never blanks the pane"
     );
+    // The rail's page can be empty while the ledger still holds sessions (a
+    // capped or hiccupped read), so the ledger decides: a pointer it holds
+    // opens (#3200), a pointer it does not opens nothing.
     assert_eq!(
         pick_initial_session(&[], Some(older), &known),
+        Some(older),
+        "the ledger, not the rail's page, decides whether the pointer is real"
+    );
+    assert_eq!(
+        pick_initial_session(&[], Some(uuid::Uuid::new_v4()), &known),
         None,
-        "an empty rail opens nothing rather than inventing an id"
+        "an empty rail and a pointer the ledger does not hold open nothing rather than inventing an id"
     );
 }
 
