@@ -171,6 +171,8 @@ impl Dashboard {
         self.hello = None;
         self.instance_error = None;
         self.instance_epoch = self.instance_epoch.wrapping_add(1);
+        // An approval card asks for the crab the window just left.
+        self.approvals.clear();
         // The topic grouping, the closed set and the icons are per crab too.
         // The rail's refetch reads the rows and the pins only, so without
         // this the new crab's topics stood flat under the old crab's map.

@@ -592,6 +592,13 @@ fn moved_by(event: &Event) -> &'static [Part] {
     }
 }
 
+/// Whether `event` makes the reader read the cache again: the other way a
+/// crab event reaches the window, beside [`to_turn_event`].
+#[cfg(test)]
+pub(crate) fn refreshes_cache(event: &Event) -> bool {
+    !moved_by(event).is_empty()
+}
+
 /// An open event reader. Dropping it stops the reader and closes the stream.
 pub struct Watch {
     stop: CancellationToken,
@@ -941,10 +948,13 @@ pub(crate) fn to_turn_event(event: Event) -> Option<TurnEvent> {
         // (`moved_by`) and sends `TurnEvent::Refresh` when the read changed
         // it, so the hint alone repaints nothing.
         Event::RailChanged | Event::TranscriptChanged { .. } | Event::TasksChanged => None,
-        // The window has no approval card for a remote turn yet: the request
-        // is not shown, so the crab's own approval timeout denies the tool,
-        // which is what a turn with no callback did before rb/s3b.
-        Event::ApprovalRequested { .. } => None,
+        // A card in the conversation asks the user; its answer goes back as
+        // `turn.approval_answer`. Dropping it here let the crab's own wait
+        // run out and deny the tool unasked.
+        event @ Event::ApprovalRequested { .. } => {
+            crate::remote_approval::from_event(&event, Instant::now())
+                .map(|(session, approval)| TurnEvent::ApprovalAsked { session, approval })
+        }
     }
 }
 

@@ -829,6 +829,9 @@ pub(crate) struct Dashboard {
     /// [`Dashboard::sync_remote_watch`]. Without it a remote crab's turn
     /// streams nothing and its facts (model, directory) are never read.
     pub(crate) remote_watch: Option<crate::dashboard_instances::RemoteWatch>,
+    /// A remote crab's tool approvals waiting on the user, by session. Never
+    /// filled while the window holds the crab on this machine.
+    pub(crate) approvals: crate::remote_approval::Approvals,
 }
 
 /// Who asked for a send.

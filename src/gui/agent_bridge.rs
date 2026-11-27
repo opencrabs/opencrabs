@@ -217,6 +217,19 @@ pub enum TurnEvent {
     /// its running tasks): paint again. The values are already in the cache;
     /// the event carries none.
     Refresh,
+    /// A remote crab waits for a yes or a no before it runs a tool in
+    /// `session`. Only the remote event reader sends it.
+    ApprovalAsked {
+        session: Uuid,
+        approval: crate::remote_approval::PendingApproval,
+    },
+    /// The crab's reply to an approval answer: `Ok(true)` took it,
+    /// `Ok(false)` found nothing waiting, `Err` is the refusal text.
+    ApprovalSettled {
+        session: Uuid,
+        request_id: Uuid,
+        outcome: Result<bool, String>,
+    },
 }
 
 /// Everything the UI needs to drive turns. Built by [`bootstrap`], delivered

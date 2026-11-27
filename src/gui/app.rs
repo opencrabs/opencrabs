@@ -748,6 +748,7 @@ pub(crate) fn run() {
                         metrics: chat_leaf::Metrics::default(),
                         footer_dir: None,
                         remote_watch: None,
+                        approvals: Default::default(),
                     }
                 });
                 // Local transcript targets open in this window's preview;

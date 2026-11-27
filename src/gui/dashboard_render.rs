@@ -3849,6 +3849,11 @@ impl Dashboard {
         if let Some(hint) = self.task_hint() {
             rows.push(hint_line(&hint, cx).into_any_element());
         }
+        // A remote crab waiting for a yes or a no before it runs a tool
+        // (C8). Drawn in a split too: the crab is waiting either way.
+        if let Some(card) = self.approval_row(cx) {
+            rows.push(card);
+        }
         // The offers and the plan card belong to the chrome in a split
         // (#3145). The chat leaf draws both from its pane chrome there, the
         // same compact strip every other leaf draws (#2624), pinned to the

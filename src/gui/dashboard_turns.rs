@@ -1181,6 +1181,13 @@ impl Dashboard {
         }
         let mut reload: Option<Uuid> = None;
         for ev in events {
+            // A settled turn takes its remote approval cards with it, whichever
+            // card or pane the settle goes on to: the crab stopped waiting.
+            if let Some(sid) = crate::remote_approval::ends_turn(&ev)
+                && self.approvals.turn_ended(sid)
+            {
+                cx.notify();
+            }
             // The tool's follow-up offer is stored here, before the pane
             // filter below, because it belongs to a session and not to a card
             // (#2708). Handling it in the match further down would have sent a
@@ -1284,6 +1291,28 @@ impl Dashboard {
                 }
                 // A remote crab's cache moved: the next frame reads it.
                 agent_bridge::TurnEvent::Refresh => {
+                    cx.notify();
+                }
+                // A remote crab asks before it runs a tool. Only a remote
+                // backend takes the card: the crab on this machine answers
+                // its own approvals by policy, and that does not change.
+                agent_bridge::TurnEvent::ApprovalAsked { session, approval } => {
+                    let remote = self.backend.remote_key().is_some();
+                    if self.approvals.ask(remote, session, approval) {
+                        cx.notify();
+                    }
+                }
+                // The crab's reply to an answer the card sent.
+                agent_bridge::TurnEvent::ApprovalSettled {
+                    session,
+                    request_id,
+                    outcome,
+                } => {
+                    if let crate::remote_approval::Settled::Stale(text) =
+                        self.approvals.settle(session, request_id, outcome)
+                    {
+                        self.push_session_notice(session, text, cx);
+                    }
                     cx.notify();
                 }
                 // An editor the user asked for with `!vi`, with the
