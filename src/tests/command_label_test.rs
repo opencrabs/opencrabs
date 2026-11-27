@@ -10,7 +10,7 @@
 //!
 //! Fixtures use a synthetic home path and carry no user identifiers.
 
-use crate::utils::command_label::command_label;
+use crate::utils::command_label::{command_label, shrink_paths};
 
 /// The observed shape: enter the directory, then run the real work, separated
 /// by a newline rather than `&&`.
@@ -117,4 +117,39 @@ fn a_plain_command_is_untouched() {
 #[test]
 fn semicolon_separated_leading_cd_is_dropped() {
     assert_eq!(command_label("cd /srv/app; cargo test"), "cargo test");
+}
+
+#[test]
+fn a_long_home_path_keeps_its_file_name() {
+    // The observed row (#3204): the whole field went on directories and the
+    // label never reached the script name, which is the only part that says
+    // what is running.
+    assert_eq!(
+        shrink_paths("bash \"$HOME/.opencrabs/projects/opencrabs/files/gate-combo.sh\""),
+        "bash \"~/…/gate-combo.sh\""
+    );
+}
+
+#[test]
+fn an_absolute_path_keeps_its_first_directory() {
+    // A path outside the home directory still has to say where it lives.
+    assert_eq!(
+        shrink_paths("/Users/dev/srv/rs/opencrabs/scripts/gate.sh"),
+        "/Users/…/gate.sh"
+    );
+}
+
+#[test]
+fn a_short_path_is_left_alone() {
+    // Folding a path that already fits would cost the reader information for
+    // nothing.
+    assert_eq!(shrink_paths("tail -f /tmp/x.log"), "tail -f /tmp/x.log");
+}
+
+#[test]
+fn an_option_value_shrinks_but_its_option_stays() {
+    assert_eq!(
+        shrink_paths("opencrabs --config=/Users/dev/projects/app/config.toml"),
+        "opencrabs --config=/Users/…/config.toml"
+    );
 }

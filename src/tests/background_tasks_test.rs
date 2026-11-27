@@ -90,6 +90,17 @@ fn short_label_takes_the_command_after_cd() {
     assert_eq!(short_label("cargo build"), "cargo build");
 }
 
+#[test]
+fn short_label_names_the_script_not_its_directories() {
+    // The label a detached task shows on every surface. Before #3204 it read
+    // `bash "$HOME/.opencrabs/projects/opencrabs/files/gate-combo.sh"`, which
+    // names nothing about the work.
+    assert_eq!(
+        short_label("bash \"$HOME/.opencrabs/projects/opencrabs/files/gate-combo.sh\""),
+        "bash \"~/…/gate-combo.sh\""
+    );
+}
+
 #[tokio::test]
 // The test_guard serializes suites touching the process-global parked-queue
 // state; holding it across the polling `.await`s below is the entire point —
