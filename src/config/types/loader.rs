@@ -850,7 +850,10 @@ impl Config {
         let Some(providers) = doc.get_mut("providers").and_then(|p| p.as_table_mut()) else {
             return false;
         };
-        let Some(section) = providers.get_mut("opencrabs").and_then(|o| o.as_table_mut()) else {
+        let Some(section) = providers
+            .get_mut("opencrabs")
+            .and_then(|o| o.as_table_mut())
+        else {
             return false;
         };
         let mut changed = false;
@@ -877,7 +880,10 @@ impl Config {
         let Some(providers) = doc.get_mut("providers").and_then(|p| p.as_table_mut()) else {
             return;
         };
-        let Some(section) = providers.get_mut("opencrabs").and_then(|o| o.as_table_mut()) else {
+        let Some(section) = providers
+            .get_mut("opencrabs")
+            .and_then(|o| o.as_table_mut())
+        else {
             return;
         };
         if section.get("default_model").and_then(|v| v.as_str()) == Some(legacy) {
