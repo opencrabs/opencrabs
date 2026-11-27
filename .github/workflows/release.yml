@@ -370,6 +370,29 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
 
+      # The Linux link needs somewhere to spill (#3206). Both hosted Linux legs
+      # build on a 16 GB runner with no real swap. v0.6.1's arm leg compiled
+      # every dependency, then sat silent for 22 minutes in the final crate and
+      # was killed with a shutdown signal and exit 143, twice, at the same
+      # phase and the same elapsed time. v0.6.0 cleared that same wall by 30
+      # seconds, so the margin thin LTO bought is spent. Swap leaves the
+      # release profile untouched, so the artifact keeps the bytes it would
+      # have on a bigger box; the free and df lines record the ceiling on every
+      # run instead of leaving it to be inferred from a silence.
+      - name: Give the Linux link somewhere to spill (#3206)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "before: $(free -m | awk '/^Mem:/{print $2" MB ram, "$7" MB available"}')"
+          echo "disk: $(df -h / | awk 'NR==2{print $4" free on /"}')"
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile > /dev/null
+          sudo swapon /swapfile
+          swapon --show
+          echo "after: $(free -m | awk '/^Swap:/{print $2" MB swap"}')"
+
       - name: Build
         shell: bash
         env:
