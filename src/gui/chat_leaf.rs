@@ -71,6 +71,31 @@ impl Settle {
         self.rechecks = 0;
         self.expect = Some(row_total + 1);
     }
+
+    /// Arm the handshake for a turn the user stopped (#3216).
+    ///
+    /// The stop writes three rows past the count the window last read: the
+    /// question the turn opened, the answer row the turn owns from its start
+    /// (#964), and the stop marker itself. All three were already written by
+    /// the time the stop settles, so the first read that returns them is the
+    /// write having landed. Lower-bound counting, the way `begin` does: a
+    /// read that reaches the number proves the marker exists, because the
+    /// marker is the last of the three to be written.
+    ///
+    /// This used to be no reload at all: the write runs on its own thread, so
+    /// a read taken in the settle frame could beat it and draw the turn
+    /// without its rows. But skipping the wait hid the exchange instead: the
+    /// card stayed marked live, `persisted_turn_is_hidden` kept skipping the
+    /// persisted copy, and the next send's `live.begin` repointed the only
+    /// copy of the exchange on screen at a new question. The rows were in the
+    /// ledger the whole time; only a session switch rebuilt them. The budget
+    /// owns the wait instead, exactly as it does for a finished turn.
+    pub(crate) fn begin_after_stop(&mut self, row_total: usize) {
+        self.retries = 0;
+        self.deadline = None;
+        self.rechecks = 0;
+        self.expect = Some(row_total + 3);
+    }
 }
 
 /// What each settled turn cost and how fast it answered (#2324).

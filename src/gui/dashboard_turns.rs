@@ -2012,12 +2012,25 @@ impl Dashboard {
                         );
                     }
                     if self.chat_state.session() == Some(session) {
-                        // No reload on purpose. The write above runs on its own
-                        // thread, so a read taken from this frame can land
-                        // before the answer row exists and draw the turn
-                        // without it. The card keeps its stream, with the clock
-                        // and rate frozen where the stop landed, and the next
-                        // read of this session finds the answer in the ledger.
+                        // Reload on purpose now (#3216). The write above runs
+                        // on its own thread, so a read taken from this frame
+                        // can land before the answer row exists, which is why
+                        // the stop never read in this frame. But skipping the
+                        // wait hid the cancelled exchange: the card stayed
+                        // marked live, so `persisted_turn_is_hidden` kept
+                        // skipping its persisted copy, and the next send's
+                        // `live.begin` repointed the only copy of the exchange
+                        // on screen at the new question. Nothing was deleted;
+                        // only a session switch rebuilt the rows. The settle
+                        // handshake owns the wait: it re-reads on a budget
+                        // until the question, the answer row and the stop
+                        // marker are all in the ledger, then the landed arm
+                        // clears the card and the persisted turn draws. The
+                        // card keeps its stream and its frozen clock until
+                        // that read lands, so the stop still never draws a
+                        // turn without its rows.
+                        self.turn.settle.begin_after_stop(self.chat_state.row_total());
+                        self.reload_transcript(session, cx);
                         self.turn.live.finalize(None);
                         self.turn.busy = false;
                         self.turn.live.thinking = false;

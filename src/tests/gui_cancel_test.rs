@@ -279,3 +279,64 @@ fn gui_cancel_stop_leaves_the_chat_leaves_turn_alone_from_a_pane() {
          session in the split (#2885)"
     );
 }
+
+/// #3216: a stopped exchange must survive the send that follows it.
+///
+/// The stop used to reload nothing, so the cancelled turn stayed marked live
+/// and `persisted_turn_is_hidden` kept skipping its persisted copy. The next
+/// send's `live.begin` then repointed the only copy of the exchange on screen
+/// at the new question, and the cancelled question, its answer and its stop
+/// marker vanished until a session switch rebuilt the rows from the ledger.
+/// Nothing was deleted; the render just had no owner for them.
+#[test]
+fn gui_cancel_arms_the_settle_handshake_so_the_exchange_reloads() {
+    let arm = cancelled_arm();
+    assert!(
+        arm.contains("self.turn.settle.begin_after_stop(self.chat_state.row_total());"),
+        "the cancelled arm must arm the settle handshake, or the exchange stays \
+         hidden until a session switch (#3216)"
+    );
+    assert!(
+        arm.contains("self.reload_transcript(session, cx);"),
+        "the cancelled arm must read the ledger on a budget, not leave the \
+         exchange undrawn (#3216)"
+    );
+    assert!(
+        !arm.contains("No reload on purpose"),
+        "the old no-reload comment described the bug, not the behaviour (#3216)"
+    );
+}
+
+/// The count the handshake arms for: the stop writes three rows past what the
+/// window last read (question, the turn's own answer row, the stop marker),
+/// so a read short of that must keep waiting instead of drawing the exchange
+/// without its marker. The GUI is its own bin (`required-features` in
+/// Cargo.toml), so the lib tests cannot link `Settle` and the contract is
+/// pinned against the source, the way every other cancel pin here is.
+#[test]
+fn gui_cancel_settle_waits_for_all_three_rows() {
+    const CHAT_LEAF: &str = include_str!("../gui/chat_leaf.rs");
+    const TURN_SWAP: &str = include_str!("../gui/turn_swap.rs");
+
+    let arm = CHAT_LEAF
+        .split_once("pub(crate) fn begin_after_stop(")
+        .expect("the stop arms its own handshake")
+        .1
+        .split_once("/// What each settled turn cost")
+        .expect("the method ends where the metrics struct begins");
+    assert!(
+        arm.0.contains("self.expect = Some(row_total + 3);"),
+        "the stop expects question + answer row + stop marker, not just one \
+         new row, or the exchange draws before its marker is written (#3216)"
+    );
+
+    let landed = TURN_SWAP
+        .split_once("pub(crate) fn settle_landed(")
+        .expect("the shared landed predicate")
+        .1;
+    assert!(
+        landed.contains(">="),
+        "landed is a lower bound on the ledger, the same rule the Done path \
+         uses, so the two paths cannot disagree (#3216)"
+    );
+}
