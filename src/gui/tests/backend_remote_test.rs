@@ -858,3 +858,66 @@ fn the_swap_touches_the_last_marker_for_the_file_only() {
         "no marker"
     );
 }
+
+/// The card's answer is `turn.approval_answer` over the remote door. A token
+/// without `manage` is refused at the gateway, and the card gets the refusal
+/// in the words every refused action uses instead of failing silently (C8).
+#[test]
+fn an_approval_answer_without_manage_comes_back_refused() {
+    use opencrabs::backend::turn::ApprovalAnswer;
+
+    let served = serve(mock(
+        Ctx::new(PathBuf::from("unused.db")),
+        &[Scope::Read, Scope::Send],
+    ));
+    let backend = Backend::Remote(served.crab.clone());
+    let answer = ApprovalAnswer {
+        session_id: Uuid::new_v4(),
+        request_id: Uuid::new_v4(),
+        approved: true,
+        always: false,
+    };
+    let asked = answer.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    backend
+        .spawn(answer, move |reply| {
+            let _ = tx.send(crate::remote_approval::settled_event(&asked, reply));
+        })
+        .expect("the answer left");
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(TurnEvent::ApprovalSettled { outcome, .. }) => assert_eq!(
+            outcome,
+            Err(
+                "turn.approval_answer: needs a2a:manage: this crab's token does not grant it"
+                    .into()
+            )
+        ),
+        Ok(_) => panic!("another event came back"),
+        Err(e) => panic!("no reply: {e}"),
+    }
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 1);
+}
+
+/// With `manage`, an answer for a request nothing waits on reaches the crab
+/// and comes back `false`: the card goes and the notices say why.
+#[test]
+fn an_approval_answer_with_manage_reaches_the_crab() {
+    use opencrabs::backend::turn::ApprovalAnswer;
+
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let answer = ApprovalAnswer {
+        session_id: Uuid::new_v4(),
+        request_id: Uuid::new_v4(),
+        approved: false,
+        always: false,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    backend
+        .spawn(answer, move |reply| {
+            let _ = tx.send(reply);
+        })
+        .expect("the answer left");
+    let reply = rx.recv_timeout(Duration::from_secs(20)).expect("a reply");
+    assert_eq!(reply, Ok(false));
+}

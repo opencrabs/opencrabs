@@ -28,6 +28,8 @@ mod models_picker_test;
 mod plan_strip_test;
 mod pool_door_test;
 mod prompt_files_test;
+// A remote crab asking before it runs a tool (C8).
+mod remote_approval_test;
 mod remote_watch_wiring_test;
 mod session_restore_test;
 mod share_address_test;
