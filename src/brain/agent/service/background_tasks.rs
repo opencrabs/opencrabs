@@ -1090,7 +1090,8 @@ fn ours_and_real(path: &std::path::Path) -> Option<std::fs::Metadata> {
 /// whole field on `export` and never reached the script (#3207).
 ///
 /// Preparation to skip: variable assignments (`export FOO=bar`, `FOO=bar`),
-/// `set` flag lines, and bare directory changes anywhere before the payload.
+/// `set` flag lines, and bare directory changes wherever they sit: a trailing
+/// `cd` is not the work, the statement before it is.
 /// Farewells to skip: a trailing `echo`, `exit`, `true`, `false` or `:`,
 /// matched on the first word so `exit $code` and `echo "EXIT=$code" >> log`
 /// count as the farewells they are. A single-statement command returns
@@ -1102,6 +1103,9 @@ fn payload_statement(segments: &[String]) -> Option<&str> {
         bare == "set"
             || bare.starts_with("set ")
             || bare.starts_with("export ")
+            // A bare directory change is preparation wherever it sits: the
+            // work is the statement before it, not the `cd` after it.
+            || crate::utils::command_label::is_bare_cd(bare)
             || (!bare.is_empty()
                 && !bare.contains(' ')
                 && bare.contains('=')
@@ -1138,10 +1142,10 @@ fn payload_statement(segments: &[String]) -> Option<&str> {
 /// folded to `anchor/…/file` before the cut (#3204), and the cut stays as the
 /// last resort for a payload with no long path to fold.
 pub(crate) fn short_label(command: &str) -> String {
-    let after_cd = crate::utils::command_label::command_label(command);
-    let folded = match payload_statement(&after_cd.split("; ").collect::<Vec<_>>()) {
+    let segments = crate::utils::command_label::command_label_segments(command);
+    let folded = match payload_statement(&segments) {
         Some(payload) => payload.to_string(),
-        None => after_cd,
+        None => segments.join("; "),
     };
     let folded = crate::utils::command_label::shrink_paths(&folded);
     let label: String = folded.chars().take(60).collect();

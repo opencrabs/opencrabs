@@ -143,6 +143,22 @@ fn short_label_names_the_payload_of_a_compound_command() {
         short_label("bash ~/gate.sh; code=$?; echo \"EXIT=$code\"; exit $code"),
         "bash ~/gate.sh"
     );
+    // A directory change is preparation wherever it sits, so a trailing `cd`
+    // does not take the payload slot away from the work before it.
+    assert_eq!(short_label("cd /srv/app && make && cd /srv/other"), "make");
+}
+
+#[test]
+fn short_label_keeps_a_quoted_separator_inside_an_argument() {
+    // A quoted `; ` is data, not a separator (#3207). The label used to be
+    // built by joining the segments with `"; "` and splitting that string
+    // back apart, which cut a quoted separator in half and labelled this
+    // command `b"`. The segments come from the quote-aware split instead.
+    assert_eq!(short_label("echo \"a; b\""), "echo \"a; b\"");
+    assert_eq!(
+        short_label("echo \"one; two && three\""),
+        "echo \"one; two && three\""
+    );
 }
 
 #[test]

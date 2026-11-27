@@ -22,10 +22,22 @@
 /// Returns an empty string for an empty command; callers supply their own
 /// placeholder.
 pub fn command_label(command: &str) -> String {
+    command_label_segments(command).join("; ")
+}
+
+/// The same segments [`command_label`] renders, as a list instead of a joined
+/// string.
+///
+/// The join separator is `"; "`, which is indistinguishable from a `"; "` that
+/// lives inside a quoted argument: a caller that splits the joined label back
+/// apart cuts `echo "a; b"` in half. Handing out the segments keeps the
+/// quote-aware split of `split_segments` as the only place that decides
+/// where a command begins and ends.
+pub fn command_label_segments(command: &str) -> Vec<String> {
     let command = cut_heredoc(command);
     let segments = split_segments(&command);
     if segments.is_empty() {
-        return String::new();
+        return Vec::new();
     }
 
     // Strip only LEADING `cd`s. A `cd` in the middle or at the end is doing
@@ -40,10 +52,7 @@ pub fn command_label(command: &str) -> String {
         kept = segments.iter().collect();
     }
 
-    kept.iter()
-        .map(|s| collapse_whitespace(s))
-        .collect::<Vec<_>>()
-        .join("; ")
+    kept.iter().map(|s| collapse_whitespace(s)).collect()
 }
 
 /// Cut the command at its first heredoc marker (`<<'EOF'`), top-level only.
@@ -95,7 +104,11 @@ fn cut_heredoc(command: &str) -> String {
 ///
 /// Segments are already split on every separator, so everything after `cd ` is
 /// the path, spaces and quotes included.
-fn is_bare_cd(segment: &str) -> bool {
+///
+/// Shared with the task-label payload picker, which treats a directory change
+/// as preparation wherever it sits: a trailing `cd` must not take the payload
+/// slot away from the work before it. One definition, so the two cannot drift.
+pub fn is_bare_cd(segment: &str) -> bool {
     segment
         .strip_prefix("cd ")
         .is_some_and(|rest| !rest.trim().is_empty())

@@ -346,6 +346,7 @@ pub(crate) fn detail_modal(
     if let Some(command) = detail.command.as_ref() {
         body = body.child(
             div()
+                .id("task-detail-command")
                 .w_full()
                 .min_w_0()
                 .max_h(px(120.0))
