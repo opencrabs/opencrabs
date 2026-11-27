@@ -97,6 +97,17 @@ fn deepseek_v4_family_resolves_at_off_peak_list() {
     assert_rates("deepseek-v4-pro", 0.66, 1.98, None, Some(0.022));
 }
 
+// ── Built-in provider ───────────────────────────────────────────────────────
+
+#[test]
+fn the_built_in_combo_id_bills_the_deepseek_flash_card() {
+    // `combo` is the built-in provider's chat id, so a row for it keeps every
+    // turn on the free default priced instead of falling to the unknown-model
+    // default (#3203). The owner prices it at the DeepSeek V4.1 Flash card.
+    assert_rates("combo", 0.15, 0.60, None, Some(0.003));
+    assert_eq!(shipped_table().cost_origin("combo"), CostOrigin::Priced);
+}
+
 // ── Moonshot ────────────────────────────────────────────────────────────────
 
 #[test]
