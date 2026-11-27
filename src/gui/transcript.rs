@@ -3800,9 +3800,10 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
                     },
                 ));
             }
-            LiveEntry::Narration(text) => {
-                lines.push((entry_index, LiveCardLine::Narration(text.clone())))
-            }
+            LiveEntry::Narration(text) => lines.push((
+                entry_index,
+                LiveCardLine::Narration(spoken::while_streaming(text).into_owned()),
+            )),
             LiveEntry::Reasoning(text) => {
                 lines.push((entry_index, LiveCardLine::Reasoning(fit(text.trim(), 600))));
             }
@@ -3812,8 +3813,13 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
     // happens (#3190). The index is past the entries, so it never collides
     // with a real one and a menu on it resolves to nothing the way a stale
     // tool index already does.
-    if let Some(text) = live.pending() {
-        lines.push((live.entries.len(), LiveCardLine::Pending(text.to_string())));
+    // A spoken block is for the ear (#3096): the stream carries it raw so the
+    // voice path can read it, and the card hides it in every state it passes
+    // through while it arrives.
+    if let Some(text) = live.pending().map(spoken::while_streaming)
+        && !text.is_empty()
+    {
+        lines.push((live.entries.len(), LiveCardLine::Pending(text.into_owned())));
     }
     lines
 }
@@ -4630,7 +4636,8 @@ pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     // the paragraph it already owns is what it falls back to.
     live.pending()
         .or_else(|| live.narration().last())
-        .map(collapsed_paragraph)
+        .map(spoken::while_streaming)
+        .map(|text| collapsed_paragraph(&text))
         .filter(|text| !text.is_empty())
 }
 
@@ -8940,6 +8947,34 @@ mod tests {
         live.clear();
         assert!(live.is_empty());
         assert_eq!(live.answer(), None);
+    }
+
+    /// A spoken block streamed into a turn stays in the raw stream for the
+    /// voice path and never reaches the card, neither its body lines nor the
+    /// collapsed one-line preview (#3096): every painter of the live prose
+    /// goes through the same filter.
+    #[test]
+    fn a_streamed_spoken_block_is_painted_nowhere_on_the_live_card() {
+        let mut live = LiveTurn::default();
+        live.begin("enquanto o outro corre".into());
+        for stream in [
+            "Feito.\n\n<<SPOKEN:Feito. Diz se avanço.>>",
+            "Feito.\n\n<<SPOKEN:Feito. Diz se",
+            "Feito.\n\n<<SPO",
+        ] {
+            live.stream = stream.to_string();
+            assert!(
+                live.answer().is_some_and(|raw| raw.contains("<<")),
+                "the raw stream keeps the block for the voice path"
+            );
+            for (_, line) in live_card_lines(&live) {
+                if let LiveCardLine::Pending(text) | LiveCardLine::Narration(text) = line {
+                    assert!(!text.contains("<<"), "card painted {text:?} from {stream:?}");
+                }
+            }
+            let preview = collapsed_narration(&live).unwrap_or_default();
+            assert!(!preview.contains("<<"), "preview painted {preview:?} from {stream:?}");
+        }
     }
 
     /// A notice is a line ABOUT a turn, not a turn (#2895). Model switches,
