@@ -353,6 +353,14 @@ impl AgentService {
 
         let mut out = format!("{time_marker}\n\n{user_message}");
 
+        // How to answer a voice note rides with the voice note only (#3222):
+        // in the system prompt every typed turn read it and some wrote a
+        // spoken block nobody would hear.
+        if crate::channels::voice::spoken::is_voice_turn(user_message) {
+            out.push_str("\n\n");
+            out.push_str(crate::channels::voice::spoken::SPOKEN_INSTRUCTION);
+        }
+
         if let Some(reminder) = Self::active_plan_reminder(session_id).await {
             out.push_str("\n\n");
             out.push_str(&reminder);

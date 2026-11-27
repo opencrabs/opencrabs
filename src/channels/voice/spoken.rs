@@ -46,6 +46,28 @@ const CLOSE: &str = ">>";
 /// to add it (#3092).
 pub const VOICE_PREFIX: &str = "[voice note]";
 
+/// How a voice turn is answered, told to the model only on a voice turn.
+///
+/// This used to sit in the system prompt, sent on every turn, and a model that
+/// read it on typed turns wrote the block anyway: tokens spent on speech nobody
+/// plays, and a raw marker on the live card (#3222). Riding along with the
+/// marked message instead makes the rule structural: a typed turn never sees it.
+pub const SPOKEN_INSTRUCTION: &str = "[Voice turn: this message was spoken, so it is answered with speech as well: end your reply with one `<<SPOKEN:...>>` block holding two to four plain sentences, one for what you did and one for what the user has to do next, in the language they wrote in. No markdown, no file paths, no lists, no code, and never a `>>` inside it, because that closes the block early. Everything above the block stays exactly as full as the work deserves. The block is stripped from every surface before display. Only this turn gets a block.]";
+
+/// Whether a message carries a voice note.
+///
+/// Channels put their `[Channel: ...]` banner and chat history in front of the
+/// words, so the note is not always the first thing in the message: any line
+/// that opens with it counts. A line that merely mentions the note mid
+/// sentence does not.
+pub fn is_voice_turn(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .get(..VOICE_PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(VOICE_PREFIX))
+    })
+}
+
 /// Mark a message as having come from a recording.
 ///
 /// Added at the edge, after the transcript is in hand and before the turn
@@ -302,6 +324,33 @@ fn collapse(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_turn_is_detected_behind_a_channel_banner() {
+        assert!(is_voice_turn("[voice note] turn it up"));
+        assert!(is_voice_turn("[Voice Note]: turn it up"));
+        assert!(is_voice_turn(
+            "[Channel: Telegram (chat_id: 1)]\n[voice note] turn it up"
+        ));
+        assert!(is_voice_turn(&voice_prefix("turn it up")));
+    }
+
+    #[test]
+    fn typed_turn_is_not_a_voice_turn() {
+        assert!(!is_voice_turn("turn it up"));
+        assert!(!is_voice_turn("what does [voice note] mean?"));
+        assert!(!is_voice_turn(""));
+        assert!(!is_voice_turn("[voice"));
+        // Multibyte input around the probe must not panic on a char boundary.
+        assert!(!is_voice_turn("ção [voice note]\n🦀🦀🦀🦀🦀🦀🦀🦀"));
+    }
+
+    #[test]
+    fn spoken_instruction_names_the_marker_the_parser_reads() {
+        // The instruction and the parser must agree on the opener, or a voice
+        // turn writes a block nothing splits off.
+        assert!(SPOKEN_INSTRUCTION.contains(OPEN));
+    }
 
     /// A reply with no block comes back as it was. Most replies have none, so a
     /// parser that reshaped them would rewrite the history of the app.
