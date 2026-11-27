@@ -23,6 +23,7 @@
 //! half written fence cannot swallow the rest of the answer.
 
 use crate::channels::voice::text_cleanup::clean_for_tts;
+use std::borrow::Cow;
 
 /// The most a spoken reply may say, in characters.
 ///
@@ -132,6 +133,53 @@ pub fn split(text: &str) -> (String, Option<String>) {
 /// The reply as the reader sees it, block and all removed.
 pub fn visible(text: &str) -> String {
     split(text).0
+}
+
+/// Prose that is still streaming, with every spoken block hidden.
+///
+/// [`visible`] runs on the settled reply. The live card paints the raw chunks
+/// as they arrive, so a block reached the screen there, closed or still half
+/// written, in a typed turn just as much as in a voice one. While the text is
+/// streaming, a block that has not closed yet is the end of the text, and an
+/// opener cut mid word (`<<SPO`) is too: neither can be anything but the start
+/// of the block. The raw stream is left untouched for the voice path, which
+/// reads the block out of it.
+pub fn while_streaming(text: &str) -> Cow<'_, str> {
+    if !text.contains('<') {
+        return Cow::Borrowed(text.trim_end());
+    }
+    let mut shown = text.to_string();
+    while let Some((start, end)) = locate(&shown) {
+        shown.replace_range(start..end, "");
+    }
+    if let Some(open) = find_ignore_case(&shown, OPEN) {
+        shown.truncate(open);
+    } else if let Some(partial) = partial_opener(&shown) {
+        shown.truncate(partial);
+    }
+    Cow::Owned(shown.trim_end().to_string())
+}
+
+/// Byte offset of `needle` in `haystack`, ignoring ASCII case.
+fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .char_indices()
+        .map(|(at, _)| at)
+        .find(|&at| {
+            haystack
+                .get(at..at + needle.len())
+                .is_some_and(|window| window.eq_ignore_ascii_case(needle))
+        })
+}
+
+/// Where a trailing, unfinished `<<SPOKEN:` opener begins, if the text ends in one.
+fn partial_opener(text: &str) -> Option<usize> {
+    (1..OPEN.len()).rev().find_map(|len| {
+        let at = text.len().checked_sub(len)?;
+        let tail = text.get(at..)?;
+        let prefix = OPEN.get(..len)?;
+        tail.eq_ignore_ascii_case(prefix).then_some(at)
+    })
 }
 
 /// What to speak when the model left the block out.
@@ -361,6 +409,46 @@ mod tests {
     #[test]
     fn visible_is_the_answer_alone() {
         assert_eq!(visible("Done.\n\n<<SPOKEN:Done.>>"), "Done.");
+    }
+
+    /// The live card paints the raw stream, so every state a block passes
+    /// through while it arrives must stay off the screen: closed, still open,
+    /// and an opener cut anywhere inside its own token, in any case.
+    #[test]
+    fn a_streaming_block_never_reaches_the_screen_in_any_state() {
+        let answer = "Feito, olá 🦀.";
+        let block = "\n\n<<SPOKEN:Feito. Diz-me se avanço.>>";
+        for cut in 0..=block.len() {
+            let Some(partial) = block.get(..cut) else {
+                continue;
+            };
+            let streamed = format!("{answer}{partial}");
+            assert_eq!(
+                while_streaming(&streamed),
+                answer,
+                "the block leaked at byte {cut}: {streamed:?}"
+            );
+        }
+        assert_eq!(
+            while_streaming("Done.\n<<spoken:lower case too>>"),
+            "Done."
+        );
+        assert_eq!(
+            while_streaming("Done.\n<<Spoken:still being writ"),
+            "Done."
+        );
+    }
+
+    /// Only the spoken block is hidden: other markers and plain prose are
+    /// painted exactly as they streamed.
+    #[test]
+    fn streaming_text_without_a_block_is_left_alone() {
+        assert_eq!(while_streaming("plain prose"), "plain prose");
+        assert_eq!(
+            while_streaming("see <<IMG:/tmp/a.png>> here"),
+            "see <<IMG:/tmp/a.png>> here"
+        );
+        assert_eq!(while_streaming("a < b and c"), "a < b and c");
     }
 
     /// A transcript that already carries the note is not marked twice. The
