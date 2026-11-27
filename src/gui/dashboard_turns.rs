@@ -2305,7 +2305,17 @@ impl Dashboard {
             let tap: StripTap = Rc::new(move |_window, app| {
                 let _ = weak.update(app, |this, cx| this.toggle_tasks(session, cx));
             });
-            return Some(task_strip(label.to_string(), Some(tap)).into_any_element());
+            // A drag over the strip is a copy gesture (#2678), and what it
+            // copies comes from the roster, not from the folded label the
+            // strip paints: the full command of every running task, one per
+            // line (#3209).
+            let copy_rows = rows.clone();
+            let copy: StripTap = Rc::new(move |_window, app| {
+                if let Some(text) = task_list::copy_text(&copy_rows) {
+                    app.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            });
+            return Some(task_strip(label.to_string(), Some(tap), Some(copy)).into_any_element());
         }
         let focused = self.task_focus == Some(session);
         // A row that finished takes its output with it: the card must not go

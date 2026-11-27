@@ -1013,11 +1013,13 @@ fn the_running_task_strip_keeps_a_gutter_in_a_narrow_pane() {
 }
 
 #[test]
-fn the_running_task_strip_copies_its_label_on_a_drag() {
+fn the_running_task_strip_copies_the_full_commands_on_a_drag() {
     // #2678: the strip names the job the user wants to quote back ("that
     // command is stuck"). It is one truncated line with no character grid,
     // so the gesture is the copy: a press, then a release far enough away
-    // to be a drag, writes the whole label. A plain click stays a click.
+    // to be a drag. #3209 moved what the clipboard takes out to the window,
+    // which mints it from the roster's full commands: the folded label the
+    // strip paints is never what lands on the clipboard.
     let src = DASHBOARD;
     let strip = fn_body(src, "task_strip");
     assert!(
@@ -1033,12 +1035,13 @@ fn the_running_task_strip_copies_its_label_on_a_drag() {
         "a release inside the threshold is a click, not a copy"
     );
     assert!(
-        strip.contains("write_to_clipboard(ClipboardItem::new_string"),
-        "a drag writes the label to the clipboard"
+        strip.contains("on_copy"),
+        "a drag copies through the window-minted handler"
     );
+    let area = fn_body(src, "task_area");
     assert!(
-        strip.contains("let copied = format!("),
-        "the whole label is copied, not the truncated part"
+        area.contains("copy_text"),
+        "the copy text is built from the roster, not the strip's label"
     );
 }
 

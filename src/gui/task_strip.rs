@@ -24,14 +24,11 @@ pub(crate) type StripTap = Rc<dyn Fn(&mut Window, &mut App)>;
 ///
 /// A plain click, the press and release the drag test below lets through,
 /// opens the session's task list. `on_tap` is that click, minted by the
-/// window, and `None` leaves the strip a label.
-pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>) -> Div {
-    // #2678: the roster above the composer is the line the user quotes back at
-    // the agent ("that job is stuck"), so a drag over it copies it. The strip
-    // is one truncated line with no character grid of its own, so there is
-    // nothing to select inside it: the gesture is the copy, and it copies the
-    // whole label rather than the part that survived truncation.
-    //
+/// window, and `None` leaves the strip a label. A drag is the copy gesture
+/// (#2678): the window also mints what a drag copies, `on_copy`, so the
+/// clipboard can take the roster's full commands rather than the folded
+/// label this strip paints (#3209). `None` leaves the drag nothing to do.
+pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>, on_copy: Option<StripTap>) -> Div {
     // The press outlives the frame it landed in. The strip is rebuilt on every
     // render, and while a turn streams or the elapsed time ticks a render
     // lands between most presses and their release: a press kept in a cell
@@ -41,7 +38,6 @@ pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>) -> Div {
         static STRIP_PRESS: std::cell::Cell<Option<Point<Pixels>>> =
             const { std::cell::Cell::new(None) };
     }
-    let copied = format!("⏳ {text}");
     let clickable = on_tap.is_some();
     div()
         .when(clickable, |d| d.cursor_pointer())
@@ -68,7 +64,9 @@ pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>) -> Div {
                 }
                 return;
             }
-            app.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+            if let Some(copy) = on_copy.as_ref() {
+                copy(window, app);
+            }
         })
         .child(
             div()

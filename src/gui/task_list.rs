@@ -128,6 +128,30 @@ pub(crate) fn header_text(count: usize) -> String {
     }
 }
 
+/// How long a copied mark stays lit on whatever the copy came from.
+pub(crate) const COPY_FLASH: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// What a copy gesture on the strip or a row hands the clipboard (#3209):
+/// every task's full command, one per line, or the label when the command
+/// was never ours (a mirrored cli task).
+///
+/// Neither surface can recover the whole statement from what it paints. The
+/// strip is cut to [`STRIP_LABEL_CHARS`] and a row's label is folded for the
+/// same reason, both deliberate for display (#3207). The roster holds the
+/// real command, so the clipboard takes it from there, not from the part
+/// that survived the fold.
+pub(crate) fn copy_text(rows: &[TaskRow]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.iter()
+            .map(|row| row.command.as_deref().unwrap_or(&row.label).to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// What the output block says for an open task: its tail, or a line that
 /// explains the silence. A task with no file to read and one that has not
 /// written yet look the same on disk, and both are ordinary.
@@ -370,6 +394,39 @@ mod tests {
     fn the_header_counts_in_the_singular_and_the_plural() {
         assert_eq!(header_text(1), "1 task running");
         assert_eq!(header_text(3), "3 tasks running");
+    }
+
+    #[test]
+    fn the_clipboard_takes_the_full_commands_one_per_line() {
+        // #3209: neither the strip nor a row paints the whole statement, so
+        // the copy comes from the roster, not from the folded label.
+        let rows = vec![
+            TaskRow {
+                id: Uuid::new_v4(),
+                label: "cargo bui…".into(),
+                command: Some("cargo build --release".into()),
+                tag: "detached",
+                secs: 5,
+                ours: true,
+            },
+            TaskRow {
+                id: Uuid::new_v4(),
+                label: "claude on the f…".into(),
+                command: None,
+                tag: "claude",
+                secs: 9,
+                ours: false,
+            },
+        ];
+        assert_eq!(
+            copy_text(&rows).as_deref(),
+            Some("cargo build --release\nclaude on the f…")
+        );
+    }
+
+    #[test]
+    fn nothing_running_has_nothing_to_copy() {
+        assert_eq!(copy_text(&[]), None);
     }
 
     #[test]
