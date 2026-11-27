@@ -226,21 +226,33 @@ const FIELD_MIC_GLYPH: f32 = 1.65;
 
 /// The smoked glass the card floats on: near-black, faintly transparent, so
 /// white ink lands hard against it and the code behind reads as a shadow
-/// rather than as texture (#3066). The card's ceiling (#3130) starts at the
-/// pill's floor tone and lightens slightly downward, so the seam between the
-/// two reads as one continuous ramp instead of a 9-unit step up.
-const GLASS_TOP: u32 = 0x0c0c10e8;
-const GLASS_BOTTOM: u32 = 0x0e0e12d8;
+/// rather than as texture (#3066). One continuous ramp hands off from the
+/// pill's floor (#3130) and then runs DOWN into near-black, the way the
+/// reference card sits darker than the field above it: ceiling at the pill's
+/// tone, floor a step into black. The alphas ride high (ec, e2) so the sharp
+/// terminal lines behind dim into mush; gpui 0.2.2 has no per-element blur,
+/// so opacity does the frost's job (#3130's audit).
+const GLASS_TOP: u32 = 0x0a0a0eec;
+const GLASS_BOTTOM: u32 = 0x08080be2;
 
 /// The field's fill: darker at the crown than at the floor, so the pill
 /// hands its bottom edge to the card's top at the same tone and the two
 /// read as one sheet of glass (#3130). The old flat fill made the card's
 /// top edge a 9-unit step UP from the pill's floor, which the eye read as
-/// two stacked panels.
-const PILL_FILL: u32 = 0x0c0c10f2;
+/// two stacked panels. One step darker overall (2026-11-27: "a bit darker").
+const PILL_FILL: u32 = 0x0a0a0ef4;
 /// The pill's crown tone: a step darker than the pill's floor, so the ramp
 /// runs downward through the pill and hands off at its floor (#3130).
-const PILL_CROWN: u32 = 0x08080c98;
+const PILL_CROWN: u32 = 0x060608a0;
+
+/// The smoke over the card: a whisper of cool grey-blue drifting through the
+/// glass, faint enough that ink stays hard against it (#3130's audit). This
+/// stands in for the backdrop blur the reference carries and gpui 0.2.2
+/// cannot give a single element: a haze layer over the smoked fill breaks the
+/// flatness and suggests depth where the terminal behind shows through.
+const SMOKE_COOL: u32 = 0xaebdd40d;
+const SMOKE_DEEP: u32 = 0x0b0e1412;
+
 
 /// The invitation's glass rim. Spotlight's edge is not a drawn border: it is a
 /// lit edge, brightest along the top where the light falls, thinning as it
@@ -803,6 +815,19 @@ pub(super) fn overlay(
         .rounded(px(SEEKER_RADIUS))
         .bg(glass)
         .overflow_hidden();
+    // The smoke rides the card as its own layer, under the ink: over the
+    // smoked fill, under every child painted after it (#3130's audit).
+    card = card.child(
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(px(SEEKER_RADIUS))
+            .bg(linear_gradient(
+                160.0,
+                linear_color_stop(rgba(SMOKE_COOL), 0.0),
+                linear_color_stop(rgba(SMOKE_DEEP), 1.0),
+            )),
+    );
 
     if reveal {
         // The kind chips. Hidden while a session pick is armed: a narrowed
@@ -1777,5 +1802,29 @@ mod tests {
         let printed = rows(&state);
         assert_eq!(printed[0].title, "= 28.1690140845");
         assert_eq!(printed[0].kind, "calc");
+    }
+    /// The smoke is the frost's stand-in: gpui 0.2.2 cannot blur one element,
+    /// so the card wears a haze layer under its ink and rides its alpha high
+    /// to dim the sharp lines behind it (#3130's audit).
+    #[test]
+    fn the_card_wears_smoke_where_blur_cannot_go() {
+        let src = include_str!("command_palette.rs");
+        assert!(
+            src.contains("SMOKE_COOL") && src.contains("SMOKE_DEEP"),
+            "the haze is its own pair of tones, not a stolen rim colour"
+        );
+        assert!(
+            src.contains(".absolute()\n            .inset_0()\n            .rounded(px(SEEKER_RADIUS))\n            .bg(linear_gradient(\n                160.0,"),
+            "the smoke is a full-card layer at 160 degrees, not a fill the ink paints over"
+        );
+        let glass = src.find("const GLASS_BOTTOM").expect("the floor tone exists");
+        let line = src[glass..].lines().next().expect("one line");
+        let alpha = line
+            .trim_start_matches("const GLASS_BOTTOM: u32 = 0x08080b")
+            .trim_end_matches(';');
+        assert!(
+            u8::from_str_radix(alpha, 16).unwrap() > 0xd8,
+            "the floor rides its alpha high so the terminal behind dims into mush"
+        );
     }
 }
