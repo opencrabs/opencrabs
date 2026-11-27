@@ -23,7 +23,7 @@
 /// placeholder.
 pub fn command_label(command: &str) -> String {
     let command = cut_heredoc(command);
-    let segments = split_segments(command);
+    let segments = split_segments(&command);
     if segments.is_empty() {
         return String::new();
     }
@@ -55,23 +55,40 @@ pub fn command_label(command: &str) -> String {
 /// the head (`cat > ~/…/script.sh`) and drops the rest. The scan is
 /// quote-aware via [`shell_scan`], so `echo "a << b"` survives untouched, and
 /// `<<<` (a here-string, not a heredoc) is skipped.
-fn cut_heredoc(command: &str) -> &str {
-    use crate::utils::shell_scan::{scan, ShellChar};
+fn cut_heredoc(command: &str) -> String {
+    use crate::utils::shell_scan::{ShellChar, scan};
     let is_syntax = |c: &ShellChar| !c.literal && !c.quote_mark;
     let scanned = scan(command);
     for i in 0..scanned.len().saturating_sub(1) {
         if scanned[i].ch == '<' && is_syntax(&scanned[i]) && scanned[i + 1].ch == '<' {
-            if scanned.get(i + 2).is_some_and(|c| c.ch == '<' && is_syntax(c)) {
+            if scanned
+                .get(i + 2)
+                .is_some_and(|c| c.ch == '<' && is_syntax(c))
+            {
                 continue;
             }
-            let rest = &command[i + 2..];
-            let word = rest.trim_start().trim_start_matches(['\'', '"']);
-            if word.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                return command[..i].trim_end();
+            // Everything stays in char space: `i` counts scanned chars, so a
+            // byte slice like `command[i..]` would land mid-character on any
+            // command carrying a multibyte char before the marker. The head is
+            // rebuilt from the scanned chars and the marker word is read from
+            // the scanned tail, never from `command` itself.
+            let head: String = scanned[..i].iter().map(|c| c.ch).collect();
+            let word: String = scanned[i + 2..]
+                .iter()
+                .map(|c| c.ch)
+                .skip_while(|c| c.is_whitespace())
+                .collect();
+            let word = word.trim_start_matches(['\'', '"']);
+            if word
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                return head.trim_end().to_string();
             }
         }
     }
-    command
+    command.to_string()
 }
 
 /// Is this segment a bare directory change and nothing else?

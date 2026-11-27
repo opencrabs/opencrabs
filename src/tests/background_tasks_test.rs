@@ -107,17 +107,25 @@ fn short_label_cuts_an_inline_heredoc_at_its_script_path() {
     // string (#3204): the label must keep the file the script lands in and
     // drop the body, or it prints code instead of naming the task.
     let command = "cat > ~/.opencrabs/projects/opencrabs/files/gate-combo-watch2.sh <<'EOF'\n#!/bin/bash\nLOG=\"x\"\nEOF\nbash \"$HOME/.opencrabs/projects/opencrabs/files/gate-combo-watch2.sh\"";
-    assert_eq!(
-        short_label(command),
-        "cat > ~/…/gate-combo-watch2.sh"
-    );
+    assert_eq!(short_label(command), "cat > ~/…/gate-combo-watch2.sh");
+}
+
+#[test]
+fn short_label_cuts_a_heredoc_after_a_multibyte_char() {
+    // The cut runs in char space, never byte space: a multibyte char before
+    // the marker must not panic or corrupt the head (#3204).
+    let command = "echo café > ~/.opencrabs/projects/opencrabs/files/gate.sh <<'EOF'\nbody\nEOF\nbash run.sh";
+    assert_eq!(short_label(command), "echo café > ~/…/gate.sh");
 }
 
 #[test]
 fn short_label_keeps_a_quoted_shift_that_is_not_a_heredoc() {
     // Quote-aware: `<<` inside a literal string is data, not a heredoc
     // marker, so the label keeps the whole command.
-    assert_eq!(short_label("echo \"a << b\" && cargo build"), "echo \"a << b\"; cargo build");
+    assert_eq!(
+        short_label("echo \"a << b\" && cargo build"),
+        "echo \"a << b\"; cargo build"
+    );
 }
 
 #[tokio::test]
