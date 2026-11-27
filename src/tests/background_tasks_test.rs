@@ -114,7 +114,8 @@ fn short_label_cuts_an_inline_heredoc_at_its_script_path() {
 fn short_label_cuts_a_heredoc_after_a_multibyte_char() {
     // The cut runs in char space, never byte space: a multibyte char before
     // the marker must not panic or corrupt the head (#3204).
-    let command = "echo café > ~/.opencrabs/projects/opencrabs/files/gate.sh <<'EOF'\nbody\nEOF\nbash run.sh";
+    let command =
+        "echo café > ~/.opencrabs/projects/opencrabs/files/gate.sh <<'EOF'\nbody\nEOF\nbash run.sh";
     assert_eq!(short_label(command), "echo café > ~/…/gate.sh");
 }
 
