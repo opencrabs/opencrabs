@@ -4,15 +4,15 @@
 
 OpenCrabs is community funded. No venture capital, no investors, no company behind it. The people listed here pay for the subscriptions, the inference and the credits that keep the agent running, and some of them also write the code.
 
-Numbers below are derived from [`sponsors.json`](sponsors.json) as of **November 13, 2026**. Currencies are never converted, so each one is totalled on its own.
+Numbers below are derived from [`sponsors.json`](sponsors.json) as of **November 25, 2026**. Currencies are never converted, so each one is totalled on its own.
 
 ## Totals
 
 | Type | Total | How it is counted |
 |---|---|---|
 | Contributions | **€30** | Transferred, not converted |
-| Contributions | **$133.25** | Transferred, not converted |
-| In kind | **$450** | Subscription rate times billings to date |
+| Contributions | **$188.25** | Transferred, not converted |
+| In kind | **$500** | Subscription rate times billings to date |
 | Credits | **8B to 9B tokens** | Qwen Ambassador programme: Magic Cubes credits and early access. No money value recorded |
 
 ## Who is behind it
@@ -36,6 +36,8 @@ Numbers below are derived from [`sponsors.json`](sponsors.json) as of **November
 | October 24, 2026 | Adolfo Usier | $18.13 | Free model access for every user, built-in provider |
 | November 7, 2026 | Adolfo Usier | $20 | Free model access for every user, built-in provider |
 | November 13, 2026 | Adolfo Usier | $30 | Free model access for every user, built-in provider |
+| November 21, 2026 | Adolfo Usier | $30 | Free model access for every user, built-in provider |
+| November 25, 2026 | Daniel Carneiro | $25 | Free model access for every user, built-in provider |
 
 ## Subscriptions paid directly
 
@@ -43,8 +45,8 @@ These are recurring costs a sponsor pays out of pocket rather than money handed 
 
 | Sponsor | Subscription | Rate | Since | Billings to date | Committed |
 |---|---|---|---|---|---|
-| Adolfo Usier | Z.ai Pro subscription | $30/month | February 14, 2026 | 9 | $270 |
-| Adolfo Usier | 2x OpenCode Go subscription | $20/month | February 14, 2026 | 9 | $180 |
+| Adolfo Usier | Z.ai Pro subscription | $30/month | February 14, 2026 | 10 | $300 |
+| Adolfo Usier | 2x OpenCode Go subscription | $20/month | February 14, 2026 | 10 | $200 |
 
 ### Replacement value today
 
@@ -52,7 +54,7 @@ What the same subscriptions would cost at current list prices. Shown for context
 
 | Sponsor | Subscription | List price today | Billings to date | Value today |
 |---|---|---|---|---|
-| Adolfo Usier | Z.ai Pro subscription | $70/month | 9 | $630 |
+| Adolfo Usier | Z.ai Pro subscription | $70/month | 10 | $700 |
 
 ## Credits and access
 

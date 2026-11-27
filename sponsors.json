@@ -3,7 +3,7 @@
   "repository": "opencrabs/opencrabs",
   "inception": "2026-02-14",
   "billing_day": 14,
-  "updated": "2026-11-13",
+  "updated": "2026-11-25",
   "notes": {
     "currency": "Amounts are never converted. Each currency is totalled on its own, so no exchange rate can go stale in this file.",
     "credits": "Credit and access grants carry no money amount on purpose. Nobody paid a rate for them, so any figure would be invented. Usage is recorded instead.",
@@ -190,6 +190,19 @@
       "public": true
     },
     {
+      "id": "adolfo-2026-11-21-inference",
+      "sponsor": "adolfousier",
+      "kind": "money",
+      "category": "inference",
+      "description": "Inference credits for the built-in provider",
+      "date": "2026-11-21",
+      "date_precision": "day",
+      "amount": 30,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
       "id": "adolfo-2026-11-13-inference",
       "sponsor": "adolfousier",
       "kind": "money",
@@ -198,6 +211,19 @@
       "date": "2026-11-13",
       "date_precision": "day",
       "amount": 30,
+      "currency": "USD",
+      "purpose": "Free model access for every user, built-in provider",
+      "public": true
+    },
+    {
+      "id": "loonix-2026-11-25-inference",
+      "sponsor": "loonix",
+      "kind": "money",
+      "category": "inference",
+      "description": "Inference credits for the built-in provider",
+      "date": "2026-11-25",
+      "date_precision": "day",
+      "amount": 25,
       "currency": "USD",
       "purpose": "Free model access for every user, built-in provider",
       "public": true
