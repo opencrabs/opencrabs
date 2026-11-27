@@ -73,7 +73,9 @@ pub enum ProviderError {
     /// is accepted, the server just has not begun answering. Retryable with
     /// a backoff scaled to the budget that expired, chosen by
     /// `stream_retry_backoff`.
-    #[error("No first token after {budget_secs}s: the provider accepted the request but never started answering")]
+    #[error(
+        "No first token after {budget_secs}s: the provider accepted the request but never started answering"
+    )]
     PrefillTimeout { budget_secs: u64 },
 
     /// Thinking-loop timeout (#890): model streamed for N seconds without

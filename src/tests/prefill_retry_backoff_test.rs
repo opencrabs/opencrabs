@@ -13,9 +13,7 @@
 //! the tool loop calls this function, so a silent change here changes how a
 //! live turn waits.
 
-use crate::brain::provider::error::{
-    ProviderError, short_error_reason, stream_retry_backoff,
-};
+use crate::brain::provider::error::{ProviderError, short_error_reason, stream_retry_backoff};
 use std::time::Duration;
 
 #[test]
@@ -61,7 +59,10 @@ fn transport_ladder_is_unchanged_for_other_classes() {
     // Dropped streams and 5xx keep 500ms → 1s → 2s → 4s → 8s, capped from
     // there so a long retry run cannot overflow the shift.
     let dropped = ProviderError::StreamError("connection closed".to_string());
-    assert_eq!(stream_retry_backoff(&dropped, 1), Duration::from_millis(500));
+    assert_eq!(
+        stream_retry_backoff(&dropped, 1),
+        Duration::from_millis(500)
+    );
     assert_eq!(stream_retry_backoff(&dropped, 2), Duration::from_secs(1));
     assert_eq!(stream_retry_backoff(&dropped, 3), Duration::from_secs(2));
     assert_eq!(stream_retry_backoff(&dropped, 4), Duration::from_secs(4));
@@ -96,10 +97,7 @@ fn prefill_timeout_is_retryable_and_reasoned() {
         RetryableError::is_retryable(&err),
         "a prefill cut must reach the retry arm"
     );
-    assert_eq!(
-        short_error_reason(&err),
-        "no first token after 120s"
-    );
+    assert_eq!(short_error_reason(&err), "no first token after 120s");
     // No declared cooldown: the hint path must stay empty so the scaled
     // policy above is what the wait comes from.
     assert_eq!(RetryableError::retry_after(&err), None);

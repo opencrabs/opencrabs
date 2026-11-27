@@ -2029,7 +2029,9 @@ impl Dashboard {
                         // card keeps its stream and its frozen clock until
                         // that read lands, so the stop still never draws a
                         // turn without its rows.
-                        self.turn.settle.begin_after_stop(self.chat_state.row_total());
+                        self.turn
+                            .settle
+                            .begin_after_stop(self.chat_state.row_total());
                         self.reload_transcript(session, cx);
                         self.turn.live.finalize(None);
                         self.turn.busy = false;

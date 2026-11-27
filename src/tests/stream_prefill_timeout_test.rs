@@ -152,4 +152,3 @@ fn stream_loop_selects_the_clock_from_whether_a_chunk_arrived() {
         "the pre-#3212 single-clock poll must not come back"
     );
 }
-

@@ -11064,9 +11064,9 @@ mod tests {
 
         for (_, line) in live_card_lines(&live) {
             let text = match line {
-                LiveCardLine::Narration(t) | LiveCardLine::Reasoning(t) | LiveCardLine::Pending(t) => {
-                    t
-                }
+                LiveCardLine::Narration(t)
+                | LiveCardLine::Reasoning(t)
+                | LiveCardLine::Pending(t) => t,
                 LiveCardLine::Tool { text, .. } => text,
             };
             assert!(
