@@ -358,6 +358,33 @@ impl BackgroundTaskManager {
         );
     }
 
+    /// Mirror work a turn left running after it ended (#3219): a process it
+    /// detached or a `systemd-run` unit it started. `key` is the identity the
+    /// row is removed by ([`Self::mirror_finished`]), `label` what a surface
+    /// prints, `output` the log the work writes to when one is known. No
+    /// cancel: the process is not this one's child.
+    pub fn mirror_started_external(
+        &self,
+        session_id: Uuid,
+        key: String,
+        label: String,
+        output: Option<PathBuf>,
+    ) {
+        self.push_row(
+            session_id,
+            RunningTask {
+                task_id: Uuid::new_v4(),
+                label,
+                started: std::time::Instant::now(),
+                progress: None,
+                source: TaskSource::Mirror,
+                key: Some(key),
+                output,
+                cancel: None,
+            },
+        );
+    }
+
     /// Remove a mirrored external task row (see [`Self::mirror_started`]).
     /// No-op when nothing matches: a `task_notification` may name a task we
     /// never saw started (mid-session attach, log replay) — that is not an

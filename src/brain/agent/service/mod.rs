@@ -15,6 +15,7 @@ pub(crate) mod compaction_prompts;
 pub(crate) mod compaction_stream;
 pub(crate) mod context;
 pub(crate) mod context_rows;
+pub(crate) mod detached_watch;
 pub(crate) mod work_status;
 #[allow(unused_imports)] // only used in test code
 pub(crate) use context::{format_editing_reminder, format_plan_reminder, plan_state_block};
