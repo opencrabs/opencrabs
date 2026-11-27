@@ -184,14 +184,11 @@ pub fn while_streaming(text: &str) -> Cow<'_, str> {
 
 /// Byte offset of `needle` in `haystack`, ignoring ASCII case.
 fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
-    haystack
-        .char_indices()
-        .map(|(at, _)| at)
-        .find(|&at| {
-            haystack
-                .get(at..at + needle.len())
-                .is_some_and(|window| window.eq_ignore_ascii_case(needle))
-        })
+    haystack.char_indices().map(|(at, _)| at).find(|&at| {
+        haystack
+            .get(at..at + needle.len())
+            .is_some_and(|window| window.eq_ignore_ascii_case(needle))
+    })
 }
 
 /// Where a trailing, unfinished `<<SPOKEN:` opener begins, if the text ends in one.
@@ -478,14 +475,8 @@ mod tests {
                 "the block leaked at byte {cut}: {streamed:?}"
             );
         }
-        assert_eq!(
-            while_streaming("Done.\n<<spoken:lower case too>>"),
-            "Done."
-        );
-        assert_eq!(
-            while_streaming("Done.\n<<Spoken:still being writ"),
-            "Done."
-        );
+        assert_eq!(while_streaming("Done.\n<<spoken:lower case too>>"), "Done.");
+        assert_eq!(while_streaming("Done.\n<<Spoken:still being writ"), "Done.");
     }
 
     /// Only the spoken block is hidden: other markers and plain prose are

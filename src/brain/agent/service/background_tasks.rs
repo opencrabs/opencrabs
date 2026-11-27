@@ -134,11 +134,9 @@ impl RunningTask {
             return Some(path.clone());
         }
         match &self.source {
-            TaskSource::Claude { id } => claude_task_output_in(
-                &std::env::temp_dir(),
-                claude_projects_dir().as_deref(),
-                id,
-            ),
+            TaskSource::Claude { id } => {
+                claude_task_output_in(&std::env::temp_dir(), claude_projects_dir().as_deref(), id)
+            }
             _ => None,
         }
     }
@@ -988,7 +986,11 @@ pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u
     if transcript {
         // A fragment cut by the seek does not parse, so it drops out here
         // and no rendered line has to be discarded for it.
-        raw = raw.lines().filter_map(transcript_line).collect::<Vec<_>>().join("\n");
+        raw = raw
+            .lines()
+            .filter_map(transcript_line)
+            .collect::<Vec<_>>()
+            .join("\n");
         clipped = false;
     }
     let plain = super::tool_loop::strip_ansi_output(&raw);

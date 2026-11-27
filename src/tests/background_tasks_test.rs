@@ -929,7 +929,12 @@ fn a_sub_agent_task_output_is_its_transcript_in_the_projects_tree() {
     std::fs::create_dir_all(&agents).expect("subagents dir");
     let transcript = agents.join("agent-abc1860b5ed86cfc0.jsonl");
     std::fs::write(&transcript, "{}\n").expect("write transcript");
-    let tasks = temp.path().join("claude-1000").join(slug).join(sid).join("tasks");
+    let tasks = temp
+        .path()
+        .join("claude-1000")
+        .join(slug)
+        .join(sid)
+        .join("tasks");
     std::fs::create_dir_all(&tasks).expect("task dir");
     std::os::unix::fs::symlink(&transcript, tasks.join("abc1860b5ed86cfc0.output"))
         .expect("link like the CLI does");
@@ -952,7 +957,12 @@ fn a_planted_link_without_a_real_transcript_is_still_refused() {
     let projects = tempfile::tempdir().expect("projects dir");
     let secret = temp.path().join("secret.txt");
     std::fs::write(&secret, "token\n").expect("write secret");
-    let tasks = temp.path().join("claude-1000").join("cwd").join("session").join("tasks");
+    let tasks = temp
+        .path()
+        .join("claude-1000")
+        .join("cwd")
+        .join("session")
+        .join("tasks");
     std::fs::create_dir_all(&tasks).expect("task dir");
     std::os::unix::fs::symlink(&secret, tasks.join("linked.output")).expect("link file");
 
@@ -962,7 +972,11 @@ fn a_planted_link_without_a_real_transcript_is_still_refused() {
     );
 
     // A transcript that is itself a link is not one either.
-    let agents = projects.path().join("cwd").join("session").join("subagents");
+    let agents = projects
+        .path()
+        .join("cwd")
+        .join("session")
+        .join("subagents");
     std::fs::create_dir_all(&agents).expect("subagents dir");
     std::os::unix::fs::symlink(&secret, agents.join("agent-linked.jsonl")).expect("link");
     assert_eq!(
@@ -973,14 +987,18 @@ fn a_planted_link_without_a_real_transcript_is_still_refused() {
 
 #[test]
 fn a_transcript_record_reads_as_what_the_agent_does() {
-    let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Merge done."}]}}"#;
+    let text =
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Merge done."}]}}"#;
     assert_eq!(transcript_line(text).as_deref(), Some("Merge done."));
 
     let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status\ngit log"}}]}}"#;
     assert_eq!(transcript_line(tool).as_deref(), Some("> Bash: git status"));
 
     let described = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"x","description":"Show status"}}]}}"#;
-    assert_eq!(transcript_line(described).as_deref(), Some("> Bash: Show status"));
+    assert_eq!(
+        transcript_line(described).as_deref(),
+        Some("> Bash: Show status")
+    );
 
     for quiet in [
         r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hm"}]}}"#,
