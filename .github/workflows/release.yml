@@ -574,6 +574,25 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
+          # Cargo does not always uplift the PDB from deps/ to the release
+          # root, and the miss is not deterministic (mspdbsrv writes the
+          # file asynchronously; the linker names it opencrabs_gui.pdb for
+          # a bin called opencrabs-gui, the same hyphen/underscore split
+          # cargo had to special-case for the exe itself, rust-lang/cargo
+          # #4960). Before failing, recover the symbol the way the binaries
+          # themselves are found: from deps/, under either spelling.
+          for p in opencrabs.pdb opencrabs-gui.pdb; do
+            if [ ! -f "$p" ]; then
+              u="${p//-/_}"
+              for cand in "deps/$p" "deps/$u"; do
+                if [ -f "$cand" ]; then
+                  echo "::warning::$p was not uplifted by cargo; recovered from $cand"
+                  cp "$cand" "$p"
+                  break
+                fi
+              done
+            fi
+          done
           for p in opencrabs.pdb opencrabs-gui.pdb; do
             if [ ! -f "$p" ]; then
               echo "::error::$p was not linked; refusing to publish a partial symbol archive"
