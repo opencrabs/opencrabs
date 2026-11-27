@@ -53,16 +53,14 @@ fn the_pill_floor_and_the_card_ceiling_are_one_tone() {
         .map(|at| &src[at..])
         .expect("the card's ceiling tone exists");
     let tone_of = |line: &str| -> String {
-        let hex = line
-            .split("0x")
+        line.split("0x")
             .nth(1)
             .expect("hex")
             .get(..8)
             .expect("rgb+alpha")
             .get(..6)
             .expect("rgb")
-            .to_string();
-        hex
+            .to_string()
     };
     assert_eq!(
         tone_of(floor.trim_start_matches("const ")),
