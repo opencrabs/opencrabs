@@ -738,8 +738,8 @@ impl LiveTurn {
         // marker arrives split across chunks, and a per-chunk pass would leave
         // a half of it behind on either side. The same pass drops the
         // `<!-- phantom_blocked=1 -->` iterations the service discarded.
-        let clean = crate::utils::sanitize::strip_phantom_blocked(
-            &crate::utils::sanitize::strip_comment_markers(&self.stream),
+        let clean = opencrabs::utils::sanitize::strip_phantom_blocked(
+            &opencrabs::utils::sanitize::strip_comment_markers(&self.stream),
         );
         if clean != self.stream {
             self.stream = clean;
@@ -817,8 +817,8 @@ impl LiveTurn {
     /// `<!-- phantom_blocked=1 -->` sections go the same way: they are the
     /// service's discarded iterations and were never meant for a reader.
     fn push_narration_entry(&mut self, text: &str) {
-        let clean = crate::utils::sanitize::strip_phantom_blocked(
-            &crate::utils::sanitize::strip_comment_markers(text),
+        let clean = opencrabs::utils::sanitize::strip_phantom_blocked(
+            &opencrabs::utils::sanitize::strip_comment_markers(text),
         );
         let text = clean.trim();
         if text.is_empty() {
@@ -895,8 +895,8 @@ impl LiveTurn {
         // Reasoning is model output too, so it carries the same risk of a tool
         // envelope written into it (#3217). The card paints this text, and a
         // ledger inside it leaked exactly the way the answer bubble did.
-        let reasoning = crate::utils::sanitize::strip_phantom_blocked(
-            &crate::utils::sanitize::strip_comment_markers(text),
+        let reasoning = opencrabs::utils::sanitize::strip_phantom_blocked(
+            &opencrabs::utils::sanitize::strip_comment_markers(text),
         );
         let text = reasoning.trim();
         if text.is_empty() {
