@@ -730,6 +730,20 @@ impl LiveTurn {
             self.tps.advance(now);
         }
         self.stream.push_str(text);
+        // The answer bubble is drawn from this buffer and is never passed
+        // through the ledger walk the persisted rows get (#3217), so a
+        // provider that writes its tool envelope into answer text put the raw
+        // `<!-- tools-v2: [{...}] -->` block, tool output included, straight
+        // on screen. Stripped over the whole buffer, not over `text` alone: a
+        // marker arrives split across chunks, and a per-chunk pass would leave
+        // a half of it behind on either side. The same pass drops the
+        // `<!-- phantom_blocked=1 -->` iterations the service discarded.
+        let clean = crate::utils::sanitize::strip_phantom_blocked(
+            &crate::utils::sanitize::strip_comment_markers(&self.stream),
+        );
+        if clean != self.stream {
+            self.stream = clean;
+        }
         // The provider reports the same narration twice: once as intermediate
         // text and once as streamed chunks. `push_narration` drains the
         // streamed copy only when the paragraph arrives SECOND, so the other
@@ -792,8 +806,21 @@ impl LiveTurn {
 
     /// Put one narration paragraph in the card, unless the newest narration
     /// entry already ends with it.
+    ///
+    /// The ledger marker is stripped here so the card never paints one
+    /// (#3217): a newer provider narrates its tool envelope inline instead of
+    /// keeping it to the tool channel, and the persisted rows already lose it
+    /// through `next_ledger`. The live card had no such pass, so the raw
+    /// `<!-- tools-v2: [{...}] -->` block with the tool's own output inside
+    /// reached the bubble. A paragraph that is nothing but a ledger is the
+    /// tool's working-out, not the crab's words, so it adds no row at all.
+    /// `<!-- phantom_blocked=1 -->` sections go the same way: they are the
+    /// service's discarded iterations and were never meant for a reader.
     fn push_narration_entry(&mut self, text: &str) {
-        let text = text.trim();
+        let clean = crate::utils::sanitize::strip_phantom_blocked(
+            &crate::utils::sanitize::strip_comment_markers(text),
+        );
+        let text = clean.trim();
         if text.is_empty() {
             return;
         }
@@ -865,7 +892,13 @@ impl LiveTurn {
     /// here would measure the fold loop instead of the stream and collapse the
     /// rate window. The stamp travels from the bridge with the event.
     pub fn push_reasoning_at(&mut self, text: &str, now: std::time::Instant) {
-        let text = text.trim();
+        // Reasoning is model output too, so it carries the same risk of a tool
+        // envelope written into it (#3217). The card paints this text, and a
+        // ledger inside it leaked exactly the way the answer bubble did.
+        let reasoning = crate::utils::sanitize::strip_phantom_blocked(
+            &crate::utils::sanitize::strip_comment_markers(text),
+        );
+        let text = reasoning.trim();
         if text.is_empty() {
             return;
         }
@@ -10987,5 +11020,84 @@ mod tests {
         // whole run goes instead of leaving the emptiness behind.
         assert_eq!(without_trailing_blanks("\n\n\n"), "");
         assert_eq!(without_trailing_blanks("   \n \t\n"), "");
+    }
+
+    /// The ledger a newer provider writes inline must never reach the card
+    /// (#3217). The persisted rows shed it in `next_ledger`, but the live card
+    /// paints the streaming buffer and the narration entries directly, so a
+    /// `<!-- tools-v2: [...] -->` block with the tool's own output inside
+    /// landed in the bubble, JSON escapes and all, until the reload swapped in
+    /// the stored row. The envelope is the tool's working-out, so nothing of
+    /// it, and nothing of the text it wrapped, is drawn.
+    #[test]
+    fn a_ledger_in_the_stream_never_reaches_the_card() {
+        // A real payload: rustc-style output carrying a `-->` arrow, exactly
+        // the shape that made a naive non-greedy match leak the tail.
+        // Written with escaped quotes rather than a raw literal: the payload
+        // carries `\"` internally and a raw string would need a `"#`
+        // terminator inside it.
+        const LEDGER: &str = "<!-- tools-v2: [{\"d\":\"bash: grep -n \\\"fn row_blocks\\\"\",\
+                              \"s\":\"true\",\"o\":\"STDOUT:\\n1372:fn row_blocks\\n \
+                              --> src/gui/transcript.rs:10\"}] -->";
+
+        let mut live = LiveTurn::default();
+        live.begin("audit it".into());
+        // The marker arrives split across chunks, the way the provider streams
+        // it, so a per-chunk pass would leave half of it behind on each side.
+        let (head, tail) = LEDGER.split_at(45);
+        live.note_chunk_at(head, std::time::Instant::now());
+        live.note_chunk_at(tail, std::time::Instant::now());
+
+        let body = live.answer().unwrap_or_default().to_string();
+        assert!(
+            !body.contains("tools-v2") && !body.contains("<!--"),
+            "the answer buffer must not carry the envelope, got {body:?}"
+        );
+        assert!(
+            body.is_empty(),
+            "a turn whose text was only a ledger has nothing to say, got {body:?}"
+        );
+
+        // The same envelope in narration and in reasoning is the same leak.
+        live.push_narration(&format!("before {LEDGER} after"));
+        live.push_reasoning_at(&format!("{LEDGER}"), std::time::Instant::now());
+
+        for (_, line) in live_card_lines(&live) {
+            let text = match line {
+                LiveCardLine::Narration(t) | LiveCardLine::Reasoning(t) | LiveCardLine::Pending(t) => {
+                    t
+                }
+                LiveCardLine::Tool { text, .. } => text,
+            };
+            assert!(
+                !text.contains("tools-v2") && !text.contains("<!--"),
+                "a ledger reached the card's body: {text:?}"
+            );
+        }
+        let narration: Vec<&str> = live.narration().collect();
+        assert_eq!(narration.len(), 1, "one paragraph, not one per half");
+        assert!(
+            narration[0].starts_with("before") && narration[0].ends_with("after"),
+            "the prose around the envelope survives, got {:?}",
+            narration[0]
+        );
+    }
+
+    /// The discarded-iteration sections are stripped the same way (#3217):
+    /// the service writes them to the row under paired markers and the reload
+    /// keeps them for a human, but a card painting one live showed working-out
+    /// the turn had already thrown away.
+    #[test]
+    fn a_phantom_blocked_section_never_reaches_the_card() {
+        let mut live = LiveTurn::default();
+        live.begin("go".into());
+        live.note_chunk_at(
+            "real answer\n<!-- phantom_blocked=1 -->\ndiscarded narration\n<!-- /phantom_blocked=1 -->",
+            std::time::Instant::now(),
+        );
+        let body = live.answer().unwrap_or_default().to_string();
+        assert!(!body.contains("phantom_blocked"), "got {body:?}");
+        assert!(!body.contains("discarded narration"), "got {body:?}");
+        assert_eq!(body.trim(), "real answer");
     }
 }
