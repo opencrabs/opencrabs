@@ -655,3 +655,12 @@ fn strip_followup_suggestions_is_idempotent_on_custom_brains() {
         "brains without the exact header are unchanged"
     );
 }
+
+/// #3222: the system prompt goes out on every turn, typed ones included, so it
+/// must not teach the spoken block. That rule rides with the voice note.
+#[test]
+fn core_brain_does_not_teach_the_spoken_block() {
+    let dir = TempDir::new().unwrap();
+    let brain = loader(&dir).build_core_brain(None);
+    assert!(!brain.contains("<<SPOKEN:"));
+}

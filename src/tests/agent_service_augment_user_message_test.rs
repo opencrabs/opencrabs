@@ -49,3 +49,29 @@ async fn augment_user_message_falls_back_to_utc() {
     assert!(!augmented.contains("(user:"));
     assert!(augmented.ends_with("test message"));
 }
+
+/// #3222: the spoken-block rule rides with a voice note and nothing else, so a
+/// typed turn never pays for it or writes a block nobody plays.
+#[tokio::test]
+async fn spoken_instruction_rides_only_with_a_voice_note() {
+    use crate::channels::voice::spoken::{SPOKEN_INSTRUCTION, voice_prefix};
+    use crate::config::profile::with_home_override_async;
+    let dir = TempDir::new().unwrap();
+    let session_id = Uuid::new_v4();
+
+    let voice = format!(
+        "[Channel: Telegram (chat_id: 1)]\n{}",
+        voice_prefix("turn it up")
+    );
+    let typed = "turn it up";
+    let (voiced, plain) = with_home_override_async(dir.path().to_path_buf(), async {
+        (
+            AgentService::augment_user_message(session_id, &voice, Some(dir.path())).await,
+            AgentService::augment_user_message(session_id, typed, Some(dir.path())).await,
+        )
+    })
+    .await;
+    assert!(voiced.contains(SPOKEN_INSTRUCTION));
+    assert!(!plain.contains(SPOKEN_INSTRUCTION));
+    assert!(!plain.contains("<<SPOKEN:"));
+}
