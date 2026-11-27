@@ -616,6 +616,14 @@ impl Tool for BashTool {
             None
         };
 
+        // #3219: the process-group anchor for work this call leaves running.
+        // Every spawn below calls `setsid()`, so the shell it starts is its own
+        // process group leader and everything it spawns carries that group.
+        // The shell is waited on here, but the group survives it, which is the
+        // only link to a `nohup cargo build &` that is still running when this
+        // tool returns.
+        let survivor_anchor = std::sync::atomic::AtomicU32::new(0);
+
         // Execute command with timeout — use piped stdin for sudo password
         // RTK rewrite tracking (hoisted from normal-execution branch)
         #[cfg(feature = "rtk")]
@@ -647,6 +655,12 @@ impl Tool for BashTool {
                 apply_context_env(&mut cmd, context);
                 detach_session_pre_exec(&mut cmd);
                 let mut child = cmd.spawn()?;
+                // #3219: note the shell's pid while we hold the handle, so the
+                // work it may leave behind can be found by its group afterwards.
+                survivor_anchor.store(
+                    child.id().unwrap_or(0),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 sudo_child_pid.store(
                     child.id().unwrap_or(0),
                     std::sync::atomic::Ordering::Relaxed,
@@ -704,6 +718,11 @@ impl Tool for BashTool {
                 apply_context_env(&mut cmd, context);
                 detach_session_pre_exec(&mut cmd);
                 let child = cmd.spawn()?;
+                // #3219: process-group anchor, see the other spawn sites.
+                survivor_anchor.store(
+                    child.id().unwrap_or(0),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 probe_child_pid.store(
                     child.id().unwrap_or(0),
                     std::sync::atomic::Ordering::Relaxed,
@@ -792,6 +811,11 @@ impl Tool for BashTool {
                     apply_context_env(&mut cmd, context);
                     detach_session_pre_exec(&mut cmd);
                     let child = cmd.spawn()?;
+                    // #3219: process-group anchor, see the other spawn sites.
+                    survivor_anchor.store(
+                        child.id().unwrap_or(0),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     retry_child_pid.store(
                         child.id().unwrap_or(0),
                         std::sync::atomic::Ordering::Relaxed,
@@ -877,6 +901,11 @@ impl Tool for BashTool {
                     child.id().unwrap_or(0),
                     std::sync::atomic::Ordering::Relaxed,
                 );
+                // #3219: process-group anchor, see the other spawn sites.
+                survivor_anchor.store(
+                    child.id().unwrap_or(0),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 child.wait_with_output().await
             };
 
@@ -904,6 +933,26 @@ impl Tool for BashTool {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let exit_code = output.status.code().unwrap_or(-1);
+
+        // #3219: the shell for this call has been waited on by now, so the
+        // only members still in its process group are work it backgrounded
+        // itself. Adopt them: a row per process while they run, one receipt
+        // when they are gone, owned by the process-lifetime runtime so both
+        // survive the turn and the CLI exit. Silent when nothing was left
+        // behind, which is the ordinary case. The timeout arm never reaches
+        // here: it returns early after killing the tree, so there is nothing
+        // left to adopt.
+        if let Some(mgr) = context.background_manager.as_ref() {
+            let shell_pid = survivor_anchor.load(std::sync::atomic::Ordering::Relaxed);
+            if shell_pid != 0 {
+                std::sync::Arc::clone(mgr).adopt_survivors(
+                    context.session_id,
+                    &input.command,
+                    shell_pid,
+                );
+            }
+        }
+
 
         // RTK metrics tracking: record that the command was rewritten.
         // We can't measure "original" tokens without running the command twice,

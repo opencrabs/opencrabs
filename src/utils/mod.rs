@@ -28,6 +28,7 @@ pub mod model_order;
 pub mod pdf_vision;
 pub mod plan_files;
 pub mod plan_mode;
+pub mod proc_snapshot;
 pub mod prompt_analyzer;
 pub mod provider_pair;
 pub mod providers;

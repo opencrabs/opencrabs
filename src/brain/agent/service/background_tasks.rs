@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use super::types::{BgTaskMeta, ProgressCallback, ProgressEvent, PushOrigin, QueuedUserMessage};
+use crate::utils::proc_snapshot::{self, ProcId};
 
 /// Result of a finished background command.
 #[derive(Debug, Clone)]
@@ -115,6 +116,14 @@ pub enum TaskSource {
     Claude { id: String },
     /// Any other mirrored external task.
     Mirror,
+    /// A process a Bash call left running (#3219).
+    ///
+    /// Nobody asked for it to be backgrounded: the command backgrounded it
+    /// itself (`nohup x &`), the shell exited, and this process adopted it
+    /// afterwards so the row and the completion survive the turn. The pid is
+    /// kept for a surface that wants to name it; the row's identity is its
+    /// task id, because a pid is reused and a label is not unique.
+    Survivor { pid: u32 },
 }
 
 impl TaskSource {
@@ -124,6 +133,7 @@ impl TaskSource {
             TaskSource::Detached => "detached",
             TaskSource::Claude { .. } => "claude",
             TaskSource::Mirror => "task",
+            TaskSource::Survivor { .. } => "survivor",
         }
     }
 }
@@ -170,6 +180,48 @@ pub struct BackgroundTaskManager {
     /// takes the turn idle, so without this the TUI has nothing at all to draw
     /// while a long build runs and the wait looks like a hang (#762).
     running: Mutex<HashMap<Uuid, Vec<RunningTask>>>,
+    /// Process groups a Bash call left running, waiting to be reported
+    /// (#3219).
+    ///
+    /// Separate from `running` because a group is what gets polled and
+    /// delivered as one receipt: the rows in `running` are its per-process
+    /// display, this is the state that outlives them.
+    survivors: Mutex<Vec<SurvivorGroup>>,
+    /// Whether the poller for `survivors` is running.
+    ///
+    /// Read and written under the `survivors` lock, so a poller that finds the
+    /// roster empty cannot exit at the same moment a group is adopted and
+    /// leave it unwatched.
+    survivor_poller: std::sync::atomic::AtomicBool,
+}
+
+/// One process a Bash call left behind (#3219).
+struct TrackedProc {
+    /// pid plus start time: the pair that survives pid reuse.
+    id: ProcId,
+    /// Full command line, for the row and the receipt.
+    command: String,
+    /// The row this process is drawn as.
+    task_id: Uuid,
+    /// Whether it was still running at the last poll.
+    alive: bool,
+}
+
+/// The work one Bash call left behind, reported as a single receipt (#3219).
+struct SurvivorGroup {
+    session_id: Uuid,
+    /// The bash call whose shell left these running, for the receipt.
+    parent_command: String,
+    /// The process group they share: the pid of the shell that has exited.
+    ///
+    /// Kept because it is the only way to stop the whole tree later: the
+    /// group's leader is gone, so a signal has to name the group.
+    pgid: u32,
+    started: std::time::Instant,
+    /// When to stop following them. Past this the group is stopped and the
+    /// receipt says so, rather than a row that never closes (#1984).
+    deadline: std::time::Instant,
+    procs: Vec<TrackedProc>,
 }
 
 use super::work_status::{CommandExit, WorkStatus};
@@ -178,6 +230,8 @@ impl BackgroundTaskManager {
     pub fn new() -> Self {
         Self {
             running: Mutex::new(HashMap::new()),
+            survivors: Mutex::new(Vec::new()),
+            survivor_poller: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -371,6 +425,211 @@ impl BackgroundTaskManager {
     /// error, there is just nothing to clean up.
     pub fn mirror_finished(&self, session_id: Uuid, label: &str) {
         self.mark_finished(session_id, label);
+    }
+
+    /// Adopt the work a Bash call left running (#3219).
+    ///
+    /// `shell_pid` is the shell the tool spawned for this call. It was started
+    /// with `setsid()`, so its pid is also its process group id and everything
+    /// it started carries that group. The shell itself has been waited on by
+    /// the time this runs, which is exactly why the group is the useful link:
+    /// the survivors are reparented, so their ppid says nothing, but their
+    /// group still says which call they belong to.
+    ///
+    /// A row is opened per survivor and a poller follows them here, on the
+    /// process-lifetime runtime, so both outlive the turn that started them.
+    /// When they are gone a receipt is delivered through the same route a
+    /// detached task's completion takes, which is the whole point of the issue:
+    /// long work the agent started must not depend on the agent remembering to
+    /// ask about it.
+    ///
+    /// Silent when there is nothing to adopt, which is the ordinary case.
+    ///
+    /// One limit worth naming: a survivor that inherited this call's stdout
+    /// or stderr pipe (`nohup x &` with no redirect) keeps the pipe open, so
+    /// the tool's own read of the shell's output waits on the survivor and
+    /// this call returns only after the survivor exits. By then its group has
+    /// no members and nothing is adopted. A survivor that redirects (`> log
+    /// 2>&1 &`) releases the pipe and is found here. Widening that would
+    /// mean teaching the bash tool to spot pipe-holding children before they
+    /// block, which is its own change.
+    pub fn adopt_survivors(
+        self: std::sync::Arc<Self>,
+        session_id: Uuid,
+        parent_command: &str,
+        shell_pid: u32,
+    ) {
+        if shell_pid == 0 {
+            return;
+        }
+        let entries = proc_snapshot::list_processes();
+        let members = proc_snapshot::group_members(&entries, shell_pid);
+        if members.is_empty() {
+            return;
+        }
+        let mut procs = Vec::with_capacity(members.len());
+        for member in members {
+            let task_id = Uuid::new_v4();
+            let label = if member.command.trim().is_empty() {
+                format!("pid {}", member.id.pid)
+            } else {
+                short_label(&member.command)
+            };
+            self.push_row(
+                session_id,
+                RunningTask {
+                    task_id,
+                    label,
+                    command: Some(member.command.clone()),
+                    started: std::time::Instant::now(),
+                    // No callback: this process emits no start event, so a
+                    // finish event would update a row no surface drew. The
+                    // roster reads `running_tasks`, and the receipt below is
+                    // what reaches the agent.
+                    progress: None,
+                    source: TaskSource::Survivor { pid: member.id.pid },
+                    key: None,
+                    // Its output goes wherever the command sent it, which this
+                    // process never learned. `None` is the honest answer and
+                    // `output_path` already treats it as one.
+                    output: None,
+                    // Not ours to stop: the row did not spawn it, and a cancel
+                    // that killed a build the user did not name would be a
+                    // worse surprise than a row that cannot be cancelled.
+                    cancel: None,
+                },
+            );
+            procs.push(TrackedProc {
+                id: member.id,
+                command: member.command,
+                task_id,
+                alive: true,
+            });
+        }
+        tracing::info!(
+            target: "background_task",
+            "Adopted {} process(es) left running by a bash call in session {session_id} \
+             (group {shell_pid}, command: {parent_command})",
+            procs.len()
+        );
+        let group = SurvivorGroup {
+            session_id,
+            parent_command: parent_command.to_string(),
+            pgid: shell_pid,
+            started: std::time::Instant::now(),
+            deadline: std::time::Instant::now() + SURVIVOR_CEILING,
+            procs,
+        };
+        // Push and claim the poller under ONE lock. A poller that found the
+        // roster empty is about to clear the flag and exit; taking the same
+        // lock here is what stops a group from arriving in that window and
+        // never being watched.
+        let need_poller = {
+            let mut groups = match self.survivors.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            groups.push(group);
+            !self
+                .survivor_poller
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        };
+        if need_poller {
+            spawn_survivor_poller(std::sync::Arc::clone(&self));
+        }
+    }
+
+    /// One pass over the adopted groups: close the rows of processes that are
+    /// gone, deliver a receipt per finished group, and report whether the
+    /// roster is now empty.
+    ///
+    /// Blocking by design (it spawns `ps`), so the poller calls it on the
+    /// blocking pool rather than on the runtime that finalizes detached
+    /// commands.
+    fn poll_survivors(&self) -> bool {
+        let entries = proc_snapshot::list_processes();
+        let mut receipts = Vec::new();
+        {
+            let mut groups = match self.survivors.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            groups.retain_mut(|group| {
+                for proc in group.procs.iter_mut().filter(|p| p.alive) {
+                    if proc_snapshot::is_alive(&entries, &proc.id) {
+                        continue;
+                    }
+                    proc.alive = false;
+                    // pid AND start time in the log: a reader of a trace must
+                    // be able to tell a real exit from a pid-reuse artefact.
+                    tracing::debug!(
+                        target: "background_task",
+                        "Survivor pid {} (start_time {}) exited",
+                        proc.id.pid,
+                        proc.id.start_time
+                    );
+                    self.mark_finished_by_id(group.session_id, proc.task_id);
+                }
+                if group.procs.iter().any(|p| p.alive) {
+                    if std::time::Instant::now() < group.deadline {
+                        return true;
+                    }
+                    // Ceiling. The row has to close: a task that is followed
+                    // forever is the hourglass that never goes away (#1984).
+                    // What is left after this long is stuck, and the receipt
+                    // names the signal instead of implying it finished.
+                    stop_survivor_group(group.pgid);
+                    for proc in group.procs.iter_mut().filter(|p| p.alive) {
+                        proc.alive = false;
+                        self.mark_finished_by_id(group.session_id, proc.task_id);
+                    }
+                    receipts.push((group.session_id, survivor_receipt(group, true)));
+                    return false;
+                }
+                receipts.push((group.session_id, survivor_receipt(group, false)));
+                false
+            });
+        }
+        // Delivery happens outside the lock: it enqueues into a session, which
+        // is not work to do while the roster is held.
+        for (session_id, msg) in receipts {
+            let outcome = super::session_routes::deliver_to_session(session_id, msg, true);
+            match outcome {
+                super::session_routes::Delivery::Redirected { to } => {
+                    tracing::info!(
+                        target: "background_task",
+                        "Leftover work completion for session {session_id} was redirected \
+                         to session {to}, which now owns its channel"
+                    );
+                }
+                super::session_routes::Delivery::Parked => {
+                    tracing::info!(
+                        target: "background_task",
+                        "Leftover work completion for session {session_id} is parked until \
+                         its channel claims the session"
+                    );
+                }
+                super::session_routes::Delivery::NoRoute => {
+                    tracing::warn!(
+                        target: "background_task",
+                        "Leftover work completion for session {session_id} had nowhere to \
+                         go; the session will not hear about it"
+                    );
+                }
+                super::session_routes::Delivery::RefusedInFlight { .. } => {
+                    tracing::warn!(
+                        target: "background_task",
+                        "Leftover work completion for session {session_id} was refused by \
+                         the mid-turn gate despite interrupt=true"
+                    );
+                }
+                super::session_routes::Delivery::Delivered => {}
+            }
+        }
+        match self.survivors.lock() {
+            Ok(groups) => groups.is_empty(),
+            Err(poisoned) => poisoned.into_inner().is_empty(),
+        }
     }
 
     /// Spawn `command` (via `sh -c`) in `cwd`, detached; on completion enqueue a
@@ -716,6 +975,149 @@ where
             tokio::spawn(future);
         }
     }
+}
+
+/// How often the survivor poller reads the process table (#3219).
+///
+/// Three seconds is the point where a `ps` spawn per tick is still cheaper than
+/// the work being watched, and where a build that ends is reported while the
+/// user still remembers starting it. The poller only runs while at least one
+/// adopted group is alive.
+const SURVIVOR_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long a survivor is followed before it is stopped and reported (#3219).
+///
+/// Longer than [`DETACH_CEILING`] on purpose: a detached command is something
+/// the agent chose to background and 30 minutes is its budget, while a survivor
+/// is a build or a test run that was already expected to take a while. Six
+/// hours is past any honest build; what is still alive then is stuck, and a row
+/// that is followed forever is the hourglass #1984 removed.
+const SURVIVOR_CEILING: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Follow the adopted survivor groups until none are left (#3219).
+///
+/// Runs on the process-lifetime runtime, so it survives the turn that adopted
+/// the work and the exit of the CLI process that ran it. The table read is a
+/// blocking `ps`, so it happens on the blocking pool: this runtime's single
+/// worker also finalizes detached commands, and a `ps` must not sit in front of
+/// one of those.
+fn spawn_survivor_poller(this: std::sync::Arc<BackgroundTaskManager>) {
+    spawn_waiter(async move {
+        loop {
+            tokio::time::sleep(SURVIVOR_POLL).await;
+            let poller = std::sync::Arc::clone(&this);
+            match tokio::task::spawn_blocking(move || poller.poll_survivors()).await {
+                Ok(true) => {
+                    // Nothing left to watch. The flag is cleared while the
+                    // roster lock is held, which is the same lock adoption
+                    // takes, so a group that arrives in this window either is
+                    // seen here (and keeps the poller alive) or finds the flag
+                    // clear and starts a new one.
+                    let empty = {
+                        let groups = match this.survivors.lock() {
+                            Ok(g) => g,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        if groups.is_empty() {
+                            this.survivor_poller
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if empty {
+                        return;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // A panic in the poll must not leave the flag set, or no
+                    // later group would ever be watched.
+                    tracing::error!(
+                        target: "background_task",
+                        "The leftover-work poller failed: {e}"
+                    );
+                    this.survivor_poller
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// Stop every process in `pgid`, best-effort (#3219).
+///
+/// A group signal, because the leader is gone: `kill(-pgid)` reaches the
+/// survivor and anything it started. It can never reach this process, since a
+/// group is only tracked when its id is the pid of a child shell.
+#[cfg(unix)]
+fn stop_survivor_group(pgid: u32) {
+    if pgid == 0 || pgid == std::process::id() {
+        return;
+    }
+    // SAFETY: `kill` takes plain integers and reports failure in its return
+    // value, which is deliberately ignored: the process may already be gone.
+    unsafe {
+        libc::kill(-(pgid as i32), libc::SIGTERM);
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_survivor_group(pgid: u32) {
+    crate::utils::shell::kill_process_tree(pgid);
+}
+
+/// The receipt for a group of processes a Bash call left running (#3219).
+///
+/// Delivered through the same route a detached task's completion takes, but
+/// without [`BgTaskMeta`]: the card renders an exit code from that payload, and
+/// a survivor's exit status is genuinely unreadable, so claiming one would be
+/// the exact kind of invented receipt this codebase refuses.
+fn survivor_receipt(group: &SurvivorGroup, stopped: bool) -> QueuedUserMessage {
+    let elapsed = format_elapsed(group.started.elapsed().as_secs_f32());
+    let mut roster = String::new();
+    for proc in &group.procs {
+        let command = if proc.command.trim().is_empty() {
+            "(command line unavailable)".to_string()
+        } else {
+            proc.command.clone()
+        };
+        roster.push_str(&format!("- {command} (pid {})\n", proc.id.pid));
+    }
+    let outcome = if stopped {
+        format!(
+            "They were still running after {elapsed}, so they were stopped with SIGTERM \
+             at the tracking ceiling. Whatever they were doing is unfinished."
+        )
+    } else {
+        "They are no longer running. Their exit status is not readable: they outlived \
+         the shell that started them, so nothing here could wait on them. Do not \
+         report an exit code you do not have."
+            .to_string()
+    };
+    let context = format!(
+        "[System: work a bash call left running has ended.\n\
+         Command that started it: {parent}\n\
+         Processes it left behind:\n{roster}\
+         Ran for: {elapsed}\n\
+         {outcome}\n\n\
+         Check the result yourself (a log file, an output path, or a follow-up \
+         command) and tell the user what it came to. Do not re-run the work just \
+         because its status is unknown.]",
+        parent = group.parent_command,
+    );
+    let display = format!(
+        "🔧 leftover work {}: {}",
+        if stopped { "stopped" } else { "finished" },
+        short_label(&group.parent_command)
+    );
+    let mut msg = QueuedUserMessage::system(context, display);
+    // Same origin as a detached completion, so every surface treats the
+    // receipt the way it already treats the other background outcomes.
+    msg.origin = PushOrigin::BackgroundTask;
+    msg
 }
 
 /// The background-task repository, when a pool exists.
