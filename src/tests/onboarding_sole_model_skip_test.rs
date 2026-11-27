@@ -39,7 +39,7 @@ fn the_built_in_provider_offers_exactly_one_model() {
     w.ps.selected_provider = index_of_provider("opencrabs").expect("built-in provider exists");
     assert_eq!(
         w.ps.sole_model_choice().as_deref(),
-        Some("deepseek-v4.1-flash"),
+        Some("combo"),
         "`/models opencrabs` has one model to land on, so the picker must not ask"
     );
 }
