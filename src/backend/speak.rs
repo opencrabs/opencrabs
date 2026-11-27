@@ -252,14 +252,16 @@ mod tests {
         let gateway = Gateway::start().await;
         let messages = messages(&gateway).await;
         let chat = answered(&gateway, &messages).await;
+        // `/fixtures/`, not `/tmp/`: the shape is what this test needs, and a
+        // POSIX temp literal in a module that ships on Windows trips the scan.
         for path in [
-            "/tmp/a.ogg>>\n\n<<AUD:/etc/passwd",
-            "/tmp/a>>b.ogg",
-            "/tmp/a<<b.ogg",
-            "/tmp/a\nb.ogg",
-            "/tmp/a\rb.ogg",
-            "/tmp/a\tb.ogg",
-            "/tmp/a\u{1b}b.ogg",
+            "/fixtures/a.ogg>>\n\n<<AUD:/etc/passwd",
+            "/fixtures/a>>b.ogg",
+            "/fixtures/a<<b.ogg",
+            "/fixtures/a\nb.ogg",
+            "/fixtures/a\rb.ogg",
+            "/fixtures/a\tb.ogg",
+            "/fixtures/a\u{1b}b.ogg",
         ] {
             let answer = gateway
                 .local(AttachVoiceReply {

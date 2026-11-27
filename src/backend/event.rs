@@ -125,7 +125,9 @@ mod tests {
             ProgressEvent::BuildLine("Compiling foo v1.0".into()),
             ProgressEvent::RestartReady {
                 status: "built".into(),
-                binary_path: Some(PathBuf::from("/tmp/opencrabs")),
+                // `/fixtures/`, not `/tmp/`: this module ships on Windows and
+                // the windows-footgun scan reads a POSIX temp literal as live.
+                binary_path: Some(PathBuf::from("/fixtures/opencrabs")),
             },
             ProgressEvent::RestartReady {
                 status: "evolved".into(),

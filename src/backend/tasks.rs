@@ -581,7 +581,8 @@ mod tests {
     fn answers_survive_the_wire() {
         let read = DetailRead {
             running: true,
-            path: Some(PathBuf::from("/tmp/task.log")),
+            // `/fixtures/`: a `/tmp/` literal trips the windows-footgun scan.
+            path: Some(PathBuf::from("/fixtures/task.log")),
             stamp: Some((42, SystemTime::UNIX_EPOCH)),
             history: Some("line\n".into()),
         };

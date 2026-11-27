@@ -768,7 +768,8 @@ mod tests {
     fn broken_keys_error() -> anyhow::Error {
         let parsed = BROKEN_KEYS.parse::<toml_edit::DocumentMut>();
         anyhow::Error::from(parsed.expect_err("the keys file is broken"))
-            .context("Failed to parse config file: \"/tmp/crab/keys.toml\"")
+            // `/fixtures/`, not `/tmp/`: the scan reads a POSIX temp literal as live.
+            .context("Failed to parse config file: \"/fixtures/crab/keys.toml\"")
     }
 
     #[test]

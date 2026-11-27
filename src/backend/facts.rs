@@ -250,7 +250,8 @@ mod tests {
         let ctx = booted_ctx().await;
         let service = ctx.service().expect("booted");
         let session = Uuid::new_v4();
-        let own = PathBuf::from("/tmp/facts-session-own");
+        // `/fixtures/`: a `/tmp/` literal here trips the windows-footgun scan.
+        let own = PathBuf::from("/fixtures/facts-session-own");
         service.set_session_only_working_directory(session, own.clone());
 
         let facts = facts_for(&ctx, Some(session)).expect("facts");
