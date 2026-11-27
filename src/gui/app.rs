@@ -490,7 +490,7 @@ pub(crate) fn run() {
                     let instance_card = std::rc::Rc::new(std::cell::Cell::new(false));
                     let instance_strip = cx.new({
                         let instance_card = instance_card.clone();
-                        move |_| instance_strip::InstanceStrip::new(strip_owner, instance_card)
+                        move |cx| instance_strip::InstanceStrip::new(strip_owner, instance_card, cx)
                     });
                     Dashboard {
                         screen: Screen::Chat,
