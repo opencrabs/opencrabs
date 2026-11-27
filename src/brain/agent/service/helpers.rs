@@ -1347,11 +1347,12 @@ impl AgentService {
         // branch because that one only fires when blocks were accumulated,
         // which a prefill cut by definition never did.
         if prefill_cut && block_states.is_empty() {
+            let prefill_err = crate::brain::provider::ProviderError::PrefillTimeout {
+                budget_secs: prefill_timeout.as_secs(),
+            };
             crate::config::health::record_failure(
                 &failure_attribution_name(provider.as_ref()),
-                &crate::brain::provider::ProviderError::PrefillTimeout {
-                    budget_secs: prefill_timeout.as_secs(),
-                },
+                &crate::brain::provider::error::short_error_reason(&prefill_err),
             );
             tracing::warn!(
                 "⏱️ Prefill cut after {}s with no content — returning PrefillTimeout (#3213)",
