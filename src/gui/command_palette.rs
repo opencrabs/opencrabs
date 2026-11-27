@@ -254,7 +254,6 @@ const PILL_CROWN: u32 = 0x06060af2;
 /// window the alphas exist to close (#3130).
 const GLASS_IDLE_BOTTOM: u32 = 0x08080bf8;
 
-
 /// The invitation's glass rim. Spotlight's edge is not a drawn border: it is a
 /// lit edge, brightest along the top where the light falls, thinning as it
 /// turns down the sides, and catching once more along the bottom curve. A
