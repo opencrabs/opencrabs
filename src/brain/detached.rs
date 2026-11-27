@@ -52,13 +52,23 @@ pub fn units_announced(text: &str) -> Vec<String> {
                 .chars()
                 .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\\')
                 .collect();
-            let is_unit = name.ends_with(".service") || name.ends_with(".scope");
-            if is_unit && !out.contains(&name) {
+            if valid_unit_name(&name) && !out.contains(&name) {
                 out.push(name);
             }
         }
     }
     out
+}
+
+/// Whether `name` is a unit name safe to hand to `systemctl` as an argument:
+/// a unit suffix, only the characters systemd allows in a name, and no
+/// leading `-` that would read as an option.
+pub fn valid_unit_name(name: &str) -> bool {
+    let has_suffix = name.ends_with(".service") || name.ends_with(".scope");
+    let allowed = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '@' | '-'));
+    has_suffix && allowed && !name.starts_with('-') && name.len() <= 256
 }
 
 /// Note the units a CLI line announced for `session_id`.
@@ -183,16 +193,37 @@ pub fn alive(id: ProcId) -> bool {
     proc_id(id.pid).is_some_and(|now| now.start == id.start)
 }
 
-/// The command line of `pid`, spaces between arguments, cut to `max` chars.
-pub fn cmdline(pid: i32, max: usize) -> String {
+/// A short name for the process `pid` runs, safe to show and to log.
+pub fn command_label(pid: i32) -> String {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let text: String = raw
+    let argv: Vec<String> = raw
         .split(|b| *b == 0)
         .filter(|a| !a.is_empty())
         .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
-    text.chars().take(max).collect()
+        .collect();
+    label_from_argv(&argv)
+}
+
+/// The program's file name plus, when it is not an option, the file name of
+/// its first argument (`bash build.sh`, `cargo build`, `sleep 4`).
+///
+/// Never the whole command line: an argument can carry a token, a password or
+/// a URL with credentials, and the label is drawn on a card and written to
+/// the log.
+pub fn label_from_argv(argv: &[String]) -> String {
+    let base = |a: &str| {
+        let name = a.rsplit('/').next().unwrap_or(a);
+        name.chars().take(48).collect::<String>()
+    };
+    let Some(program) = argv.first() else {
+        return String::new();
+    };
+    match argv.get(1) {
+        Some(arg) if !arg.starts_with('-') && !arg.contains('=') && !arg.contains("://") => {
+            format!("{} {}", base(program), base(arg))
+        }
+        _ => base(program),
+    }
 }
 
 /// Whether `pid` descends from `ancestor` (or is it).
