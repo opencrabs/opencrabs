@@ -341,8 +341,12 @@ fn the_strip_is_drawn_only_behind_the_remote_crabs_flag() {
         frame.contains("if !self.remote_crabs {\n            return None;"),
         "{frame}"
     );
-    let element = fn_body(WIRING, "instance_strip_element");
-    assert!(element.contains("self.crab_list_frame()?"), "{element}");
+    // The strip's mount is gated where it is mounted (#3178): the render
+    // adds the element only behind the flag, so the card layer cannot appear
+    // with it off either.
+    assert!(RENDER.contains(
+        "if self.instance_rail {\n            root = root.child(self.instance_strip_element(cx));"
+    ));
     assert!(RAIL.contains("crabs: self.crab_list_frame().map("));
     assert!(APP.contains("remote_crabs: Config::current().gui.remote_crabs,"));
     // While off no paired crab is probed: the loop's target list is empty.

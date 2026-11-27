@@ -1610,6 +1610,33 @@ impl App {
                 }
                 self.onboarding = Some(wizard);
                 self.mode = AppMode::Onboarding;
+                // Opening the model picker is the moment the list has to be
+                // current (#3176). Before this, `/models` rendered whatever
+                // config.toml last wrote and only went live once the user
+                // pressed Enter on the API-key field, so a model Google had
+                // released since the last save was invisible. Start the same
+                // fetch the picker's own keystroke starts.
+                if step == OnboardingStep::ProviderAuth {
+                    use crate::ui_core::model_selector::FetchRequest;
+                    let started = self.onboarding.as_mut().and_then(|wizard| {
+                        let request = FetchRequest::from_selector(&wizard.ps)?;
+                        let provider_index = request.provider_index;
+                        let generation = wizard.model_fetch_lifecycle.begin(&request);
+                        wizard.ps.models_fetching = true;
+                        Some((request, provider_index, generation))
+                    });
+                    if let Some((request, provider_index, generation)) = started {
+                        let sender = self.event_sender();
+                        tokio::spawn(async move {
+                            let outcome = crate::ui_core::model_selector::fetch(request).await;
+                            let _ = sender.send(TuiEvent::OnboardingModelsFetched {
+                                generation,
+                                provider_index,
+                                outcome,
+                            });
+                        });
+                    }
+                }
                 true
             }
             "/new" => {
@@ -2687,7 +2714,7 @@ impl App {
         }
     }
 
-    pub(crate) fn expand_message(msg: crate::db::models::Message) -> Vec<DisplayMessage> {
+    pub(crate) fn expand_message(mut msg: crate::db::models::Message) -> Vec<DisplayMessage> {
         if msg.role == crate::services::message::PLAN_COMPLETED_ROLE {
             return if crate::services::message::CompletedPlanPayload::from_message(&msg).is_some() {
                 vec![DisplayMessage::from(msg)]
@@ -2700,6 +2727,14 @@ impl App {
         // fully transparent in the TUI — don't render them at all on reload.
         if msg.content.starts_with("[CONTEXT COMPACTION") {
             return vec![];
+        }
+        // A row the user DID author can carry the scaffold EMBEDDED: a summary
+        // copied out of the transcript and pasted into the composer rides after
+        // the typed words, and Enter persists it as one row (2026-11-26 GUI
+        // leak). Cut everything from the banner down before any render path
+        // sees it; the typed head is what the user wrote, the tail is scaffold.
+        if let Some(stripped) = crate::utils::strip_embedded_compaction(&msg.content) {
+            msg.content = stripped;
         }
         // A synthetic seed is context for the model, never a message the user
         // wrote (#2756). Rows persisted before the fix still carry the whole
@@ -4395,92 +4430,102 @@ impl App {
         // persisted pair already obeys that rule (#705); this override did not,
         // so a turn that fell elsewhere reported that provider's model and
         // silently replaced the user's pick, leaving `/models` looking ignored.
-        if let Some(ref session) = self.current_session
-            && crate::brain::agent::service::should_refresh_session_model(
+        // The model fed to BOTH the in-memory override and the spawned
+        // session-row write is validated at WRITE time (#3177): a transient
+        // loop-fallback's echo repairs to the chain default instead of
+        // replacing the pick or persisting `primary / fb-model`. Construction
+        // stayed verbatim, so `response.model` still reports what served.
+        if let Some(ref session) = self.current_session {
+            let write_model = self.agent_service.validated_session_pair(
+                session.id,
+                response.provider_name.clone(),
+                response.model.clone(),
+            );
+            if crate::brain::agent::service::should_refresh_session_model(
                 response.started_on_session_provider,
                 &self.agent_service.provider_model_for_session(session.id),
-                &response.model,
-            )
-        {
-            self.agent_service
-                .set_session_model(session.id, response.model.clone());
-        }
+                &write_model,
+            ) {
+                self.agent_service
+                    .set_session_model(session.id, write_model.clone());
+            }
 
-        // Spawn slow post-completion work in the background so the render loop
-        // can draw the next frame immediately (is_processing is already false).
-        // DB writes and file reads here were causing 5+ second spinner delays.
-        let session_service = self.session_service.clone();
-        let session_for_bg = self.current_session.clone();
-        let response_model = response.model.clone();
-        let response_provider = response.provider_name.clone();
-        // Only a turn that STARTED on the session's own provider may rewrite the
-        // saved pair (#705). A turn that started on the wrong provider (a #704
-        // restore gap) carries an involuntarily-remapped pair that must never
-        // overwrite the session's saved choice — that was the silent-switch bug.
-        let response_started_on_session_provider = response.started_on_session_provider;
-        let plan_path = self.plan_file_path().cloned();
+            // Spawn slow post-completion work in the background so the render loop
+            // can draw the next frame immediately (is_processing is already false).
+            // DB writes and file reads here were causing 5+ second spinner delays.
+            let session_service = self.session_service.clone();
+            let session_for_bg = self.current_session.clone();
+            let response_model = write_model;
+            let response_provider = response.provider_name.clone();
+            // Only a turn that STARTED on the session's own provider may rewrite the
+            // saved pair (#705). A turn that started on the wrong provider (a #704
+            // restore gap) carries an involuntarily-remapped pair that must never
+            // overwrite the session's saved choice — that was the silent-switch bug.
+            let response_started_on_session_provider = response.started_on_session_provider;
+            let plan_path = self.plan_file_path().cloned();
 
-        tokio::spawn(async move {
-            // Persist the {provider, model} pair from the response onto the
-            // session row whenever it differs from what's stored. The two
-            // fields are a LOCKED unit — writing only one (the prior code
-            // wrote `model` alone behind an `is_none()` gate) lets a sticky
-            // fallback's model land on a row whose provider_name still
-            // points at the original. The next turn then ships e.g.
-            // dialagram/glm-5.1 — a pair that exists in no provider's
-            // catalogue. ProviderSwitched event handler also keeps the row
-            // in sync; this is the second writer that closes the same gap
-            // for paths that produce a response without firing
-            // ProviderSwitched (e.g. resume after restart, channel-driven
-            // turns whose progress events miss the TUI loop).
-            if let Some(mut session) = session_for_bg {
-                let pair_changed = session.model.as_deref() != Some(response_model.as_str())
-                    || session.provider_name.as_deref() != Some(response_provider.as_str());
-                // A changed pair from a turn that started on the WRONG provider
-                // is an involuntary remap (#705) — skip it so the session's
-                // saved choice survives. Genuine fallbacks start matched and are
-                // persisted here (and by the ProviderSwitched handler).
-                if pair_changed && !response_started_on_session_provider {
-                    tracing::warn!(
-                        "Skipping provider/model persist for session {}: turn ran on '{}' \
+            tokio::spawn(async move {
+                // Persist the {provider, model} pair from the response onto the
+                // session row whenever it differs from what's stored. The two
+                // fields are a LOCKED unit — writing only one (the prior code
+                // wrote `model` alone behind an `is_none()` gate) lets a sticky
+                // fallback's model land on a row whose provider_name still
+                // points at the original. The next turn then ships e.g.
+                // dialagram/glm-5.1 — a pair that exists in no provider's
+                // catalogue. ProviderSwitched event handler also keeps the row
+                // in sync; this is the second writer that closes the same gap
+                // for paths that produce a response without firing
+                // ProviderSwitched (e.g. resume after restart, channel-driven
+                // turns whose progress events miss the TUI loop).
+                if let Some(mut session) = session_for_bg {
+                    let pair_changed = session.model.as_deref() != Some(response_model.as_str())
+                        || session.provider_name.as_deref() != Some(response_provider.as_str());
+                    // A changed pair from a turn that started on the WRONG provider
+                    // is an involuntary remap (#705) — skip it so the session's
+                    // saved choice survives. Genuine fallbacks start matched and are
+                    // persisted here (and by the ProviderSwitched handler).
+                    if pair_changed && !response_started_on_session_provider {
+                        tracing::warn!(
+                            "Skipping provider/model persist for session {}: turn ran on '{}' \
                          which is not the session's saved provider (involuntary remap, #705)",
-                        session.id,
-                        response_provider
-                    );
-                } else if pair_changed {
-                    session.model = Some(response_model);
-                    session.provider_name = Some(response_provider);
-                    if let Err(e) = session_service.update_session(&session).await {
-                        tracing::warn!("Failed to update session provider/model pair: {}", e);
+                            session.id,
+                            response_provider
+                        );
+                    } else if pair_changed {
+                        session.model = Some(response_model);
+                        session.provider_name = Some(response_provider);
+                        if let Err(e) = session_service.update_session(&session).await {
+                            tracing::warn!("Failed to update session provider/model pair: {}", e);
+                        }
                     }
                 }
-            }
 
-            // Thinking persistence is handled by tool_loop's per-iteration
-            // append_content with `<!-- reasoning -->` markers in `content`.
-            // No TUI-side write here — the prior fake-UUID `set_thinking` call
-            // silently no-op'd (UPDATE affected 0 rows) and corrupted the
-            // post-restart layout by losing the per-iteration chronological
-            // position. Reload now reconstructs the exact streamed view via
-            // `expand_message` + `extract_reasoning`.
+                // Thinking persistence is handled by tool_loop's per-iteration
+                // append_content with `<!-- reasoning -->` markers in `content`.
+                // No TUI-side write here — the prior fake-UUID `set_thinking` call
+                // silently no-op'd (UPDATE affected 0 rows) and corrupted the
+                // post-restart layout by losing the per-iteration chronological
+                // position. Reload now reconstructs the exact streamed view via
+                // `expand_message` + `extract_reasoning`.
 
-            // Reload user commands (agent may have written new ones to commands.json)
-            // This is synchronous but fast — just a file read + parse.
-            // We can't call self.reload_user_commands() from a spawned task,
-            // so we skip it here. The next send_message will pick up new commands.
+                // Reload user commands (agent may have written new ones to commands.json)
+                // This is synchronous but fast — just a file read + parse.
+                // We can't call self.reload_user_commands() from a spawned task,
+                // so we skip it here. The next send_message will pick up new commands.
 
-            // Resolve any legacy terminal plan statuses on disk (Completed
-            // archives, Cancelled deletes) via the shared loader. Live plans
-            // are never deleted here: an idle Active plan (including a
-            // seed-failed empty-task one) stays intact for retry, and
-            // Editing survives across turns by design.
-            if let Some(ref path) = plan_path
-                && path.exists()
-                && crate::utils::plan_files::load_plan_from_path(path).is_none()
-            {
-                tracing::debug!("Plan at {} resolved to NoPlan on reload", path.display());
-            }
-        });
+                // Resolve any legacy terminal plan statuses on disk (Completed
+                // archives, Cancelled deletes) via the shared loader. Live plans
+                // are never deleted here: an idle Active plan (including a
+                // seed-failed empty-task one) stays intact for retry, and
+                // Editing survives across turns by design.
+                if let Some(ref path) = plan_path
+                    && path.exists()
+                    && crate::utils::plan_files::load_plan_from_path(path).is_none()
+                {
+                    tracing::debug!("Plan at {} resolved to NoPlan on reload", path.display());
+                }
+            });
+        }
 
         // Re-read the plan file so the widget reflects the post-turn state.
         // When the plan completed and was archived (JSON renamed to archive/),
@@ -4742,5 +4787,47 @@ pub(crate) async fn run_evolve_directly(
                 text: format!("Evolve error: {}", e),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod embedded_compaction_render_tests {
+    /// A user row the user DID author, with the summary pasted inside it: the
+    /// reload path shows the words, never the scaffold (2026-11-26 GUI leak,
+    /// mirrored here so the TUI cannot regress on it).
+    #[test]
+    fn expand_message_cuts_an_embedded_compaction_banner() {
+        let msg = crate::db::models::Message::new(
+            uuid::Uuid::new_v4(),
+            "user".to_string(),
+            "what the actual fuck [CONTEXT COMPACTION — DELTA SEGMENT. Obligation status: OPEN"
+                .to_string(),
+            0,
+        );
+        let rows = crate::tui::app::App::expand_message(msg);
+        assert_eq!(rows.len(), 1, "the row still renders");
+        let shown = &rows[0].content;
+        assert!(
+            !shown.contains("[CONTEXT COMPACTION"),
+            "the banner never paints: {shown}"
+        );
+        assert!(
+            shown.contains("what the actual fuck"),
+            "the user's own words survive: {shown}"
+        );
+    }
+
+    /// A row without the banner is untouched.
+    #[test]
+    fn expand_message_leaves_plain_rows_alone() {
+        let msg = crate::db::models::Message::new(
+            uuid::Uuid::new_v4(),
+            "user".to_string(),
+            "plain words about compaction".to_string(),
+            0,
+        );
+        let rows = crate::tui::app::App::expand_message(msg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "plain words about compaction");
     }
 }

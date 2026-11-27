@@ -57,7 +57,12 @@ pub(crate) fn queue_strip(queued: &[agent_bridge::PendingMessage], expanded: boo
                 .child(SharedString::from(format!("queued {}", queued.len()))),
         );
     for (i, m) in queued.iter().take(shown).enumerate() {
-        let text = m.display_text.lines().next().unwrap_or_default();
+        // The scaffold never shows in the strip: a queued message that carries
+        // the compaction banner shows the user's own words (2026-11-26 GUI
+        // leak, same rule as the card and the reload path).
+        let display = opencrabs::utils::strip_embedded_compaction(&m.display_text)
+            .unwrap_or_else(|| m.display_text.clone());
+        let text = display.lines().next().unwrap_or_default();
         let mut chars = text.chars();
         let short: String = chars.by_ref().take(96).collect();
         let suffix = if chars.next().is_some() { "…" } else { "" };

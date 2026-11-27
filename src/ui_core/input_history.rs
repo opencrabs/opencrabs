@@ -8,6 +8,49 @@
 /// terminal left open and a window cannot cap the same file differently.
 pub const HISTORY_CAP: usize = 500;
 
+/// Which way a vertical key goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vertical {
+    Up,
+    Down,
+}
+
+/// What a vertical key does in a composer: it moves the caret inside the
+/// text, or it moves the history to another entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAction {
+    Caret,
+    History,
+}
+
+/// Who owns the vertical key right now.
+///
+/// The caret keeps the key while it still has somewhere to go: Up moves the
+/// caret until it sits at the very start of the text, and only a caret there
+/// hands the key to the history. Down is the mirror. A recalled entry is
+/// walked the same way a draft is, line by line, and the history takes over
+/// once the caret is out of the text.
+///
+/// Both surfaces ask this, so the terminal and the window walk the history
+/// the same way instead of each inventing a rule (#3188).
+///
+/// The interceptors that come before the answer are their own: the terminal
+/// hands the key to a queued message and to a stashed draft before the
+/// history sees it, and the window hands it to a follow-up offer above the
+/// field (#3101). Neither surface lets those interceptors take the key from a
+/// draft that still has rows of its own to walk.
+pub fn vertical_action(caret: usize, content_len: usize, direction: Vertical) -> VerticalAction {
+    let caret_moves = match direction {
+        Vertical::Up => caret > 0,
+        Vertical::Down => caret < content_len,
+    };
+    if caret_moves {
+        VerticalAction::Caret
+    } else {
+        VerticalAction::History
+    }
+}
+
 /// Recall an older entry. Returns false when there is no history to enter.
 pub fn input_history_up(
     entries: &[String],

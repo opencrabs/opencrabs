@@ -191,30 +191,40 @@ pub fn format_user_error(err: &AgentError) -> String {
             }
         }
     }
-    // A dead link is not a provider fault, and "try again" is the wrong
-    // advice: nothing about the request changes until the network is back.
-    // The raw text here is reqwest's ("error sending request for url ...:
-    // error trying to connect: dns error: failed to lookup address
-    // information"), which reads as a crash to anyone who is not a network
-    // engineer. The retry ladder has already spent its budget and walked the
-    // fallback chain by the time this runs, so the honest line is the one
-    // thing the user can act on (#3152).
-    let unreachable = [
-        "dns error",
-        "failed to lookup address",
-        "Network is unreachable",
-        "No route to host",
-        "Temporary failure in name resolution",
-        "dns resolution failed",
-    ]
-    .iter()
-    .any(|needle| raw.contains(needle));
-    if unreachable {
-        return "No network: this machine cannot reach the provider. Check \
-                the wifi or the VPN, then send the message again."
+    // A link that is simply not there (#3152). `utils::retry` deliberately
+    // spends its whole ladder on DNS/connection errors rather than fast-failing,
+    // so this is what the user finally sees after minutes of waiting: reqwest's
+    // own words, which read as a crash to anyone who is not a network engineer.
+    // Naming the missing link is the difference between "the app is broken" and
+    // "the wifi is off".
+    if is_unreachable(&raw) {
+        return "No network: this machine cannot reach the provider. Check the \
+                wifi or the VPN, then send the message again."
             .to_string();
     }
     raw
+}
+
+/// Does this error describe a link that is not there, rather than a provider
+/// that answered? The shapes are the ones reqwest and the OS produce for a dead
+/// interface, a dropped route or a resolver that cannot reach anything; each
+/// one is checked case-insensitively because the casing differs by platform.
+///
+/// `connection refused` is deliberately absent: the host answered, so nothing
+/// is wrong with the link, and telling someone to check their wifi when their
+/// local proxy is down sends them looking in the wrong place.
+fn is_unreachable(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    [
+        "dns error",
+        "failed to lookup address",
+        "network is unreachable",
+        "no route to host",
+        "temporary failure in name resolution",
+        "dns resolution failed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Extract an HTTP status code from a string like

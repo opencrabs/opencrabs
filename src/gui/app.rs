@@ -241,6 +241,9 @@ pub(crate) fn run() {
         });
     let initial_transparency =
         gui_theme::clamp_window_transparency(Config::current().gui.transparency);
+    // The rail gate (#3178) is read beside the transparency, both once before
+    // the window exists: the mount and the probe loop are decided here.
+    let instance_rail = Config::current().gui.instance_rail;
     Application::new().run(move |cx: &mut App| {
         // Dock icon first: a bare binary has no bundle, so macOS would show
         // its generic "exec" icon for the whole session otherwise.
@@ -663,7 +666,7 @@ pub(crate) fn run() {
                         cd_show_hidden: false,
                         cd_session: None,
                         models_rows: Vec::new(),
-                        models_query: String::new(),
+                        models_query: TextField::new(),
                         models_index: 0,
                         models_provider: None,
                         models_session: None,
@@ -713,6 +716,7 @@ pub(crate) fn run() {
                         rail_scroll,
                         rail_view,
                         instances: instances::Instances::default(),
+                        instance_rail,
                         instance_strip,
                         instance_card,
                         crabs_open: false,
@@ -825,11 +829,17 @@ pub(crate) fn run() {
                 // thread, the probe loop that keeps their dots honest, and the
                 // handshake with the crab the window starts on. A missing
                 // store is an empty strip: a fresh install has no remotes and
-                // must not open with a warning.
+                // must not open with a banner. The rail is opt-in
+                // (#3178): with the gate off neither the store read nor the
+                // probe loop runs, so a user without the feature never pays
+                // for it. The handshake is with this window's own crab, so it
+                // runs either way.
                 view.update(cx, |this, cx| {
-                    this.load_instances(cx);
                     this.fetch_hello(cx);
-                    Dashboard::spawn_instance_probe(cx);
+                    if this.instance_rail {
+                        this.load_instances(cx);
+                        Dashboard::spawn_instance_probe(cx);
+                    }
                 });
                 // Then the panes the last run left behind, in the same slots
                 // at the same sizes, with the caret on the same pane (#2675).

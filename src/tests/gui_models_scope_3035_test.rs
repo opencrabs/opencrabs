@@ -79,17 +79,28 @@ fn the_prompt_is_the_shared_channel_text() {
     );
 }
 
-/// The scope is visible without prior knowledge: a chip in the header's
-/// action slot, spelled out in the subtitle, and a key that flips it.
+/// The scope is visible without prior knowledge: a chip in the footer beside
+/// the "tab scope" hint, spelled out in the subtitle, and a key that flips it.
+///
+/// The chip used to sit in the header's action slot (#3035), top-right corner
+/// while its hint lived in the footer: one control, two opposite corners, so
+/// it read as window decoration instead of the switch that changes what Enter
+/// applies to. It moved into the footer row next to the hint it governs
+/// (#3181). Every check below is about the scope being visible and
+/// reachable, and all of them still hold in the footer.
 #[test]
 fn the_scope_is_on_screen_and_reachable() {
     assert!(
         MODAL.contains("\"models-scope\""),
-        "the header carries a scope control"
+        "the modal carries a scope control"
     );
     assert!(
-        MODAL.contains("actions: Some(scope_chip.into_any_element())"),
-        "the control uses the slot the modal already reserves"
+        MODAL.contains(".child(scope_chip)"),
+        "the control sits in the footer, beside the hint that explains it (#3181)"
+    );
+    assert!(
+        MODAL.contains("scope: this session") && MODAL.contains("scope: all sessions"),
+        "the control spells out the state it holds"
     );
     assert!(
         MODAL.contains("all sessions"),

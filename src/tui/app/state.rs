@@ -1680,11 +1680,29 @@ impl App {
         // already trimmed `self.messages` to the display budget;
         // pending_messages from the background are the deltas
         // accumulated AFTER that DB snapshot, so they belong at
-        // the tail. Each `DisplayMessage` carries its own UUID so
-        // a future DB reload that picks up the persisted form
-        // won't collide.
+        // the tail.
+        //
+        // BUT the agent persists rows to the DB while the session
+        // is in background: queued-message continuations
+        // (#3179, tool_loop create_continuation_message) and the
+        // final answer row. Those rows are ALREADY in the
+        // freshly loaded `self.messages`, so extending blindly
+        // painted the same text twice (#3179). Drop any pending
+        // row whose role and text already exist in the loaded
+        // list before merging.
         if !bg.pending_messages.is_empty() {
-            self.messages.extend(bg.pending_messages);
+            let known: std::collections::HashSet<(String, String)> = self
+                .messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.trim().to_string()))
+                .collect();
+            for msg in bg.pending_messages {
+                let key = (msg.role.clone(), msg.content.trim().to_string());
+                if known.contains(&key) {
+                    continue;
+                }
+                self.messages.push(msg);
+            }
         }
         true
     }
@@ -3142,7 +3160,11 @@ impl App {
                     state.push_message(DisplayMessage {
                         id: Uuid::new_v4(),
                         role: "user".to_string(),
-                        content: text,
+                        // The scaffold never paints: a queued message that
+                        // carries the compaction banner is cut here, so the
+                        // echo of a pasted summary stays the user's own words
+                        // (2026-11-26 GUI leak, same rule as the GUI card).
+                        content: crate::utils::strip_embedded_compaction(&text).unwrap_or(text),
                         timestamp: chrono::Utc::now(),
                         token_count: None,
                         cost: None,

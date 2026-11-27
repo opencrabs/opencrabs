@@ -180,6 +180,60 @@ fn a_stripped_iteration_leaves_the_folded_card() {
     );
 }
 
+/// #3152: a retry says so on the card.
+///
+/// `utils::retry` never fast-fails a dead link: it spends its whole budget and
+/// then walks the fallback chain, so a machine with no wifi sat for the length
+/// of that ladder with a counting clock and no word about the network. The
+/// terminal and every channel already print the notice; the card dropped the
+/// event. Folding it here covers the window, a split pane, a parked turn and a
+/// rail card at once, because this is the one painter they all run.
+#[test]
+fn a_provider_retry_says_so_on_the_card() {
+    use crate::transcript;
+    use opencrabs::brain::agent::ProgressEvent;
+
+    let mut live = transcript::LiveTurn::default();
+    let at = std::time::Instant::now();
+    assert!(live.notices.is_empty(), "a fresh card has said nothing");
+
+    crate::fold_live(
+        &mut live,
+        ProgressEvent::RetryAttempt {
+            attempt: 1,
+            max: 4,
+            reason: "dns error: failed to lookup address information".to_string(),
+        },
+        at,
+    );
+
+    let notice = live
+        .notices
+        .last()
+        .expect("the card must carry the retry it just ran");
+    // `send_label` counts the initial send, so retry 1 of a 4-retry ceiling is
+    // "attempt 2 of 5" -- the same wording Telegram and the terminal use.
+    assert_eq!(
+        notice, "Retry attempt 2 of 5: dns error: failed to lookup address information",
+        "the card's retry line drifted from the other surfaces"
+    );
+}
+
+/// #3152: the window's own turn needs the notice too.
+///
+/// It folds its events arm by arm instead of going through `fold_live`, so the
+/// fold test above cannot keep this card honest: delete the arm and every pane
+/// and rail card keeps its retry line while the one card the user is actually
+/// watching goes silent again, which is the bug as reported.
+#[test]
+fn the_windows_own_turn_carries_the_retry_notice() {
+    let turns = include_str!("../dashboard_turns.rs");
+    assert!(
+        turns.contains("ProgressEvent::RetryAttempt"),
+        "the window's own card dropped the retry notice again (#3152)"
+    );
+}
+
 /// The conversation caps at a readable measure in a single pane, and any
 /// pane narrower than the cap draws at its own width (#2586).
 #[test]
@@ -3984,45 +4038,6 @@ fn the_composer_is_a_card_on_a_square_ground() {
     assert!(
         !surface.contains(".rounded("),
         "the ground is the shot, so it carries no corner either: {surface}"
-    );
-}
-
-/// A provider retry has to reach the card (#3152).
-///
-/// With no network the ladder spends its whole budget and walks the fallback
-/// chain before a single `Failed` arrives, so a card that dropped
-/// `RetryAttempt` showed a clock and a ctx reading and nothing else: the
-/// window looked frozen while the turn was alive and retrying. Folding is the
-/// one place every surface already runs (a split leaf, a parked turn, a rail
-/// card), so this pins the notice once for all of them instead of once per
-/// owner.
-#[test]
-fn a_provider_retry_says_so_on_the_card() {
-    use crate::transcript;
-    use opencrabs::brain::agent::ProgressEvent;
-
-    let mut live = transcript::LiveTurn::default();
-    crate::fold_live(
-        &mut live,
-        ProgressEvent::RetryAttempt {
-            attempt: 1,
-            max: 4,
-            reason: "HTTP request failed: dns error: failed to lookup address".to_string(),
-        },
-        std::time::Instant::now(),
-    );
-
-    let line = live
-        .notices
-        .last()
-        .expect("a retry is the only thing a silent turn has to say");
-    assert!(
-        line.contains("Retry attempt 2 of 5"),
-        "the label is the one the terminal and every channel print: {line}"
-    );
-    assert!(
-        line.contains("dns error"),
-        "the reason the user can act on has to survive: {line}"
     );
 }
 

@@ -293,13 +293,14 @@ impl Dashboard {
     }
 
     /// The strip entity, mounted for its cards only: it has no box of its
-    /// own and paints the card that is up over the window. Mounted only with
-    /// `[gui] remote_crabs` on, the only way a card can be opened.
-    pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let frame = self.crab_list_frame()?;
+    /// own and paints the card that is up over the window. The render mounts
+    /// it only behind `[gui] instance_rail`, the only way a card can be
+    /// opened.
+    pub(crate) fn instance_strip_element(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let frame = StripFrame::from_model(&self.instances, now(), self.instance_error.clone());
         let view = self.instance_strip.clone();
         view.update(cx, |strip, cx| strip.set_frame(frame, cx));
-        Some(AnyView::from(view).into_any_element())
+        AnyView::from(view).into_any_element()
     }
 
     /// A pairing went through: the strip hands over the store as it now

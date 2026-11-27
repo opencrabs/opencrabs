@@ -47,7 +47,7 @@ impl Dashboard {
     /// Standalone provider selection filters both pointer and keyboard rows.
     /// Onboarding keeps its wizard-wide catalogue.
     pub(crate) fn visible_model_rows(&self) -> Vec<models::Row> {
-        let mut rows = models::filtered_rows(&self.models_rows, &self.models_query);
+        let mut rows = models::filtered_rows(&self.models_rows, self.models_query.text());
         if self.screen == Screen::Models
             && let Some(provider) = self.models_provider.as_deref()
         {
@@ -354,7 +354,7 @@ impl Dashboard {
                 });
             }
             if !outcome.models.is_empty() {
-                let selected = models::filtered_rows(&self.models_rows, &self.models_query)
+                let selected = models::filtered_rows(&self.models_rows, self.models_query.text())
                     .get(self.models_index)
                     .map(models::Row::pair);
                 let current = if let Some(ob) = self.onboard.as_ref()
@@ -380,7 +380,7 @@ impl Dashboard {
                         .as_ref()
                         .map(|(provider, model)| (provider.as_str(), model.as_str())),
                 );
-                let visible = models::filtered_rows(&self.models_rows, &self.models_query);
+                let visible = models::filtered_rows(&self.models_rows, self.models_query.text());
                 self.models_index = visible
                     .iter()
                     .position(|row| Some(row.pair()) == selected)
@@ -462,34 +462,53 @@ impl Dashboard {
         }
         let visible = self.visible_model_rows();
         let last = visible.len().saturating_sub(1);
+        // The typed id is one step past the last catalogue row (#3180), so
+        // Down walks into it and Enter fires it. The wizard keeps its own
+        // zero-match-only row and never gains the extra step.
+        let custom_pair = if onboarding {
+            // The wizard resolves its typed id against the provider it is
+            // editing (custom name or picked provider), as before.
+            let provider = self.onboard.as_ref().map(|ob| {
+                if ob.wizard.ps.is_custom() {
+                    ob.wizard.ps.custom_name.clone()
+                } else {
+                    ob.provider_id().to_string()
+                }
+            });
+            models::manual_pair(
+                self.models_query.text(),
+                provider.as_deref().unwrap_or_default(),
+            )
+        } else {
+            let provider = self.models_provider.clone().or_else(|| {
+                let target = self.models_session.or(self.chat_session);
+                self.backend.facts(target).map(|facts| facts.provider)
+            });
+            models::manual_pair(
+                self.models_query.text(),
+                provider.as_deref().unwrap_or_default(),
+            )
+        };
+        // Only the standalone picker gains the extra step; the wizard's
+        // Down stays clamped to its catalogue exactly as before.
+        let walk_last = if !onboarding && custom_pair.is_some() {
+            last + 1
+        } else {
+            last
+        };
         let mut query_changed = false;
         match ev.keystroke.key.as_str() {
             "up" => self.models_index = self.models_index.saturating_sub(1),
-            "down" => self.models_index = (self.models_index + 1).min(last),
+            "down" => self.models_index = (self.models_index + 1).min(walk_last),
             "enter" => {
-                let pair = visible
-                    .get(self.models_index.min(last))
-                    .map(models::Row::pair)
-                    .or_else(|| {
-                        let provider = if onboarding {
-                            self.onboard.as_ref().map(|ob| {
-                                if ob.wizard.ps.is_custom() {
-                                    ob.wizard.ps.custom_name.clone()
-                                } else {
-                                    ob.provider_id().to_string()
-                                }
-                            })
-                        } else {
-                            self.models_provider.clone().or_else(|| {
-                                let target = self.models_session.or(self.chat_session);
-                                self.backend.facts(target).map(|facts| facts.provider)
-                            })
-                        };
-                        models::manual_pair(
-                            &self.models_query,
-                            provider.as_deref().unwrap_or_default(),
-                        )
-                    });
+                let pair = if custom_pair.is_some() && self.models_index > last {
+                    custom_pair.clone()
+                } else {
+                    visible
+                        .get(self.models_index.min(last))
+                        .map(models::Row::pair)
+                        .or_else(|| custom_pair.clone())
+                };
                 if let Some(pair) = pair {
                     if onboarding {
                         self.select_onboard_pair(&pair);
@@ -498,11 +517,6 @@ impl Dashboard {
                     self.pick_model(pair, cx);
                 }
                 return !onboarding;
-            }
-            "backspace" => {
-                self.models_query.pop();
-                self.models_index = 0;
-                query_changed = true;
             }
             "escape" if !onboarding => {
                 if self.models_query.is_empty() {
@@ -522,7 +536,54 @@ impl Dashboard {
                 return true;
             }
             "tab" | "escape" if onboarding => return false,
-            _ => {
+            // Every editing chord the composer answers (#3186). The field is
+            // the same `TextField` engine the composer and the name prompts
+            // use, so alt+backspace and ctrl+w remove a word, ctrl+u clears
+            // to the start, ctrl+a selects all, arrows walk by character or
+            // word, shift extends the selection, and copy/cut/paste act on
+            // it. The chords used to be rejected outright here, which left
+            // the field append-only: the caret could not move and a wrong
+            // model id had to be erased one backspace at a time.
+            key => {
+                if let Some(edit) = text_field::editing_chord(
+                    key,
+                    ev.keystroke.modifiers.control,
+                    ev.keystroke.modifiers.platform,
+                    ev.keystroke.modifiers.alt,
+                    ev.keystroke.modifiers.shift,
+                ) {
+                    let before = self.models_query.text().to_string();
+                    match text_field::apply(&mut self.models_query, edit) {
+                        Some(text_field::ClipboardRequest::Write(text)) => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                        Some(text_field::ClipboardRequest::Read) => {
+                            if let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                            {
+                                // One line only: a pasted newline is invisible
+                                // in the field and can never be part of an id.
+                                let flat: String = text
+                                    .chars()
+                                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                                    .collect();
+                                self.models_query.insert_text(flat.trim());
+                            }
+                        }
+                        None => {}
+                    }
+                    if self.models_query.text() != before {
+                        self.models_index = 0;
+                        // The wizard keeps its own filter in sync. This path
+                        // returns before the shared tail below, so the sync
+                        // happens here instead of through `query_changed`.
+                        if onboarding && let Some(ob) = self.onboard.as_mut() {
+                            ob.wizard.ps.model_filter = self.models_query.text().to_string();
+                            ob.wizard.ps.selected_model = 0;
+                        }
+                    }
+                    return true;
+                }
                 if ev.keystroke.modifiers.control
                     || ev.keystroke.modifiers.alt
                     || ev.keystroke.modifiers.platform
@@ -538,7 +599,7 @@ impl Dashboard {
                 else {
                     return false;
                 };
-                self.models_query.push(ch);
+                self.models_query.type_char(ch);
                 self.models_index = 0;
                 query_changed = true;
             }
@@ -547,7 +608,7 @@ impl Dashboard {
             && onboarding
             && let Some(ob) = self.onboard.as_mut()
         {
-            ob.wizard.ps.model_filter = self.models_query.clone();
+            ob.wizard.ps.model_filter = self.models_query.text().to_string();
             ob.wizard.ps.selected_model = 0;
         }
         true

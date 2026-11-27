@@ -147,6 +147,14 @@ impl AgentService {
             .await
             .map_err(AgentError::db)?;
 
+        // `response.model` stays VERBATIM here (#3177, corrected): the
+        // endpoint's echo is the truth about what served the turn, and
+        // agent_model_selection_test pins that contract. Catalog-based
+        // repair at construction ate legitimate per-turn overrides whose
+        // echo is not in the provider's (live-fetched) list. Contamination
+        // is caught where it actually matters: at the session-row WRITE,
+        // see `validated_session_pair`.
+
         Ok(AgentResponse {
             message_id: assistant_db_msg.id,
             content: assistant_text,

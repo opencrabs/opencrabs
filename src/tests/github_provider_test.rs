@@ -7,6 +7,7 @@ use crate::brain::Provider;
 use crate::brain::provider::custom_openai_compatible::OpenAIProvider;
 use crate::config::{Config, ProviderConfig, ProviderConfigs, resolve_provider_from_config};
 use crate::tui::onboarding::{OnboardingWizard, PROVIDERS};
+use crate::ui_core::model_selector::normalize_filter_query;
 
 // ── Provider array ──────────────────────────────────────────────
 
@@ -433,4 +434,43 @@ fn wizard_github_model_filter_by_provider_name() {
     let filtered = wizard.ps.filtered_model_names();
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0], "Llama-3.3-70B-Instruct");
+}
+
+/// #3182: a space in the query and a dash in the model id are the same
+/// separator, so the owner's "qwen ambassador" finds "Qwen-Ambassador".
+#[test]
+fn wizard_model_filter_folds_separators_between_query_and_id() {
+    let mut wizard = OnboardingWizard::new();
+    wizard.ps.selected_provider = 2;
+    wizard.ps.models = vec![
+        "Qwen-Ambassador".to_string(),
+        "Qwen-Ambassador/Qwen4-Max".to_string(),
+    ];
+    // Spelled with a space, found in a dash-shaped id.
+    wizard.ps.model_filter = "qwen ambassador".to_string();
+    assert_eq!(wizard.ps.filtered_model_names().len(), 2);
+    // The reverse direction too: dash query, space-shaped id.
+    wizard.ps.models = vec!["Qwen Ambassador".to_string()];
+    wizard.ps.model_filter = "qwen-ambassador".to_string();
+    assert_eq!(wizard.ps.filtered_model_names().len(), 1);
+    // An underscore is folded the same way.
+    wizard.ps.model_filter = "qwen_ambassador".to_string();
+    assert_eq!(wizard.ps.filtered_model_names().len(), 1);
+    // And a genuinely different word still misses.
+    wizard.ps.model_filter = "qwenx".to_string();
+    assert!(wizard.ps.filtered_model_names().is_empty());
+}
+
+/// The normalizer itself: lowercase, fold any separator run to one space,
+/// keep everything else, including the `/` pair split.
+#[test]
+fn normalize_filter_query_folds_separator_runs_and_keeps_slashes() {
+    assert_eq!(
+        normalize_filter_query("Qwen--Ambassador / Qwen4_Max"),
+        "qwen ambassador / qwen4 max"
+    );
+    assert_eq!(normalize_filter_query("  spaced \t out  "), "spaced out");
+    assert_eq!(normalize_filter_query("two/bet"), "two/bet");
+    assert_eq!(normalize_filter_query("---"), "");
+    assert_eq!(normalize_filter_query(""), "");
 }

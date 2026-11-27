@@ -229,3 +229,53 @@ fn sub_vendor_path_is_not_mistaken_for_the_provider_prefix() {
     assert_eq!(chosen, "inferhub/alicn/qwen3.8-max");
     assert!(leaked.is_none());
 }
+
+// ── #3177: the RESPONSE-time stamp ────────────────────────────────
+//
+// The request-time guard above runs before the tool loop, but the final
+// `AgentResponse` takes its model from the LAST LLM response, which a
+// transient (non-sticky) fallback can have served. `stamp_response_pair`
+// reuses the guard at construction time: every AgentResponse routes its
+// model through it, so a stranger model never persists under the provider
+// the ledger names as the server (victim rows: `ngodeai / combo-murah`
+// written onto sessions ngodeai never served).
+
+use crate::brain::agent::service::tool_loop::stamp_response_pair;
+
+#[test]
+fn in_catalogue_response_model_passes_through() {
+    // The happy path: the response model is the provider's own spelling,
+    // possibly canonicalized from a self-prefixed catalogue (#2289).
+    let supported = vec!["ngodeai/glm-5.3-flash".to_string()];
+    let stamped = stamp_response_pair(
+        "ngodeai",
+        "glm-5.3-flash",
+        "ngodeai/glm-5.3-flash",
+        &supported,
+    );
+    assert_eq!(stamped, "ngodeai/glm-5.3-flash");
+}
+
+#[test]
+fn foreign_response_model_repairs_to_provider_default() {
+    // The incident: a transient fallback served `combo-murah` but the
+    // ledger names the primary, whose catalogue has no such model. The
+    // stamp repairs to the primary's default and logs the leak (tracing
+    // warn carries both names; the repaired value is what persists).
+    let supported = vec!["opencrabs/deepseek-v4.1-flash".to_string()];
+    let stamped = stamp_response_pair(
+        "opencrabs",
+        "combo-murah",
+        "opencrabs/deepseek-v4.1-flash",
+        &supported,
+    );
+    assert_eq!(stamped, "opencrabs/deepseek-v4.1-flash");
+}
+
+#[test]
+fn empty_catalogue_leaves_the_response_model_alone() {
+    // Same contract as the request-time guard: a provider with a live-only
+    // model list can't be judged, so the model passes through untouched.
+    let stamped = stamp_response_pair("somewhere", "combo-murah", "somewhere-default", &[]);
+    assert_eq!(stamped, "combo-murah");
+}

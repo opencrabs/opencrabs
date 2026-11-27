@@ -2063,6 +2063,37 @@ impl AgentService {
         self.provider_for_session(session_id).name().to_string()
     }
 
+    /// Validate a `{provider, model}` pair at session-row WRITE time (#3177).
+    ///
+    /// Construction keeps `response.model` VERBATIM: the endpoint's echo is
+    /// the truth about what served the turn, and `agent_model_selection_test`
+    /// pins that contract (a catalog repair at construction ate legitimate
+    /// per-turn overrides whose echo is not in a live-fetched model list).
+    /// The WRITE is where contamination actually persists, so the judgment
+    /// lives here, right before `update_session`: when the named provider is
+    /// the session's own chain, judge the model against that chain's
+    /// catalogue via `stamp_response_pair`. A transient loop-fallback's echo
+    /// (e.g. `combo/murah` under `ngodeai`, the #3177 victim rows) repairs to
+    /// the chain default and logs both names instead of persisting an
+    /// impossible pair. A sticky subprovider name passes through untouched:
+    /// the pair is the subprovider's own and is already coherent.
+    pub(crate) fn validated_session_pair(
+        &self,
+        session_id: Uuid,
+        provider_name: String,
+        model: String,
+    ) -> String {
+        let p = self.provider_for_session(session_id);
+        if p.name() != provider_name {
+            // The response names a subprovider (sticky pin) or a different
+            // serving provider entirely: its pair is its own, coherent.
+            return model;
+        }
+        let provider_default = p.default_model().to_string();
+        let supported = p.supported_models();
+        super::tool_loop::stamp_response_pair(&provider_name, &model, &provider_default, &supported)
+    }
+
     /// Default model for a specific session, including sticky-fallback
     /// active sub-model. Resolution order:
     /// 1. The per-session override in `session_models` (set by

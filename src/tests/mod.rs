@@ -388,6 +388,7 @@ pub mod gui_focus_report_test;
 pub mod gui_font_test;
 pub mod gui_footer_title_test;
 pub mod gui_help_cards_test;
+pub mod gui_instance_rail_test;
 pub mod gui_lane_3033_test;
 pub mod gui_layout_test;
 #[cfg(feature = "gui")]
@@ -1064,6 +1065,7 @@ pub mod mission_control_input_test;
 pub mod mission_control_layout_test;
 pub mod mission_control_schedule_service_test;
 pub mod mission_control_skill_inbox_test;
+pub mod model_fetch_identity_test;
 pub mod model_fetch_test;
 #[cfg(feature = "telegram")]
 pub mod models_picker_dedup_test;

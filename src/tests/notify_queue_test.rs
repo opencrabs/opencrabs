@@ -677,3 +677,145 @@ fn a_redelivered_push_says_its_age_once_it_is_late() {
         "an hour and a half past the threshold reads as 1h01m, got: {recent_late}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3175: a marked redelivery retires its row.
+//
+// `mark_delayed` prepends `[DELAYED PUSH] queued 30h59m ago, ...` to the copy
+// handed to the turn, while the row keeps the unmarked text. The clear key was
+// built from the marked text and the comparison was not normalised for that
+// header, so the row never matched its own delivery: it survived, the next
+// boot re-offered it, and the agent answered an hours-old message again, once
+// per restart, until the 72h reaper took it.
+// ---------------------------------------------------------------------------
+
+use crate::brain::agent::service::notify_queue::{
+    STALE_NOTICE_SECS, mark_delayed, strip_delayed_mark,
+};
+
+#[test]
+fn the_delay_marker_never_reaches_the_identity() {
+    let body = "re-anchor to the ledger";
+    let marked = mark_delayed(body, STALE_NOTICE_SECS * 30);
+    assert!(
+        marked.starts_with("[DELAYED PUSH]"),
+        "the fixture must actually be marked, got: {marked}"
+    );
+    assert_eq!(
+        strip_delayed_mark(&marked),
+        body,
+        "the header must strip back to the push's own text"
+    );
+    assert_eq!(
+        durable_context_text(&marked),
+        body,
+        "a marked copy must normalise to the identity persist wrote"
+    );
+    // The age changes on every boot, so the strip cannot be a fixed string.
+    assert_eq!(
+        durable_context_text(&mark_delayed(body, STALE_NOTICE_SECS + 60)),
+        body,
+        "a differently-aged header must strip the same way"
+    );
+    // A push can pick up both framings, in either order.
+    let both = mark_delayed(&format!("{BUSY_LANE_WRAPPER}{body}"), STALE_NOTICE_SECS * 2);
+    assert_eq!(
+        durable_context_text(&both),
+        body,
+        "the two framings must both come off"
+    );
+    let reversed = format!(
+        "{BUSY_LANE_WRAPPER}{}",
+        mark_delayed(body, STALE_NOTICE_SECS * 2)
+    );
+    assert_eq!(
+        durable_context_text(&reversed),
+        body,
+        "order must not matter"
+    );
+    // A marker with no body under it is left alone rather than emptied: an
+    // empty key would match nothing and retire nothing.
+    let header_only = "[DELAYED PUSH] queued 2h00m ago";
+    assert_eq!(
+        strip_delayed_mark(header_only),
+        header_only,
+        "a header with no body must not strip to nothing"
+    );
+}
+
+/// The regression itself: the delivery the boot hands over is the MARKED one,
+/// and retiring it is the whole point.
+#[tokio::test]
+async fn a_marked_redelivery_retires_its_row() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let (body, display) = ("the parked push body", "parked push");
+
+    // Persisted the way the queue does it: the push's own text, unmarked.
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        body,
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record");
+
+    // Handed over the way `redeliver_persisted` does: marked with its age.
+    let delivered = mark_delayed(body, STALE_NOTICE_SECS + 3600);
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        &durable_context_text(&delivered),
+        display,
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(25),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(
+        retired, 1,
+        "the marked redelivery must retire the row it came from"
+    );
+    assert!(
+        repo.all().await.expect("all").is_empty(),
+        "a surviving row is the message the next boot re-answers"
+    );
+}
+
+/// A row written by a build that stored the header must still be retirable,
+/// which is why both sides of the comparison are normalised.
+#[tokio::test]
+async fn a_row_that_stored_the_header_still_matches_its_delivery() {
+    let (repo, _db) = setup().await;
+    let session = Uuid::new_v4();
+    let (body, display) = ("a stored-header body", "stored header");
+
+    repo.record(
+        Uuid::new_v4(),
+        session,
+        &mark_delayed(body, STALE_NOTICE_SECS * 3),
+        display,
+        PushOrigin::SessionNotify,
+        None,
+    )
+    .await
+    .expect("record marked row");
+
+    let retired = retire_rows_until(
+        &repo,
+        session,
+        body,
+        display,
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(25),
+    )
+    .await
+    .expect("retire");
+
+    assert_eq!(retired, 1, "a stored header must not shield the row");
+    assert!(repo.all().await.expect("all").is_empty());
+}

@@ -58,6 +58,20 @@ pub(crate) fn rail_activity_line(live: &transcript::LiveTurn) -> String {
     parts.join(" \u{b7} ")
 }
 
+/// The line a card shows while a send is being retried (#3152).
+///
+/// The wording is `send_label`'s, the same function the terminal and every
+/// channel print, so a retry reads the same wherever it is seen. It is built in
+/// one place because the window's own turn folds its events arm by arm instead
+/// of through `fold_live`, and two copies of a format string drift.
+pub(crate) fn retry_notice(attempt: u32, max: u32, reason: &str) -> String {
+    format!(
+        "{}: {}",
+        opencrabs::utils::retry::send_label(attempt, max),
+        reason
+    )
+}
+
 /// Fold one progress event into a live card.
 ///
 /// Free because two owners draw the same card: a split leaf's pane (#2614) and
@@ -134,36 +148,35 @@ pub(crate) fn fold_live(
             // A finish with no row is not an error: the turn may have settled.
             transcript::settle_detached(&mut live.tools, &task_id, success, elapsed_secs);
         }
-        ProgressEvent::QueuedUserMessage { text } => live.injected.push(text),
+        // The scaffold strip keeps a pasted compaction summary out of the
+        // live card: the event text is whatever the user queued, and a copy
+        // that rode in with the banner must not paint the whole summary back
+        // (2026-11-26 GUI leak). Same rule the reload path applies.
+        ProgressEvent::QueuedUserMessage { text } => {
+            live.injected
+                .push(opencrabs::utils::strip_embedded_compaction(&text).unwrap_or(text));
+        }
         // The service discarded what it had already streamed: a phantom
         // iteration, a gaslighting preamble, a thinking-loop timeout. The card
         // has to drop it too, or the working-out that just got retried stays on
         // screen as the answer until the turn settles (#3021).
         ProgressEvent::StripStreamedContent { bytes, .. } => live.strip_streamed(bytes),
-        // A retry is the only trace a turn leaves while it is riding out a
-        // dead link. `utils::retry` does not fast-fail a connection or a DNS
-        // error (see its comment on the patient backoff), so a laptop with no
-        // wifi spends the whole five-send budget and then walks the fallback
-        // chain before a single `Failed` reaches the card. Until then the
-        // window painted a clock and a ctx reading and said nothing, which
-        // reads as a frozen turn instead of a machine with no network (#3152).
+        // A retry ladder is silent by design (#3152): `utils::retry` does not
+        // fast-fail a dead link, it spends the whole budget and then walks the
+        // fallback chain, so the user stares at a counting clock with no word
+        // about the network. The terminal and every channel already print this
+        // line; the GUI was the one surface that dropped it.
         //
-        // Folded here rather than in the window's event match on purpose: this
-        // is the one function every surface already runs (a split leaf, a
-        // parked turn, a rail card), so the notice appears wherever the turn
-        // is being drawn without a second copy of the rule. The label is the
-        // same `send_label` the terminal and every channel print.
+        // This arm covers a split leaf's pane, a parked turn and a rail card,
+        // because they all fold through here. The window's own turn does not:
+        // it folds its events arm by arm in `dashboard_turns`, so it carries the
+        // same notice in its own arm rather than silently keeping the old
+        // behaviour on the one card the user is looking at.
         ProgressEvent::RetryAttempt {
             attempt,
             max,
             reason,
-        } => {
-            live.notices.push(format!(
-                "{}: {}",
-                opencrabs::utils::retry::send_label(attempt, max),
-                reason
-            ));
-        }
+        } => live.notices.push(retry_notice(attempt, max, &reason)),
         _ => {}
     }
 }

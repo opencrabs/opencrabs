@@ -173,7 +173,7 @@ static REGISTRATIONS: LazyLock<Vec<ProviderRegistration>> = LazyLock::new(|| {
             session_id: "gemini",
             aliases: &[],
             is_enabled: |c| c.providers.gemini.as_ref().is_some_and(|p| p.enabled),
-            factory: sync_factory(try_create_gemini),
+            factory: Box::new(|config| Box::pin(try_create_gemini(config))),
             config_field: |c| c.providers.gemini.as_ref(),
         },
         ProviderRegistration {
@@ -2363,7 +2363,7 @@ fn try_create_openai(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
 }
 
 /// Try to create Gemini provider if configured
-fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
+async fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
     let gemini_config = match &config.providers.gemini {
         Some(cfg) => cfg,
         None => return Ok(None),
@@ -2377,10 +2377,13 @@ fn try_create_gemini(config: &Config) -> Result<Option<Arc<dyn Provider>>> {
         }
     };
 
-    let model = gemini_config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| "gemini-2.0-flash".to_string());
+    let model = match gemini_config.default_model.as_deref() {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        // Nothing pinned in config: ask Google for the live list and pick
+        // from it (#3149). The old hardcoded fallback pointed at a model
+        // Google had already shut down.
+        _ => GeminiProvider::resolve_default_model(&api_key).await,
+    };
 
     tracing::info!("Using Gemini provider with model: {}", model);
     let mut provider = GeminiProvider::new(api_key).with_model(model);

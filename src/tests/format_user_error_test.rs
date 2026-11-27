@@ -260,32 +260,76 @@ fn format_user_error_surfaces_sqlite_cause() {
     );
 }
 
-/// A dead link gets a sentence the user can act on (#3152).
+/// #3152: a link that is not there gets named as one.
 ///
-/// The provider chain renders reqwest's own words: `error sending request for
-/// url (...): error trying to connect: dns error: failed to lookup address
-/// information: Temporary failure in name resolution`. Every case above this
-/// one in the helper is about what the PROVIDER said, so none of them matched
-/// and the raw text fell through to the card. A laptop with the wifi off then
-/// showed that line and read as a crash. The real variant is
-/// `ProviderError::HttpError`, whose `Display` is the reqwest chain; a
-/// `reqwest::Error` cannot be built in a unit test, so this pins the same
-/// rendered text, which is all the helper reads.
+/// `utils::retry` spends its whole ladder on DNS and connection errors rather
+/// than fast-failing, so by the time the turn dies the user has waited minutes
+/// and the only line left was reqwest's own words. "dns error: failed to lookup
+/// address information: Temporary failure in name resolution" reads as a crash
+/// to anyone who is not a network engineer, and it names no action.
+///
+/// A real dead link arrives as `ProviderError::HttpError`, whose text is
+/// "HTTP request failed: " followed by reqwest's source chain. A `reqwest::Error`
+/// cannot be built in a unit test, so the same text is carried on `Internal`;
+/// the helper only reads the rendered string, which is the seam under test.
+fn unreachable_err(raw: &str) -> AgentError {
+    AgentError::Internal(raw.to_string())
+}
+
 #[test]
 fn format_user_error_names_a_dead_link() {
-    let raw = AgentError::Internal(
-        "error sending request for url (https://api.example.com/v1/messages): \
-         error trying to connect: dns error: failed to lookup address \
-         information: Temporary failure in name resolution"
-            .to_string(),
+    let err = unreachable_err(
+        "HTTP request failed: error sending request for url (https://example.invalid/v1): \
+         dns error: failed to lookup address information: Temporary failure in name resolution",
     );
-    let msg = format_user_error(&raw);
+    let msg = format_user_error(&err);
     assert!(
         msg.starts_with("No network"),
-        "the card must name the missing link instead of echoing reqwest: {msg}"
+        "the dead link must be named as one, not printed raw: {msg}"
     );
     assert!(
         !msg.contains("dns error"),
-        "the DNS wording is not a sentence a user can act on: {msg}"
+        "reqwest's wording must not reach the user: {msg}"
+    );
+    assert!(
+        msg.contains("wifi") && msg.contains("again"),
+        "the sentence must say what to do next: {msg}"
+    );
+}
+
+/// The same shape in the spellings macOS, Linux and Windows produce: the match
+/// is case-insensitive because the platform decides how it is written.
+#[test]
+fn format_user_error_names_every_unreachable_shape() {
+    for raw in [
+        "HTTP request failed: error trying to connect: dns error: no records found",
+        "HTTP request failed: error trying to connect: Network is unreachable (os error 101)",
+        "HTTP request failed: error trying to connect: No route to host (os error 65)",
+        "HTTP request failed: error trying to connect: dns resolution failed",
+        "HTTP request failed: error trying to connect: failed to lookup address information: \
+         nodename nor servname provided",
+    ] {
+        let msg = format_user_error(&unreachable_err(raw));
+        assert!(
+            msg.starts_with("No network"),
+            "unreachable shape not named: {raw} -> {msg}"
+        );
+    }
+}
+
+/// A provider that answered is not a dead link: `connection refused` means the
+/// host is up and nothing is listening, so pointing at the wifi would send the
+/// user looking in the wrong place.
+#[test]
+fn format_user_error_keeps_a_refused_connection_raw() {
+    let err = unreachable_err("HTTP request failed: error trying to connect: connection refused");
+    let msg = format_user_error(&err);
+    assert!(
+        !msg.starts_with("No network"),
+        "a refused connection is not a missing network: {msg}"
+    );
+    assert!(
+        msg.contains("connection refused"),
+        "the real cause must survive: {msg}"
     );
 }

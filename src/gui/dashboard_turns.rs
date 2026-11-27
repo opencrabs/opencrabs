@@ -1614,7 +1614,13 @@ impl Dashboard {
                     ProgressEvent::QueuedUserMessage { text },
                     _,
                 ) if self.chat_state.session() == Some(sid) => {
-                    self.turn.live.injected.push(text);
+                    // Same scaffold strip as live_fold: a queued message that
+                    // carries the compaction banner never paints it into the
+                    // live card (2026-11-26 GUI leak).
+                    self.turn
+                        .live
+                        .injected
+                        .push(opencrabs::utils::strip_embedded_compaction(&text).unwrap_or(text));
                     cx.notify();
                 }
                 agent_bridge::TurnEvent::ProgressFor(sid, ProgressEvent::TokenCount(count), _) => {
@@ -1685,6 +1691,29 @@ impl Dashboard {
                     _,
                 ) => {
                     self.turn.live.strip_streamed(bytes);
+                }
+                // A retry ladder is silent by design (#3152): `utils::retry`
+                // spends its whole budget on a dead link and then walks the
+                // fallback chain, so the user watches a counting clock for
+                // minutes with no word about the network. The terminal and
+                // every channel already print this line. The window's own turn
+                // folds its events here arm by arm rather than through
+                // `fold_live`, so it needs the arm too, or the one card the
+                // user is actually looking at stays the silent one.
+                agent_bridge::TurnEvent::ProgressFor(
+                    _,
+                    ProgressEvent::RetryAttempt {
+                        attempt,
+                        max,
+                        reason,
+                    },
+                    _,
+                ) => {
+                    self.turn
+                        .live
+                        .notices
+                        .push(crate::live_fold::retry_notice(attempt, max, &reason));
+                    cx.notify();
                 }
                 // Compaction notices and queue echoes: the phase-2 transcript
                 // mirror. They persist to the DB and show on the reload;

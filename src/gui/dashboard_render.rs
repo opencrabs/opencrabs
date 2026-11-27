@@ -1397,7 +1397,8 @@ impl Render for Dashboard {
                             cx,
                             model_picker::ModelPickerView {
                                 rows: &self.models_rows,
-                                query: &self.models_query,
+                                query: self.models_query.text(),
+                                field: None,
                                 selected: self.models_index,
                                 fetching: self.models_fetching,
                                 pending: self.models_pending.len(),
@@ -1409,7 +1410,6 @@ impl Render for Dashboard {
                                 row_layout: picker_layout.model_row,
                                 provider_label_width: picker_layout.provider_label_width,
                                 show_provider_labels: true,
-                                backend: &self.backend,
                             },
                         );
                         model_footer = Some(rendered.footer);
@@ -2916,10 +2916,11 @@ impl Render for Dashboard {
         // The instance strip has no column (#3178): the crabs are listed in
         // the rail under its logo. Its entity is mounted, with no box of its
         // own, only so the card that is up (pair, share, a crab's own card)
-        // paints over the window, on every screen, and only with
-        // `[gui] remote_crabs` on.
-        if let Some(strip) = self.instance_strip_element(cx) {
-            root = root.child(strip);
+        // paints over the window, on every screen. Opt-in though (#3178): a
+        // user who never turned the rail on mounts nothing, not even the card
+        // layer.
+        if self.instance_rail {
+            root = root.child(self.instance_strip_element(cx));
         }
         if self.rail_open {
             let width = self.rail_width;

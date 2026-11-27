@@ -68,3 +68,77 @@ mod tests {
         ));
     }
 }
+
+/// The banner every compaction summary is authored with. The full-context
+/// marker and the delta-segment continuation share the prefix, so one literal
+/// here covers both and the render paths stop repeating it.
+pub const COMPACTION_BANNER: &str = "[CONTEXT COMPACTION";
+
+/// Split compaction scaffold out of a row that carries it EMBEDDED.
+///
+/// A summary row starts with the banner, so the render paths skip it whole.
+/// The banner can also ride INSIDE a row the user did author: text copied out
+/// of the transcript (a reply quoting the scaffold) and pasted into the
+/// composer lands after the typed words. Enter queued it while the turn was
+/// busy, and the tool-boundary drain persisted it as one continuation row, so
+/// the bubble painted the whole summary after two typed sentences (2026-11-26,
+/// session 00d3619d: a 1498-char transcript copy glued onto a 106-char
+/// complaint, byte-exact against the copy receipt in opencrabs-gui.log).
+///
+/// Everything from the banner to the end of the row is scaffold. The summary
+/// is injected as a whole message, so nothing user-authored ever follows it,
+/// and the head is the user's own words. `None` when the row carries no
+/// banner, so callers keep the text untouched.
+pub fn strip_embedded_compaction(content: &str) -> Option<String> {
+    // split_once, not a byte index: `find` plus `content[..idx]` is a
+    // clippy::string_slice site, and the byte-slice ratchet in CI fails the
+    // push on any new one (scripts/byte-slice-baseline.txt). split_once hands
+    // back the head without an index, and it is the same first-match
+    // semantics the find had.
+    let (head, _) = content.split_once(COMPACTION_BANNER)?;
+    let head = head.trim_end();
+    Some(format!("{head}\n\n[compaction summary hidden]"))
+}
+
+#[cfg(test)]
+mod embedded_compaction_tests {
+    use super::{COMPACTION_BANNER, strip_embedded_compaction};
+
+    #[test]
+    fn an_embedded_banner_is_cut_with_its_tail() {
+        // The incident shape: typed words, one space, then the whole pasted
+        // summary. The words survive, the scaffold and anything after it do
+        // not.
+        let row = "what the actual fuck [CONTEXT COMPACTION — DELTA SEGMENT. More\nscaffold lines\nand more";
+        let stripped = strip_embedded_compaction(row).expect("the banner is embedded");
+        assert_eq!(
+            stripped,
+            "what the actual fuck\n\n[compaction summary hidden]"
+        );
+        assert!(!stripped.contains("scaffold lines"));
+    }
+
+    #[test]
+    fn a_row_without_the_banner_is_untouched() {
+        assert_eq!(strip_embedded_compaction("plain words"), None);
+        assert_eq!(strip_embedded_compaction(""), None);
+        // A near miss is not a banner: the user's text stays theirs.
+        assert_eq!(
+            strip_embedded_compaction("we were talking about compaction"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_banner_constant_matches_both_authored_markers() {
+        // Full-context and delta-segment summaries share the prefix. If the
+        // builder in brain::agent::context ever changes its wording, this test
+        // is the tripwire.
+        let full = "[CONTEXT COMPACTION — The conversation was automatically compacted";
+        let delta = "[CONTEXT COMPACTION — DELTA SEGMENT. This block summarises";
+        for marker in [full, delta] {
+            assert!(marker.starts_with(COMPACTION_BANNER));
+            assert!(strip_embedded_compaction(marker).is_some());
+        }
+    }
+}

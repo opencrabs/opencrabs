@@ -622,7 +622,7 @@ This solves the core UX problem in mention-only groups: previously, tagging the 
 | Feature | Description |
 |---------|-------------|
 | **Cursor Navigation** | Full cursor movement: Left/Right arrows, Ctrl+Left/Right word jump, Home/End, Delete, Backspace at position |
-| **Input History** | Persistent command history (`~/.opencrabs/history.txt`), loaded on startup, shared live with the window's composers, capped at 500 entries. A typed draft survives Arrow Up then Down, Esc twice, a pane focus change, and a session switch; see [Composer drafts and history](#composer-drafts-and-history) |
+| **Input History** | Persistent command history (`~/.opencrabs/history.txt`), loaded on startup, shared live with the window's composers, capped at 500 entries. A pasted block stays one entry, so it comes back whole. A typed draft survives Arrow Up then Down, Esc twice, a pane focus change, and a session switch; see [Composer drafts and history](#composer-drafts-and-history) |
 | **Inline Tool Approval** | Claude Code-style `❯ Yes / Always / No` selector with arrow key navigation |
 | **Inline Plan Approval** | Interactive plan review selector (Approve / Reject / Request Changes / View Plan) |
 | **Session Management** | Create, rename, delete sessions with persistent SQLite storage; each session remembers its provider + model, and switching sessions auto-restores the provider (no manual `/models` needed); token counts and context % per session. New sessions auto-generate a meaningful title from the first user message (no more "New Chat"). `Ctrl+Shift+P` in the sessions list pins the selected session to the top with a ★ marker in the terminal and a quiet pin icon in the window (the window answers `ctrl-shift-p` too); pins survive restarts, unpinning restores the real recency slot, and the order beneath the pins never changes. The window's rename dialog also picks a session icon: eight built-in marks or your own image (png, jpg, jpeg, webp, gif, bmp, tiff or svg, up to 5 MB), stored under `~/.opencrabs/gui-icons/` and shown on the rail card and the tab; renaming keeps the picked icon. `Alt+Space` opens **Seeker** on both surfaces, one field that finds a conversation, a slash command, a screen, a skill, the matching docs.opencrabs.com page or the setup for a messaging channel and runs it on Enter; a channel that is not configured yet prints the steps it takes under the field. Typing `create topic` arms the same session list so the pick names a new topic under it, `favorite` pins the picked session through that list, and a query that matches nothing offers to start a session with your words as the request. The window also opens the same card with `cmd-k`, and `ctrl-f` there narrows the rail instead. Busy sessions carry a live activity line on both surfaces, naming the running tool, thinking, or responding as it happens. The rail filters: in the terminal `s` cycles the plan-state chip (all, in progress, finished, no plan), `a` shows or hides cron and RSI automation sessions (hidden by default), and `/` searches keywords across titles and stored message content, rendering the matching snippet beside the title; the window tucks the same filters behind a funnel toggle and answers `ctrl-f` with a rail search that reads message content too |
@@ -736,6 +736,10 @@ Both surfaces keep what you typed. The rules are the same in the terminal and in
 | **Switch panes** (TUI split, GUI split) | Each pane keeps its own draft, its own recall position and its own stashed draft. Moving focus moves all three with the pane |
 
 History is one list, shared in real time. The terminal and the window read and write the same `~/.opencrabs/history.txt` (500 entries, consecutive duplicates collapsed), and inside the window the single composer and every split pane walk one in-memory list, so a message sent in a pane is recalled in the window and the other way round. A restart keeps the list.
+
+One entry is one record in that file, so a pasted block of text comes back as the block you pasted, newlines and blank lines included, instead of one entry per line.
+
+The arrows walk the text in the field first, line by line, and only a caret that is out of the way hands the key to the history, which then moves one entry per press. The window and the terminal ask the same question about that (`src/ui_core/input_history.rs`), so the two walk the history the same way.
 
 #### Voice messages
 
@@ -1499,7 +1503,7 @@ stt_model = "qwen3.8-omni-flash"             # transcription on day 0, sent as i
 
 ### Google Gemini
 
-**Models:** `gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-1.5-pro` — fetched live from the Gemini API
+**Models:** resolved live from the Gemini models API at startup when `default_model` is unset, preferring Google's rolling `gemini-flash-latest` alias. Nothing is pinned, so a retired version cannot break the provider.
 
 **Setup** in `keys.toml` — get a key at [aistudio.google.com](https://aistudio.google.com):
 ```toml

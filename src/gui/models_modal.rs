@@ -6,8 +6,24 @@ use opencrabs::ui_core::card::concentric_radius;
 impl Dashboard {
     pub(crate) fn models_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
-        let visible = models::filtered_rows(&self.models_rows, &self.models_query);
-        let providers = models::providers(&visible);
+        let visible = models::filtered_rows(&self.models_rows, self.models_query.text());
+        // The selected provider keeps its tile while the filter runs (#3183):
+        // the tiles are built from the filtered rows, so typing a query that
+        // hides every model of the provider in scope made its tile vanish and
+        // the selection look deselected. Rebuild it from the unfiltered
+        // catalogue and append it, still highlighted, until the selection
+        // changes. Its click stays meaningful too: picking it clears nothing,
+        // the picker just keeps filtering by the query, and the count shown
+        // is the catalogue count.
+        let mut providers = models::providers(&visible);
+        if let Some(selected) = self.models_provider.as_deref()
+            && !providers.iter().any(|row| row.provider == selected)
+            && let Some(pinned) = models::providers(&self.models_rows)
+                .into_iter()
+                .find(|row| row.provider == selected)
+        {
+            providers.push(pinned);
+        }
         let live = self
             .backend
             .facts(self.models_session.or(self.chat_session))
@@ -80,7 +96,8 @@ impl Dashboard {
             cx,
             model_picker::ModelPickerView {
                 rows: &model_rows,
-                query: &self.models_query,
+                query: self.models_query.text(),
+                field: Some(&self.models_query),
                 selected: self.models_index,
                 fetching: self.models_fetching,
                 pending: self.models_pending.len(),
@@ -99,9 +116,48 @@ impl Dashboard {
                 row_layout: opencrabs::ui_core::model_layout::ModelRowLayout::Stacked,
                 provider_label_width: 0.0,
                 show_provider_labels: false,
-                backend: &self.backend,
             },
         );
+        // The scope control (#3035, placement #3181): two states, this
+        // session or all sessions. It lives in the footer beside the
+        // "tab scope" hint, so the control, its hint and the apply action
+        // read as one unit instead of header chrome. Tab flips it as well,
+        // and the subtitle spells the state out either way.
+        //
+        // It is built above the body row on purpose: the body slice is what
+        // the layout pin measures, and that slice is the two panels only.
+        // A third radius inside it read as a third panel (#2921).
+        let scope_chip = div()
+            .id("models-scope")
+            .flex()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(px(concentric_radius(6.0)))
+            .border_1()
+            .border_color(rgb(if scope_all { shown.accent } else { shown.track }))
+            .cursor_pointer()
+            .hover(|d| d.border_color(rgb(shown.accent)))
+            .child(text(
+                if scope_all {
+                    "scope: all sessions"
+                } else {
+                    "scope: this session"
+                },
+                Size::Xs,
+                if scope_all {
+                    shown.accent
+                } else {
+                    shown.text_muted
+                },
+            ))
+            .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                this.models_scope_all = !this.models_scope_all;
+                cx.notify();
+            }));
         let body = div()
             .flex()
             .flex_row()
@@ -152,59 +208,64 @@ impl Dashboard {
         // A pending all-sessions pick owns the footer (#3035): the count and
         // the second tap are the whole point, so the normal hint steps aside
         // until the reader answers.
+        // The footer is a structured keycap row (#3181), matching the help
+        // dialog's command row: every chord is its own bordered chip with the
+        // action spelled beside it, not one dumped plain-text string.
+        let hint = |chord: &'static str, label: &'static str| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .px_1()
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(shown.track))
+                        .bg(rgb(shown.panel_hi))
+                        .text_xs()
+                        .text_color(rgb(shown.text_normal))
+                        .child(SharedString::from(chord)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(shown.text_faint))
+                        .child(SharedString::from(label)),
+                )
+        };
         let footer = if let Some(prompt) = self.models_scope_prompt() {
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
                 .child(text(prompt, Size::Sm, shown.text))
-                .child(modal_shell::footer(
-                    "enter apply to all  esc cancel".to_string(),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_4()
+                        .child(hint("enter", "apply to all"))
+                        .child(hint("esc", "cancel")),
+                )
         } else {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(picker.footer)
-                .child(modal_shell::footer(
-                    "type filter or custom id  enter switch  tab scope  esc close".to_string(),
-                ))
+            // The chip sits on the hint row it belongs to (#3181).
+            div().flex().flex_col().gap_1().child(picker.footer).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(scope_chip)
+                    .child(hint("\u{2191}\u{2193}", "scroll"))
+                    .child(hint("enter", "switch"))
+                    .child(hint("tab", "scope"))
+                    .child(hint("esc", "close")),
+            )
         };
-        // The scope control (#3035): two states, this session or all
-        // sessions, in the header slot the modal already reserves. Tab flips
-        // it as well, and the subtitle spells the state out either way.
-        let scope_chip = div()
-            .id("models-scope")
-            .flex()
-            .flex_none()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .rounded(px(concentric_radius(6.0)))
-            .border_1()
-            .border_color(rgb(if scope_all { shown.accent } else { shown.track }))
-            .cursor_pointer()
-            .hover(|d| d.border_color(rgb(shown.accent)))
-            .child(text(
-                if scope_all {
-                    "scope: all sessions"
-                } else {
-                    "scope: this session"
-                },
-                Size::Xs,
-                if scope_all {
-                    shown.accent
-                } else {
-                    shown.text_muted
-                },
-            ))
-            .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-                this.models_scope_all = !this.models_scope_all;
-                cx.notify();
-            }));
 
         let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
             this.screen = Screen::Chat;
@@ -216,7 +277,7 @@ impl Dashboard {
                 id: "models-modal",
                 title: "Models".to_string(),
                 subtitle,
-                actions: Some(scope_chip.into_any_element()),
+                actions: None,
                 header_close: true,
                 body: body.into_any_element(),
                 footer: Some(footer.into_any_element()),

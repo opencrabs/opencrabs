@@ -598,9 +598,13 @@ pub(crate) struct Dashboard {
     /// The model picker's rows, built when the screen opens so a slow frame
     /// never rebuilds the catalogue.
     pub(crate) models_rows: Vec<models::Row>,
-    /// The live search text. Selection indexes the filtered rows, never the
+    /// The live search text, with a caret and a selection (#3186). It is the
+    /// same [`TextField`] engine the composer and the name prompts use, so
+    /// alt+backspace and ctrl+w remove a word, ctrl+u clears to the start,
+    /// ctrl+a selects all, and copy/cut/paste act on the selection exactly as
+    /// they do in the composer. Selection indexes the filtered rows, never the
     /// unfiltered catalogue underneath them.
-    pub(crate) models_query: String,
+    pub(crate) models_query: TextField,
     /// The row the arrows stand on.
     pub(crate) models_index: usize,
     /// The provider the models screen's list marks. A click sets it and moves
@@ -726,6 +730,10 @@ pub(crate) struct Dashboard {
     /// is looking at. Read once when the window opens; the health of each one
     /// is the probe loop's business, not the render's.
     pub(crate) instances: instances::Instances,
+    /// Whether the rail is on at all (#3178). Read once from the config when
+    /// the window opens, because the mount and the probe loop are both decided
+    /// there: the settings row therefore carries the restart chip.
+    pub(crate) instance_rail: bool,
     /// The strip drawn as a cached view, the same way the rail is (#2933): a
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.

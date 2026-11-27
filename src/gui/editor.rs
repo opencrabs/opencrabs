@@ -18,7 +18,8 @@ use opencrabs::ui_core::card::glass_fill;
 use opencrabs::ui_core::commands::gui_completions;
 use opencrabs::ui_core::composer::{self, ComposerDraft, SharedHistory, lock_history};
 use opencrabs::ui_core::input_history::{
-    input_history_down, input_history_up, record_input_history,
+    Vertical, VerticalAction, input_history_down, input_history_up, record_input_history,
+    vertical_action,
 };
 use opencrabs::ui_core::palette::{next_word_end, previous_word_start};
 use std::borrow::Cow;
@@ -1617,12 +1618,27 @@ impl Editor {
     /// the row starts, its length in bytes)`. A row is a wrapped piece of one
     /// logical line; before the field has ever been shaped the layout is
     /// empty and each logical line stands in for its own single row.
+    ///
+    /// The kept layout is the shape of the text as it was painted, and a
+    /// recall swaps the whole buffer at once, so those rows can belong to
+    /// text that is gone. Walking them moves the caret to an offset that
+    /// means nothing and the field looks stuck (#3188). The shaped lines are
+    /// trusted only while they are the lines of the text in the field; until
+    /// the field is painted again each logical line stands for its own single
+    /// row, which is the row the terminal walks anyway.
     fn visual_rows(&self) -> Vec<(usize, usize)> {
+        let shaped_matches_text = self
+            .shaped_draft
+            .as_ref()
+            .is_some_and(|cache| cache.key.0 == self.content);
         let mut rows = Vec::new();
         for line in 0..self.line_count() {
             let start = self.line_start(line);
             let len = self.line_len(line);
-            match self.last_layout.get(line) {
+            let shaped = shaped_matches_text
+                .then(|| self.last_layout.get(line))
+                .flatten();
+            match shaped {
                 Some(shaped) => {
                     for (from, to) in visual_segments(shaped, len) {
                         rows.push((start + from, to - from));
@@ -1740,18 +1756,19 @@ impl Editor {
         if self.step_emoji_popup(-1, cx) {
             return;
         }
-        let rows = self.visual_rows();
-        let target = vertical_row_target(&rows, self.cursor_offset(), -1);
-        if target != self.cursor_offset() {
-            self.move_to(target, cx);
-            return;
-        }
-        // Off the top row of a draft the offer still wins over history: the
-        // caret has nowhere left to go, and the card above the field is the
-        // only thing up there that does something.
-        if offer_waiting {
-            cx.emit(EditorEvent::Above);
-            return;
+        // The caret keeps the vertical key while it still has somewhere to go,
+        // and the history takes it at the ends. The terminal asks the same
+        // question through the shared rule, so the two surfaces walk the
+        // history the same way instead of each inventing one (#3188).
+        if vertical_action(self.cursor_offset(), self.content.len(), Vertical::Up)
+            == VerticalAction::Caret
+        {
+            let rows = self.visual_rows();
+            let target = vertical_row_target(&rows, self.cursor_offset(), -1);
+            if target != self.cursor_offset() {
+                self.move_to(target, cx);
+                return;
+            }
         }
         // The guard is released before anything else touches `self`: holding it
         // across `move_to` would keep an immutable borrow of the editor alive.
@@ -1771,7 +1788,11 @@ impl Editor {
             self.marked_range = None;
             cx.notify();
         } else {
-            self.move_to(target, cx);
+            // No older entry left to walk to. The caret stays where it is and
+            // the blink restarts, so an empty walk reads as the end of the
+            // history and not as a field that fell asleep.
+            let caret = self.cursor_offset();
+            self.move_to(caret, cx);
         }
     }
 
@@ -1786,11 +1807,19 @@ impl Editor {
         // walks the caret through them first. Off the last row it is the way
         // out: every original goes back to wait untouched, oldest first, and
         // the draft the recall covered returns (#2696, #2637).
-        let rows = self.visual_rows();
-        let target = vertical_row_target(&rows, self.cursor_offset(), 1);
-        if target != self.cursor_offset() {
-            self.move_to(target, cx);
-            return;
+        //
+        // The caret keeps the key while it has somewhere to go, and the recall
+        // and the history take it at the ends. The terminal asks the same
+        // question through the shared rule (#3188).
+        if vertical_action(self.cursor_offset(), self.content.len(), Vertical::Down)
+            == VerticalAction::Caret
+        {
+            let rows = self.visual_rows();
+            let target = vertical_row_target(&rows, self.cursor_offset(), 1);
+            if target != self.cursor_offset() {
+                self.move_to(target, cx);
+                return;
+            }
         }
         if self.recall.is_some() {
             let recall = self.recall.take().expect("a recall is active");
@@ -1821,7 +1850,11 @@ impl Editor {
             self.marked_range = None;
             cx.notify();
         } else {
-            self.move_to(target, cx);
+            // Nothing newer to walk to: the caret stays where it is and the
+            // screen below gets the key, the way it does at the end of a
+            // draft.
+            let caret = self.cursor_offset();
+            self.move_to(caret, cx);
             cx.emit(EditorEvent::Below);
         }
     }
