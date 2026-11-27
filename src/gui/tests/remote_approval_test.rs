@@ -409,7 +409,7 @@ fn separators_that_break_a_line_are_escaped() {
 #[test]
 fn the_input_area_is_bounded_and_scrolls() {
     let src = include_str!("../remote_approval.rs");
-    let card = &src[src.find("pub(crate) fn card(").expect("card")..];
+    let (_, card) = src.split_once("pub(crate) fn card(").expect("card");
     assert!(
         card.contains(".max_h(px(INPUT_MAX_HEIGHT))"),
         "input area is unbounded"
