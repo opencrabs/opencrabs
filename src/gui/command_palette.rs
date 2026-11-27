@@ -1803,3 +1803,4 @@ mod tests {
         assert_eq!(printed[0].title, "= 28.1690140845");
         assert_eq!(printed[0].kind, "calc");
     }
+}

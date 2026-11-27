@@ -27,4 +27,3 @@ fn the_card_wears_smoke_where_blur_cannot_go() {
         "the floor rides its alpha high so the terminal behind dims into mush"
     );
 }
-}
