@@ -369,3 +369,97 @@ fn a_tunnel_dials_where_the_gateway_listens() {
         "http://10.0.0.4:9000"
     );
 }
+
+fn keyed_gateway() -> crate::config::A2aConfig {
+    crate::config::A2aConfig {
+        enabled: true,
+        api_key: Some("a-long-key".to_string()),
+        ..Default::default()
+    }
+}
+
+fn stub_spec(dir: &Path, port: u16) -> TunnelSpec {
+    TunnelSpec {
+        origin_host: "127.0.0.1".to_string(),
+        port,
+        state_dir: dir.to_path_buf(),
+        binary: Some(stub_script(dir, true)),
+        url_timeout: Duration::from_secs(10),
+    }
+}
+
+#[test]
+fn open_refuses_a_closed_or_keyless_gateway_before_spawning() {
+    // The gate `connect` and the share card share: neither door publishes a
+    // gateway that is off or answers anyone.
+    let dir = tempfile::tempdir().unwrap();
+    let spec = stub_spec(dir.path(), 18998);
+    let off = crate::config::A2aConfig {
+        enabled: false,
+        ..keyed_gateway()
+    };
+    assert!(open(&off, &spec).is_err());
+    let keyless = crate::config::A2aConfig {
+        api_key: Some("  ".to_string()),
+        ..keyed_gateway()
+    };
+    let err = open(&keyless, &spec).expect_err("keyless gateway");
+    assert!(err.to_string().contains("KEYLESS"), "{err:#}");
+    assert!(
+        status(dir.path()).unwrap().is_none(),
+        "a refused open spawns nothing"
+    );
+}
+
+#[test]
+fn open_starts_once_then_reuses_and_refuses_another_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = stub_spec(dir.path(), 18997);
+    let first = open(&keyed_gateway(), &spec).expect("stub open");
+    let Opened::Started(started) = first else {
+        panic!("the first open starts the tunnel");
+    };
+    assert_eq!(started.url, "https://stub-abc-123.trycloudflare.com");
+
+    // A second open for the same port reuses it: one cloudflared, not two.
+    let second = open(&keyed_gateway(), &spec).expect("reuse");
+    let Opened::Reused(reused) = second else {
+        panic!("the second open reuses the tunnel");
+    };
+    assert_eq!(reused.pid, started.pid);
+
+    let other = stub_spec(dir.path(), 18996);
+    let err = open(&keyed_gateway(), &other).expect_err("another port");
+    assert!(err.to_string().contains("--stop"), "{err:#}");
+
+    assert!(stop(dir.path()).unwrap());
+}
+
+#[test]
+fn an_owned_tunnel_stops_on_drop_and_only_its_own_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = stub_spec(dir.path(), 18995);
+    let Opened::Started(state) = open(&keyed_gateway(), &spec).expect("stub open") else {
+        panic!("a fresh state dir starts a tunnel");
+    };
+
+    // A stale owner (another pid) never stops a tunnel it does not own.
+    assert!(!stop_owned(dir.path(), state.pid.wrapping_add(1)).unwrap());
+    assert!(status(dir.path()).unwrap().is_some());
+
+    let owned = OwnedTunnel::adopt(dir.path(), &state);
+    assert_eq!(owned.pid(), state.pid);
+    drop(owned);
+    assert!(
+        status(dir.path()).unwrap().is_none(),
+        "dropping the owner stops the tunnel"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while pid_alive(state.pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !pid_alive(state.pid),
+        "no orphan cloudflared after the drop"
+    );
+}
