@@ -402,6 +402,8 @@
 3	src/gui/tests/main_test.rs	render[render
 2	src/gui/tests/main_test.rs	src[..at]
 1	src/gui/tests/main_test.rs	src[at..]
+1	src/gui/tests/main_test.rs	src[arm_start..]
+1	src/gui/tests/main_test.rs	src[arm_start..arm_end]
 2	src/gui/tests/main_test.rs	src[line..at]
 2	src/gui/tests/sidebar_action_test.rs	src[..at]
 1	src/gui/tests/sidebar_action_test.rs	src[at..]
