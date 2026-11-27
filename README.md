@@ -1347,7 +1347,7 @@ The CLI `migrate` command currently supports OpenClaw and Hermes. For everything
 | Provider | Auth | Models | Streaming | Tools | Notes |
 |----------|------|--------|-----------|-------|-------|
 | **Xiaomi (MiMo)** | API key | mimo-v2.5-pro (1M ctx), v2-pro, v2.5, omni, flash | ✅ | ✅ | OpenAI-compatible. Get a key at platform.xiaomimimo.com. MiMo v2.5 is multimodal (native vision) |
-| [OpenCrabs (built in)](#opencrabs-built-in) | Automatic (install token, no key to paste) | deepseek-v4.1-flash (200k ctx, multimodal) | ✅ | ✅ | Set up on first run with no account. No charge and no usage caps during the experimental phase |
+| [OpenCrabs (built in)](#opencrabs-built-in) | Automatic (install token, no key to paste) | combo (200k ctx, multimodal) | ✅ | ✅ | Set up on first run with no account. No charge and no usage caps during the experimental phase |
 | [Anthropic Claude](#anthropic-claude) | API key | Claude Opus 4.6, Sonnet 4.5, Haiku 4.5+ | ✅ | ✅ | Cost tracking, automatic retry |
 | [OpenAI](#openai) | API key | GPT-5 Turbo, GPT-5 | ✅ | ✅ | |
 | [GitHub Copilot](#github-copilot) | OAuth | GPT-4o, Claude Sonnet 4+ | ✅ | ✅ | Uses your Copilot subscription — no API charges |
@@ -1473,7 +1473,7 @@ Model list is **fetched live** from the OpenRouter API during onboarding and via
 OpenCrabs ships its own provider, so a new install can chat without creating an account or pasting a key.
 
 **What you get on a fresh install**
-- **Chat model:** `deepseek-v4.1-flash`, 200k context window. The window is fixed at 200k on this provider: the endpoint is free and serves one model, so `context_window` is not honoured here.
+- **Chat model:** `combo`, 200k context window. The window is fixed at 200k on this provider: the endpoint is free and serves one model id, so `context_window` is not honoured here. The older `deepseek-v4.1-flash` name still answers on the same endpoint for clients built before the rename, and an upgraded install is moved onto `combo` on its next start.
 - **Vision:** `vision_model` is set to the same model, so attached images work on day 0.
 - **Image generation:** on by default for fresh installs through `gemini-2.5-flash-image`, which is image-only and never offered as a chat model. Existing installs set `generation_model` on `[providers.opencrabs]` to get it (see [Image Generation & Vision](#-image-generation--vision)).
 - **Voice (in):** transcription works on day 0. The built-in provider answers no `/v1/audio/*` route, so the shipped config sets `stt_model = "qwen3.8-omni-flash"` and the audio is sent as an `input_audio` part on `/v1/chat/completions` alongside the transcription instruction. An engine you configure yourself (Groq, an [OI]-compatible endpoint, Voicebox, local whisper.cpp) stays available, and the active provider's route is the primary one.
@@ -1490,8 +1490,8 @@ OpenCrabs ships its own provider, so a new install can chat without creating an 
 ```toml
 [providers.opencrabs]
 enabled = false                       # chosen through onboarding, not by hand
-default_model = "deepseek-v4.1-flash"
-models = ["deepseek-v4.1-flash"]
+default_model = "combo"
+models = ["combo"]
 # context_window is not honoured here: the built-in endpoint is free and fixed
 # at 200k, so any value set in this section is ignored.
 vision_model = "deepseek-v4.1-flash"       # vision on day 0, same endpoint
@@ -2600,7 +2600,7 @@ A 10-step setup wizard covers the rest of the setup. On a fresh install it does 
 
 ### First Run
 
-On a fresh install there is no setup step for the LLM. The session runs on the built-in OpenCrabs provider with `deepseek-v4.1-flash`, and the first screen goes straight to chat.
+On a fresh install there is no setup step for the LLM. The session runs on the built-in OpenCrabs provider with `combo`, and the first screen goes straight to chat.
 
 - The welcome names what is already set (provider, model, vision, transcription, image generation) and asks only about what is still missing: your profile in `USER.md` and text to speech. Answer what you want and skip the rest.
 - To use another provider, type `/models`, or run `/onboard` and choose Advanced. On a first run, Advanced preselects OpenCrabs with its key and model already filled in, and you can pick any other provider instead.

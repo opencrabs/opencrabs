@@ -12,11 +12,8 @@ fn example_config_lists_the_built_in_model_disabled_by_default() {
         .expect("[providers.opencrabs] present in the example");
 
     assert!(!section.enabled, "built-in provider ships disabled");
-    assert_eq!(
-        section.default_model.as_deref(),
-        Some("deepseek-v4.1-flash")
-    );
-    assert_eq!(section.models, vec!["deepseek-v4.1-flash".to_string()]);
+    assert_eq!(section.default_model.as_deref(), Some("combo"));
+    assert_eq!(section.models, vec!["combo".to_string()]);
     // The built-in endpoint is free and fixed at 200k, so the key is not
     // offered in the example and is not honoured if a user adds it (#2066).
     assert_eq!(section.context_window, None);

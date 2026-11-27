@@ -83,11 +83,7 @@ fn provisioning_a_fresh_home_reaches_all_four_capabilities() {
             .opencrabs
             .as_ref()
             .expect("the built-in section survives seeding");
-        assert_eq!(
-            section.default_model.as_deref(),
-            Some("deepseek-v4.1-flash"),
-            "text"
-        );
+        assert_eq!(section.default_model.as_deref(), Some("combo"), "text");
         assert!(
             section
                 .vision_model
@@ -165,7 +161,7 @@ fn a_provisioned_home_resolves_the_builtin_provider() {
         let (provider, model) = config.providers.active_provider_and_model();
         assert_eq!(provider, "opencrabs", "the built-in provider is the one");
         assert_eq!(
-            model, "deepseek-v4.1-flash",
+            model, "combo",
             "with the model the shipped section declares"
         );
     });
