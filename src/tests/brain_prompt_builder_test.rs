@@ -655,3 +655,36 @@ fn strip_followup_suggestions_is_idempotent_on_custom_brains() {
         "brains without the exact header are unchanged"
     );
 }
+
+// ── spoken block rule (#3222) ─────────────────────────────────────────────────
+
+/// The voice rule left the system prompt.
+///
+/// It was a paragraph in `BRAIN_PREAMBLE`, which is sent on every turn, so a
+/// typed question paid for it and some models answered one with a block nobody
+/// would ever play. It now rides with the voice turn's own message.
+#[test]
+fn core_brain_does_not_teach_the_spoken_block() {
+    let dir = TempDir::new().unwrap();
+    let brain = loader(&dir).build_core_brain(None);
+    assert!(
+        !brain.contains("<<SPOKEN:"),
+        "the system prompt still teaches the spoken block"
+    );
+    assert!(
+        !brain.contains("VOICE TURNS GET A SPOKEN SUMMARY"),
+        "the rule paragraph is still in the preamble"
+    );
+}
+
+/// The full brain is the same prompt with more files behind it, so the rule
+/// must be absent there too.
+#[test]
+fn system_brain_does_not_teach_the_spoken_block() {
+    let dir = TempDir::new().unwrap();
+    let brain = loader(&dir).build_system_brain(None);
+    assert!(
+        !brain.contains("<<SPOKEN:"),
+        "the system brain still teaches the spoken block"
+    );
+}

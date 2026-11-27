@@ -23,6 +23,7 @@
 //! half written fence cannot swallow the rest of the answer.
 
 use crate::channels::voice::text_cleanup::clean_for_tts;
+use std::borrow::Cow;
 
 /// The most a spoken reply may say, in characters.
 ///
@@ -88,6 +89,30 @@ pub fn without_prefix(text: &str) -> &str {
     rest.strip_prefix(':').unwrap_or(rest).trim_start()
 }
 
+/// What the model is told when a message came from a recording (#3222).
+///
+/// This used to sit in the system preamble, which is sent on every turn. A
+/// typed question then paid for the rule, and some models obeyed it and wrote a
+/// block nobody would ever play. It rides with the user message instead, and
+/// only when that message carries [`VOICE_PREFIX`], so a typed turn never sees
+/// it.
+pub const SPOKEN_INSTRUCTION: &str = "\
+VOICE TURNS GET A SPOKEN SUMMARY: this message began with `[voice note]`, so it was spoken, and it is answered with speech as well: end your reply with one `<<SPOKEN:...>>` block holding two to four plain sentences, one for what you did and one for what the user has to do next, in the language they wrote in. No markdown, no file paths, no lists, no code, and never a `>>` inside it, because that closes the block early. Everything above the block stays exactly as full as the work deserves: the block is what gets read aloud, the rest is what gets read. The block is stripped from every surface before display, so it never reaches a screen, and a reply that arrives without one is spoken from its first paragraph instead.";
+
+/// Whether a turn's message came from a recording (#3222).
+///
+/// The note opens the transcript, but a channel puts its own banner in front of
+/// the text, so the note can sit on a later line. Any line that opens with it
+/// counts. A mention in the middle of a sentence does not: that is someone
+/// talking about voice notes, not sending one.
+pub fn is_voice_turn(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .get(..VOICE_PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(VOICE_PREFIX))
+    })
+}
+
 /// Split a reply into what is read and what is spoken.
 ///
 /// Returns the visible answer with the block removed and its blank lines
@@ -105,19 +130,7 @@ pub fn split(text: &str) -> (String, Option<String>) {
     };
     let head = text.get(..start).unwrap_or_default();
     let tail = text.get(end..).unwrap_or_default();
-    // A block belongs on its own line, and that is where the model puts it. If
-    // one arrives mid sentence instead, the hole it leaves is closed with a
-    // space rather than a line break, because a stray break in the middle of a
-    // paragraph is more visible than the join.
-    let joined = if head.is_empty() {
-        // Nothing came before the block, so there is no paragraph to rejoin and
-        // no space of its own to keep.
-        tail.trim_start().to_string()
-    } else if head.ends_with('\n') || tail.starts_with('\n') {
-        format!("{head}\n{tail}")
-    } else {
-        format!("{} {}", head.trim_end(), tail.trim_start())
-    };
+    let joined = join_block(head, tail);
     let visible = collapse(&joined);
     let payload = text
         .get(start + OPEN.len()..end - CLOSE.len())
@@ -132,6 +145,103 @@ pub fn split(text: &str) -> (String, Option<String>) {
 /// The reply as the reader sees it, block and all removed.
 pub fn visible(text: &str) -> String {
     split(text).0
+}
+
+/// The text a surface may DRAW while the reply is still streaming (#3222).
+///
+/// [`split`] removes a block from a finished reply, and it cannot help here:
+/// for most of a turn the block has no closing `>>` yet, so it is not a block
+/// by that parse and the raw `<<SPOKEN:` lands on screen in the card and in the
+/// bubble until the rows reload. This hides the three shapes a stream produces:
+///
+/// - a closed block, the same range [`locate`] returns;
+/// - an unclosed one, everything from its opener to the end of the stream;
+/// - a trailing partial opener (`<<SPOK`, `<<SPOKE`, ...), a block whose name
+///   has not finished arriving.
+///
+/// Borrowed when there is nothing to hide, so a paint path that asks on every
+/// frame copies nothing in the ordinary case. The raw stream is never touched:
+/// the synthesizer still finds the block when the turn ends.
+pub fn while_streaming(text: &str) -> Cow<'_, str> {
+    let Some(start) = block_start(text) else {
+        return Cow::Borrowed(text);
+    };
+    let head = text.get(..start).unwrap_or_default();
+    let Some(end) = close_of(text, start) else {
+        // Unclosed or still arriving: everything from the opener is the block.
+        return Cow::Borrowed(head.trim_end());
+    };
+    let joined = join_block(head, text.get(end..).unwrap_or_default());
+    // A model that appended twice leaves a second block behind the first, and
+    // each pass strictly shortens the text, so this cannot run away.
+    Cow::Owned(match block_start(&joined) {
+        Some(_) => while_streaming(&joined).into_owned(),
+        None => joined,
+    })
+}
+
+/// Where a spoken block opens in `text`, when one is there or still arriving.
+///
+/// [`locate`] needs the closing `>>`, which a block spends most of its life
+/// without. This finds the opener alone, and it matches a partial one too.
+fn block_start(text: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    while let Some(found) = text.get(offset..)?.find("<<") {
+        let start = offset + found;
+        if opens_spoken(text.get(start + 2..).unwrap_or_default()) {
+            return Some(start);
+        }
+        offset = start + 2;
+    }
+    None
+}
+
+/// Whether the text right after `<<` reads as a `SPOKEN:` kind.
+///
+/// Case-insensitive, per character, and true when the stream runs out before
+/// the kind does: a partial token is still our block, and the bytes already on
+/// screen are the ones that must not be.
+fn opens_spoken(after: &str) -> bool {
+    const KIND: &str = "SPOKEN:";
+    let mut expected = KIND.chars();
+    for ch in after.chars() {
+        let Some(want) = expected.next() else {
+            // More arrived than a kind holds, so this is `<<SPOKENX...`.
+            return false;
+        };
+        if !ch.eq_ignore_ascii_case(&want) {
+            return false;
+        }
+        if want == ':' {
+            return true;
+        }
+    }
+    true
+}
+
+/// The byte just past the closing `>>` of the block that opens at `start`.
+fn close_of(text: &str, start: usize) -> Option<usize> {
+    let after = text.get(start + 2..)?;
+    let rel = after.find(CLOSE)?;
+    Some(start + 2 + rel + CLOSE.len())
+}
+
+/// Join the text before a block to the text after it.
+///
+/// A block belongs on its own line, and that is where the model puts it. If one
+/// arrives mid sentence instead, the hole it leaves is closed with a space
+/// rather than a line break, because a stray break in the middle of a paragraph
+/// is more visible than the join.
+fn join_block(head: &str, tail: &str) -> String {
+    if head.is_empty() {
+        // Nothing came before the block, so there is no paragraph to rejoin and
+        // no space of its own to keep.
+        tail.trim_start().to_string()
+    } else if head.ends_with('\n') || tail.starts_with('\n') {
+        format!("{head}\n{tail}")
+    } else {
+        format!("{} {}", head.trim_end(), tail.trim_start())
+    }
 }
 
 /// What to speak when the model left the block out.
@@ -388,5 +498,82 @@ mod tests {
             without_prefix("[voice notes] two takes"),
             "[voice notes] two takes"
         );
+    }
+
+    /// #3222: the block never reaches a screen, whatever state the stream is in.
+    ///
+    /// A stream is a range that grows, so this walks every prefix of a reply
+    /// that carries a block. At no point may the drawn text hold the opener:
+    /// that was the whole bug, the block stayed visible for the seconds it took
+    /// to arrive.
+    #[test]
+    fn a_streaming_block_never_reaches_the_screen_in_any_state() {
+        let full = "Shipped it.\n\n<<SPOKEN:Shipped it. I need one answer from you.>>";
+        for cut in 0..=full.len() {
+            let head = full.get(..cut).unwrap_or_default();
+            let expected = match head.find("<<") {
+                Some(at) => head.get(..at).unwrap_or_default().trim_end(),
+                None => head,
+            };
+            assert_eq!(while_streaming(head), expected, "cut {cut}");
+        }
+    }
+
+    /// The parse is case-insensitive, so a model writing `<<spoken:` gets the
+    /// same treatment as one writing the token in capitals.
+    #[test]
+    fn a_lowercase_block_is_hidden_while_it_streams() {
+        assert_eq!(while_streaming("Done.\n<<spoken:Done.>>"), "Done.");
+        assert_eq!(while_streaming("Done.\n<<SpOkEn:Don"), "Done.");
+    }
+
+    /// A block written mid answer leaves one clean sentence, the same join
+    /// [`split`] makes once the reply settles.
+    #[test]
+    fn a_closed_block_mid_answer_leaves_one_sentence() {
+        assert_eq!(
+            while_streaming("Done <<SPOKEN:Done.>> and pushed."),
+            "Done and pushed."
+        );
+    }
+
+    /// A reply with nothing to hide is borrowed, so the paint path that asks on
+    /// every frame copies nothing in the ordinary case.
+    #[test]
+    fn streaming_text_without_a_block_is_left_alone() {
+        let text = "Reading the parser, then I will report.";
+        assert!(matches!(while_streaming(text), Cow::Borrowed(_)));
+        assert_eq!(while_streaming(text), text);
+    }
+
+    /// Other markers belong to the transcript, and a `<<` that opens nothing is
+    /// ordinary text. Hiding either would drop an attachment or eat a shift.
+    #[test]
+    fn a_marker_that_is_not_spoken_is_not_hidden() {
+        let attachment = "Take a look <<AUD:/tmp/take.ogg";
+        assert_eq!(while_streaming(attachment), attachment);
+        let shift = "x << 2 shifts";
+        assert_eq!(while_streaming(shift), shift);
+    }
+
+    /// #3222: the rule rides with the message, so detection has to survive the
+    /// banner a channel puts in front of the transcript.
+    #[test]
+    fn voice_turn_is_detected_behind_a_channel_banner() {
+        assert!(is_voice_turn("[voice note] turn it up"));
+        assert!(is_voice_turn("[Voice note]: turn it up"));
+        assert!(is_voice_turn(
+            "Platform: Group / Dev [chat:1]\n\n[voice note] turn it up"
+        ));
+        assert!(is_voice_turn("[voice note] áéí óú"));
+    }
+
+    /// A typed turn is not a voice turn, and neither is a sentence that only
+    /// talks about the note.
+    #[test]
+    fn typed_turn_is_not_a_voice_turn() {
+        assert!(!is_voice_turn("turn it up"));
+        assert!(!is_voice_turn("why does the [voice note] prefix exist?"));
+        assert!(!is_voice_turn("[voice notes] two takes"));
     }
 }

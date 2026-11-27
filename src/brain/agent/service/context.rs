@@ -353,6 +353,16 @@ impl AgentService {
 
         let mut out = format!("{time_marker}\n\n{user_message}");
 
+        // #3222: the spoken-block rule used to ride in the system preamble,
+        // which every turn pays for, so a typed question carried it and some
+        // models answered one with a block nobody would ever play. It travels
+        // with the message that needs it instead, and a typed turn never sees
+        // it.
+        if crate::channels::voice::spoken::is_voice_turn(user_message) {
+            out.push_str("\n\n");
+            out.push_str(crate::channels::voice::spoken::SPOKEN_INSTRUCTION);
+        }
+
         if let Some(reminder) = Self::active_plan_reminder(session_id).await {
             out.push_str("\n\n");
             out.push_str(&reminder);

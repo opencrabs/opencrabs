@@ -5,6 +5,7 @@
 //! comments and their tests are unchanged, only the module boundary is new.
 
 use super::*;
+use opencrabs::channels::voice::spoken;
 
 /// The card's single line for a turn running with no pane of its own (#2718).
 ///
@@ -24,7 +25,9 @@ pub(crate) fn rail_activity_line(live: &transcript::LiveTurn) -> String {
     let narration = live
         .narration()
         .last()
-        .map(transcript::collapsed_paragraph)
+        // A spoken block that arrived as intermediate text is hidden on the
+        // rail too, or the leak just moves one surface over (#3222).
+        .map(|text| transcript::collapsed_paragraph(&spoken::while_streaming(text)))
         .filter(|text| !text.is_empty());
     // `live_status_line` invents "OpenCrabs is thinking..." for a turn that has
     // produced nothing at all, which on a card would out-shout the preview it

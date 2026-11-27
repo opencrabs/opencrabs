@@ -27,6 +27,7 @@ use opencrabs::ui_core::message_reader;
 use opencrabs::ui_core::plan_history::CompletedPlanView;
 use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -953,14 +954,19 @@ impl LiveTurn {
     /// where that prose belongs while the turn runs, so the body paints it
     /// in place and the bubble under the card is left for the settled
     /// answer alone.
-    pub fn pending(&self) -> Option<&str> {
+    ///
+    /// A spoken block is hidden here (#3222). For most of a turn it has no
+    /// closing `>>`, so the settled-reply parse cannot see it and the raw
+    /// `<<SPOKEN:` reached the screen. The stream itself is untouched, so the
+    /// synthesizer still finds the block when the turn ends.
+    pub fn pending(&self) -> Option<Cow<'_, str>> {
         if self.settled.is_some() {
             return None;
         }
         if self.stream.trim().is_empty() {
             None
         } else {
-            Some(self.stream.as_str())
+            Some(spoken::while_streaming(self.stream.as_str()))
         }
     }
 
@@ -3902,9 +3908,13 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
                     },
                 ));
             }
-            LiveEntry::Narration(text) => {
-                lines.push((entry_index, LiveCardLine::Narration(text.clone())))
-            }
+            LiveEntry::Narration(text) => lines.push((
+                entry_index,
+                // A spoken block can arrive as intermediate text too, so the
+                // narration row is stripped the same way the pending one is
+                // (#3222).
+                LiveCardLine::Narration(spoken::while_streaming(text).into_owned()),
+            )),
             LiveEntry::Reasoning(text) => {
                 lines.push((entry_index, LiveCardLine::Reasoning(fit(text.trim(), 600))));
             }
@@ -3915,7 +3925,7 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
     // with a real one and a menu on it resolves to nothing the way a stale
     // tool index already does.
     if let Some(text) = live.pending() {
-        lines.push((live.entries.len(), LiveCardLine::Pending(text.to_string())));
+        lines.push((live.entries.len(), LiveCardLine::Pending(text.into_owned())));
     }
     lines
 }
@@ -4731,8 +4741,8 @@ pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     // the sentence the turn is sending RIGHT NOW is what the card shows, and
     // the paragraph it already owns is what it falls back to.
     live.pending()
-        .or_else(|| live.narration().last())
-        .map(collapsed_paragraph)
+        .or_else(|| live.narration().last().map(Cow::Borrowed))
+        .map(|text| collapsed_paragraph(&text))
         .filter(|text| !text.is_empty())
 }
 

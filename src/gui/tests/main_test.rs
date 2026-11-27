@@ -4150,6 +4150,61 @@ fn the_pending_prose_streams_inside_the_live_card() {
     assert_eq!(live.pending(), None, "a settled turn has nothing pending");
 }
 
+/// #3222: a spoken block is painted nowhere while the turn streams.
+///
+/// The strip used to run only on the settled reply, so the card body, its
+/// narration rows and the folded head all showed the raw `<<SPOKEN:` for the
+/// seconds the block took to arrive. The stream is walked through every state
+/// it can be in, and no surface may hold the opener.
+#[test]
+fn a_streamed_spoken_block_is_painted_nowhere_on_the_live_card() {
+    use crate::transcript::{LiveCardLine, LiveTurn, collapsed_narration, live_card_lines};
+
+    const FULL: &str = "Shipped it.\n\n<<SPOKEN:Shipped it. I need one answer from you.>>";
+    for cut in 0..=FULL.len() {
+        let mut live = LiveTurn::default();
+        live.begin("ship it".into());
+        live.note_chunk_at(FULL.get(..cut).unwrap_or_default(), std::time::Instant::now());
+
+        let pending = live.pending().map(|text| text.into_owned()).unwrap_or_default();
+        assert!(
+            !pending.contains("<<") && !pending.contains("SPOKEN"),
+            "the pending line leaked the block at cut {cut}: {pending:?}"
+        );
+
+        let card: Vec<String> = live_card_lines(&live)
+            .into_iter()
+            .map(|(_, line)| match line {
+                LiveCardLine::Narration(text) | LiveCardLine::Pending(text) => text,
+                LiveCardLine::Tool { text, .. } | LiveCardLine::Reasoning(text) => text,
+            })
+            .collect();
+        for row in &card {
+            assert!(
+                !row.contains("SPOKEN"),
+                "a card row leaked the block at cut {cut}: {row:?}"
+            );
+        }
+
+        let head = collapsed_narration(&live).unwrap_or_default();
+        assert!(
+            !head.contains("SPOKEN"),
+            "the folded head leaked the block at cut {cut}: {head:?}"
+        );
+    }
+
+    // A block that arrives as intermediate text, the way the provider sends
+    // the same paragraph twice, is hidden from the narration row too.
+    let mut live = LiveTurn::default();
+    live.begin("ship it".into());
+    live.push_narration("Shipped it.\n<<SPOKEN:Shipped it.>>");
+    for (_, line) in live_card_lines(&live) {
+        if let LiveCardLine::Narration(text) = line {
+            assert!(!text.contains("SPOKEN"), "narration leaked the block: {text:?}");
+        }
+    }
+}
+
 /// #3190: the completion never repeats a paragraph the card already claims.
 ///
 /// The answer painted twice, once from the card and once from the turn the
