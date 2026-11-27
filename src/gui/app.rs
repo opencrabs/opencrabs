@@ -694,6 +694,7 @@ pub(crate) fn run() {
                         options_focus: None,
                         task_open: HashMap::new(),
                         task_tails: HashMap::new(),
+                        copied_task: None,
                         task_detail: None,
                         task_detail_scroll: ScrollHandle::new(),
                         task_detail_generation: 0,

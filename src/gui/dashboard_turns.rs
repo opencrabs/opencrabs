@@ -2342,6 +2342,13 @@ impl Dashboard {
             other => other,
         };
         let tail = open.and_then(|task| self.task_tail(session, task));
+        // The row a copy drag just took (#3209): lit while the flash is
+        // fresh and the task is still on the roster.
+        let copied = self
+            .copied_task
+            .filter(|(_, at)| at.elapsed() < task_list::COPY_FLASH)
+            .filter(|(id, _)| rows.iter().any(|row| row.id == *id))
+            .map(|(id, _)| id);
         let on_header: transcript::ClickHandler = Rc::new(cx.listener(
             move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
                 cx.stop_propagation();
@@ -2352,9 +2359,27 @@ impl Dashboard {
             .iter()
             .map(|row| {
                 let task = row.id;
+                let row = row.clone();
                 let pick: transcript::ClickHandler = Rc::new(cx.listener(
-                    move |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
+                    move |this: &mut Self, ev: &gpui::ClickEvent, _window, cx| {
                         cx.stop_propagation();
+                        // A drag on a row is the copy gesture, not a request
+                        // to fold the row's output (#3209). The clipboard
+                        // takes the roster's full command; the row only
+                        // paints a folded label, so the copy cannot come
+                        // from what is on screen. The lit row is the
+                        // acknowledgement, and it goes out on its own as the
+                        // card keeps repainting.
+                        if let gpui::ClickEvent::Mouse(click) = ev
+                            && (click.up.position - click.down.position).magnitude() > 2.0
+                        {
+                            if let Some(text) = task_list::copy_text(std::slice::from_ref(&row)) {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            }
+                            this.copied_task = Some((task, std::time::Instant::now()));
+                            cx.notify();
+                            return;
+                        }
                         this.toggle_task_output(session, task, cx);
                     },
                 ));
@@ -2380,6 +2405,7 @@ impl Dashboard {
                 &rows,
                 open,
                 focused,
+                copied,
                 tail.as_ref().map(|t| t.as_ref()),
                 task_list::CardClicks {
                     header: on_header,

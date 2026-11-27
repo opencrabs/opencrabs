@@ -173,12 +173,14 @@ pub(crate) struct CardClicks {
 }
 
 /// The open card: a header that closes it, one row per task, and under the
-/// open row the last lines it wrote.
+/// open row the last lines it wrote. `copied` is the row a copy drag just
+/// took, lit until the flash runs out (#3209).
 pub(crate) fn task_card(
     session: Uuid,
     rows: &[TaskRow],
     open: Option<Uuid>,
     focused: bool,
+    copied: Option<Uuid>,
     tail: Option<&str>,
     clicks: CardClicks,
 ) -> Div {
@@ -257,7 +259,16 @@ pub(crate) fn task_card(
                         .min_w_0()
                         .overflow_hidden()
                         .truncate()
-                        .text_color(rgb(if is_open { pal.text } else { pal.text_normal }))
+                        // The row a copy drag just took glows the strip's
+                        // teal until the flash runs out (#3209), so the
+                        // copy visibly lands on the row it came from.
+                        .text_color(rgb(if copied == Some(row.id) {
+                            pal.teal
+                        } else if is_open {
+                            pal.text
+                        } else {
+                            pal.text_normal
+                        }))
                         .child(SharedString::from(row.label.clone())),
                 )
                 .child(

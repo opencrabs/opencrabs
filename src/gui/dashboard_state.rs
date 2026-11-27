@@ -671,6 +671,10 @@ pub(crate) struct Dashboard {
     /// file it came from once that file was found. Re-read on a one-second
     /// tick, the same cadence the strip's elapsed time moves at.
     pub(crate) task_tails: HashMap<Uuid, TaskTail>,
+    /// The task a copy drag just took the command of, and when (#3209). The
+    /// card repaints while tasks run, so the lit row goes out on its own a
+    /// moment later, with no timer of its own.
+    pub(crate) copied_task: Option<(Uuid, std::time::Instant)>,
     /// The task opened into its full view, with Enter on its row or the
     /// row's open door. It outlives the task: the view stays on the last
     /// output once the task ends, until the reader closes it.
