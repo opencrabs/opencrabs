@@ -48,6 +48,8 @@ This release teaches the window to talk and listen: voice messages land end to e
 - `67cac9f10` **The settled context footer reads the same token identity as the live counter (#3196)**
 - `251a6ef0d` **The plan card measures at the size its rows paint (#3197)**
 - `e0a9ea420` **The composer slash popup lists runtime skills and user commands (#3199)** and runs them as slash prompts (#3198)
+- `ebc61a350` **The built-in provider sends the `combo` model id (#3203)**: the shipped example, the onboarding catalogue and the preamble carry it, and a startup migration moves an existing `config.toml` off the legacy `deepseek-v4.1-flash` name while the proxy keeps answering both
+- `8e28facb3` **`combo` is priced at the DeepSeek V4.1 Flash card (#3203)**, so a turn on the free built-in provider shows a cost in `/usage` instead of reading as an estimate
 - `441f76020` **A single-pane restart opens the conversation the window was showing (#3200)**
 - `d7a6a1f36` **The provider pin rebuilds from config on fallback (#3189)** and self-healing alerts normalize their dashes
 - The black-chat family is fixed at its roots: rows size by pane (#2981), the transcript caps instead of wrapping, blank tails drop, a failed read keeps the rows it could not replace, and a snap returns when the box is above the rows
