@@ -18,8 +18,7 @@ use crate::agent_bridge::TurnEvent;
 use crate::backend_glue::Backend;
 use crate::backend_remote::{refreshes_cache, to_turn_event};
 use crate::remote_approval::{
-    Approvals, INPUT_CHARS, PendingApproval, Settled, describe, ends_turn, from_event,
-    settled_event,
+    Approvals, PendingApproval, Settled, describe, ends_turn, from_event, settled_event, visible,
 };
 
 /// How many kinds `Event` has. [`ordinal`] has no wildcard, so a new kind
@@ -193,18 +192,31 @@ fn a_newline_in_the_input_is_not_folded_away() {
     assert!(shown.contains("echo a\\nrm -rf ~"), "{shown}");
 }
 
-/// A cut is said out loud, with how much was left out.
+/// Nothing is cut: a long input is shown whole, so what is approved is
+/// what was read.
 #[test]
-fn a_cut_input_says_how_much_it_left_out() {
-    let long = "é".repeat(INPUT_CHARS + 10);
-    let shown = describe(&serde_json::json!({ "command": long }));
-    let full =
-        serde_json::to_string_pretty(&serde_json::json!({ "command": long })).expect("encode");
-    let left = full.chars().count() - INPUT_CHARS;
+fn a_long_input_is_shown_whole() {
+    let long = "x".repeat(20_000);
+    let shown = describe(&serde_json::json!({ "content": long }));
+    assert!(shown.contains(&long));
+}
+
+/// A bidi override or a zero-width character cannot make the card read one
+/// command while the crab runs another: each shows as an escape.
+#[test]
+fn invisible_and_reordering_characters_show_as_escapes() {
+    let shown = describe(&serde_json::json!({"command": "ls \u{202e}fdp.exe\u{200b}"}));
     assert!(
-        shown.ends_with(&format!("\n[{left} more characters not shown]")),
+        !shown.contains('\u{202e}') && !shown.contains('\u{200b}'),
         "{shown}"
     );
+    assert!(
+        shown.contains("\\u{202e}") && shown.contains("\\u{200b}"),
+        "{shown}"
+    );
+    assert_eq!(visible("a\nb"), "a\nb", "the newline keeps its line");
+    assert_eq!(visible("bash\u{2066}"), "bash\\u{2066}");
+    assert_eq!(visible("café"), "café", "ordinary text is untouched");
 }
 
 fn pending(request_id: Uuid, now: Instant) -> PendingApproval {

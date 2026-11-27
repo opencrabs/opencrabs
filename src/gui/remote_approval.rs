@@ -18,6 +18,7 @@
 //! another principal's turn) stays on the card in the crab's own words.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -32,10 +33,6 @@ use uuid::Uuid;
 use crate::agent_bridge::TurnEvent;
 use crate::dashboard_state::Dashboard;
 use crate::{palette, transcript};
-
-/// The most of a tool's input the card prints, in characters. Past it the
-/// card says how much it left out, so nothing is hidden without a word.
-pub(crate) const INPUT_CHARS: usize = 4000;
 
 /// One tool waiting for a yes or a no on a remote crab.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,22 +81,55 @@ pub(crate) fn from_event(event: &Event, now: Instant) -> Option<(Uuid, PendingAp
 
 /// A tool's whole input as the card prints it: every field, pretty JSON, so
 /// a newline inside a command reads as `\n` and no field can hide behind
-/// another. Cut at [`INPUT_CHARS`] on a character boundary, with a line
-/// saying how many characters were left out.
+/// another. Never cut: what is approved is what was read. Characters that
+/// draw nothing or reorder the text are shown as escapes ([`visible`]).
 pub(crate) fn describe(input: &Value) -> String {
     if input.is_null() {
         return String::new();
     }
     let full = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
-    let total = full.chars().count();
-    if total <= INPUT_CHARS {
-        return full;
+    visible(&full)
+}
+
+/// `text` with every character that draws nothing or reorders what is drawn
+/// (bidi controls, zero-width and other format characters, controls other
+/// than the newline) written as `\u{..}`, so the card cannot show one
+/// command while the crab runs another.
+pub(crate) fn visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if hides(c) {
+            let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
     }
-    let kept: String = full.chars().take(INPUT_CHARS).collect();
-    format!(
-        "{kept}\n[{} more characters not shown]",
-        total - INPUT_CHARS
-    )
+    out
+}
+
+/// Whether `c` draws nothing, or changes how the text around it is drawn.
+fn hides(c: char) -> bool {
+    (c.is_control() && c != '\n')
+        || matches!(
+            c,
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{061c}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{17b4}'
+                | '\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0000}'..='\u{e007f}'
+        )
 }
 
 /// The session a settle of the turn in `event` ends, if it is one: a finished,
@@ -274,7 +304,7 @@ pub(crate) fn card(
     let left = approval.deadline.saturating_duration_since(now);
     let title = format!(
         "The crab asks to run {} (denied in {}s)",
-        approval.tool_name,
+        visible(&approval.tool_name),
         left.as_secs()
     );
     let mut col = div()
