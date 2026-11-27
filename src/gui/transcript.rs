@@ -11060,7 +11060,7 @@ mod tests {
 
         // The same envelope in narration and in reasoning is the same leak.
         live.push_narration(&format!("before {LEDGER} after"));
-        live.push_reasoning_at(&format!("{LEDGER}"), std::time::Instant::now());
+        live.push_reasoning_at(LEDGER, std::time::Instant::now());
 
         for (_, line) in live_card_lines(&live) {
             let text = match line {
