@@ -131,18 +131,10 @@ pub fn cmd_connect(
     }
 
     // ── main flow: mint code + start tunnel ──────────────────────────────
-    if !config.a2a.enabled {
-        anyhow::bail!(
-            "the A2A gateway is disabled ([a2a].enabled = false); a tunnel to a closed door helps nobody. Enable it first."
-        );
-    }
-    if config.a2a.api_key.as_deref().unwrap_or("").is_empty() {
-        anyhow::bail!(
-            "refusing to open a tunnel to a KEYLESS gateway: set [a2a].api_key first. \
-             Without it, anyone who learns the tunnel URL gets the agent's full tool \
-             surface (the #1473 open-gate posture), and route announcement stays suppressed."
-        );
-    }
+    // The same gate the window's share card applies: both doors into a
+    // public tunnel go through `tunnel::open`, and this early call only makes
+    // the refusal land before a code is minted.
+    tunnel::gateway_gate(&config.a2a)?;
     let port = port.unwrap_or(config.a2a.port);
     let scope_list = parse_scopes(scopes)?;
     // Session lifetime for whatever this code redeems into. Absent means the
@@ -178,20 +170,11 @@ pub fn cmd_connect(
         return Ok(());
     }
 
-    // A running tunnel for THIS port is reused — `connect` means "make me
+    // A running tunnel for THIS port is reused: `connect` means "make me
     // reachable and give me a code", not "start a second tunnel". A tunnel
-    // bound to a different port is a conflict the caller must resolve.
-    let existing = tunnel::status(&state_dir)?;
-    if let Some(st) = &existing
-        && st.port != port
-    {
-        anyhow::bail!(
-            "a tunnel for port {} is already running ({}); use --port {}, or --stop first",
-            st.port,
-            st.url,
-            st.port
-        );
-    }
+    // bound to a different port is a conflict the caller must resolve, and
+    // checking here makes it fail before a code is minted.
+    let existing = tunnel::reusable(&state_dir, port)?;
 
     // Mint BEFORE the tunnel so the code's 5-minute TTL covers the
     // (up to 60 s) URL wait, not just the moment it's printed.
@@ -199,23 +182,22 @@ pub fn cmd_connect(
         .mint_code_with_ttl(&scope_list, session_ttl)
         .context("mint pairing code")?;
 
-    let state = match existing {
-        Some(st) => {
+    let spec = TunnelSpec::on(port, &config.a2a.bind);
+    if existing.is_none() {
+        println!("Starting cloudflared quick tunnel → {} …", spec.origin());
+    }
+    // The one tunnel path, shared with the window's share card.
+    let state = match tunnel::open(&config.a2a, &spec) {
+        Ok(tunnel::Opened::Reused(st)) => {
             println!("Reusing running tunnel (pid {}): {}", st.pid, st.url);
             st
         }
-        None => {
-            let spec = TunnelSpec::on(port, &config.a2a.bind);
-            println!("Starting cloudflared quick tunnel → {} …", spec.origin());
-            match tunnel::start(&spec) {
-                Ok(st) => st,
-                Err(e) => {
-                    eprintln!("Tunnel failed: {e:#}");
-                    eprintln!("Log: {}", state_dir.join("tunnel.log").display());
-                    eprintln!("The minted pairing code was NOT consumed; it expires in 5 minutes.");
-                    return Err(e);
-                }
-            }
+        Ok(tunnel::Opened::Started(st)) => st,
+        Err(e) => {
+            eprintln!("Tunnel failed: {e:#}");
+            eprintln!("Log: {}", state_dir.join("tunnel.log").display());
+            eprintln!("The minted pairing code was NOT consumed; it expires in 5 minutes.");
+            return Err(e);
         }
     };
 
