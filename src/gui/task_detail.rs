@@ -6,6 +6,11 @@
 //! through everything it has written, follows the newest line until the
 //! reader scrolls away, and can stop the task after a confirmation.
 //!
+//! What the view holds can leave it again: a click on the command block
+//! copies the command in full, `c` copies the output (the command when the
+//! output is empty, so the key is never dead), and a copied mark confirms
+//! the write landed (#3209).
+//!
 //! The modal holds its own copy of what it last read. A task that ends takes
 //! its row, and often its log file, with it; the view stays open on the last
 //! output and says the task ended, because the moment a task finishes is
@@ -14,7 +19,7 @@
 //! Every action has a key and a pointer door: arrows, PageUp/PageDown and the
 //! wheel scroll, End or a click on the notice follows again, `s` or the
 //! button asks to stop, Enter or a second click confirms, Esc or the scrim
-//! goes back to the list.
+//! goes back to the list, `c` or a click on the command block copies (#3209).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -80,6 +85,10 @@ pub(crate) struct TaskDetail {
     pub(crate) stop_sent: bool,
     /// How long the task had run when it left the roster.
     pub(crate) ended: Option<u64>,
+    /// When something was last copied out of this view (#3209), command or
+    /// output. The view repaints on its own beat while it is open, so the
+    /// copied mark goes out on its own, with no timer of its own.
+    pub(crate) copied_at: Option<Instant>,
 }
 
 impl TaskDetail {
@@ -112,6 +121,7 @@ impl TaskDetail {
             confirm_stop: false,
             stop_sent: false,
             ended: None,
+            copied_at: None,
         }
     }
 
@@ -164,6 +174,9 @@ pub(crate) enum DetailStep {
     ConfirmStop,
     /// Take the stop question back.
     DropConfirm,
+    /// Copy the view's text to the clipboard: the output, or the command
+    /// when the output is empty (#3209).
+    CopyOutput,
     /// The view owns the keyboard, so a key it has no use for goes nowhere.
     Ignore,
 }
@@ -188,9 +201,20 @@ pub(crate) fn detail_key(key: &str, confirm: bool, stoppable: bool) -> DetailSte
         "pagedown" => DetailStep::Scroll(PAGE_STEP),
         "home" => DetailStep::Top,
         "end" => DetailStep::Follow,
+        "c" => DetailStep::CopyOutput,
         "s" if stoppable => DetailStep::AskStop,
         _ => DetailStep::Ignore,
     }
+}
+
+/// How long the copied mark stays lit after a copy (#3209). The view
+/// repaints every [`REPAINT_TICK`], so the mark clears within one tick of
+/// expiring, on no timer of its own.
+pub(crate) const COPY_MARK: Duration = Duration::from_millis(1200);
+
+/// Whether a copied mark is still worth painting (#3209).
+pub(crate) fn copy_mark(at: Option<Instant>) -> bool {
+    at.is_some_and(|at| at.elapsed() < COPY_MARK)
 }
 
 /// Reconcile the follow flag with where the reader is.
@@ -248,13 +272,13 @@ pub(crate) fn unseen_text(unseen: usize) -> String {
 /// The key hints at the foot of the view.
 pub(crate) fn footer_text(stoppable: bool, ours: bool, ended: bool) -> &'static str {
     if ended {
-        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End newest \u{b7} Esc back \u{b7} the task has ended"
+        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End newest \u{b7} c copy \u{b7} Esc back \u{b7} the task has ended"
     } else if stoppable {
-        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} s stop \u{b7} Esc back"
+        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} c copy \u{b7} s stop \u{b7} Esc back"
     } else if ours {
-        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} Esc back \u{b7} stopping"
+        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} c copy \u{b7} Esc back \u{b7} stopping"
     } else {
-        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} Esc back \u{b7} runs inside claude, not ours to stop"
+        "\u{2191}\u{2193} PgUp PgDn scroll \u{b7} End follow \u{b7} c copy \u{b7} Esc back \u{b7} runs inside claude, not ours to stop"
     }
 }
 
@@ -263,6 +287,8 @@ pub(crate) struct DetailDoors {
     pub(crate) close: ClickHandler,
     pub(crate) stop: ClickHandler,
     pub(crate) follow: ClickHandler,
+    /// A click on the command block copies it in full (#3209).
+    pub(crate) copy_command: ClickHandler,
 }
 
 /// The modal. `viewport` is the window's size, so the card fits a small
@@ -342,8 +368,11 @@ pub(crate) fn detail_modal(
     let mut body = div().flex().flex_col().gap_2().w_full().min_w_0();
     // What the strip only had room to name (#3207). Wrapped mono text, capped
     // so an inline-heredoc launch cannot push the output off the card, and
-    // scrollable once it outgrows the cap.
+    // scrollable once it outgrows the cap. A click hands the full command to
+    // the clipboard (#3209): the block wraps for reading, but the clipboard
+    // takes the string the shell was handed, not the wrap of it.
     if let Some(command) = detail.command.as_ref() {
+        let copy_door = doors.copy_command;
         body = body.child(
             div()
                 .id("task-detail-command")
@@ -357,12 +386,15 @@ pub(crate) fn detail_modal(
                 .font_family(fonts::current_mono())
                 .text_xs()
                 .text_color(rgb(pal.text_normal))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgb(palette::current().track)))
                 .child(
                     div()
                         .w_full()
                         .min_w_0()
                         .child(SharedString::from(command.clone())),
-                ),
+                )
+                .on_click(move |ev: &ClickEvent, window, app| copy_door(ev, window, app)),
         );
     }
     body = body.child(
@@ -401,6 +433,17 @@ pub(crate) fn detail_modal(
                 .cursor_pointer()
                 .child(SharedString::from(unseen_text(detail.unseen)))
                 .on_click(move |ev: &ClickEvent, window, app| follow_door(ev, window, app)),
+        );
+    }
+    // The acknowledgement (#3209): whatever was copied last, command or
+    // output, lights this mark until it runs out. The view repaints on its
+    // own beat, so it clears itself.
+    if copy_mark(detail.copied_at) {
+        body = body.child(
+            div()
+                .text_xs()
+                .text_color(rgb(pal.teal))
+                .child("\u{2713} copied"),
         );
     }
 
@@ -487,6 +530,29 @@ mod tests {
     fn a_key_the_view_has_no_use_for_goes_nowhere() {
         assert_eq!(detail_key("a", false, true), DetailStep::Ignore);
         assert_eq!(detail_key("tab", false, true), DetailStep::Ignore);
+    }
+
+    #[test]
+    fn c_copies_and_the_footer_names_it() {
+        // #3209: the output is the reading matter, so c takes it.
+        assert_eq!(detail_key("c", false, true), DetailStep::CopyOutput);
+        // c without output is never dead: a mirrored task with an empty log
+        // still has its command, if it handed us one.
+        assert_eq!(detail_key("c", false, false), DetailStep::CopyOutput);
+        for footer in [
+            footer_text(true, true, false),
+            footer_text(false, true, false),
+            footer_text(false, false, false),
+            footer_text(false, false, true),
+        ] {
+            assert!(footer.contains("c copy"), "{footer} names the copy key");
+        }
+    }
+
+    #[test]
+    fn the_copied_mark_runs_out_on_its_own() {
+        assert!(!copy_mark(None));
+        assert!(copy_mark(Some(Instant::now())));
     }
 
     #[test]

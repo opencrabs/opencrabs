@@ -2663,6 +2663,21 @@ impl Dashboard {
                 detail.confirm_stop = false;
                 cx.notify();
             }
+            // The output is the reading matter, so c takes it; an empty read
+            // falls back to the command, so the key is never dead on a
+            // mirrored task whose log has nothing yet (#3209).
+            task_detail::DetailStep::CopyOutput => {
+                let text = if detail.text.trim().is_empty() {
+                    detail.command.clone()
+                } else {
+                    Some(detail.text.to_string())
+                };
+                if let Some(text) = text {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    detail.copied_at = Some(std::time::Instant::now());
+                    cx.notify();
+                }
+            }
             task_detail::DetailStep::Ignore => {}
         }
     }
@@ -2745,6 +2760,21 @@ impl Dashboard {
                 this.follow_task_detail(cx);
             },
         ));
+        // A click on the command block copies it in full (#3209): the block
+        // wraps for reading, the clipboard takes the string the shell was
+        // handed. The mark lights, and goes out as the view repaints.
+        let copy_command: transcript::ClickHandler = Rc::new(cx.listener(
+            |this: &mut Self, _ev: &gpui::ClickEvent, _window, cx| {
+                cx.stop_propagation();
+                if let Some(detail) = this.task_detail.as_mut()
+                    && let Some(command) = detail.command.clone()
+                {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(command));
+                    detail.copied_at = Some(std::time::Instant::now());
+                    cx.notify();
+                }
+            },
+        ));
         let detail = self.task_detail.as_ref()?;
         Some(
             task_detail::detail_modal(
@@ -2755,6 +2785,7 @@ impl Dashboard {
                     close,
                     stop,
                     follow,
+                    copy_command,
                 },
             )
             .into_any_element(),
