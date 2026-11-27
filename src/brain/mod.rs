@@ -7,6 +7,7 @@ pub mod agent;
 pub mod bash_failure;
 pub mod brain_sections;
 pub mod commands;
+pub mod detached;
 pub mod directives;
 pub mod feedback_policy;
 pub mod filter;
