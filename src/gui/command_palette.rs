@@ -224,34 +224,35 @@ const FIELD_MIC_GAP: f32 = 14.0;
 const FIELD_MIC_TILE: f32 = 2.35;
 const FIELD_MIC_GLYPH: f32 = 1.65;
 
-/// The smoked glass the card floats on: near-black, faintly transparent, so
-/// white ink lands hard against it and the code behind reads as a shadow
-/// rather than as texture (#3066). One continuous ramp hands off from the
-/// pill's floor (#3130) and then runs DOWN into near-black, the way the
-/// reference card sits darker than the field above it: ceiling at the pill's
-/// tone, floor a step into black. The alphas ride high (ec, e2) so the sharp
-/// terminal lines behind dim into mush; gpui 0.2.2 has no per-element blur,
-/// so opacity does the frost's job (#3130's audit).
-const GLASS_TOP: u32 = 0x0a0a0eec;
-const GLASS_BOTTOM: u32 = 0x08080be2;
+/// The near-opaque glass the card floats on (#3066, #3130). The measured fact
+/// the ramp must survive: the terminal behind is bright (up to 255), the
+/// scrim only knocks it to about 57, and anything at less than ~96 percent
+/// alpha lets that bleed back in as visible texture. At the old crown alpha
+/// (a0, 63 percent) the bleed was 21 units of borrowed brightness, which is
+/// why the pill's top rendered LIGHTER than its bottom and the ramp read
+/// inverted. So the glass is near-opaque (f2-f8) and the ramp is pure
+/// colour: ceiling at the pill's floor tone, floor a step into black.
+/// Less transparency is the only frost gpui 0.2.2 can give a single element;
+/// it has no backdrop blur (2026-11-27: "less transparency if we can't do
+/// the blur").
+const GLASS_TOP: u32 = 0x14141af6;
+const GLASS_BOTTOM: u32 = 0x0a0a0ef8;
 
 /// The field's fill: darker at the crown than at the floor, so the pill
 /// hands its bottom edge to the card's top at the same tone and the two
-/// read as one sheet of glass (#3130). The old flat fill made the card's
-/// top edge a 9-unit step UP from the pill's floor, which the eye read as
-/// two stacked panels. One step darker overall (2026-11-27: "a bit darker").
-const PILL_FILL: u32 = 0x0a0a0ef4;
-/// The pill's crown tone: a step darker than the pill's floor, so the ramp
-/// runs downward through the pill and hands off at its floor (#3130).
-const PILL_CROWN: u32 = 0x060608a0;
+/// read as one sheet of glass (#3130). The spread is 14 units now, because
+/// once the bleed-through is gone the ramp is colour-driven and needs real
+/// width to stay visible (2026-11-27: "darker and keep the gradient").
+const PILL_FILL: u32 = 0x14141af8;
+/// The pill's crown tone: a step darker than the pill's floor, near-opaque
+/// so the bright terminal behind cannot lift it (#3130).
+const PILL_CROWN: u32 = 0x06060af2;
 
-/// The smoke over the card: a whisper of cool grey-blue drifting through the
-/// glass, faint enough that ink stays hard against it (#3130's audit). This
-/// stands in for the backdrop blur the reference carries and gpui 0.2.2
-/// cannot give a single element: a haze layer over the smoked fill breaks the
-/// flatness and suggests depth where the terminal behind shows through.
-const SMOKE_COOL: u32 = 0xaebdd40d;
-const SMOKE_DEEP: u32 = 0x0b0e1412;
+/// The idle card's floor tone: the idle menu still reads a shade deeper than
+/// the typed one, but through its COLOUR now instead of a lowered alpha. The
+/// old trick (dropping the bottom stop's alpha to b8) re-opened the bleed
+/// window the alphas exist to close (#3130).
+const GLASS_IDLE_BOTTOM: u32 = 0x08080bf8;
 
 
 /// The invitation's glass rim. Spotlight's edge is not a drawn border: it is a
@@ -721,13 +722,13 @@ pub(super) fn overlay(
     // Smoked, not slate (#3066). The old fill was a blue-grey close enough to
     // the dimmed code behind it that the two read as one surface; a near-black
     // crystal with a little transparency puts the white ink in hard contrast and
-    // lets the code show through as a shadow. The idle menu stays more
-    // transparent at the bottom, so it still reads as a hint rather than a wall.
+    // lets the code show through as a shadow. The idle menu keeps its deeper
+    // read through colour now, not through a lowered alpha (#3130).
     let glass = if idle && idle_revealed && !pick_armed {
         linear_gradient(
             180.0,
             linear_color_stop(rgba(GLASS_TOP), 0.0),
-            linear_color_stop(rgba((GLASS_BOTTOM & 0xffffff00) | 0xb8), 1.0),
+            linear_color_stop(rgba(GLASS_IDLE_BOTTOM), 1.0),
         )
     } else {
         linear_gradient(
@@ -815,20 +816,6 @@ pub(super) fn overlay(
         .rounded(px(SEEKER_RADIUS))
         .bg(glass)
         .overflow_hidden();
-    // The smoke rides the card as its own layer, under the ink: over the
-    // smoked fill, under every child painted after it (#3130's audit).
-    card = card.child(
-        div()
-            .absolute()
-            .inset_0()
-            .rounded(px(SEEKER_RADIUS))
-            .bg(linear_gradient(
-                160.0,
-                linear_color_stop(rgba(SMOKE_COOL), 0.0),
-                linear_color_stop(rgba(SMOKE_DEEP), 1.0),
-            )),
-    );
-
     if reveal {
         // The kind chips. Hidden while a session pick is armed: a narrowed
         // conversation list has no kinds to filter (#2491).
