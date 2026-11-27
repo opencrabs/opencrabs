@@ -720,7 +720,7 @@ pub(crate) fn run() {
                         instance_strip,
                         instance_card,
                         crabs_open: false,
-                        remote_crabs: Config::current().gui.remote_crabs,
+                        instance_probing: false,
                         instance_error: None,
                         instance_epoch: 0,
                         composer: chat_leaf::Composer::new(editor),
@@ -838,6 +838,7 @@ pub(crate) fn run() {
                     this.fetch_hello(cx);
                     if this.instance_rail {
                         this.load_instances(cx);
+                        this.instance_probing = true;
                         Dashboard::spawn_instance_probe(cx);
                     }
                 });

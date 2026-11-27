@@ -974,10 +974,10 @@ impl Dashboard {
         // its step chord is global: Ctrl+Alt+Up/Down walks the crabs and
         // opens the one it lands on, the same switch a click on the badge
         // makes. Without it the strip is mouse-only, which for a column that
-        // picks "who am I talking to" is a hole. Behind `[gui] remote_crabs`
+        // picks "who am I talking to" is a hole. Behind `[gui] instance_rail`
         // like the strip itself: with the switch off the chord is not taken.
         if self.screen == Screen::Chat
-            && self.remote_crabs
+            && self.instance_rail
             && ev.keystroke.modifiers.control
             && ev.keystroke.modifiers.alt
             && !ev.keystroke.modifiers.platform

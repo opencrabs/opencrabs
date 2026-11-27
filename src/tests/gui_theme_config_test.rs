@@ -109,12 +109,12 @@ fn the_theme_round_trips_through_toml() {
 }
 
 #[test]
-fn remote_crabs_is_off_unless_the_config_says_so() {
-    assert!(!GuiConfig::default().remote_crabs);
+fn instance_rail_is_off_unless_the_config_says_so() {
+    assert!(!GuiConfig::default().instance_rail);
     let absent: GuiConfig = toml::from_str("theme = \"auto\"").unwrap();
-    assert!(!absent.remote_crabs);
-    let on: GuiConfig = toml::from_str("remote_crabs = true").unwrap();
-    assert!(on.remote_crabs);
+    assert!(!absent.instance_rail);
+    let on: GuiConfig = toml::from_str("instance_rail = true").unwrap();
+    assert!(on.instance_rail);
 }
 
 #[test]

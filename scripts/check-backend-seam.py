@@ -139,7 +139,7 @@ LOCAL_ONLY: dict[tuple[str, str], str] = {
     ("src/gui/dashboard_screens.rs", "pick_theme"): "[gui] config of this window",
     ("src/gui/dashboard_screens.rs", "pick_base"): "[gui] config of this window",
     ("src/gui/dashboard_screens.rs", "keep_accent"): "[gui] config of this window",
-    ("src/gui/dashboard_instances.rs", "toggle_remote_crabs"): "[gui] config of this window",
+    ("src/gui/dashboard_instances.rs", "toggle_instance_rail"): "[gui] config of this window",
     # janela: L8
     ("src/gui/config_reload.rs", "watch"): "watches this window's config",
     ("src/gui/dashboard_keys.rs", "play_plan_chime"): "[gui] config of this window",

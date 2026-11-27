@@ -92,10 +92,10 @@ impl Dashboard {
         if self.settings_open {
             self.reload_settings(cx);
         }
-        // `[gui] remote_crabs` is a window preference read from this
+        // `[gui] instance_rail` is a window preference read from this
         // machine's file whichever crab the window holds: a hand edit flips
         // the strip the same way the settings switch does.
-        self.set_remote_crabs(config.gui.remote_crabs, cx);
+        self.set_instance_rail(config.gui.instance_rail, cx);
         cx.notify();
     }
 }

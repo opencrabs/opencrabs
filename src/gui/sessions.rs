@@ -2000,7 +2000,7 @@ pub fn rail(
 
 /// What the view hands the rail's brand row, built with their handlers.
 ///
-/// The crabs are both `None` with `[gui] remote_crabs` off (#3178), and
+/// The crabs are both `None` with `[gui] instance_rail` off (#3178), and
 /// then the brand row is exactly main's: the bare logo, no arrow, no list.
 #[derive(Default)]
 pub struct RailBrand {

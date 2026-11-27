@@ -119,6 +119,15 @@ pub struct SettingSpec {
     pub blurb: &'static str,
 }
 
+/// Whether `spec` is this window's own preference rather than the held
+/// crab's. The one such row is `[gui] instance_rail` (#3178): it decides what
+/// this window draws and probes, so it reads and writes this machine's config
+/// and applies live, never through the crab, which does not list it as
+/// settable. Every other row travels to the crab.
+pub fn is_window_pref(spec: &SettingSpec) -> bool {
+    spec.section == "gui" && spec.key == "instance_rail"
+}
+
 /// A row's current value, as the crab's config holds it.
 pub use opencrabs::backend::settings::SettingValue as RowValue;
 
@@ -230,7 +239,7 @@ pub const SPECS: &[SettingSpec] = &[
         label: "Remote instance rail",
         kind: SettingKind::Toggle,
         restart: true,
-        blurb: "the left column of remote crabs; off until you ask for it (#3178)",
+        blurb: "crabs on other machines, under the rail's logo; this window only, off until you ask for it (#3178)",
         group: SettingsSection::Advanced,
     },
     SettingSpec {

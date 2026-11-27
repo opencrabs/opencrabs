@@ -256,10 +256,10 @@ impl Dashboard {
     }
 
     /// The crabs as the rail's list reads them (#3178), or `None` with
-    /// `[gui] remote_crabs` off: then the rail mounts nothing new, not even
+    /// `[gui] instance_rail` off: then the rail mounts nothing new, not even
     /// the arrow beside its logo.
     pub(crate) fn crab_list_frame(&self) -> Option<StripFrame> {
-        if !self.remote_crabs {
+        if !self.instance_rail {
             return None;
         }
         Some(StripFrame::from_model(
@@ -271,7 +271,7 @@ impl Dashboard {
 
     /// The rail's logo was clicked: fold or unfold the list of crabs.
     pub(crate) fn toggle_crab_list(&mut self, cx: &mut Context<Self>) {
-        if !self.remote_crabs {
+        if !self.instance_rail {
             return;
         }
         self.crabs_open = !self.crabs_open;
@@ -352,14 +352,18 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Fold a new value of `[gui] remote_crabs` into the window.
+    /// Fold a new value of `[gui] instance_rail` into the window.
     ///
     /// Switching it off while a remote crab is held goes home first, through
     /// the same swap a click on the mark makes: a hidden strip must not leave
     /// the window talking to a crab the reader can no longer see or leave.
     /// An open `+` card is closed too, so no invisible card keeps the keys.
-    pub(crate) fn set_remote_crabs(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.remote_crabs == on {
+    ///
+    /// Switching it on reads the store, which the window skipped at open with
+    /// the rail off (#3178), and starts the probe loop the first time: a user
+    /// who never turns the rail on never pays for either.
+    pub(crate) fn set_instance_rail(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.instance_rail == on {
             return;
         }
         if !on {
@@ -368,9 +372,16 @@ impl Dashboard {
                 .update(cx, |strip, cx| strip.close_card(cx));
             self.crabs_open = false;
         }
-        self.remote_crabs = on;
+        self.instance_rail = on;
+        if on {
+            self.load_instances(cx);
+            if !self.instance_probing {
+                self.instance_probing = true;
+                Self::spawn_instance_probe(cx);
+            }
+        }
         logging::info(&format!(
-            "instances: remote crabs strip switched {}",
+            "instances: instance rail switched {}",
             match on {
                 true => "on",
                 false => "off",
@@ -379,14 +390,14 @@ impl Dashboard {
         cx.notify();
     }
 
-    /// Flip `[gui] remote_crabs` from the settings modal: written to this
+    /// Flip `[gui] instance_rail` from the settings modal: written to this
     /// machine's config, never through the held crab, because it is a window
     /// preference. A failed write leaves the window as it was and says so.
-    pub(crate) fn toggle_remote_crabs(&mut self, cx: &mut Context<Self>) -> Result<bool, String> {
-        let next = !self.remote_crabs;
-        opencrabs::config::Config::write_key("gui", "remote_crabs", &next.to_string())
-            .map_err(|e| format!("could not save gui.remote_crabs: {e}"))?;
-        self.set_remote_crabs(next, cx);
+    pub(crate) fn toggle_instance_rail(&mut self, cx: &mut Context<Self>) -> Result<bool, String> {
+        let next = !self.instance_rail;
+        opencrabs::config::Config::write_key("gui", "instance_rail", &next.to_string())
+            .map_err(|e| format!("could not save gui.instance_rail: {e}"))?;
+        self.set_instance_rail(next, cx);
         Ok(next)
     }
 
@@ -439,7 +450,7 @@ impl Dashboard {
                 // With the strip switched off no paired crab is probed: a
                 // hidden feature must not keep talking to the network.
                 let targets = match this.update(cx, |this, _cx| {
-                    if !this.remote_crabs {
+                    if !this.instance_rail {
                         return Vec::new();
                     }
                     this.instances

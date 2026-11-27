@@ -122,7 +122,9 @@ impl Dashboard {
         let Some(spec) = settings_view::SPECS.get(index) else {
             return;
         };
-        if settings_view::write_op(spec, &value).is_none() {
+        // A window preference never travels to the crab, which would refuse
+        // it anyway: it is not one of the crab's settable keys.
+        if settings_view::is_window_pref(spec) || settings_view::write_op(spec, &value).is_none() {
             return;
         }
         let backend = self.backend.clone();
@@ -171,6 +173,16 @@ impl Dashboard {
             let Some(spec) = settings_view::SPECS.get(index) else {
                 return;
             };
+            // `[gui] instance_rail` is this window's switch: it writes this
+            // machine's config and applies at once, whichever crab is held.
+            if settings_view::is_window_pref(spec) {
+                self.settings_status = Some(match self.toggle_instance_rail(cx) {
+                    Ok(on) => format!("saved gui.instance_rail = {on}"),
+                    Err(e) => e,
+                });
+                cx.notify();
+                return;
+            }
             let Some(current) = self.settings_values.get(index).cloned() else {
                 return;
             };
@@ -367,35 +379,6 @@ impl Dashboard {
 
     /// The modal: the rail on the left, the active section on the right, the
     /// status line under both. Listeners live here, shells in `settings_modal`.
-    /// The `[gui] remote_crabs` switch, at the head of General. It is this
-    /// window's preference, so it never travels to the held crab like the
-    /// SPECS rows do: it reads and writes this machine's config. Clicked, not
-    /// on the keyboard cursor, because the cursor walks the crab's rows.
-    fn remote_crabs_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let shown = palette::current();
-        let control = div().child(text(
-            settings_view::value_label(&settings_view::RowValue::Bool(self.remote_crabs)),
-            Size::Sm,
-            shown.accent,
-        ));
-        let row = settings_modal::row_shell(
-            SharedString::from("settings-row-remote-crabs"),
-            false,
-            "Remote crabs",
-            "pair and switch to crabs on other machines; this window only, off by default",
-            false,
-            control,
-        );
-        let flip = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
-            this.settings_status = Some(match this.toggle_remote_crabs(cx) {
-                Ok(on) => format!("saved gui.remote_crabs = {on}"),
-                Err(e) => e,
-            });
-            cx.notify();
-        });
-        row.on_click(flip).into_any_element()
-    }
-
     pub(crate) fn settings_modal(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let shown = palette::current();
         let active = self.settings_section;
@@ -434,9 +417,6 @@ impl Dashboard {
                 .into_any_element(),
             );
         }
-        if active == settings_view::SettingsSection::General {
-            body.push(self.remote_crabs_row(cx));
-        }
         for index in rows {
             if index < setting_count {
                 let Some(spec) = settings_view::SPECS.get(index) else {
@@ -444,6 +424,13 @@ impl Dashboard {
                 };
                 let Some(value) = self.settings_values.get(index).cloned() else {
                     continue;
+                };
+                // The window's own preference paints what this window holds,
+                // not what the crab answered (#3178).
+                let value = if settings_view::is_window_pref(spec) {
+                    settings_view::RowValue::Bool(self.instance_rail)
+                } else {
+                    value
                 };
                 let control = if matches!(spec.kind, settings_view::SettingKind::Number { .. }) {
                     let minus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
@@ -494,7 +481,9 @@ impl Dashboard {
                     self.settings_cursor == index,
                     spec.label,
                     spec.blurb,
-                    spec.restart,
+                    // The window's own switch applies at once (#3178), so
+                    // its row does not ask for a restart it does not need.
+                    spec.restart && !settings_view::is_window_pref(spec),
                     control,
                 );
                 let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {

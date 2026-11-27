@@ -356,6 +356,20 @@ mod crab_door {
     #[test]
     fn every_row_is_a_key_the_crab_lets_be_set_with_the_same_kind() {
         for spec in SPECS {
+            // The window's own preference (#3178) is the one row that never
+            // travels: the crab must not list it, or a remote modal would
+            // write the rail switch into another machine's config.
+            if crate::settings_view::is_window_pref(spec) {
+                assert!(
+                    !SETTABLE
+                        .iter()
+                        .any(|(section, key, _)| *section == spec.section && *key == spec.key),
+                    "{}.{} is this window's, the crab must not set it",
+                    spec.section,
+                    spec.key
+                );
+                continue;
+            }
             let found = SETTABLE
                 .iter()
                 .find(|(section, key, _)| *section == spec.section && *key == spec.key);

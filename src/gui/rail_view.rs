@@ -80,7 +80,7 @@ pub(crate) struct RailFrame {
     pub(crate) filter: sessions::RailFilter,
     pub(crate) filter_open: bool,
     /// The crabs listed under the logo (#3178). `None` is `[gui]
-    /// remote_crabs` off: the rail mounts nothing new, not even the arrow.
+    /// instance_rail` off: the rail mounts nothing new, not even the arrow.
     pub(crate) crabs: Option<CrabsFrame>,
 }
 

@@ -6,7 +6,7 @@
 //! selected session. A pick swaps the backend the other two read from rather
 //! than drawing a second rail.
 //!
-//! It has no column of its own (#3178). With `[gui] remote_crabs` on, the
+//! It has no column of its own (#3178). With `[gui] instance_rail` on, the
 //! rail's logo unfolds a list of the crabs (`rail_view.rs`), and the list
 //! reads the [`StripFrame`] the window resolves here. The strip entity keeps
 //! the cards and paints only the one that is up, over the whole window.

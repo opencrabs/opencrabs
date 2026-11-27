@@ -730,10 +730,14 @@ pub(crate) struct Dashboard {
     /// is looking at. Read once when the window opens; the health of each one
     /// is the probe loop's business, not the render's.
     pub(crate) instances: instances::Instances,
-    /// Whether the rail is on at all (#3178). Read once from the config when
-    /// the window opens, because the mount and the probe loop are both decided
-    /// there: the settings row therefore carries the restart chip.
+    /// `[gui] instance_rail` (#3178): whether the crabs are listed, their
+    /// cards mounted and their dots probed. Read from this machine's config
+    /// when the window opens and on every reload, because it is a window
+    /// preference, never the held crab's.
     pub(crate) instance_rail: bool,
+    /// Whether the probe loop has been started. With the rail off at open the
+    /// loop is not spawned; the first switch on starts it, once.
+    pub(crate) instance_probing: bool,
     /// The strip drawn as a cached view, the same way the rail is (#2933): a
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.
@@ -742,12 +746,8 @@ pub(crate) struct Dashboard {
     /// overlay stack reads it, so the card owns the keyboard (#3133).
     pub(crate) instance_card: std::rc::Rc<std::cell::Cell<bool>>,
     /// The rail's list of crabs is unfolded under its logo (#3178). Only
-    /// ever true with `remote_crabs` on.
+    /// ever true with `instance_rail` on.
     pub(crate) crabs_open: bool,
-    /// `[gui] remote_crabs`: whether the strip is drawn and its crabs probed.
-    /// Read from this machine's config when the window opens and on every
-    /// reload, because it is a window preference, never the held crab's.
-    pub(crate) remote_crabs: bool,
     /// The last instance error, drawn as one mark at the bottom of the strip.
     /// `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,
