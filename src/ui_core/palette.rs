@@ -493,6 +493,26 @@ pub enum PaletteAction {
     Calc {
         answer: String,
     },
+    /// A remote-crab row: the frontend walks the same handler the rail's list
+    /// of crabs walks for that job.
+    ///
+    /// Window-only, and only with `[gui] instance_rail` on: the crabs are a
+    /// window feature, so the terminal never lists these rows.
+    Crab(CrabPick),
+}
+
+/// What a remote-crab row asks for. A crab is named by its `host_id`, the
+/// identity the window's instance store keys it by.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CrabPick {
+    /// Talk to that crab; `None` is this window's own crab.
+    Switch(Option<String>),
+    /// Open the pairing card for a new crab.
+    Pair,
+    /// Open that crab's own card, where forgetting it is a named button.
+    Forget(String),
+    /// Open that crab's own card, where its new address is typed.
+    Repoint(String),
 }
 
 /// Why the card is armed as a session picker. The purpose decides what a

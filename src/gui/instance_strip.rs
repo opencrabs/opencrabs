@@ -32,6 +32,7 @@ use opencrabs::remote::instance_store::{self, InstanceFile, InstanceStore, Known
 use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
 use opencrabs::remote::scopes::BASE_SCOPES;
 use opencrabs::remote::tunnel;
+use opencrabs::ui_core::palette::{CrabPick, PaletteAction, PaletteItem, PaletteKind};
 use opencrabs::ui_core::text_field::{self, TextField};
 
 use crate::instances::{Health, InstanceEntry, Instances, badge_tint, badge_title};
@@ -92,6 +93,64 @@ impl StripFrame {
             error,
         }
     }
+}
+
+/// The Seeker's rows for the crabs, read from the same frame the rail's list
+/// reads.
+///
+/// `None` is `[gui] instance_rail` off, and then there is not one row: the
+/// Seeker must not offer a feature the window does not draw. With it on there
+/// is a "trocar para" row for this crab and one per paired crab, the pairing
+/// row, and per crab the "esquecer" and "nova morada" rows, which open that
+/// crab's own card, the one its right-click opens.
+pub(crate) fn seeker_items(frame: Option<&StripFrame>) -> Vec<PaletteItem> {
+    let Some(frame) = frame else {
+        return Vec::new();
+    };
+    let crab = |title: String, subtitle: String, keywords: &str, pick: CrabPick| {
+        PaletteItem::new(
+            title,
+            subtitle,
+            PaletteKind::Action,
+            PaletteAction::Crab(pick),
+        )
+        .with_keywords(keywords)
+    };
+    let mut items = vec![crab(
+        "trocar para este crab".to_string(),
+        "volta ao crab desta janela".to_string(),
+        "crab instance remote switch home local troca casa",
+        CrabPick::Switch(None),
+    )];
+    for badge in &frame.badges {
+        items.push(crab(
+            format!("trocar para {}", badge.label),
+            badge.title.to_string(),
+            "crab instance remote switch open troca abrir",
+            CrabPick::Switch(Some(badge.host_id.clone())),
+        ));
+    }
+    items.push(crab(
+        "emparelhar um crab".to_string(),
+        "liga esta janela a um crab noutra máquina".to_string(),
+        "crab instance remote pair add connect emparelhar novo",
+        CrabPick::Pair,
+    ));
+    for badge in &frame.badges {
+        items.push(crab(
+            format!("esquecer {}", badge.label),
+            "abre o cartão do crab, onde esquecer é um botão".to_string(),
+            "crab instance remote forget remove unpair esquecer apagar",
+            CrabPick::Forget(badge.host_id.clone()),
+        ));
+        items.push(crab(
+            format!("nova morada de {}", badge.label),
+            "abre o cartão do crab, onde se cola o endereço novo".to_string(),
+            "crab instance remote address url repoint moved endereço morada",
+            CrabPick::Repoint(badge.host_id.clone()),
+        ));
+    }
+    items
 }
 
 /// The strip as an entity, so a cached frame can replay it.

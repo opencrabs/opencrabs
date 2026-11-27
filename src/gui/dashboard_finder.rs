@@ -135,6 +135,12 @@ impl Dashboard {
         // modal, so that row prints here and nowhere else (#2713). The split
         // rows live in the shared catalog because both surfaces own panes.
         items.extend(actions::gui_items());
+        // The remote crabs, behind the same gate as the rail's list of them:
+        // with `[gui] instance_rail` off the frame is `None` and not one row
+        // is added.
+        items.extend(crate::instance_strip::seeker_items(
+            self.crab_list_frame().as_ref(),
+        ));
         for skill in opencrabs::brain::skills::load_all_skills() {
             items.push(
                 PaletteItem::new(
@@ -721,6 +727,10 @@ impl Dashboard {
             PaletteAction::OpenDocs(path) => {
                 let url = docs::url(path);
                 preview::launch(&preview::url_command(&url));
+            }
+            PaletteAction::Crab(pick) => {
+                // The rail's own handlers, through one door (#3178).
+                self.run_crab_pick(pick, cx);
             }
             PaletteAction::Calc { answer } => {
                 // Spotlight's contract: the answer goes to the clipboard and

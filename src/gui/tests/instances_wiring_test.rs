@@ -835,3 +835,69 @@ fn the_snippet_leaves_what_is_already_right_alone() {
         "the one missing key: {snippet}"
     );
 }
+
+// ── The Seeker's rows for the crabs, behind the same flag ───────────────────
+
+/// With `[gui] instance_rail` off the Seeker lists no crab row at all; with
+/// it on and N crabs paired it lists N + 1 switches (each crab and this one),
+/// the pairing row, and a forget and a new-address row per crab.
+#[test]
+fn the_seeker_lists_the_crabs_only_behind_the_flag() {
+    use crate::instance_strip::seeker_items;
+    use opencrabs::ui_core::palette::{CrabPick, PaletteAction};
+
+    assert!(
+        seeker_items(None).is_empty(),
+        "with the flag off the Seeker must not offer a crab"
+    );
+
+    let model = two();
+    let frame = StripFrame::from_model(&model, 0, None);
+    let items = seeker_items(Some(&frame));
+    let switches: Vec<&PaletteAction> = items
+        .iter()
+        .map(|item| &item.action)
+        .filter(|action| matches!(action, PaletteAction::Crab(CrabPick::Switch(_))))
+        .collect();
+    assert_eq!(switches.len(), model.entries().len() + 1, "{items:?}");
+    assert!(switches.contains(&&PaletteAction::Crab(CrabPick::Switch(None))));
+    for id in ["a:1", "b:2"] {
+        for pick in [
+            CrabPick::Switch(Some(id.to_string())),
+            CrabPick::Forget(id.to_string()),
+            CrabPick::Repoint(id.to_string()),
+        ] {
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.action == PaletteAction::Crab(pick.clone())),
+                "{pick:?} missing: {items:?}"
+            );
+        }
+    }
+    let pairs = items
+        .iter()
+        .filter(|item| item.action == PaletteAction::Crab(CrabPick::Pair))
+        .count();
+    assert_eq!(pairs, 1);
+    assert!(items.iter().any(|item| item.title == "trocar para alpha"));
+
+    // The Seeker reads the rows through the list's one gate, and every pick
+    // goes back through the rail's own handlers, not a second copy of them.
+    let finder = include_str!("../dashboard_finder.rs");
+    assert!(finder.contains("seeker_items(\n            self.crab_list_frame().as_ref(),"));
+    assert!(finder.contains("PaletteAction::Crab(pick) => {"));
+    let run = fn_body(WIRING, "run_crab_pick");
+    assert!(
+        run.contains("if !self.instance_rail {\n            return;"),
+        "{run}"
+    );
+    for handler in [
+        "self.instance_clear(cx)",
+        "self.instance_picked(&host_id, cx)",
+        "self.instance_pair(cx)",
+        "self.instance_manage(&badge, cx)",
+    ] {
+        assert!(run.contains(handler), "{handler} not reused: {run}");
+    }
+}

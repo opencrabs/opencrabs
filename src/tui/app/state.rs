@@ -4408,6 +4408,13 @@ impl App {
                 });
                 self.notification_shown_at = Some(std::time::Instant::now());
             }
+            PaletteAction::Crab(_) => {
+                // Nothing lists a crab row in the terminal: the remote crabs
+                // are the window's rail, so this arm keeps the match
+                // exhaustive and says where they live.
+                self.notification = Some("Remote crabs live in the window".to_string());
+                self.notification_shown_at = Some(std::time::Instant::now());
+            }
         }
         Ok(())
     }

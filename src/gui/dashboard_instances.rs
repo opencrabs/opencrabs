@@ -27,6 +27,7 @@ use opencrabs::backend::hello::Hello;
 use opencrabs::remote::instance_client::{self, Target};
 use opencrabs::remote::instance_repoint;
 use opencrabs::remote::instance_store::{InstanceFile, InstanceStore, KnownInstance, now};
+use opencrabs::ui_core::palette::CrabPick;
 
 /// How often the probe loop wakes. Five seconds is the same cadence the
 /// channel chip already pays.
@@ -284,6 +285,39 @@ impl Dashboard {
         let badge = badge.clone();
         self.instance_strip
             .update(cx, |strip, cx| strip.open_manage(&badge, cx));
+    }
+
+    /// A Seeker row for the crabs (`instance_strip::seeker_items`): the same
+    /// handler the rail's list walks for that job. Nothing happens with
+    /// `[gui] instance_rail` off, the same gate the rows are listed behind.
+    ///
+    /// A switch to the crab already open leaves it open: a click on the open
+    /// row means "back home", but a row that names the crab must not take
+    /// the reader somewhere else.
+    pub(crate) fn run_crab_pick(&mut self, pick: CrabPick, cx: &mut Context<Self>) {
+        if !self.instance_rail {
+            return;
+        }
+        match pick {
+            CrabPick::Switch(None) => self.instance_clear(cx),
+            CrabPick::Switch(Some(host_id)) => {
+                if self.instances.selected_host_id() != Some(host_id.as_str()) {
+                    self.instance_picked(&host_id, cx);
+                }
+            }
+            CrabPick::Pair => self.instance_pair(cx),
+            CrabPick::Forget(host_id) | CrabPick::Repoint(host_id) => {
+                let badge = self.crab_list_frame().and_then(|frame| {
+                    frame
+                        .badges
+                        .into_iter()
+                        .find(|badge| badge.host_id == host_id)
+                });
+                if let Some(badge) = badge {
+                    self.instance_manage(&badge, cx);
+                }
+            }
+        }
     }
 
     /// The list's "emparelhar um crab" row: the pairing card.
