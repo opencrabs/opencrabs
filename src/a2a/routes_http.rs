@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use crate::a2a::server::{A2aState, GrantedScopes};
 use crate::remote::now_secs;
 use crate::remote::routes::{
-    AnnouncedRoute, collect_interfaces, host_id, select_advertised_routes,
+    AnnouncedRoute, collect_interfaces, host_id, reachable_through_bind, select_advertised_routes,
 };
 use crate::remote::scopes::{SCOPE_READ, allows};
 use crate::remote::tunnel;
@@ -26,7 +26,9 @@ use crate::remote::tunnel;
 /// routes from live interfaces + the tunnel URL when one is running.
 pub fn announced_routes(state: &A2aState) -> anyhow::Result<(String, Vec<AnnouncedRoute>)> {
     let state_dir = state.remote_state_dir.as_path();
-    let ifaces = collect_interfaces();
+    // Only the addresses the socket is bound to: a loopback gateway has no
+    // lan or tailnet route, whatever interfaces the machine has.
+    let ifaces = reachable_through_bind(&collect_interfaces(), &state.host);
     // A dead tunnel's state self-cleans inside status(); announce only live ones.
     let tunnel_url = tunnel::status(state_dir)?.map(|t| t.url);
     let routes = select_advertised_routes(&ifaces, state.port, tunnel_url.as_deref());

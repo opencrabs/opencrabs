@@ -153,6 +153,39 @@ pub fn select_advertised_routes(
     routes
 }
 
+/// Keep only the interfaces a gateway bound to `bind` actually listens on.
+///
+/// Announcing an address the socket is not bound to sends clients to a door
+/// that refuses them: a gateway on `127.0.0.1` announced its LAN address,
+/// and a client recovering a dead tunnel URL dialled it and got nothing.
+///
+/// - unspecified (`0.0.0.0`, `::`) or empty: every interface listens.
+/// - loopback: no interface is reachable from another machine.
+/// - one concrete IPv4: only the interface holding that address.
+/// - anything that is not a bare IP (a hostname): unknown, so nothing is
+///   filtered, which is the behaviour before this filter existed.
+pub fn reachable_through_bind(ifaces: &[Iface], bind: &str) -> Vec<Iface> {
+    let bind = bind.trim();
+    if bind.is_empty() {
+        return ifaces.to_vec();
+    }
+    let Ok(ip) = bind.parse::<std::net::IpAddr>() else {
+        return ifaces.to_vec();
+    };
+    if ip.is_unspecified() {
+        return ifaces.to_vec();
+    }
+    if ip.is_loopback() {
+        return Vec::new();
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => ifaces.iter().filter(|i| i.ipv4 == v4).cloned().collect(),
+        // Only IPv4 interfaces are enumerated, so a concrete IPv6 bind
+        // matches none of them.
+        std::net::IpAddr::V6(_) => Vec::new(),
+    }
+}
+
 /// Stable per-machine identifier so clients can correlate sightings of the
 /// same host across changing addresses. Created once under
 /// `<state_dir>/host_id`; not a secret (it identifies, it does not
