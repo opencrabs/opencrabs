@@ -48,6 +48,8 @@ This release teaches the window to talk and listen: voice messages land end to e
 - `67cac9f10` **The settled context footer reads the same token identity as the live counter (#3196)**
 - `251a6ef0d` **The plan card measures at the size its rows paint (#3197)**
 - `e0a9ea420` **The composer slash popup lists runtime skills and user commands (#3199)** and runs them as slash prompts (#3198)
+- `1520ef6bb` / `eeef73dcd` **A background task's label names the work, not the path to it (#3204)**: a long path argument folds to its anchor and file name, so the strip reads `bash ~/…/gate-combo.sh` instead of spending its field on directories, and an inline heredoc launch cuts at the marker instead of printing the script body
+- `1786b744b` **The Seeker card frosts the field behind it (#3130)**: the card's alphas ride high so the lines behind it dim into mush, a whisper of cool smoke drifts under the ink, and the ramp runs down into near-black instead of lightening
 - `ebc61a350` **The built-in provider sends the `combo` model id (#3203)**: the shipped example, the onboarding catalogue and the preamble carry it, and a startup migration moves an existing `config.toml` off the legacy `deepseek-v4.1-flash` name while the proxy keeps answering both
 - `8e28facb3` **`combo` is priced at the DeepSeek V4.1 Flash card (#3203)**, so a turn on the free built-in provider shows a cost in `/usage` instead of reading as an estimate
 - `441f76020` **A single-pane restart opens the conversation the window was showing (#3200)**
@@ -74,10 +76,13 @@ This release teaches the window to talk and listen: voice messages land end to e
 - `b2c834bf6` The `/clear` doc names provider fallback as a reason to clear (#3125)
 - `6cf615f91` The start guide says when the daily log file actually exists (#2933)
 - `812c8826a` README: the instance rail, the digit jump chord and the A2A session methods
+- `75f179135` SPONSORS: the November 21 and November 25 top-ups
 
 ### 🧹 Miscellaneous
 
 - `7a57ee79c` The release workflow publishes the Windows PDB sidecar so panic reports can name frames (#3134)
+- `8a8edeece` The arm64 release leg gets an 8G swapfile before the build, so the final link spills instead of freezing until the runner is killed (#3206)
+- `53fb71298` The Windows symbol pack recovers the gui pdb from `deps/` under either spelling before it asserts, and still fails on a pdb that exists nowhere (#3205)
 - `623f97e3f` The packaged crate fits back under the 10 MB crates.io budget (#3136), checked by a new CI weigh step
 - `842a041f0` The advisory GUI boot job is gated on lint and audit (#3137)
 - `00d0aad02` / `5bbd898b2` The Windows slice carries its results into the job summary and gets its own cap (#2944)
@@ -103,8 +108,8 @@ This release teaches the window to talk and listen: voice messages land end to e
 
 ### 📊 Stats
 
-- 754 commits since v0.6.0
-- 438 files changed, +71,810 / -15,365 lines
+- 773 commits since v0.6.0
+- 453 files changed, +72,486 / -15,404 lines
 - 13,214 tests (13,214 passed, 0 failed, 34 ignored)
 
 
