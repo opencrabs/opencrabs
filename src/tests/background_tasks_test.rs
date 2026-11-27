@@ -7,10 +7,10 @@ use crate::brain::agent::service::ProgressCallback;
 use crate::brain::agent::service::ProgressEvent;
 use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
-    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, TaskSource, claude_completion_message,
-    claude_needs_survival_delivery, claude_task_label, claude_task_output,
-    clear_claude_mirrors_for_session, completion_message, format_elapsed, output_tail, short_label,
-    tail_lines,
+    BackgroundTaskManager, ClaudeTurnTasks, CmdResult, TaskOutput, TaskSource,
+    claude_completion_message, claude_needs_survival_delivery, claude_task_label,
+    claude_task_output_from, clear_claude_mirrors_for_session, completion_message, format_elapsed,
+    output_tail, short_label, tail_lines,
 };
 // `run_detached`'s tests drive shell job control (`&`), so they are unix-only.
 #[cfg(unix)]
@@ -839,7 +839,7 @@ fn a_plain_mirror_keeps_its_label_as_its_identity() {
     mgr.mirror_started(sid, "cargo build");
     let rows = mgr.running_tasks(sid);
     assert_eq!(rows[0].source, TaskSource::Mirror);
-    assert!(rows[0].output_path().is_none(), "nothing to read for it");
+    assert!(rows[0].output().is_none(), "nothing to read for it");
     mgr.mirror_finished(sid, "cargo build");
     assert_eq!(mgr.running_for(sid), 0);
 }
@@ -856,7 +856,7 @@ fn the_output_tail_is_the_last_lines_without_escapes() {
     std::fs::write(&path, body).expect("write log");
 
     assert_eq!(
-        output_tail(&path, 3),
+        output_tail(&TaskOutput::log(&path), 3),
         "line 19\nline 20\n   Compiling opencrabs",
         "colour codes and the trailing blank line are gone"
     );
@@ -868,7 +868,7 @@ fn the_output_tail_shows_only_the_last_draw_of_a_progress_line() {
     let path = dir.path().join("task.log");
     std::fs::write(&path, "start\n10%\r50%\r100%\ndone\n").expect("write log");
 
-    assert_eq!(output_tail(&path, 8), "start\n100%\ndone");
+    assert_eq!(output_tail(&TaskOutput::log(&path), 8), "start\n100%\ndone");
 }
 
 #[test]
@@ -882,7 +882,7 @@ fn the_output_tail_never_shows_a_secret() {
     )
     .expect("write log");
 
-    let tail = output_tail(&path, 8);
+    let tail = output_tail(&TaskOutput::log(&path), 8);
     assert!(
         tail.contains("api.telegram.org"),
         "the line itself survives"
@@ -903,7 +903,7 @@ fn the_output_tail_of_a_long_log_starts_on_a_whole_line() {
     }
     std::fs::write(&path, body).expect("write log");
 
-    let tail = output_tail(&path, 10_000);
+    let tail = output_tail(&TaskOutput::log(&path), 10_000);
     let first = tail.lines().next().expect("some lines");
     assert!(
         first.starts_with("row number ") && first.len() == "row number 00000".len(),
@@ -915,7 +915,10 @@ fn the_output_tail_of_a_long_log_starts_on_a_whole_line() {
 #[test]
 fn a_missing_output_file_is_empty_not_an_error() {
     let dir = tempfile::tempdir().expect("temp dir");
-    assert_eq!(output_tail(&dir.path().join("never-written.log"), 8), "");
+    assert_eq!(
+        output_tail(&TaskOutput::log(dir.path().join("never-written.log")), 8),
+        ""
+    );
 }
 
 #[test]
@@ -940,12 +943,12 @@ fn a_claude_task_output_is_found_by_its_id() {
     std::fs::write(other.join("zzz.output"), "nope\n").expect("write other");
 
     assert_eq!(
-        claude_task_output(temp.path(), "bh2o5pwot"),
-        Some(tasks.join("bh2o5pwot.output"))
+        claude_task_output_in(temp.path(), Some(temp.path()), "bh2o5pwot"),
+        Some(TaskOutput::log(tasks.join("bh2o5pwot.output")))
     );
-    assert_eq!(claude_task_output(temp.path(), "unknown"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "unknown"), None);
     assert_eq!(
-        claude_task_output(temp.path(), "zzz"),
+        claude_task_output_in(temp.path(), Some(temp.path()), "zzz"),
         None,
         "only claude-* trees are searched"
     );
@@ -953,7 +956,9 @@ fn a_claude_task_output_is_found_by_its_id() {
 
 /// The temp directory is shared: a tree someone else planted can point its
 /// "output" at any file this user can read. A link is never followed, at
-/// the file or at any directory above it.
+/// the file or at any directory above it. The one link that means something
+/// is a sub-agent's, and it is answered by rebuilding the transcript path,
+/// never by reading the link (see the transcript tests below).
 #[cfg(unix)]
 #[test]
 fn a_claude_task_output_reached_through_a_link_is_refused() {
@@ -970,7 +975,7 @@ fn a_claude_task_output_reached_through_a_link_is_refused() {
         .join("tasks");
     std::fs::create_dir_all(&tasks).expect("task dir");
     std::os::unix::fs::symlink(&secret, tasks.join("linked.output")).expect("link file");
-    assert_eq!(claude_task_output(temp.path(), "linked"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "linked"), None);
 
     // A real file behind a linked directory.
     let real = temp.path().join("elsewhere");
@@ -979,11 +984,11 @@ fn a_claude_task_output_reached_through_a_link_is_refused() {
     let session = temp.path().join("claude-1000").join("cwd").join("other");
     std::fs::create_dir_all(&session).expect("session dir");
     std::os::unix::fs::symlink(&real, session.join("tasks")).expect("link dir");
-    assert_eq!(claude_task_output(temp.path(), "behind"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "behind"), None);
 
     // A directory named like an output file is not one.
     std::fs::create_dir_all(tasks.join("folder.output")).expect("dir as file");
-    assert_eq!(claude_task_output(temp.path(), "folder"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "folder"), None);
 }
 
 #[test]
@@ -993,9 +998,125 @@ fn a_claude_task_id_cannot_steer_the_lookup_out_of_the_tree() {
     std::fs::create_dir_all(session.join("tasks")).expect("task dir");
     std::fs::write(session.join("secret.output"), "x").expect("write");
 
-    assert_eq!(claude_task_output(temp.path(), "../secret"), None);
-    assert_eq!(claude_task_output(temp.path(), ""), None);
-    assert_eq!(claude_task_output(temp.path(), "a/b"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "../secret"), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), ""), None);
+    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "a/b"), None);
+}
+
+/// A sub-agent's `.output` is a LINK to its transcript. The link itself is
+/// never read: the transcript is rebuilt from the slug and session the temp
+/// walk just proved are ours, under the CLI's own projects dir (#3208).
+#[cfg(unix)]
+#[test]
+fn a_claude_sub_agent_transcript_is_found_without_following_the_link() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let slug = "-home-someone-project";
+    let session = "0e17f469-67de-4046-af86-5fdbd4c8be05";
+    let tasks = temp
+        .path()
+        .join("claude-1000")
+        .join(slug)
+        .join(session)
+        .join("tasks");
+    std::fs::create_dir_all(&tasks).expect("task dir");
+    let projects = temp.path().join("projects");
+    let subagents = projects.join(slug).join(session).join("subagents");
+    std::fs::create_dir_all(&subagents).expect("subagents dir");
+    let transcript = subagents.join("agent-abc.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").expect("write transcript");
+
+    // The link points at a decoy. Following it would answer with the decoy;
+    // rebuilding the path answers with the transcript.
+    let decoy = temp.path().join("decoy.txt");
+    std::fs::write(&decoy, "not the transcript\n").expect("write decoy");
+    std::os::unix::fs::symlink(&decoy, tasks.join("abc.output")).expect("link output");
+
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(&projects), "abc"),
+        Some(TaskOutput::transcript(&transcript)),
+    );
+}
+
+/// A planted link with no transcript behind it is still nothing. The temp
+/// tree is shared, so "there is a link" is not evidence a sub-agent ran.
+#[cfg(unix)]
+#[test]
+fn a_claude_sub_agent_link_without_a_transcript_is_refused() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let tasks = temp
+        .path()
+        .join("claude-1000")
+        .join("cwd")
+        .join("session")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks).expect("task dir");
+    let decoy = temp.path().join("decoy.txt");
+    std::fs::write(&decoy, "secret\n").expect("write decoy");
+    std::os::unix::fs::symlink(&decoy, tasks.join("abc.output")).expect("link output");
+    let projects = temp.path().join("projects");
+    std::fs::create_dir_all(&projects).expect("projects dir");
+
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(&projects), "abc"),
+        None,
+        "the link is never read and no transcript exists to rebuild"
+    );
+}
+
+/// The rebuilt transcript gets the same check as everything else: a link is
+/// not a transcript, even under the projects tree.
+#[cfg(unix)]
+#[test]
+fn a_transcript_that_is_itself_a_link_is_refused() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let slug = "cwd";
+    let session = "session";
+    let tasks = temp
+        .path()
+        .join("claude-1000")
+        .join(slug)
+        .join(session)
+        .join("tasks");
+    std::fs::create_dir_all(&tasks).expect("task dir");
+    let projects = temp.path().join("projects");
+    let subagents = projects.join(slug).join(session).join("subagents");
+    std::fs::create_dir_all(&subagents).expect("subagents dir");
+    let secret = temp.path().join("secret.txt");
+    std::fs::write(&secret, "token\n").expect("write secret");
+    std::os::unix::fs::symlink(&secret, subagents.join("agent-abc.jsonl")).expect("link transcript");
+    std::os::unix::fs::symlink(&secret, tasks.join("abc.output")).expect("link output");
+
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(&projects), "abc"),
+        None,
+    );
+}
+
+/// A transcript tail reads as what the agent said, with one line per tool
+/// call. Raw JSON, thinking and tool results never reach the card (#3208).
+#[test]
+fn a_transcript_tail_reads_as_text_not_json() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent-abc.jsonl");
+    let records = [
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"raw output"}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private"}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the file."}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/x.rs"}}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done.\nSecond line."}]}}"#,
+    ];
+    std::fs::write(&path, records.join("\n")).expect("write transcript");
+
+    let tail = output_tail(&TaskOutput::transcript(&path), 10);
+    assert_eq!(
+        tail,
+        "Reading the file.\n> Tool: Read (/tmp/x.rs)\nDone.\nSecond line.",
+        "agent text plus one line per tool call; thinking and tool results stay hidden"
+    );
+    assert!(
+        !tail.contains("\"type\""),
+        "a card must never show raw JSON: {tail}"
+    );
 }
 
 #[cfg(unix)]
@@ -1023,8 +1144,8 @@ async fn a_detached_command_publishes_its_log_while_it_runs() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source, TaskSource::Detached);
     assert_eq!(rows[0].source.tag(), "detached");
-    let path = mgr
-        .output_path_for(sid, rows[0].task_id)
+    let output = mgr
+        .output_for(sid, rows[0].task_id)
         .expect("a spawned command knows its own log");
 
     // The command is still sleeping when its first line is readable. The
@@ -1033,7 +1154,7 @@ async fn a_detached_command_publishes_its_log_while_it_runs() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut tail = String::new();
     while tokio::time::Instant::now() < deadline {
-        tail = mgr.output_tail(&path, 8);
+        tail = mgr.output_tail(&output, 8);
         if tail.contains(&marker) {
             break;
         }
@@ -1042,12 +1163,12 @@ async fn a_detached_command_publishes_its_log_while_it_runs() {
     assert!(
         tail.contains(&marker),
         "output is readable mid-run: {tail:?} (log present: {}, running: {})",
-        path.exists(),
+        output.path().exists(),
         mgr.running_for(sid),
     );
     assert_eq!(mgr.running_for(sid), 1, "and the command has not finished");
     assert_eq!(
-        mgr.output_path_for(sid, Uuid::new_v4()),
+        mgr.output_for(sid, Uuid::new_v4()),
         None,
         "an unknown task has no output"
     );

@@ -80,6 +80,6 @@ pub(crate) fn task_strip(text: String, on_tap: Option<StripTap>, on_copy: Option
 /// One open task's output as the window last read it.
 pub(crate) struct TaskTail {
     pub(crate) read_at: std::time::Instant,
-    pub(crate) path: Option<std::path::PathBuf>,
+    pub(crate) path: Option<opencrabs::brain::agent::service::TaskOutput>,
     pub(crate) text: Option<SharedString>,
 }

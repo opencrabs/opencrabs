@@ -78,7 +78,7 @@ pub struct RunningTask {
     /// the identity, which is every spawned command.
     pub key: Option<String>,
     /// The file the task's merged output is being written to while it runs,
-    /// when this process knows it. See [`RunningTask::output_path`].
+    /// when this process knows it. See [`RunningTask::output`].
     pub output: Option<PathBuf>,
     /// The signal that stops the command, for a row this process spawned.
     /// `None` for a mirrored task: its process belongs to someone else, and
@@ -138,6 +138,50 @@ impl TaskSource {
     }
 }
 
+/// What a task's output file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputKind {
+    /// A log: whatever the command printed, shown as it is.
+    Log,
+    /// A claude-cli sub-agent transcript: one JSON record per line (#3208).
+    Transcript,
+}
+
+/// A task's output file and what to do with it (#3208).
+///
+/// The kind travels with the path because the two are read differently. A log
+/// is text a surface shows as it came. A sub-agent transcript is JSONL that
+/// has to be rendered first: raw, a task card reads as braces and keys, which
+/// is what "no output available" was really hiding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutput {
+    pub path: PathBuf,
+    pub kind: OutputKind,
+}
+
+impl TaskOutput {
+    /// A log file.
+    pub fn log(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: OutputKind::Log,
+        }
+    }
+
+    /// A claude-cli sub-agent transcript.
+    pub fn transcript(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            kind: OutputKind::Transcript,
+        }
+    }
+
+    /// Where the text is read from.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 impl RunningTask {
     /// The file holding this task's output so far, if one can be found.
     ///
@@ -146,12 +190,15 @@ impl RunningTask {
     /// runs, so it is looked up by task id on demand. `None` is an ordinary
     /// answer: the file may not exist yet, and the layout is the CLI's own
     /// detail rather than a contract.
-    pub fn output_path(&self) -> Option<PathBuf> {
+    pub fn output(&self) -> Option<TaskOutput> {
         if let Some(path) = self.output.as_ref() {
-            return Some(path.clone());
+            return Some(TaskOutput::log(path.clone()));
         }
         match &self.source {
-            TaskSource::Claude { id } => claude_task_output(&std::env::temp_dir(), id),
+            TaskSource::Claude { id } => {
+                let projects = claude_projects_dir();
+                claude_task_output_in(&std::env::temp_dir(), projects.as_deref(), id)
+            }
             _ => None,
         }
     }
@@ -253,12 +300,12 @@ impl BackgroundTaskManager {
     }
 
     /// Where task `task_id` of `session_id` is writing its output, if it is
-    /// still running and a file can be found (see [`RunningTask::output_path`]).
-    pub fn output_path_for(&self, session_id: Uuid, task_id: Uuid) -> Option<PathBuf> {
+    /// still running and a file can be found (see [`RunningTask::output`]).
+    pub fn output_for(&self, session_id: Uuid, task_id: Uuid) -> Option<TaskOutput> {
         self.running_tasks(session_id)
             .into_iter()
             .find(|t| t.task_id == task_id)?
-            .output_path()
+            .output()
     }
 
     /// Ask task `task_id` of `session_id` to stop.
@@ -287,16 +334,16 @@ impl BackgroundTaskManager {
         }
     }
 
-    /// The scrubbed tail of a task's output file (see [`output_tail`]). A
-    /// method so a surface outside this crate can read what it was handed.
-    pub fn output_tail(&self, path: &std::path::Path, max_lines: usize) -> String {
-        output_tail(path, max_lines)
+    /// The scrubbed tail of a task's output (see [`output_tail`]). A method
+    /// so a surface outside this crate can read what it was handed.
+    pub fn output_tail(&self, output: &TaskOutput, max_lines: usize) -> String {
+        output_tail(output, max_lines)
     }
 
     /// The scrubbed output a task's full view scrolls through (see
     /// [`output_history`]).
-    pub fn output_history(&self, path: &std::path::Path) -> String {
-        output_history(path)
+    pub fn output_history(&self, output: &TaskOutput) -> String {
+        output_history(output)
     }
 
     fn mark_started(
@@ -491,7 +538,7 @@ impl BackgroundTaskManager {
                     key: None,
                     // Its output goes wherever the command sent it, which this
                     // process never learned. `None` is the honest answer and
-                    // `output_path` already treats it as one.
+                    // `output` already treats it as one.
                     output: None,
                     // Not ours to stop: the row did not spawn it, and a cancel
                     // that killed a build the user did not name would be a
@@ -1349,8 +1396,8 @@ fn read_log_tail(path: &std::path::Path) -> String {
 /// not be the one place that shows it. A missing or unreadable file is an
 /// empty string, never an error, because the file belongs to a process that
 /// may not have written yet or may already have cleaned up.
-pub fn output_tail(path: &std::path::Path, max_lines: usize) -> String {
-    output_tail_within(path, max_lines, 16 * 1024)
+pub fn output_tail(output: &TaskOutput, max_lines: usize) -> String {
+    output_tail_within(output, max_lines, 16 * 1024)
 }
 
 /// How many lines of a task's output the full view keeps.
@@ -1364,36 +1411,34 @@ pub const HISTORY_BYTES: u64 = 512 * 1024;
 /// The output a task's full view scrolls through: the last
 /// [`HISTORY_LINES`] lines within the final [`HISTORY_BYTES`], cleaned and
 /// scrubbed exactly as [`output_tail`] cleans its handful.
-pub fn output_history(path: &std::path::Path) -> String {
-    output_tail_within(path, HISTORY_LINES, HISTORY_BYTES)
+pub fn output_history(output: &TaskOutput) -> String {
+    output_tail_within(output, HISTORY_LINES, HISTORY_BYTES)
 }
 
 /// [`output_tail`] reading at most `max_bytes` off the end of the file.
-pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
+pub fn output_tail_within(output: &TaskOutput, max_lines: usize, max_bytes: u64) -> String {
+    let (raw, clipped) = read_tail(output.path(), max_bytes);
+    // A clipped read lands mid-line; drop the fragment. Dropping it off the
+    // RAW text is what lets a transcript keep every record it can still
+    // parse, since a half record renders as nothing anyway.
+    let body = if clipped {
+        raw.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    } else {
+        raw.as_str()
     };
-    let clipped = size > max_bytes;
-    if clipped && file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::new();
-    let _ = file.take(max_bytes).read_to_end(&mut buf);
-    let raw = String::from_utf8_lossy(&buf);
-    let plain = super::tool_loop::strip_ansi_output(&raw);
-    let mut lines: Vec<&str> = plain
-        .lines()
-        // A progress bar redraws one line with `\r`; only the last draw is
-        // what a terminal would be showing.
-        .map(|l| l.rsplit('\r').find(|part| !part.is_empty()).unwrap_or(""))
-        .map(str::trim_end)
-        .collect();
-    if clipped && !lines.is_empty() {
-        // The seek landed mid-line; drop the fragment.
-        lines.remove(0);
-    }
+    let mut lines: Vec<String> = match output.kind {
+        OutputKind::Log => {
+            let plain = super::tool_loop::strip_ansi_output(body);
+            plain
+                .lines()
+                // A progress bar redraws one line with `\r`; only the last
+                // draw is what a terminal would be showing.
+                .map(|l| l.rsplit('\r').find(|part| !part.is_empty()).unwrap_or(""))
+                .map(|l| l.trim_end().to_string())
+                .collect()
+        }
+        OutputKind::Transcript => render_transcript(body),
+    };
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
@@ -1402,20 +1447,134 @@ pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u
     crate::logging::redact::scrub(&text).into_owned()
 }
 
-/// Find a claude-cli background task's output file under `temp`.
+/// The tail bytes of `path` and whether the read started mid-file.
+fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
+    use std::io::{Read, Seek, SeekFrom};
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return (String::new(), false);
+    };
+    let clipped = size > max_bytes;
+    if clipped && file.seek(SeekFrom::End(-(max_bytes as i64))).is_err() {
+        return (String::new(), false);
+    }
+    let mut buf = Vec::new();
+    let _ = file.take(max_bytes).read_to_end(&mut buf);
+    (String::from_utf8_lossy(&buf).into_owned(), clipped)
+}
+
+/// Render a claude-cli sub-agent transcript as text (#3208).
 ///
-/// The CLI writes it to `<temp>/claude-<uid>/<cwd slug>/<session>/tasks/<id>.output`
-/// and reports that path in no event while the task runs, so it is found by
-/// walking the three levels above `tasks/`. The newest match wins, in case a
-/// task id was ever reused across sessions. Ids that are not a plain token are
-/// refused so a hostile id cannot steer the lookup out of the tree.
+/// One JSON record per line. Only what the agent said is shown, plus one
+/// `> Tool: …` line per tool call so a card still reads as progress.
+/// Thinking blocks and tool results stay hidden: they are the model's
+/// private reasoning and raw payloads, not something to show a reader.
+/// A line that is not JSON is shown as it is (the CLI sometimes writes one),
+/// but a line that is JSON cut off at the end of a live file is not.
+fn render_transcript(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            if !line.starts_with('{') {
+                out.push(line.to_string());
+            }
+            continue;
+        };
+        let kind = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // Some records nest the payload under `message`; others are the
+        // payload itself. Both shapes appear across CLI versions.
+        let message = value.get("message").unwrap_or(&value);
+        match message.get("content") {
+            Some(serde_json::Value::String(text)) if kind == "assistant" => {
+                push_text(&mut out, text);
+            }
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    match item.get("type").and_then(|v| v.as_str()) {
+                        Some("text") if kind == "assistant" => {
+                            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                                push_text(&mut out, text);
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("tool");
+                            out.push(tool_line(name, item.get("input")));
+                        }
+                        // Thinking, tool results and anything else: hidden.
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Push one block of agent text, one line per line.
+fn push_text(out: &mut Vec<String>, text: &str) {
+    for line in text.lines() {
+        out.push(line.trim_end().to_string());
+    }
+}
+
+/// One `> Tool:` line for a tool call, with the shortest useful hint.
+fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
+    let hint = input.and_then(|input| {
+        ["command", "description", "file_path", "path", "pattern", "query"]
+            .iter()
+            .find_map(|key| input.get(*key).and_then(|v| v.as_str()))
+    });
+    match hint.map(str::trim).filter(|hint| !hint.is_empty()) {
+        Some(hint) => {
+            let first = hint.lines().next().unwrap_or(hint).trim();
+            let mut short: String = first.chars().take(60).collect();
+            if first.chars().count() > 60 {
+                short.push_str("...");
+            }
+            format!("> Tool: {name} ({short})")
+        }
+        None => format!("> Tool: {name}"),
+    }
+}
+
+/// Find a claude-cli background task's output, under `temp`.
+///
+/// The CLI writes a shell task's output to
+/// `<temp>/claude-<uid>/<cwd slug>/<session>/tasks/<id>.output` and reports
+/// that path in no event while the task runs, so it is found by walking the
+/// three levels above `tasks/`. The newest match wins, in case a task id was
+/// ever reused across sessions. Ids that are not a plain token are refused so
+/// a hostile id cannot steer the lookup out of the tree.
 ///
 /// The temp directory is shared with every other user on the machine, so
 /// each level has to be ours and real: a directory or file owned by someone
-/// else, or reached through a symlink, is skipped, and the match must be a
+/// else, or reached through a symlink, is skipped, and a match must be a
 /// regular file. Otherwise anyone could plant a `claude-x` tree whose
 /// "output" is a link to a file only we can read, or a pipe that never ends.
-pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
+///
+/// A sub-agent is the one task whose output is a LINK: the CLI points
+/// `<id>.output` at `<projects>/<cwd slug>/<session>/subagents/agent-<id>.jsonl`.
+/// The link is still never followed, because the temp tree is shared.
+/// Instead the transcript is rebuilt from the slug and session this walk just
+/// proved are ours, under the CLI's own projects dir, and taken only when it
+/// is a regular file of ours (#3208). The dir is a parameter so a test can
+/// point at its own tree instead of the live one.
+pub fn claude_task_output_in(
+    temp: &std::path::Path,
+    projects: Option<&std::path::Path>,
+    id: &str,
+) -> Option<TaskOutput> {
     if id.is_empty()
         || !id
             .chars()
@@ -1434,7 +1593,7 @@ pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
             })
             .unwrap_or_default()
     };
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut best: Option<(std::time::SystemTime, TaskOutput)> = None;
     for root in dirs(temp) {
         let is_claude = root
             .file_name()
@@ -1450,17 +1609,80 @@ pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
                     continue;
                 }
                 let candidate = tasks.join(&file);
-                let Some(meta) = ours_and_real(&candidate).filter(|m| m.is_file()) else {
-                    continue;
+                let found = match ours_and_real(&candidate) {
+                    Some(meta) if meta.is_file() => Some((
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        TaskOutput::log(candidate),
+                    )),
+                    // A link is the sub-agent case: its output is the
+                    // transcript, and the link itself is never read.
+                    None if is_link(&candidate) => {
+                        let (Some(slug), Some(session_name)) =
+                            (cwd.file_name(), session.file_name())
+                        else {
+                            continue;
+                        };
+                        subagent_transcript(id, slug, session_name, projects).map(|path| {
+                            let at = std::fs::metadata(&path)
+                                .and_then(|m| m.modified())
+                                .unwrap_or(std::time::UNIX_EPOCH);
+                            (at, TaskOutput::transcript(path))
+                        })
+                    }
+                    _ => None,
                 };
-                let at = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                if best.as_ref().is_none_or(|(seen, _)| at > *seen) {
-                    best = Some((at, candidate));
+                if let Some((at, output)) = found
+                    && best.as_ref().is_none_or(|(seen, _)| at > *seen)
+                {
+                    best = Some((at, output));
                 }
             }
         }
     }
-    best.map(|(_, path)| path)
+    best.map(|(_, output)| output)
+}
+
+/// Whether `path` is a symlink, without following it.
+fn is_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Where the CLI keeps its projects tree.
+fn claude_projects_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir).join("projects"));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".claude").join("projects"))
+}
+
+/// The transcript of sub-agent `id`, rebuilt from the slug and session the
+/// temp walk proved are ours.
+///
+/// Every level is checked the way the temp tree is: ours, real, and not a
+/// link, so a planted projects tree cannot serve a file the agent would then
+/// read and show.
+fn subagent_transcript(
+    id: &str,
+    slug: &std::ffi::OsStr,
+    session: &std::ffi::OsStr,
+    projects: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let mut dir = projects?.to_path_buf();
+    if !ours_and_real(&dir).is_some_and(|m| m.is_dir()) {
+        return None;
+    }
+    for part in [slug, session, std::ffi::OsStr::new("subagents")] {
+        dir.push(part);
+        if !ours_and_real(&dir).is_some_and(|m| m.is_dir()) {
+            return None;
+        }
+    }
+    let file = dir.join(format!("agent-{id}.jsonl"));
+    ours_and_real(&file).filter(|m| m.is_file())?;
+    Some(file)
 }
 
 /// The metadata of `path` itself when it is not a symlink and, on unix,

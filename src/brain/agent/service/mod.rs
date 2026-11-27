@@ -5,6 +5,8 @@
 
 pub(crate) mod announcement_loop;
 pub(crate) mod background_tasks;
+// The GUI binary names a task's output, and this module is crate-private (#3208).
+pub use background_tasks::TaskOutput;
 pub mod boot_report;
 pub(crate) mod builder;
 pub(crate) mod clear;

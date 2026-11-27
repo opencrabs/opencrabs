@@ -16,7 +16,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::brain::agent::service::background_tasks::output_tail;
+use crate::brain::agent::service::background_tasks::{TaskOutput, output_tail};
 use crate::tui::app::App;
 use crate::tui::app::dialog_keys::{DialogScope, dialog_keys};
 use crate::tui::render::theme::{self, Role};
@@ -88,9 +88,9 @@ pub(super) fn render_tasks_overlay(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::default());
         let inner_height = area.height.saturating_sub(2) as usize;
         let rows = tail_rows(inner_height, tasks.len());
-        match task.output_path() {
-            Some(path) => {
-                let tail = output_tail(&path, rows);
+        match task.output() {
+            Some(output) => {
+                let tail = output_tail(&output, rows);
                 if tail.trim().is_empty() {
                     lines.push(Line::from(Span::styled("(no output yet)", dim)));
                 } else {
@@ -143,7 +143,7 @@ pub(crate) struct TaskDetail {
     /// Whether this process spawned the task and can therefore stop it.
     pub(crate) ours: bool,
     pub(crate) started: std::time::Instant,
-    pub(crate) path: Option<std::path::PathBuf>,
+    pub(crate) path: Option<TaskOutput>,
     /// Size and modification time at the last read: an unchanged file is not
     /// read again.
     pub(crate) stamp: Option<(u64, std::time::SystemTime)>,
@@ -344,19 +344,19 @@ impl App {
             d.confirm_stop = false;
         }
         if d.path.is_none() && running {
-            d.path = mgr.output_path_for(d.session, d.task);
+            d.path = mgr.output_for(d.session, d.task);
         }
-        let Some(path) = d.path.clone() else {
+        let Some(output) = d.path.clone() else {
             return;
         };
-        let stamp = std::fs::metadata(&path)
+        let stamp = std::fs::metadata(output.path())
             .ok()
             .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
         if stamp.is_some() && stamp == d.stamp {
             return;
         }
         d.stamp = stamp;
-        d.absorb(crate::brain::agent::service::background_tasks::output_history(&path));
+        d.absorb(crate::brain::agent::service::background_tasks::output_history(&output));
     }
 
     /// One key while the full view is open (see [`detail_key`]).

@@ -2442,19 +2442,19 @@ impl Dashboard {
             .is_some_and(|tail| tail.read_at.elapsed() < task_list::TAIL_TICK);
         if !fresh {
             let mgr = agent_bridge::bridge().and_then(|b| b.service.background_manager())?;
-            let path = self
+            let output = self
                 .task_tails
                 .get(&task)
                 .and_then(|tail| tail.path.clone())
-                .or_else(|| mgr.output_path_for(session, task));
-            let text = path
-                .as_deref()
-                .map(|p| SharedString::from(mgr.output_tail(p, task_list::TAIL_LINES)));
+                .or_else(|| mgr.output_for(session, task));
+            let text = output
+                .as_ref()
+                .map(|o| SharedString::from(mgr.output_tail(o, task_list::TAIL_LINES)));
             self.task_tails.insert(
                 task,
                 TaskTail {
                     read_at: std::time::Instant::now(),
-                    path,
+                    path: output,
                     text,
                 },
             );
@@ -2622,22 +2622,22 @@ impl Dashboard {
             detail.confirm_stop = false;
         }
         if detail.path.is_none() && running {
-            detail.path = mgr.output_path_for(detail.session, detail.task);
+            detail.path = mgr.output_for(detail.session, detail.task);
         }
-        let Some(path) = detail.path.clone() else {
+        let Some(output) = detail.path.clone() else {
             return;
         };
         // A file that has not changed is not read again: the read scrubs up
         // to half a megabyte, which is not worth doing once a second for a
         // task that is thinking.
-        let stamp = std::fs::metadata(&path)
+        let stamp = std::fs::metadata(output.path())
             .ok()
             .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
         if stamp.is_some() && stamp == detail.stamp {
             return;
         }
         detail.stamp = stamp;
-        detail.absorb(mgr.output_history(&path));
+        detail.absorb(mgr.output_history(&output));
     }
 
     /// One key while the full view holds the keyboard (see

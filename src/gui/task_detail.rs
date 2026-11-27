@@ -21,7 +21,6 @@
 //! button asks to stop, Enter or a second click confirms, Esc or the scrim
 //! goes back to the list, `c` or a click on the command block copies (#3209).
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{ClickEvent, IntoElement, ScrollHandle, SharedString, div, prelude::*, px, rgb};
@@ -64,7 +63,7 @@ pub(crate) struct TaskDetail {
     /// When the task started, so the header keeps counting.
     pub(crate) started: Instant,
     /// The file the output is read from, once it was found.
-    pub(crate) path: Option<PathBuf>,
+    pub(crate) path: Option<opencrabs::brain::agent::service::TaskOutput>,
     /// Size and modification time of the file at the last read. A file that
     /// has not changed is not read again.
     pub(crate) stamp: Option<(u64, SystemTime)>,
@@ -301,7 +300,7 @@ pub(crate) fn detail_modal(
 ) -> impl IntoElement {
     let pal = palette::current();
     let ended = detail.ended.is_some();
-    let path = detail.path.as_ref().map(|p| p.display().to_string());
+    let path = detail.path.as_ref().map(|p| p.path().display().to_string());
     let width = (viewport.0 - 64.0).clamp(320.0, 900.0);
     let out_height = (viewport.1 - 280.0).clamp(140.0, 560.0);
 
