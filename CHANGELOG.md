@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.1] - 2026-11-27
 
-754 commits since v0.6.0, 7 contributors. 438 files changed, +71,810 / -15,365 lines.
+803 commits since v0.6.0, 7 contributors. 462 files changed, +75,330 / -15,520 lines.
 
 This release teaches the window to talk and listen: voice messages land end to end in the desktop app, the Seeker grows a calculator and a liquid glass renderer, and crabs connect to crabs through the instance rail. The terminal gets a hint row, background tasks become visible and stoppable, and compaction stops eating turn markers.
 
@@ -64,6 +64,15 @@ This release teaches the window to talk and listen: voice messages land end to e
 - `b8f9b64f6` **The composer and the terminal walk the history the same way (#3188)**, and a pasted block stays one history entry (#3187)
 - `5f975c575` **A `/cd` moves a whole project and answers in its own chat (#3036)**, off the UI thread
 - `f9eaa200a` **A window restart hands a channel turn back to its chat (#3025)**
+- `93d1e9fe0` / `5d2a19694` / `7d44d144d` **A stream runs on two clocks, and a prefill cut retries on its own schedule (#3212, #3213)**: before the first chunk the budget is `max(stream_idle_timeout_secs, handshake budget, 120s)`, so a slow warm-up is not read as a dead connection, and the retry after that cut waits a quarter of the expired budget instead of the 1s transport backoff
+- `dffdec84f` **A stop that kills the turn still settles and reloads (#3216)**
+- `86aba6241` **The live card strips tool ledgers out of narration streams (#3217)**
+- `97e8162d5` **The window binary resolves `sanitize` through the lib crate (#3218)**
+- `5370ee0dc` / `ce539e04b` **The task detail view labels the payload statement and shows the full command (#3207)**
+- `8c81f22df` / `5694b3993` / `d4fd7a55f` **A drag on a task row copies its full running command (#3209)**
+- `8e55ae5fa` **A bash call's leftover processes are tracked and reported (#3219)**: survivors are anchored by pid, pgid and start time, then adopted into the task's roster, so detached work shows instead of vanishing
+- `23e7d9276` **A sub-agent task card shows its transcript (#3208)**: output falls back from the live log to the transcript, tool lines rendered the same way
+- `b203e893d` / `0789160e4` **A streaming spoken block is hidden on every live surface (#3222)**, and a spoken block that ends the reply leaves no blank lines under the last line
 
 ### 📖 Documentation
 
@@ -76,6 +85,7 @@ This release teaches the window to talk and listen: voice messages land end to e
 - `b2c834bf6` The `/clear` doc names provider fallback as a reason to clear (#3125)
 - `6cf615f91` The start guide says when the daily log file actually exists (#2933)
 - `812c8826a` README: the instance rail, the digit jump chord and the A2A session methods
+- `917627177` README: a stream runs on two clocks, and a prefill cut retries on its own (#3212, #3213)
 - `75f179135` SPONSORS: the November 21 and November 25 top-ups
 
 ### 🧹 Miscellaneous
@@ -108,9 +118,9 @@ This release teaches the window to talk and listen: voice messages land end to e
 
 ### 📊 Stats
 
-- 773 commits since v0.6.0
-- 453 files changed, +72,486 / -15,404 lines
-- 13,214 tests (13,214 passed, 0 failed, 34 ignored)
+- 803 commits since v0.6.0
+- 462 files changed, +75,330 / -15,520 lines
+- 13,262 tests (13,262 passed, 0 failed, 34 ignored)
 
 
 ## [0.6.0] - 2026-11-14
