@@ -386,6 +386,12 @@ jobs:
           set -euo pipefail
           echo "before: $(free -m | awk '/^Mem:/{print $2" MB ram, "$7" MB available"}')"
           echo "disk: $(df -h / | awk 'NR==2{print $4" free on /"}')"
+          # Hosted ubuntu-24.04 images now ship an ACTIVE /swapfile, and
+          # fallocate on an in-use swap inode fails with "Text file busy"
+          # (#3225, release run 46135309919). Retire it first so the new file
+          # lands on a fresh inode.
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile > /dev/null
