@@ -416,7 +416,24 @@ fn a_swap_rereads_every_rail_store_the_window_loads_at_boot() {
         fn_body(TOPICS, "refresh_topic_state"),
     ]
     .concat();
-    for name in boot {
+    // Reads that only pick the launch conversation, not a store the rail
+    // draws. A swap closes the open chat instead of picking one, so it has
+    // nothing to reread for these. Each entry names why it is exempt.
+    let boot_pick_only = [
+        // #3197: which ids still exist, for the saved layout's boot session.
+        "live_session_ids",
+    ];
+    for exempt in boot_pick_only {
+        assert!(
+            boot.contains(&exempt),
+            "`sessions::load_{exempt}` is no longer read at boot; drop it from the exemptions"
+        );
+        assert!(
+            !rereads.contains(&format!("sessions::load_{exempt}(")),
+            "`sessions::load_{exempt}` is reread on a swap now; drop it from the exemptions"
+        );
+    }
+    for name in boot.into_iter().filter(|n| !boot_pick_only.contains(n)) {
         assert!(
             rereads.contains(&format!("sessions::load_{name}(")),
             "`sessions::load_{name}` is read at boot and never again on a swap"
