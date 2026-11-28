@@ -102,9 +102,7 @@ pub fn list_processes() -> Vec<ProcEntry> {
             .args(["-A", "-o", "pid=,pgid=,lstart=,command="])
             .output();
         match out {
-            Ok(out) if out.status.success() => {
-                parse_ps(&String::from_utf8_lossy(&out.stdout))
-            }
+            Ok(out) if out.status.success() => parse_ps(&String::from_utf8_lossy(&out.stdout)),
             Ok(out) => {
                 tracing::debug!(
                     target: "background_task",

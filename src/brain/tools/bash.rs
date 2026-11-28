@@ -953,7 +953,6 @@ impl Tool for BashTool {
             }
         }
 
-
         // RTK metrics tracking: record that the command was rewritten.
         // We can't measure "original" tokens without running the command twice,
         // so we record the filtered output size. RTK's own `gain` command tracks
