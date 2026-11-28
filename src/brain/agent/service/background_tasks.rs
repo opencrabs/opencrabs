@@ -1504,10 +1504,7 @@ fn render_transcript(raw: &str) -> Vec<String> {
                             }
                         }
                         Some("tool_use") => {
-                            let name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("tool");
+                            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                             out.push(tool_line(name, item.get("input")));
                         }
                         // Thinking, tool results and anything else: hidden.
@@ -1531,9 +1528,16 @@ fn push_text(out: &mut Vec<String>, text: &str) {
 /// One `> Tool:` line for a tool call, with the shortest useful hint.
 fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
     let hint = input.and_then(|input| {
-        ["command", "description", "file_path", "path", "pattern", "query"]
-            .iter()
-            .find_map(|key| input.get(*key).and_then(|v| v.as_str()))
+        [
+            "command",
+            "description",
+            "file_path",
+            "path",
+            "pattern",
+            "query",
+        ]
+        .iter()
+        .find_map(|key| input.get(*key).and_then(|v| v.as_str()))
     });
     match hint.map(str::trim).filter(|hint| !hint.is_empty()) {
         Some(hint) => {

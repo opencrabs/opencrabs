@@ -946,7 +946,10 @@ fn a_claude_task_output_is_found_by_its_id() {
         claude_task_output_in(temp.path(), Some(temp.path()), "bh2o5pwot"),
         Some(TaskOutput::log(tasks.join("bh2o5pwot.output")))
     );
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "unknown"), None);
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "unknown"),
+        None
+    );
     assert_eq!(
         claude_task_output_in(temp.path(), Some(temp.path()), "zzz"),
         None,
@@ -975,7 +978,10 @@ fn a_claude_task_output_reached_through_a_link_is_refused() {
         .join("tasks");
     std::fs::create_dir_all(&tasks).expect("task dir");
     std::os::unix::fs::symlink(&secret, tasks.join("linked.output")).expect("link file");
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "linked"), None);
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "linked"),
+        None
+    );
 
     // A real file behind a linked directory.
     let real = temp.path().join("elsewhere");
@@ -984,11 +990,17 @@ fn a_claude_task_output_reached_through_a_link_is_refused() {
     let session = temp.path().join("claude-1000").join("cwd").join("other");
     std::fs::create_dir_all(&session).expect("session dir");
     std::os::unix::fs::symlink(&real, session.join("tasks")).expect("link dir");
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "behind"), None);
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "behind"),
+        None
+    );
 
     // A directory named like an output file is not one.
     std::fs::create_dir_all(tasks.join("folder.output")).expect("dir as file");
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "folder"), None);
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "folder"),
+        None
+    );
 }
 
 #[test]
@@ -998,9 +1010,18 @@ fn a_claude_task_id_cannot_steer_the_lookup_out_of_the_tree() {
     std::fs::create_dir_all(session.join("tasks")).expect("task dir");
     std::fs::write(session.join("secret.output"), "x").expect("write");
 
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "../secret"), None);
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), ""), None);
-    assert_eq!(claude_task_output_in(temp.path(), Some(temp.path()), "a/b"), None);
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "../secret"),
+        None
+    );
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), ""),
+        None
+    );
+    assert_eq!(
+        claude_task_output_in(temp.path(), Some(temp.path()), "a/b"),
+        None
+    );
 }
 
 /// A sub-agent's `.output` is a LINK to its transcript. The link itself is
@@ -1083,7 +1104,8 @@ fn a_transcript_that_is_itself_a_link_is_refused() {
     std::fs::create_dir_all(&subagents).expect("subagents dir");
     let secret = temp.path().join("secret.txt");
     std::fs::write(&secret, "token\n").expect("write secret");
-    std::os::unix::fs::symlink(&secret, subagents.join("agent-abc.jsonl")).expect("link transcript");
+    std::os::unix::fs::symlink(&secret, subagents.join("agent-abc.jsonl"))
+        .expect("link transcript");
     std::os::unix::fs::symlink(&secret, tasks.join("abc.output")).expect("link output");
 
     assert_eq!(
@@ -1109,8 +1131,7 @@ fn a_transcript_tail_reads_as_text_not_json() {
 
     let tail = output_tail(&TaskOutput::transcript(&path), 10);
     assert_eq!(
-        tail,
-        "Reading the file.\n> Tool: Read (/tmp/x.rs)\nDone.\nSecond line.",
+        tail, "Reading the file.\n> Tool: Read (/tmp/x.rs)\nDone.\nSecond line.",
         "agent text plus one line per tool call; thinking and tool results stay hidden"
     );
     assert!(
