@@ -8,7 +8,7 @@
 //! constructed rows so it holds on any machine, not only one whose live table
 //! happens to contain the shape.
 
-use opencrabs::utils::proc_snapshot::{ProcEntry, ProcId, is_alive, same_process};
+use crate::utils::proc_snapshot::{ProcEntry, ProcId, is_alive, same_process};
 
 #[test]
 fn a_reused_pid_is_not_the_tracked_process() {

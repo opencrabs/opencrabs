@@ -9,7 +9,7 @@ use crate::brain::agent::service::QueuedUserMessage;
 use crate::brain::agent::service::background_tasks::{
     BackgroundTaskManager, ClaudeTurnTasks, CmdResult, TaskOutput, TaskSource,
     claude_completion_message, claude_needs_survival_delivery, claude_task_label,
-    claude_task_output_from, clear_claude_mirrors_for_session, completion_message, format_elapsed,
+    claude_task_output_in, clear_claude_mirrors_for_session, completion_message, format_elapsed,
     output_tail, short_label, tail_lines,
 };
 // `run_detached`'s tests drive shell job control (`&`), so they are unix-only.
