@@ -1,3 +1,7 @@
+// Every slice below goes through `get`: find offsets and hex digit pairs are
+// boundary-safe by construction, and the byte-slice ratchet counts bare
+// indexing as a site (scripts/check-byte-slice-ratchet.py).
+
 //! The command palette's frost stand-in, read as source text.
 //!
 //! One test file per module it exercises, beside the module rather than at
@@ -24,7 +28,12 @@ fn the_glass_is_near_opaque_and_the_smoke_is_gone() {
         ("const PILL_CROWN: u32 = 0x06060a", 0xf2),
     ] {
         let at = src.find(name).expect("the tone exists");
-        let line = src[at..].lines().next().expect("one line");
+        let line = src
+            .get(at..)
+            .expect("find lands on a char boundary")
+            .lines()
+            .next()
+            .expect("one line");
         let alpha = line
             .split("0x")
             .nth(1)
@@ -46,11 +55,11 @@ fn the_pill_floor_and_the_card_ceiling_are_one_tone() {
     let src = include_str!("../command_palette.rs");
     let floor = src
         .find("const PILL_FILL: u32 = 0x")
-        .map(|at| &src[at..])
+        .and_then(|at| src.get(at..))
         .expect("the pill's floor tone exists");
     let ceiling = src
         .find("const GLASS_TOP: u32 = 0x")
-        .map(|at| &src[at..])
+        .and_then(|at| src.get(at..))
         .expect("the card's ceiling tone exists");
     let tone_of = |line: &str| -> String {
         line.split("0x")
@@ -69,7 +78,7 @@ fn the_pill_floor_and_the_card_ceiling_are_one_tone() {
     );
     let crown = src
         .find("const PILL_CROWN: u32 = 0x")
-        .map(|at| &src[at..])
+        .and_then(|at| src.get(at..))
         .expect("the pill's crown tone exists");
     let luminance = |line: &str| -> u32 {
         let hex = line
@@ -79,9 +88,9 @@ fn the_pill_floor_and_the_card_ceiling_are_one_tone() {
             .get(..6)
             .expect("rgb")
             .to_string();
-        let r = u32::from_str_radix(&hex[0..2], 16).expect("hex");
-        let g = u32::from_str_radix(&hex[2..4], 16).expect("hex");
-        let b = u32::from_str_radix(&hex[4..6], 16).expect("hex");
+        let r = u32::from_str_radix(hex.get(0..2).expect("rgb"), 16).expect("hex");
+        let g = u32::from_str_radix(hex.get(2..4).expect("rgb"), 16).expect("hex");
+        let b = u32::from_str_radix(hex.get(4..6).expect("rgb"), 16).expect("hex");
         r + g + b
     };
     assert!(
