@@ -9,7 +9,6 @@
 //! Every failure has to reach the user: a create that quietly leaves a local
 //! row behind, or that does nothing at all, is the bug being fixed.
 
-use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Create a forum topic when `parent` is a Telegram forum.
@@ -19,48 +18,18 @@ use uuid::Uuid;
 /// keeps its ordinary local topic behaviour. `Err` means it IS a forum and the
 /// create failed: show it, never fall back to a local row.
 ///
-/// The work runs on its own thread with its own runtime for the same reason
-/// the rest of `sessions` does: the Bot API call is network-bound and the
-/// window must not wait on it inside a draw.
+/// The work runs on the backend's worker lane (`CreateForumTopic`): the Bot
+/// API call is network-bound and the window must not wait on it inside a draw.
 #[cfg(feature = "telegram")]
 pub async fn create_forum_topic_if_forum(
-    db_path: PathBuf,
+    backend: crate::backend_glue::Backend,
     parent: Uuid,
     name: String,
 ) -> Result<Option<Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("forum-topic-create".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt.block_on(async move {
-                    let db = match opencrabs::db::Database::connect(&db_path).await {
-                        Ok(db) => db,
-                        Err(e) => return Err(format!("{e:#}")),
-                    };
-                    opencrabs::channels::telegram::topic_create::create_forum_topic_session(
-                        db.pool(),
-                        parent,
-                        &name,
-                    )
-                    .await
-                    .map(|created| created.map(|topic| topic.session))
-                }),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("forum topic create thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("forum topic create thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::telegram_topics::CreateForumTopic { parent, name })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// A build without the Telegram channel has no forum to create a topic in, so
@@ -68,7 +37,7 @@ pub async fn create_forum_topic_if_forum(
 /// shape rather than a `cfg` at every call site.
 #[cfg(not(feature = "telegram"))]
 pub async fn create_forum_topic_if_forum(
-    _db_path: PathBuf,
+    _backend: crate::backend_glue::Backend,
     _parent: Uuid,
     _name: String,
 ) -> Result<Option<Uuid>, String> {

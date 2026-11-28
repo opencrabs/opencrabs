@@ -1,0 +1,29 @@
+{
+  "op": "projects.list",
+  "scope": "a2a:read",
+  "request": {
+    "detail": null
+  },
+  "response": {
+    "Ok": {
+      "rows": [
+        {
+          "project": {
+            "id": "3c1d2e4f-0000-4000-8000-000000000001",
+            "name": "crab",
+            "description": null,
+            "repo_remote": null,
+            "created_at": "2026-11-25T00:00:00Z",
+            "updated_at": "2026-11-25T00:00:00Z"
+          },
+          "sessions": 2,
+          "files": 0
+        }
+      ],
+      "detail": null,
+      "unassigned": [],
+      "assignable": [],
+      "notice": null
+    }
+  }
+}

@@ -48,10 +48,18 @@ fn the_editor_is_keyed_by_the_session_that_asked() {
         "the window no longer keeps one editor per conversation, so a split \
          would share buffers between panes"
     );
+    // The window reads the session's directory through the crab it holds
+    // (`Backend::facts`), never through the service directly; the facts carry
+    // the service's own per-session lookup, pinned on the library side.
     assert!(
-        src.contains("get_working_directory_for_session"),
+        src.contains(".facts(Some(session))"),
         "the session cwd lookup is gone, so a relative `!vi notes.md` would \
          read the process launch directory instead of the conversation's own"
+    );
+    assert!(
+        include_str!("../../backend/facts.rs")
+            .contains("working_directory: service.get_working_directory_for_session(id)"),
+        "the facts no longer carry the session's own working directory"
     );
     // The dialog's own module must never reach for the process launch
     // directory: each session owns its own `/cd` path, and the launch
@@ -63,8 +71,8 @@ fn the_editor_is_keyed_by_the_session_that_asked() {
         .expect("the editor dialog module left the window's source concat");
     let body = &DASHBOARD[module..];
     assert!(
-        body.contains("let cwd = agent_bridge::bridge()"),
-        "the editor resolves paths without the session bridge"
+        body.contains("let cwd = self.session_cwd("),
+        "the editor resolves paths without the session's own directory"
     );
     assert!(
         !body.contains(["launch", "_cwd()"].concat().as_str()),

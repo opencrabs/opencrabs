@@ -74,6 +74,11 @@ pub(crate) fn run() {
     // later fetch reuses it instead of re-running `Config::load` on a
     // tiny-stack background thread.
     let db_path = ledger_path();
+    // This process's own crab (F4): one `Ctx` on that ledger, recorded as the
+    // primary so the bootstrap can hand it the window's agent service.
+    let ctx = std::sync::Arc::new(opencrabs::backend::Ctx::new(db_path));
+    opencrabs::backend::set_primary(ctx.clone());
+    let backend = backend_glue::Backend::Local(ctx);
     // Agent bootstrap (task 5) starts before the window: provider, tool
     // registry, brain files and a fresh session build on a 4 MB thread and
     // report through the channel the Dashboard drains on its poll tick.
@@ -96,17 +101,17 @@ pub(crate) fn run() {
             let _ = agent_sink.send(agent_bridge::TurnEvent::BootstrapFailed(e));
         }
     }
-    let state = futures::executor::block_on(load_view(db_path.clone(), Period::AllTime));
-    let session_list = futures::executor::block_on(sessions::load_sessions(db_path.clone()));
+    let state = futures::executor::block_on(load_view(backend.clone(), Period::AllTime));
+    let session_list = futures::executor::block_on(sessions::load_sessions(backend.clone()));
     // Which hints the reader has hidden, read before the first frame so a
     // dismissed line never flashes in and out (#3121). A read that fails shows
     // every hint rather than none: a repeated hint is a small annoyance, a
     // silently empty card is a feature that looks broken.
-    let hint_dismissed = hint_dismiss::load(db_path.clone());
+    let hint_dismissed = hint_dismiss::load(backend.clone());
     // The pinned set is a sidecar table, so it is its own read. A failure
     // leaves the rail unpinned rather than hiding the conversations.
     let favorites: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_favorites(db_path.clone()))
+        futures::executor::block_on(sessions::load_favorites(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("favorites load: {e}"));
                 Vec::new()
@@ -115,7 +120,7 @@ pub(crate) fn run() {
             .collect();
     // Topics are opt-in per session, read as their own set (#2302).
     let topics: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_topics(db_path.clone()))
+        futures::executor::block_on(sessions::load_topics(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("topics load: {e}"));
                 Vec::new()
@@ -124,7 +129,7 @@ pub(crate) fn run() {
             .collect();
     // Closed topics are dimmed and refuse turns, so their set is read up front (#2305).
     let closed: std::collections::HashSet<uuid::Uuid> =
-        futures::executor::block_on(sessions::load_closed(db_path.clone()))
+        futures::executor::block_on(sessions::load_closed(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("closed load: {e}"));
                 Vec::new()
@@ -133,7 +138,7 @@ pub(crate) fn run() {
             .collect();
     // Which topic sits under which session, so the rail can group them (#2303).
     let parents: std::collections::HashMap<uuid::Uuid, uuid::Uuid> =
-        futures::executor::block_on(sessions::load_topic_parents(db_path.clone()))
+        futures::executor::block_on(sessions::load_topic_parents(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("topic parents load: {e}"));
                 Vec::new()
@@ -145,14 +150,16 @@ pub(crate) fn run() {
     // every tab drew its name alone until the owner touched a topic: the
     // "topic icons vanished" bug. The rows are already in the database; they
     // just were never read on the way in.
-    let topic_icons: std::collections::HashMap<uuid::Uuid, String> =
-        futures::executor::block_on(sessions::load_topic_icons(db_path.clone()))
-            .unwrap_or_else(|e| {
+    // An image icon keeps the file the crab named, so a remote crab's
+    // picture is fetched from that crab, not looked up in this window's store.
+    let (topic_icons, topic_icon_files) = sessions::split_topic_icons(
+        futures::executor::block_on(sessions::load_topic_icons(backend.clone())).unwrap_or_else(
+            |e| {
                 logging::error(&format!("topic icons load: {e}"));
                 Vec::new()
-            })
-            .into_iter()
-            .collect();
+            },
+        ),
+    );
     let sessions_state = match session_list {
         Ok(items) => sessions::SessionsState {
             items,
@@ -161,6 +168,7 @@ pub(crate) fn run() {
             parents: parents.clone(),
             closed: closed.clone(),
             topic_icons: topic_icons.clone(),
+            topic_icon_files: topic_icon_files.clone(),
             topic_titles: HashMap::new(),
             previews: HashMap::new(),
             selected: None,
@@ -181,6 +189,7 @@ pub(crate) fn run() {
             parents,
             closed,
             topic_icons,
+            topic_icon_files,
             topic_titles: HashMap::new(),
             previews: HashMap::new(),
             selected: None,
@@ -199,7 +208,7 @@ pub(crate) fn run() {
     // thread, and put back once the conversation is open: the chat's leaf has
     // to exist before the tree can agree with it. Nothing is drawn from it
     // until then, so a stale or unreadable file costs one log line.
-    let saved_layout = layout_store::load(&layout_store::path());
+    let saved_layout = layout_store::load(&layout_store::path_for(None));
     // The frame that file remembers (#3082). Kept beside the tree because
     // `restore_layout` consumes the tree, and the boot needs the frame before
     // the window exists.
@@ -225,7 +234,7 @@ pub(crate) fn run() {
     // falls back to the rail's page, which is the old behaviour, never to an
     // empty set that would blank the window.
     let known: std::collections::HashSet<Uuid> =
-        futures::executor::block_on(sessions::load_live_session_ids(db_path.clone()))
+        futures::executor::block_on(sessions::load_live_session_ids(backend.clone()))
             .unwrap_or_else(|e| {
                 logging::error(&format!("live session ids load: {e}"));
                 sessions_state.items.iter().map(|item| item.id).collect()
@@ -310,18 +319,6 @@ pub(crate) fn run() {
                     let history_path = history_path.clone();
                     move |cx| editor::Editor::new_with_history(history, history_path, cx)
                 });
-                // The remote panel's field, built here beside the chat's so
-                // both walk the same history: a message typed to another crab
-                // is recalled the way one typed to this one is. It is a real
-                // `Editor`, not a `TextField`, because the panel used to paint
-                // its own spans and a fake caret, and a remote question could
-                // not be edited, selected or multi-lined the way a local one
-                // can (#3133).
-                let remote_editor = cx.new({
-                    let history = history.clone();
-                    let history_path = history_path.clone();
-                    move |cx| editor::Editor::new_with_history(history, history_path, cx)
-                });
                 // A drag-copied range lands on the clipboard inside the
                 // transcript, which cannot see the composer. The dashboard owns
                 // both halves, so it is the one that turns a landed copy into
@@ -338,9 +335,16 @@ pub(crate) fn run() {
                 let view = cx.new(move |cx: &mut Context<Dashboard>| {
                     // Enter on the editor is a send: routed into the agent
                     // turn path on the Dashboard itself.
-                    cx.subscribe(&editor, |this, _editor, event, cx| match event {
-                        editor::EditorEvent::Sent(text) => {
-                            this.send_message(text.clone(), cx);
+                    cx.subscribe(&editor, |this, field, event, cx| match event {
+                        // The files go to the crab first; the text that
+                        // reaches the turn names the crab's copies (P8).
+                        editor::EditorEvent::Sent(outgoing) => {
+                            this.send_carried(
+                                outgoing.clone(),
+                                field.downgrade(),
+                                |this, text, cx| this.send_message(text, cx),
+                                cx,
+                            );
                         }
                         // A chip's thumbnail opens the same overlay a
                         // transcript tile opens: one preview, one code path.
@@ -364,16 +368,6 @@ pub(crate) fn run() {
                         }
                     })
                     .detach();
-                    // Enter in the remote field is a send to the other crab,
-                    // the same event the chat's own field emits. One path for
-                    // the key and the "enviar" button, so the two cannot
-                    // disagree about what is being sent.
-                    cx.subscribe(&remote_editor, |this, _editor, event, cx| {
-                        if let editor::EditorEvent::Sent(text) = event {
-                            this.send_remote_text(text.clone(), cx);
-                        }
-                    })
-                    .detach();
                     // The poll tick: drains bridge events onto the UI thread
                     // at a fixed cadence. Exits when the view dies.
                     cx.spawn(async move |this, cx| {
@@ -387,37 +381,45 @@ pub(crate) fn run() {
                         }
                     })
                     .detach();
-                    // The channel chip's slow probe (#2452): one lock-dir read
-                    // every few seconds, all of it off the UI thread. Exits
-                    // with the view like every other loop here. The names are
-                    // read from the config ONCE, here on the UI thread; the
-                    // worker never calls Config::load (SIGILL, 2026-11-03).
+                    // The channel chip's slow probe (#2452): one lock read
+                    // every few seconds, asked of the crab the window holds.
+                    // The names are the crab's own configured channels, read
+                    // once here and again whenever the crab or its config
+                    // changes; the probe never asks the crab for its config.
                     let chip_names: Vec<String> = {
-                        let names: Vec<String> = configured_channels()
-                            .iter()
-                            .map(|c| c.name().to_string())
-                            .collect();
+                        let names = crate::channel_chip::channel_names(
+                            &futures::executor::block_on(configured_channels(backend.clone())),
+                        );
                         logging::info(&format!(
                             "channel chip probe up: {} configured channel(s)",
                             names.len()
                         ));
                         names
                     };
-                    let probe_names = chip_names.clone();
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_secs(5))
                                 .await;
-                            // Each tick's future owns a copy: spawned work
-                            // must be 'static and may outlive the tick.
-                            let names = probe_names.clone();
-                            let line = cx
-                                .background_executor()
-                                .spawn(async move { channel_chip_line_from(&names) })
-                                .await;
+                            // The crab on screen, read each tick: a swap hands
+                            // the next tick the new crab and its names.
+                            let Ok((backend, epoch, names)) = this.update(cx, |this, _cx| {
+                                (
+                                    this.backend.clone(),
+                                    this.instance_epoch,
+                                    this.chip_channel_names.clone(),
+                                )
+                            }) else {
+                                break;
+                            };
+                            let line = channel_chip_line_from(backend, names).await;
                             if this
                                 .update(cx, |this, cx| {
+                                    // A swap while the read was out: the
+                                    // answer is the crab the window left.
+                                    if this.instance_epoch != epoch {
+                                        return;
+                                    }
                                     if this.channel_chip != line {
                                         logging::info(&format!(
                                             "channel chip -> {}",
@@ -441,7 +443,7 @@ pub(crate) fn run() {
                     // aggregate per tick, with the full refetch paid only when
                     // that aggregate moved, keeps this clear of the per-frame
                     // ledger reads #2817 removed.
-                    let rail_db = db_path.clone();
+                    let rail_db = backend.clone();
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
@@ -485,8 +487,11 @@ pub(crate) fn run() {
                     // weak handle back so a strip that outlives the window
                     // simply stops asking.
                     let strip_owner = cx.entity().downgrade();
-                    let instance_strip =
-                        cx.new(move |cx| instance_strip::InstanceStrip::new(strip_owner, cx));
+                    let instance_card = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let instance_strip = cx.new({
+                        let instance_card = instance_card.clone();
+                        move |cx| instance_strip::InstanceStrip::new(strip_owner, instance_card, cx)
+                    });
                     Dashboard {
                         screen: Screen::Chat,
                         last_screen: Screen::Chat,
@@ -512,7 +517,9 @@ pub(crate) fn run() {
                         seeker_voice_looping: false,
                         seeker_voice_error: None,
                         chip_channel_names: chip_names,
-                        channel_chip: channel_chip_line(),
+                        channel_chip: futures::executor::block_on(channel_chip_line(
+                            backend.clone(),
+                        )),
                         daemon_starting: false,
                         daemon_error: None,
                         pending: 0,
@@ -533,14 +540,18 @@ pub(crate) fn run() {
                         window_frame: saved_window,
                         window_frame_seen: saved_window,
                         window_frame_saved: saved_window,
-                        db_path: db_path.clone(),
+                        backend: backend.clone(),
+                        home_backend: backend.clone(),
+                        hello: None,
                         hint_dismissed,
                         sessions: sessions_state,
                         rail: rail_activity::RailActivity::default(),
                         rail_index: rail_activity::PlanIndex::default(),
                         rail_seen: rail_activity::SeenPlans::load(Some(
-                            opencrabs::config::opencrabs_home().join("rail_seen.json"),
+                            rail_activity::seen_path_for(None),
                         )),
+                        layout_crab: None,
+                        crab_windows: layout_store::CrabWindows::default(),
                         preview_refreshed_at: None,
                         previews_in_flight: std::rc::Rc::new(std::cell::Cell::new(0)),
                         previews_dirty: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -719,16 +730,11 @@ pub(crate) fn run() {
                         instances: instances::Instances::default(),
                         instance_rail,
                         instance_strip,
-                        instance_pairing: None,
-                        instance_menu_at: None,
-                        instance_menu_for: None,
-                        instance_share: None,
-                        instance_glyph: None,
-                        instance_remote: None,
+                        instance_card,
+                        crabs_open: false,
+                        instance_probing: false,
                         instance_error: None,
-                        remote_transcript: None,
-                        remote_editor,
-                        remote_new: false,
+                        instance_epoch: 0,
                         composer: chat_leaf::Composer::new(editor),
                         history: dashboard_history,
                         agent_rx,
@@ -741,6 +747,8 @@ pub(crate) fn run() {
                         ctx_max: 0,
                         metrics: chat_leaf::Metrics::default(),
                         footer_dir: None,
+                        remote_watch: None,
+                        approvals: Default::default(),
                     }
                 });
                 // Local transcript targets open in this window's preview;
@@ -831,15 +839,19 @@ pub(crate) fn run() {
                     view.update(cx, |this, cx| this.open_session(id, cx));
                 }
                 // The crabs this window knows, read once here on the UI
-                // thread, and the probe loop that keeps their dots honest. A
-                // missing store is an empty strip: a fresh install has no
-                // remotes and must not open with a banner. The rail is opt-in
+                // thread, the probe loop that keeps their dots honest, and the
+                // handshake with the crab the window starts on. A missing
+                // store is an empty strip: a fresh install has no remotes and
+                // must not open with a banner. The rail is opt-in
                 // (#3178): with the gate off neither the store read nor the
                 // probe loop runs, so a user without the feature never pays
-                // for it.
+                // for it. The handshake is with this window's own crab, so it
+                // runs either way.
                 view.update(cx, |this, cx| {
+                    this.fetch_hello(cx);
                     if this.instance_rail {
                         this.load_instances(cx);
+                        this.instance_probing = true;
                         Dashboard::spawn_instance_probe(cx);
                     }
                 });

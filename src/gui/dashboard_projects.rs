@@ -98,7 +98,7 @@ impl Dashboard {
         self.projects.notice = None;
         self.projects.next_generation();
         let generation = self.projects.generation;
-        let db_path = self.db_path.clone();
+        let db_path = self.backend.clone();
         let membership_update = match &action {
             ProjectAction::AssignMany {
                 project_id,

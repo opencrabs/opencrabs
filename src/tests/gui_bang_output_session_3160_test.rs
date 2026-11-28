@@ -111,7 +111,16 @@ fn the_runner_hands_the_session_to_the_event() {
         params.contains("session: Option<Uuid>"),
         "the runner must take the session the command runs in (#3160)"
     );
-    let body = function_body(src, "pub fn spawn(").expect("its body is closed");
+    // This branch routes the command through the window's backend, and
+    // every answer (refusal or output) leaves through one `deliver`, which is
+    // where the shaped event is built. The runner hands it the session.
+    let runner = function_body(src, "pub fn spawn(").expect("its body is closed");
+    assert!(
+        runner.contains("deliver(&sink, session,")
+            && runner.contains("deliver(&done_sink, session,"),
+        "the runner must hand its session to every answer it sends (#3160)"
+    );
+    let body = function_body(src, "fn deliver(").expect("its body is closed");
     assert!(
         body.contains("TurnEvent::BangOutput {"),
         "the runner must send the shaped event (#3160)"
@@ -136,7 +145,13 @@ fn the_pane_runs_the_command_in_its_own_session() {
     let src = production(DASHBOARD_TURNS);
     let body = function_body(src, "pub(crate) fn send_from_pane(").expect("its body is closed");
     assert!(
-        body.contains("bang::spawn(cmd.to_string(), Some(session),"),
+        // The backend comes first on this branch: the command runs on the
+        // crab the window holds. Whitespace folded, so rustfmt's line breaks
+        // do not decide the test.
+        body.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("bang::spawn( &self.backend, cmd.to_string(), Some(session),"),
         "a pane's command must run in that pane's session (#3160)"
     );
     assert!(
@@ -151,7 +166,7 @@ fn the_window_names_the_conversation_it_ran_the_command_in() {
     let body =
         function_body(src, "pub(crate) fn send_message_showing(").expect("its body is closed");
     assert!(
-        body.contains("bang::spawn(cmd.to_string(), session,"),
+        body.contains("bang::spawn(&self.backend, cmd.to_string(), session,"),
         "the window's command must carry the session it ran in (#3160)"
     );
     assert!(

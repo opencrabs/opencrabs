@@ -56,11 +56,18 @@ impl Dashboard {
     /// frame. Everything else on the window already reads `Config::current()`,
     /// which the reload swapped in place.
     fn refresh_from_config(&mut self, config: &Config, cx: &mut Context<Self>) {
+        // The file that reloaded is this machine's. Its channels are the
+        // chip's only while the window holds this machine's crab: a crab
+        // elsewhere keeps the names its own reply gave.
+        let this_machine = self
+            .backend
+            .lacks(opencrabs::backend::cap::Cap::Setup)
+            .is_none();
         let names: Vec<String> = configured_channels_from(config)
             .iter()
             .map(|channel| channel.name().to_string())
             .collect();
-        if names != self.chip_channel_names {
+        if this_machine && names != self.chip_channel_names {
             logging::info(&format!(
                 "config reload: {} configured channel(s)",
                 names.len()
@@ -74,16 +81,21 @@ impl Dashboard {
         // Seeker reads the live channels when it opens. While it is open it has
         // to be told, or its hint keeps saying "not set up" for a channel that
         // was just configured (#2462).
-        if self.finder.is_some() {
+        if this_machine && self.finder.is_some() {
             self.finder_channels = configured_channels_from(config);
         }
         // A hand edit or an agent write while the modal is open: re-read the
-        // rows. The cursor, the open section and any credential being typed are
-        // left alone, so a reload never moves the reader's place.
+        // rows from the crab the window holds, not from this machine's file.
+        // The cursor, the open section, the status line and any credential
+        // being typed are left alone, so a reload never moves the reader's
+        // place.
         if self.settings_open {
-            self.settings_values = settings_view::current_values(config);
-            self.settings_creds = settings_view::credential_rows(config);
+            self.reload_settings(cx);
         }
+        // `[gui] instance_rail` is a window preference read from this
+        // machine's file whichever crab the window holds: a hand edit flips
+        // the strip the same way the settings switch does.
+        self.set_instance_rail(config.gui.instance_rail, cx);
         cx.notify();
     }
 }

@@ -32,6 +32,9 @@ const EDITOR: &str = include_str!("../gui/editor.rs");
 const VOICE_INPUT: &str = include_str!("../gui/voice_input.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+const TURN: &str = include_str!("../backend/turn.rs");
+const SPEAK: &str = include_str!("../backend/speak.rs");
+const VOICE: &str = include_str!("../backend/voice.rs");
 const TRANSCRIPT: &str = include_str!("../gui/transcript.rs");
 const FINDER: &str = include_str!("../gui/dashboard_finder.rs");
 const IMAGE_UTILS: &str = include_str!("../utils/image.rs");
@@ -276,25 +279,40 @@ fn the_agent_reads_the_words_and_the_row_keeps_the_clip() {
 /// A take and a reply live in the same folder, so the name is the only thing
 /// that tells them apart. Without the prefix the player would offer the agent's
 /// own voice back to the microphone.
+///
+/// The crab keeps both clips (P4), so the names live with the crab's writer
+/// and the window reads a take by the crab's own prefix.
 #[test]
 fn a_recording_and_a_spoken_reply_keep_different_names() {
     let input = VOICE_INPUT;
     assert!(
-        input.contains("const RECORDING_PREFIX: &str = \"voice-\";"),
+        VOICE.contains("const RECORDING_PREFIX: &str = \"voice-\";"),
         "a take is named for what it is"
     );
     assert!(
-        input.contains("const REPLY_PREFIX: &str = \"reply-\";"),
+        VOICE.contains("const REPLY_PREFIX: &str = \"reply-\";"),
         "an answer is named for what it is"
     );
-    let recording = region_in(input, "pub(crate) fn is_recording(", "/// Write one take");
+    assert!(
+        !input.contains("const RECORDING_PREFIX"),
+        "the window reads a take by the name the crab gave it, not a copy of it"
+    );
+    let recording = region_in(
+        input,
+        "pub(crate) fn is_recording(",
+        "/// The stack the transcription thread runs on.",
+    );
     assert!(
         recording.contains(".starts_with(RECORDING_PREFIX)"),
         "only a take counts as a recording, and the folder alone cannot say so"
     );
-    let reply = region_in(input, "pub(crate) fn save_reply_audio(", "fn write_clip(");
+    let reply = region_in(
+        VOICE,
+        "async fn keep_reply(",
+        "/// The folder a clip belongs in",
+    );
     assert!(
-        reply.contains("write_clip(ogg, REPLY_PREFIX, session)"),
+        reply.contains("write_clip(ctx, ogg, REPLY_PREFIX, Some(session_id))"),
         "the synthesized answer is written under the reply prefix"
     );
 }
@@ -306,20 +324,27 @@ fn a_recording_and_a_spoken_reply_keep_different_names() {
 /// showed. The folder is now the session's project attachments dir, through the
 /// same resolver every other attachment uses, and only a session with no
 /// project falls back to `voice/`.
+///
+/// The folder is the crab's (P4): its ledger says which project a session
+/// belongs to and its disk keeps the clip, so the rule lives with the crab's
+/// writer and the window sends the session with the take.
 #[test]
 fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
     let input = VOICE_INPUT;
-    let clip_dir = region_in(input, "fn clip_dir(", "/// Write one take");
+    let clip_dir = region_in(VOICE, "async fn clip_dir(", "/// Write one finished clip");
     assert!(
-        clip_dir.contains("project_clip_dir(session)"),
+        clip_dir.contains("project_clip_dir(ctx, session)"),
         "the project folder is asked for first"
     );
     assert!(
-        clip_dir
-            .contains(".unwrap_or_else(|| opencrabs::config::opencrabs_home().join(VOICE_DIR))"),
+        clip_dir.contains(".unwrap_or_else(|| crate::config::opencrabs_home().join(VOICE_DIR))"),
         "a session with no project still has somewhere to put its take"
     );
-    let resolve = region_in(input, "fn project_clip_dir(", "/// Write one take");
+    let resolve = region_in(
+        VOICE,
+        "async fn project_clip_dir(",
+        "/// Write one finished clip",
+    );
     assert!(
         resolve.contains("FileService::new"),
         "the clip goes where every other attachment goes, through the file service"
@@ -329,18 +354,32 @@ fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
         "the attachments dir is the project's own resolver, not a second guess at the slug"
     );
     assert!(
-        resolve.contains("global_pool()"),
-        "the capture thread reuses the process's open pool instead of connecting again"
+        resolve.contains("ctx.database()"),
+        "the crab reuses its own open ledger instead of connecting again"
     );
+    // The window neither hears the take nor resolves its folder itself: both
+    // are the crab's, so a remote crab's take never touches this machine's
+    // keys or ledger.
+    for gone in ["transcribe_with_language", "global_pool()"] {
+        assert!(
+            !input.contains(gone),
+            "the window hears and keeps nothing itself: {gone}"
+        );
+    }
     // The capture path has to hand the session down, or the resolver above has
     // nothing to resolve: the take is transcribed on its own thread.
     assert!(
         input.contains("pub(crate) fn start(recording: Recording, session: Option<Uuid>) -> Self"),
         "the transcription job carries the conversation it belongs to"
     );
+    let send = region_in(
+        input,
+        "pub(crate) fn transcribe(",
+        "/// Have the crab hear one take and keep nothing",
+    );
     assert!(
-        input.contains("save_voice_note(&recording.pcm, session)"),
-        "the save is told which conversation the take came from"
+        send.contains("VoiceTranscribe {") && send.contains("session_id: session,"),
+        "the crab is told which conversation the take came from"
     );
     assert!(
         editor("voice_input::Transcription::start(", "));").contains("self.session"),
@@ -348,14 +387,23 @@ fn a_take_lands_in_its_project_and_falls_back_to_the_voice_folder() {
     );
     let speak = region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}");
     assert!(
-        speak.contains("save_reply_audio(&audio, Some(session_id))"),
+        speak.contains("voice::VoiceSpeak {") && speak.contains("session_id,"),
+        "the window asks the crab to speak for the session"
+    );
+    assert!(
+        region_in(
+            VOICE,
+            "async fn keep_reply(",
+            "/// The folder a clip belongs in"
+        )
+        .contains("write_clip(ctx, ogg, REPLY_PREFIX, Some(session_id))"),
         "a spoken answer lands beside the take that asked for it"
     );
     // A take is now readable from two homes, so the folder test admits both.
     let recording = region_in(
         input,
         "pub(crate) fn is_recording(",
-        "/// The folder a clip",
+        "/// The stack the transcription thread runs on.",
     );
     assert!(
         recording.contains("ProjectService::projects_dir()"),
@@ -582,20 +630,42 @@ fn a_spoken_turn_is_answered_aloud() {
         "no session keyed flag is left for a later turn to inherit"
     );
     let speak = region_in(AGENT_BRIDGE, "pub fn spawn_speak_reply(", "\n}");
+    // The crab speaks since P4: the window asks `voice.speak`, and the op
+    // synthesizes, keeps the clip and marks the row on the crab.
     assert!(
-        speak.contains("channels::voice::synthesize"),
-        "the window speaks through the same synthesis the channels use"
+        speak.contains("voice::VoiceSpeak {"),
+        "the window has the crab it holds speak the answer"
+    );
+    let spoken = region_in(
+        VOICE,
+        "impl Op for VoiceSpeak",
+        "/// Keep a synthesized answer",
     );
     assert!(
-        speak.contains("save_reply_audio"),
+        spoken.contains("channels::voice::synthesize"),
+        "the crab speaks through the same synthesis the channels use"
+    );
+    assert!(
+        spoken.contains("keep_reply(ctx, session_id, &audio)"),
         "the answer is saved beside the take so the row can play it"
     );
+    // The row is the crab's since L10: the marker is written by the backend,
+    // with the path the crab itself wrote.
     assert!(
-        speak.contains("<<AUD:{}>>"),
+        region_in(
+            VOICE,
+            "async fn keep_reply(",
+            "/// The folder a clip belongs in"
+        )
+        .contains("super::speak::attach_marker(ctx, session_id, &path)"),
+        "the crab puts the clip on the row through the backend"
+    );
+    assert!(
+        SPEAK.contains("<<AUD:{}>>"),
         "the answer row carries its clip the way a recording does"
     );
     assert!(
-        speak.contains("tts_enabled"),
+        speak.contains("tts_enabled") && spoken.contains("tts_enabled"),
         "a profile with no synthesis engine answers in text, as it does on Telegram"
     );
     // The synthesis needs a stack of its own: gpui workers are far too small
@@ -636,7 +706,7 @@ fn a_text_turn_never_inherits_a_voice_answer() {
     );
     // A drifting model that writes a spoken block on a text turn is stripped
     // here, before the settle draws the answer.
-    let settle = region_in(AGENT_BRIDGE, "match outcome {", "Err(e) =>");
+    let settle = region_in(TURN, "match outcome {", "Err(e) =>");
     assert!(
         settle.contains("spoken::visible(&response.content)"),
         "a reply on a text turn is drawn without its spoken block"

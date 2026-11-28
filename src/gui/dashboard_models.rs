@@ -6,6 +6,42 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use opencrabs::backend::BackendError;
+use opencrabs::backend::Op;
+use opencrabs::backend::cap;
+use opencrabs::backend::models::{CatalogueProvider, ModelCatalogue, ModelDiscover};
+
+/// The identity the catalogue read holds in `models_fetch_lifecycle` while
+/// it is in flight. No discovery request carries it: a provider's index is
+/// its place in the selector or the catalogue, far below this.
+const CATALOGUE_SLOT: usize = usize::MAX;
+
+/// The crab's catalogue, as it will arrive.
+pub(crate) type CatalogueReply =
+    futures::channel::oneshot::Receiver<Result<Vec<CatalogueProvider>, BackendError>>;
+
+/// Ask the crab the window holds for its model catalogue and return at once.
+///
+/// The read runs on the backend's own lane (a worker locally, a thread of
+/// its own remotely) and its reply lands on the receiver. A job that never
+/// reached a worker drops the sender, which the caller reads as a failure.
+pub(crate) fn ask_catalogue(backend: &crate::backend_glue::Backend) -> CatalogueReply {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    if let Err(e) = backend.spawn(ModelCatalogue {}, move |reply| {
+        let _ = tx.send(reply);
+    }) {
+        logging::error(&format!("models: catalogue: {e}"));
+    }
+    rx
+}
+
+/// Whether a saved setup rebuilds the agent in this process.
+///
+/// The question is the one the wizard asks (`Cap::Setup`): a backend that
+/// cannot set up this machine is a crab elsewhere, and its stack is its own.
+pub(crate) fn reloads_here(backend: &crate::backend_glue::Backend) -> bool {
+    backend.lacks(cap::Cap::Setup).is_none()
+}
 
 impl Dashboard {
     /// Standalone provider selection filters both pointer and keyboard rows.
@@ -23,6 +59,12 @@ impl Dashboard {
     /// `/models` with no argument opens the picker. With an argument it is the
     /// switch the terminal performs, and no screen opens: the reply is the
     /// answer, exactly like the terminal's.
+    ///
+    /// The crab's catalogue is asked here and lands later
+    /// (`land_catalogue`): a remote crab can take up to the transport's
+    /// deadline to answer, and the window never waits on it. The picker opens
+    /// at once on a loading state, and a typed id is resolved when the rows
+    /// arrive, off the frame.
     pub(crate) fn open_models(
         &mut self,
         arg: Option<String>,
@@ -35,17 +77,119 @@ impl Dashboard {
         // explicit act each time, never a setting that survives the picker.
         self.models_scope_all = false;
         self.models_apply_confirm = None;
-        // The catalogue is read once, here, so a frame never walks it. A pane
-        // carries its own pair, so the picker marks that pair rather than the
-        // window's when the command came from a split.
-        let current = agent_bridge::bridge().map(|b| match target {
-            Some(sid) => (
-                b.service.provider_name_for_session(sid),
-                b.service.provider_model_for_session(sid),
-            ),
-            None => (b.service.provider_name(), b.service.provider_model()),
+        let switching = arg.is_some();
+        let generation = self.begin_catalogue();
+        let reply = ask_catalogue(&self.backend);
+        cx.spawn(async move |this, cx| {
+            let reply = reply.await.unwrap_or_else(|_| {
+                Err(BackendError::Failed(format!(
+                    "{} worker dropped its result",
+                    <ModelCatalogue as Op>::NAME
+                )))
+            });
+            this.update(cx, |this, cx| {
+                this.land_catalogue(generation, target, arg, reply, cx)
+            })
+            .ok();
+        })
+        .detach();
+        if switching {
+            return;
+        }
+        self.models_query.clear();
+        self.screen = Screen::Models;
+        // No row is marked until the catalogue lands; `land_catalogue` puts
+        // the list on the provider answering right now.
+        self.models_provider = None;
+        self.models_index = 0;
+        self.sessions.rail_menu = None;
+        self.refocus_screen();
+        cx.notify();
+    }
+
+    /// Put the standalone picker on its loading state and claim the slot its
+    /// catalogue read answers to. Any later reset (another opening, the
+    /// wizard) moves the lifecycle on, so a read that lands after one is
+    /// known stale.
+    fn begin_catalogue(&mut self) -> u64 {
+        self.models_rows.clear();
+        self.models_pending.clear();
+        self.clear_model_fetch();
+        self.models_index = 0;
+        // Fetching with nothing pending is the loading state the picker
+        // draws: discovery always has its own request still pending.
+        self.models_fetching = true;
+        self.models_fetch_lifecycle.begin(&FetchRequest {
+            provider_index: CATALOGUE_SLOT,
+            ..Default::default()
+        })
+    }
+
+    /// The crab's catalogue arrived. The standalone picker switches the crab
+    /// the window holds, so its rows are the crab's own (`ModelCatalogue`)
+    /// and each provider is discovered on the crab (`ModelDiscover`, see
+    /// `start_models_fetch`).
+    ///
+    /// A read that a later reset superseded never touches the picker. A typed
+    /// id is still answered: it is resolved against the rows this read
+    /// brought, the same rows the switch would have read had it waited.
+    fn land_catalogue(
+        &mut self,
+        generation: u64,
+        target: Option<Uuid>,
+        arg: Option<String>,
+        reply: Result<Vec<CatalogueProvider>, BackendError>,
+        cx: &mut Context<Self>,
+    ) {
+        let fresh = self
+            .models_fetch_lifecycle
+            .finish(
+                generation,
+                CATALOGUE_SLOT,
+                model_fetch::FetchOutcome {
+                    provider_index: CATALOGUE_SLOT,
+                    ..Default::default()
+                },
+            )
+            .is_some();
+        if !fresh && arg.is_none() {
+            logging::debug("stale model catalogue ignored");
+            return;
+        }
+        let catalogue = reply.unwrap_or_else(|e| {
+            logging::info(&format!(
+                "models: catalogue: {}",
+                cap::notice(<ModelCatalogue as Op>::NAME, &e)
+            ));
+            Vec::new()
         });
-        self.reset_model_picker(current, None);
+        // A pane carries its own pair, so the picker marks that pair rather
+        // than the window's when the command came from a split.
+        let current = self
+            .backend
+            .facts(target)
+            .map(|facts| (facts.provider, facts.model));
+        let pair = current
+            .as_ref()
+            .map(|(provider, model)| (provider.as_str(), model.as_str()));
+        let rows = models::rows_from_catalogue(&catalogue, pair);
+        if fresh {
+            self.models_fetching = false;
+            self.models_index = rows.iter().position(|row| row.current).unwrap_or(0);
+            // A crab whose handshake already withholds discovery is not asked
+            // provider by provider only to refuse each one: its static
+            // catalogue is the list. Before the handshake lands, the crab's
+            // own refusal says the same, in the log (`model_fetch::discover`).
+            let discover = self.hello.as_ref().is_none_or(|hello| {
+                cap::check(hello, &[cap::Need::Op(<ModelDiscover as Op>::NAME)]).is_ok()
+            });
+            let active_provider = pair.map(|(provider, _)| provider).unwrap_or_default();
+            self.models_pending = if discover {
+                models::discovery_queue(&catalogue, active_provider)
+            } else {
+                Vec::new()
+            };
+        }
         if let Some(arg) = arg {
             // The typed command answers in the conversation and no screen
             // opens. But a trailing ` all` is a scope-all write (#3168), and
@@ -57,21 +201,32 @@ impl Dashboard {
                 Some(rest) if !rest.trim().is_empty() => (rest.trim(), true),
                 _ => (arg.trim(), false),
             };
-            let pair = match models::find(&self.models_rows, pair_arg) {
+            // A bare model id resolves against these rows, the ones the
+            // switch would have read had it waited for them in place.
+            let pair = match models::find(&rows, pair_arg) {
                 Some(row) => row.pair(),
                 None => pair_arg.to_string(),
             };
+            if fresh {
+                self.models_rows = rows;
+            }
+            // The switch goes to the session that typed it. A picker opened
+            // since keeps the session it is about.
+            let open = self.models_session;
+            self.models_session = target;
             if scope_all {
                 self.begin_scope_all(pair, cx);
             } else {
                 self.switch_model(pair, cx);
             }
+            if !fresh {
+                self.models_session = open;
+            }
             return;
         }
-        self.models_query.clear();
-        self.screen = Screen::Models;
+        self.models_rows = rows;
         // The list opens on the provider answering right now, so the marked
-        // row and the picker's cursor agree from the first frame.
+        // row and the picker's cursor agree from the first frame they show.
         self.models_provider = self
             .models_rows
             .iter()
@@ -82,46 +237,47 @@ impl Dashboard {
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
-        self.sessions.rail_menu = None;
         self.start_models_fetch();
-        self.refocus_screen();
         cx.notify();
     }
 
-    /// Reset the one picker catalogue used by `/models` and Brain Fuel. The
-    /// optional wizard selector contributes its unsaved provider settings.
+    /// Reset the wizard's picker catalogue (Brain Fuel). The wizard edits
+    /// this machine, so the rows and the discovery queue are this machine's,
+    /// with the selector's unsaved provider settings in them.
     pub(crate) fn reset_model_picker(
         &mut self,
         current: Option<(String, String)>,
-        edited: Option<&ProviderSelectorState>,
+        edited: &ProviderSelectorState,
     ) {
-        self.models_rows = models::rows_for_picker(
-            current
-                .as_ref()
-                .map(|(provider, model)| (provider.as_str(), model.as_str())),
-            edited,
-        );
-        let mut catalogue = ProviderSelectorState::default();
-        catalogue.load_custom_names();
+        let pair = current
+            .as_ref()
+            .map(|(provider, model)| (provider.as_str(), model.as_str()));
         let active_provider = current
             .as_ref()
             .map(|(provider, _)| provider.as_str())
-            .or_else(|| edited.map(|selector| selector.current_provider().id))
-            .unwrap_or_default();
+            .unwrap_or_else(|| edited.current_provider().id);
+        self.models_rows = models::rows_for_picker(pair, Some(edited));
+        let mut catalogue = ProviderSelectorState::default();
+        catalogue.load_custom_names();
         self.models_pending = opencrabs::ui_core::model_selector::discovery_requests(
             &catalogue,
             active_provider,
-            edited,
+            Some(edited),
         );
-        self.models_fetch = None;
-        self.models_fetch_lifecycle.invalidate();
-        self.models_fetch_error = None;
-        self.models_fetching = false;
+        self.clear_model_fetch();
         self.models_index = self
             .models_rows
             .iter()
             .position(|row| row.current)
             .unwrap_or(0);
+    }
+
+    /// Drop any discovery in flight and its outcome so far.
+    fn clear_model_fetch(&mut self) {
+        self.models_fetch = None;
+        self.models_fetch_lifecycle.invalidate();
+        self.models_fetch_error = None;
+        self.models_fetching = false;
     }
 
     /// Restart discovery after an onboarding provider or credential edit.
@@ -140,7 +296,7 @@ impl Dashboard {
             edited.current_provider().id.to_string()
         };
         let current = Some((provider, ob.model()));
-        self.reset_model_picker(current, Some(&edited));
+        self.reset_model_picker(current, &edited);
         self.start_models_fetch();
     }
 
@@ -154,7 +310,14 @@ impl Dashboard {
         self.models_fetch_lifecycle.invalidate();
         if let Some(request) = self.models_pending.first().cloned() {
             let generation = self.models_fetch_lifecycle.begin(&request);
-            self.models_fetch = Some(model_fetch::spawn(generation, request));
+            // The wizard's queue carries this machine's keys and is fetched
+            // here; the standalone picker's names a provider and nothing
+            // else, and the crab fetches it with its own key.
+            self.models_fetch = Some(if self.screen == Screen::Onboard {
+                model_fetch::spawn(generation, request)
+            } else {
+                model_fetch::discover(&self.backend, generation, request)
+            });
             self.models_fetching = true;
         } else {
             self.models_fetching = false;
@@ -204,12 +367,9 @@ impl Dashboard {
                     };
                     Some((provider, ob.model()))
                 } else {
-                    agent_bridge::bridge().map(|bridge| {
-                        (
-                            bridge.service.provider_name(),
-                            bridge.service.provider_model(),
-                        )
-                    })
+                    self.backend
+                        .facts(None)
+                        .map(|facts| (facts.provider, facts.model))
                 };
                 models::replace_provider(
                     &mut self.models_rows,
@@ -322,10 +482,7 @@ impl Dashboard {
         } else {
             let provider = self.models_provider.clone().or_else(|| {
                 let target = self.models_session.or(self.chat_session);
-                agent_bridge::bridge().map(|bridge| match target {
-                    Some(sid) => bridge.service.provider_name_for_session(sid),
-                    None => bridge.service.provider_name(),
-                })
+                self.backend.facts(target).map(|facts| facts.provider)
             });
             models::manual_pair(
                 self.models_query.text(),
@@ -641,14 +798,14 @@ impl Dashboard {
         let Some((prompt, workspace)) = picked else {
             return;
         };
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // No service to write with: the step still finishes, its prose is
             // handed to the writer on save instead of silently dropped.
             if let Some(ob) = self.onboard.as_mut() {
                 ob.mark_brain_failed("the agent is offline".to_string());
             }
             return;
-        };
+        }
         if let Some(ob) = self.onboard.as_mut() {
             ob.mark_brain_generating();
         }
@@ -657,7 +814,7 @@ impl Dashboard {
             .notices
             .push("writing your brain files".to_string());
         agent_bridge::spawn_brain_generation(
-            bridge.service.clone(),
+            self.backend.clone(),
             prompt,
             workspace,
             self.sink.clone(),
@@ -691,9 +848,9 @@ impl Dashboard {
                         .live
                         .notices
                         .push("generating personalized brain files".to_string());
-                    if let Some(bridge) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         agent_bridge::spawn_brain_generation(
-                            bridge.service.clone(),
+                            self.backend.clone(),
                             prompt,
                             workspace,
                             self.sink.clone(),
@@ -745,7 +902,25 @@ impl Dashboard {
     /// the placeholder provider, and the brain files are the system prompt, so
     /// the stack has to be rebuilt on the settings that were just written. The
     /// terminal does the same thing with `rebuild_agent_service`.
+    ///
+    /// Only for a crab on this machine. A crab elsewhere already holds what
+    /// was written (its brain files are generated on it) and runs its own
+    /// stack; rebuilding this machine's service from this machine's config
+    /// would answer nothing the window asks. The note still lands.
     pub(crate) fn reload_agent(&mut self, cx: &mut Context<Self>, saved: Option<&str>) {
+        if !reloads_here(&self.backend) {
+            if let Some(line) = saved {
+                self.turn.live.notices.push(line.to_string());
+            }
+            cx.notify();
+            return;
+        }
+        self.reload_local_agent(cx, saved);
+    }
+
+    /// The local half of [`Self::reload_agent`]: the config on this disk, the
+    /// service in this process.
+    fn reload_local_agent(&mut self, cx: &mut Context<Self>, saved: Option<&str>) {
         let config = match Config::load() {
             Ok(config) => config,
             Err(e) => {
@@ -802,12 +977,9 @@ impl Dashboard {
         // pair the session is using instead of the first row of the catalogue
         // (#2060). A first run keeps the built-in preselection from `open_at`.
         if step != onboard::OnboardingStep::HealthCheck
-            && let Some(bridge) = agent_bridge::bridge()
+            && let Some(facts) = self.backend.facts(None)
         {
-            wizard.seed_session_pair(
-                &bridge.service.provider_name(),
-                &bridge.service.provider_model(),
-            );
+            wizard.seed_session_pair(&facts.provider, &facts.model);
         }
         self.onboard = Some(wizard);
         if self
@@ -889,7 +1061,9 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        // Local and remote alike answer no facts while the crab boots, so
+        // this asks the crab the switch goes to, not this machine's service.
+        if self.backend.facts(None).is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
@@ -897,9 +1071,9 @@ impl Dashboard {
             );
             cx.notify();
             return;
-        };
+        }
         self.models_switching = Some(session);
-        agent_bridge::spawn_switch_model(bridge.service.clone(), session, pair, self.sink.clone());
+        agent_bridge::spawn_switch_model(self.backend.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
 
@@ -935,7 +1109,7 @@ impl Dashboard {
             logging::debug("model switch already in flight");
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if self.backend.facts(None).is_none() {
             self.push_session_notice(
                 session,
                 "The agent is still starting. Try again in a moment.".to_string(),
@@ -943,9 +1117,9 @@ impl Dashboard {
             );
             cx.notify();
             return;
-        };
+        }
         self.models_switching = Some(session);
-        agent_bridge::spawn_scope_count(bridge.service.clone(), session, pair, self.sink.clone());
+        agent_bridge::spawn_scope_count(self.backend.clone(), session, pair, self.sink.clone());
         cx.notify();
     }
 

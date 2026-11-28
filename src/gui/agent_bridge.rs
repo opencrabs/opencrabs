@@ -213,6 +213,23 @@ pub enum TurnEvent {
     BrainReady(String),
     /// Brain generation could not finish; carries the reason.
     BrainFailed(String),
+    /// What the window draws from a remote crab's cache moved (its facts or
+    /// its running tasks): paint again. The values are already in the cache;
+    /// the event carries none.
+    Refresh,
+    /// A remote crab waits for a yes or a no before it runs a tool in
+    /// `session`. Only the remote event reader sends it.
+    ApprovalAsked {
+        session: Uuid,
+        approval: crate::remote_approval::PendingApproval,
+    },
+    /// The crab's reply to an approval answer: `Ok(true)` took it,
+    /// `Ok(false)` found nothing waiting, `Err` is the refusal text.
+    ApprovalSettled {
+        session: Uuid,
+        request_id: Uuid,
+        outcome: Result<bool, String>,
+    },
 }
 
 /// Everything the UI needs to drive turns. Built by [`bootstrap`], delivered
@@ -354,56 +371,49 @@ pub fn spawn_update_checks(sink: EventSink) {
 
 /// Delete one session's messages from the ledger, as the TUI's ctrl+k does. The
 /// session row stays, so the conversation is kept and only its history clears (#2430).
-pub fn spawn_clear_messages(db_path: PathBuf, session_id: Uuid, sink: EventSink) {
+/// The work is the backend's `ClearMessages`, on its own `spawn_worker` lane.
+pub fn spawn_clear_messages(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
     // Both arms report: the job may fail to reach a worker, and the worker may
     // fail to run it, and the window must not keep the old rows either way.
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-clear-messages", move |runtime| {
-        let event = runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => return TurnEvent::ClearFailed(format!("clear: {e}")),
-            };
-            let service =
-                opencrabs::services::MessageService::new(ServiceContext::new(db.pool().clone()));
-            match service.delete_messages_for_session(session_id).await {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::ClearMessages { session_id },
+        move |result| {
+            let event = match result {
                 Ok(()) => TurnEvent::MessagesCleared(session_id),
-                Err(e) => TurnEvent::ClearFailed(format!("clear: {e}")),
+                Err(e) => TurnEvent::ClearFailed(e.into_message()),
+            };
+            if let Err(e) = thread_sink.send(event) {
+                crate::logging::error(&format!("clear result not delivered: {e}"));
             }
-        });
-        if let Err(e) = thread_sink.send(event) {
-            crate::logging::error(&format!("clear result not delivered: {e}"));
-        }
-    });
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("clear thread: {e}"));
         let _ = sink.send(TurnEvent::ClearFailed(format!("clear: {e}")));
     }
 }
 
-/// Run `/evolve` on its own thread, as the TUI does: download the latest
-/// release and report the outcome. The text comes back as `EvolveDone` (#2406).
-pub fn spawn_evolve(sink: EventSink, session_id: Uuid) {
+/// Run `/evolve` on the crab the window holds, as the TUI does: download the
+/// latest release and report the outcome. The text comes back as
+/// `EvolveDone` (#2406). With the local crab that is this process, as it
+/// always was; with a crab elsewhere it is that crab's binary, and a token
+/// without admin is refused there with the note the greyed out command shows.
+pub fn spawn_evolve(backend: crate::backend_glue::Backend, sink: EventSink, session_id: Uuid) {
+    use opencrabs::backend::update::Evolve;
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-evolve", move |runtime| {
-        let text = runtime.block_on(async move {
-            let tool = opencrabs::brain::tools::evolve::EvolveTool::new(None);
-            let ctx = opencrabs::brain::tools::ToolExecutionContext::new(session_id);
-            match opencrabs::brain::tools::Tool::execute(&tool, serde_json::json!({}), &ctx).await {
-                Ok(result) if result.success => {
-                    if result.output.is_empty() {
-                        "Evolve finished.".to_string()
-                    } else {
-                        result.output
-                    }
-                }
-                Ok(result) => format!(
-                    "Evolve failed: {}",
-                    result.error.unwrap_or_else(|| "unknown error".to_string())
-                ),
-                Err(e) => format!("Evolve error: {e}"),
+    let spawned = backend.spawn(Evolve { session_id }, move |reply| {
+        let text = match reply {
+            Ok(text) => text,
+            Err(e @ opencrabs::backend::BackendError::Forbidden { .. }) => {
+                opencrabs::backend::cap::notice(<Evolve as opencrabs::backend::Op>::NAME, &e)
             }
-        });
+            Err(e) => format!("Evolve error: {}", e.into_message()),
+        };
         if let Err(e) = thread_sink.send(TurnEvent::EvolveDone(text)) {
             crate::logging::error(&format!("evolve result not delivered: {e}"));
         }
@@ -433,8 +443,13 @@ pub fn spawn_bootstrap(config: Config, sink: EventSink) {
         .name("gui-agent-boot".into())
         .spawn(move || {
             let sink = thread_sink;
+            // Channel agents and cron turns run on these workers, so they need
+            // the same stack as the binary's runtime: at the 2 MiB default the
+            // first channel turn aborts the window with `tokio-rt-worker has
+            // overflowed its stack` (#2080).
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
+                .thread_stack_size(opencrabs::runtime::WORKER_STACK_SIZE)
                 .enable_all()
                 .build()
             {
@@ -752,6 +767,11 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
     let bridge = AgentBridge {
         service: Arc::new(service),
     };
+    // The window's own crab answers operations with this same service, so a
+    // local op and the window never hold two opinions about one session.
+    if let Some(ctx) = opencrabs::backend::primary() {
+        ctx.set_service(bridge.service.clone());
+    }
 
     // Pick up the turns the last process died inside (#2627). Every turn the
     // window runs writes `pending_requests`, but nothing read the table back,
@@ -774,45 +794,22 @@ async fn build(config: Config, sink: EventSink) -> Result<AgentBridge, String> {
 /// workers have tiny stacks), and only connects: migrations belong to the
 /// daemon and to the agent bootstrap, never to a UI action.
 pub fn spawn_create_session(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     sink: EventSink,
     provider: Option<String>,
     model: Option<String>,
 ) {
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-session-create", move |runtime| {
-        let sink = thread_sink;
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e}"))?;
-            let service =
-                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
-            let working_directory = Some(
-                opencrabs::utils::cwd::launch_cwd()
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            service
-                .create_session_with_provider(
-                    Some("New Chat".to_string()),
-                    provider,
-                    model,
-                    working_directory,
-                )
-                .await
-                .map(|s| s.id)
-                .map_err(|e| format!("create session: {e}"))
-        });
-        match result {
-            Ok(id) => {
-                let _ = sink.send(TurnEvent::SessionCreated(id));
-            }
-            Err(e) => {
-                let _ = sink.send(TurnEvent::SessionCreateFailed(e));
-            }
-        }
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::CreateSession { provider, model },
+        move |result| {
+            let event = match result {
+                Ok(id) => TurnEvent::SessionCreated(id),
+                Err(e) => TurnEvent::SessionCreateFailed(e.into_message()),
+            };
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionCreateFailed(format!(
             "session thread spawn: {e}"
@@ -835,31 +832,25 @@ pub fn spawn_create_session(
 /// Fire and forget by design: a failure here must never hold up or fail the
 /// turn, which is why it logs and returns. Runs on its own 4 MB thread for
 /// the same reason every other DB path does.
-pub fn spawn_track_files(db_path: PathBuf, session_id: Uuid, paths: Vec<PathBuf>) {
+pub fn spawn_track_files(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    paths: Vec<PathBuf>,
+) {
     if paths.is_empty() {
         return;
     }
-    let spawned = spawn_worker("gui-file-track", move |runtime| {
-        runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => {
-                    crate::logging::error(&format!("file track db connect: {e}"));
-                    return;
-                }
-            };
-            let service =
-                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-            for path in paths {
-                // The name in the log is the file's own: a failure has to
-                // say which attachment did not get tracked.
-                let name = path.display().to_string();
-                if let Err(e) = service.get_or_create_file(session_id, path, None).await {
-                    crate::logging::error(&format!("file track {name}: {e}"));
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::TrackFiles { session_id, paths },
+        |result| match result {
+            Ok(untracked) => {
+                for line in untracked {
+                    crate::logging::error(&line);
                 }
             }
-        });
-    });
+            Err(e) => crate::logging::error(&e.into_message()),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("file track thread spawn: {e}"));
     }
@@ -887,21 +878,27 @@ impl Drop for VoiceReplyGuard {
 /// Speak one answer back, for the turn that began as a recording (#3044).
 ///
 /// The window's half of what every channel already does: a voice note is
-/// answered with a voice note. `channels::voice::synthesize` is the same call
+/// answered with a voice note. The crab the window holds speaks it
+/// (`voice.speak`) through `channels::voice::synthesize`, the same call
 /// Telegram makes, so the reply sounds like a channel reply rather than a
-/// second implementation of one, and it already returns OGG/Opus.
+/// second implementation of one, with the crab's engine and the crab's keys.
 ///
 /// Off the UI thread for two reasons. Synthesis is a network round trip per
 /// chunk and the window must not stall on it while the answer is already on
-/// screen. And the marker has to reach the ROW, not just the card: the audio is
-/// appended to the assistant message in the ledger, so every later read of the
-/// conversation draws the clip and the row keeps it across restarts, exactly as
-/// a channel reply does.
+/// screen. And the marker has to reach the ROW, not just the card: the crab
+/// appends the audio to the assistant message in its ledger, so every later
+/// read of the conversation draws the clip and the row keeps it across
+/// restarts, exactly as a channel reply does.
 ///
-/// Silence is the normal failure: no TTS provider configured, or synthesis
-/// failed. The turn already answered in text, so nothing here is allowed to
-/// turn a spoken reply into an error the user has to read.
-pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, text: String) {
+/// Silence is the normal failure: no TTS provider configured on the crab, or
+/// synthesis failed. The turn already answered in text, so nothing here is
+/// allowed to turn a spoken reply into an error the user has to read.
+pub fn spawn_speak_reply(
+    backend: crate::backend_glue::Backend,
+    sink: EventSink,
+    session_id: Uuid,
+    text: String,
+) {
     if text.trim().is_empty() {
         return;
     }
@@ -909,26 +906,22 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
     // the arm where the job never reached a worker (#3092).
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-voice-reply", move |runtime| {
-        let voice = Config::current().voice_config();
-        if !voice.tts_enabled {
-            // A recording is answered in text when speech output is off.
-            // The mic works either way; this is the same switch that
-            // decides whether a Telegram voice note gets a voice back.
+        // The crab speaks, so its config decides: a recording is answered in
+        // text when speech output is off there. The mic works either way;
+        // this is the same switch that decides whether a Telegram voice note
+        // gets a voice back.
+        let ready = match runtime.block_on(backend.call(opencrabs::backend::voice::VoiceStatus {}))
+        {
+            Ok(ready) => ready,
+            Err(e) => {
+                crate::logging::error(&format!("voice reply: {}", e.into_message()));
+                return;
+            }
+        };
+        if !ready.tts_enabled {
             crate::logging::info("voice reply: tts disabled, answering in text only");
             return;
         }
-        // The card already carries the whole report, so only the spoken
-        // half is needed here. A model that skipped the block is still
-        // read aloud, from the paragraph it led with: a voice turn gets a
-        // voice back either way (#3092).
-        let (answer, spoken) = opencrabs::channels::voice::spoken::split(&text);
-        let speech = match spoken {
-            Some(spoken) => spoken,
-            None => {
-                crate::logging::warn("voice reply: no spoken block, reading the first paragraph");
-                opencrabs::channels::voice::spoken::first_paragraph(&answer)
-            }
-        };
         // The card is told the clip is coming before the first chunk goes
         // out (#3092). Synthesis is a network round trip per chunk, and the
         // window has nothing else to paint in the meantime.
@@ -939,62 +932,30 @@ pub fn spawn_speak_reply(db_path: PathBuf, sink: EventSink, session_id: Uuid, te
             sink: thread_sink.clone(),
             session: session_id,
         };
-        let audio = match runtime
-            .block_on(async { opencrabs::channels::voice::synthesize(&speech, &voice).await })
+        // The crab reads the spoken half (or the paragraph the answer led
+        // with), synthesizes it, keeps the clip on its own disk and marks the
+        // answer row with the path it wrote, so the row never names a path
+        // only this machine has. Each failure is the line this thread used to
+        // log.
+        let clip = match runtime
+            .block_on(backend.call(opencrabs::backend::voice::VoiceSpeak { session_id, text }))
         {
-            Ok(bytes) => bytes,
+            Ok(Some(clip)) => clip,
+            Ok(None) => return,
             Err(e) => {
-                crate::logging::error(&format!("voice reply synthesis: {e:#}"));
+                crate::logging::error(&e.into_message());
                 return;
             }
         };
-        let path = match crate::voice_input::save_reply_audio(&audio, Some(session_id)) {
-            Ok(path) => path,
-            Err(e) => {
-                crate::logging::error(&format!("voice reply save: {e}"));
-                return;
-            }
-        };
-        runtime.block_on(async move {
-            let db = match Database::connect(&db_path).await {
-                Ok(db) => db,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply db connect: {e}"));
-                    return;
-                }
-            };
-            let repo = opencrabs::db::repository::MessageRepository::new(db.pool().clone());
-            // The row this turn wrote. It settles just before this thread
-            // starts, so the last assistant row in the session is the
-            // answer being spoken.
-            let row = match repo.get_last_assistant_message(session_id).await {
-                Ok(row) => row,
-                Err(e) => {
-                    crate::logging::error(&format!("voice reply row lookup: {e}"));
-                    return;
-                }
-            };
-            let Some(row) = row else {
-                crate::logging::error("voice reply: the answer row is not in the ledger");
-                return;
-            };
-            let marker = format!("\n\n<<AUD:{}>>", path.display());
-            if let Err(e) = repo.append_content(row.id, &marker).await {
-                crate::logging::error(&format!("voice reply marker: {e}"));
-                return;
-            }
-            crate::logging::info(&format!(
-                "voice reply: {} bytes spoken into {}",
-                audio.len(),
-                path.display()
-            ));
-            let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
-                session: session_id,
-                // The thread is done with it: the marker above is the last
-                // read of the file, so the event takes ownership instead of
-                // leaving a clone to be dropped (#3092).
-                path,
-            });
+        crate::logging::info(&format!(
+            "voice reply: {} bytes spoken into {}",
+            clip.size.unwrap_or(0),
+            clip.path
+        ));
+        let _ = thread_sink.send(TurnEvent::VoiceReplySaved {
+            session: session_id,
+            // The crab's path: the settle localizes it before it plays.
+            path: PathBuf::from(clip.path),
         });
     });
     if let Err(e) = spawned {
@@ -1020,62 +981,39 @@ pub struct SessionFile {
 /// as the window's `load_view`: an own 4 MB thread with an own current-thread
 /// runtime, because gpui's workers are dispatch-queue threads with tiny
 /// stacks and sqlx needs a Tokio reactor.
-pub async fn load_files(db_path: PathBuf, session_id: Uuid) -> Result<Vec<SessionFile>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = spawn_worker("gui-file-list", move |runtime| {
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e:#}"))?;
-            let service =
-                opencrabs::services::FileService::new(ServiceContext::new(db.pool().clone()));
-            let files = service
-                .list_files_for_session(session_id)
-                .await
-                .map_err(|e| format!("{e:#}"))?;
-            Ok(files
-                .into_iter()
-                .map(|f| SessionFile {
-                    path: f.path,
-                    size: f.size,
-                })
-                .collect())
-        });
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("file list thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("file list worker: {e}")),
-    }
+pub async fn load_files(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+) -> Result<Vec<SessionFile>, String> {
+    let files = backend
+        .call(opencrabs::backend::session_ops::SessionFiles { session_id })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)?;
+    Ok(files
+        .into_iter()
+        .map(|f| SessionFile {
+            path: f.path,
+            size: f.size,
+        })
+        .collect())
 }
 
-pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
+pub fn spawn_delete_session(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-session-delete", move |runtime| {
-        let sink = thread_sink;
-        let result = runtime.block_on(async move {
-            let db = Database::connect(&db_path)
-                .await
-                .map_err(|e| format!("db connect: {e}"))?;
-            let service =
-                opencrabs::services::SessionService::new(ServiceContext::new(db.pool().clone()));
-            service
-                .delete_session(session_id)
-                .await
-                .map_err(|e| format!("delete session: {e}"))
-        });
-        match result {
-            Ok(()) => {
-                let _ = sink.send(TurnEvent::SessionDeleted(session_id));
-            }
-            Err(e) => {
-                let _ = sink.send(TurnEvent::SessionDeleteFailed(e));
-            }
-        }
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::DeleteSession { session_id },
+        move |result| {
+            let event = match result {
+                Ok(()) => TurnEvent::SessionDeleted(session_id),
+                Err(e) => TurnEvent::SessionDeleteFailed(e.into_message()),
+            };
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::SessionDeleteFailed(format!(
             "session delete thread spawn: {e}"
@@ -1089,33 +1027,29 @@ pub fn spawn_delete_session(db_path: std::path::PathBuf, session_id: Uuid, sink:
 /// the window six seconds after launch (gate smoke, 2026-10-31). Same shape
 /// as every other bridge call: 4 MB thread, own current-thread runtime,
 /// result back over the event channel.
-pub fn spawn_plan_path(db_path: std::path::PathBuf, session_id: Uuid, sink: EventSink) {
+pub fn spawn_plan_path(backend: crate::backend_glue::Backend, session_id: Uuid, sink: EventSink) {
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-plan-path", move |runtime| {
-        let sink = thread_sink;
-        // Reproduce `plan_json_path`'s resolution: the project dir when
-        // the session is bound, the profile `session/` fallback when it
-        // is not (or the DB is unreachable). Never the global pool.
-        let dir = runtime
-            .block_on(async move {
-                match Database::connect(&db_path).await {
-                    Ok(db) => {
-                        opencrabs::utils::plan_files::project_session_dir(session_id, db.pool())
-                            .await
-                    }
-                    Err(e) => {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::PlanPath { session_id },
+        move |result| {
+            // The crab reproduces `plan_json_path`'s resolution: the project
+            // dir when the session is bound, the profile `session/` fallback
+            // when it is not (or the ledger is unreachable).
+            let path = match result {
+                Ok(reply) => {
+                    if let Some(e) = reply.db_error {
                         crate::logging::error(&format!("plan path db: {e}"));
-                        None
                     }
+                    Some(PathBuf::from(reply.plan.path))
                 }
-            })
-            .unwrap_or_else(|| opencrabs::config::opencrabs_home().join("session"));
-        let path = dir.join(format!(".opencrabs_plan_{session_id}.json"));
-        let _ = sink.send(TurnEvent::PlanPath {
-            session: session_id,
-            path: Some(path),
-        });
-    });
+                Err(_) => None,
+            };
+            let _ = thread_sink.send(TurnEvent::PlanPath {
+                session: session_id,
+                path,
+            });
+        },
+    );
     if spawned.is_err() {
         let _ = sink.send(TurnEvent::PlanPath {
             session: session_id,
@@ -1124,101 +1058,12 @@ pub fn spawn_plan_path(db_path: std::path::PathBuf, session_id: Uuid, sink: Even
     }
 }
 
-/// Race a turn against its stop token (#2657).
-///
-/// The service reads the token cooperatively: at tool-iteration boundaries,
-/// and once a streaming call has returned. Inside one long provider stream
-/// neither checkpoint runs, so a stop was invisible until the answer finished
-/// (`turn cancelled by Esc`, then `turn done` tens of seconds later). Racing
-/// the whole turn is the window's equivalent of the terminal's
-/// `handle.abort()`: when the token fires the future is dropped where it
-/// stands, which runs the service's own drop guards and keeps the text it
-/// already streamed.
-///
-/// Biased on the token, so a stop that lands in the same poll as the answer
-/// wins. The user asked for the turn to be gone; painting an answer over their
-/// cancellation is what makes a stop look like it did nothing.
-///
-/// `None` means the stop fired and the turn was dropped. `Some(output)` is the
-/// turn's own result, untouched.
-pub async fn race_turn<F>(
-    turn: F,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Option<F::Output>
-where
-    F: std::future::Future,
-{
-    tokio::pin!(turn);
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => None,
-        output = &mut turn => Some(output),
-    }
-}
-
-/// Cut the trailing unanswered pair before a resend duplicates it (#2697).
-///
-/// A turn writes its `user` row and an empty `assistant` placeholder at the
-/// moment it starts, before the provider is asked. A stop that lands after the
-/// first token cannot hand the text back (the `untouched()` hand-back only
-/// covers a stop that beat the token), so that pair stays behind with no
-/// answer, and sending the same text again appended a second copy of it.
-///
-/// The pair is cut only when it is provably leftover: the newest row is an
-/// `assistant` row whose content is still empty, and the row before it is a
-/// `user` row carrying exactly the outgoing text. Anything else ends the walk.
-/// A real answer, a turn that ran a tool (tool activity lives on the assistant
-/// row, so an empty one answered nothing), and a different question are
-/// history, and history is never touched.
-async fn drop_unanswered_duplicate(
-    messages: &opencrabs::services::MessageService,
-    session_id: Uuid,
-    outgoing: &str,
-) {
-    let rows = match messages
-        .list_recent_messages_for_session(session_id, 2)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            crate::logging::error(&format!("gui dedup read: {e}"));
-            return;
-        }
-    };
-    let Some(placeholder) = rows.last() else {
-        return;
-    };
-    if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
-        return;
-    }
-    let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-        return;
-    };
-    if question.role != "user" {
-        return;
-    }
-    // The ledger keeps the redacted form of the text the turn was given.
-    let stored = opencrabs::utils::sanitize::redact_secrets(outgoing);
-    if question.content.trim() != stored.trim() {
-        return;
-    }
-    for row in [question, placeholder] {
-        if let Err(e) = messages.delete_message(row.id).await {
-            crate::logging::error(&format!("gui dedup delete: {e}"));
-            return;
-        }
-    }
-    crate::logging::info(&format!(
-        "gui dedup: dropped the unanswered pair a resend would have duplicated \
-         (session {session_id})"
-    ));
-}
-
-/// Run one turn on a 4 MB thread: the TUI's `send_message_with_tools_and_mode`
-/// call with the queue-completion handshake the TUI does around it.
+/// Run one turn as the backend's `TurnSend`, on its own `spawn_worker` lane.
 ///
 /// The progress forwarder (`install_progress_forwarder`) already streams
-/// events to `sink`; this thread only delivers the terminal event.
+/// events to `sink`; this door only delivers the terminal event. The body
+/// (the resend dedup, the call into the service, the race against `cancel`)
+/// is the crab's and lives in `backend::turn`.
 ///
 /// `display` is the row the user should read for this turn: the receipt of a
 /// command, or a channel's clean rendering of a wrapped message. The model
@@ -1226,7 +1071,7 @@ async fn drop_unanswered_duplicate(
 /// (#2756). Callers with nothing to hide pass `None` and history keeps the
 /// text that was sent.
 pub fn spawn_turn(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     content: String,
     display: Option<String>,
@@ -1237,68 +1082,36 @@ pub fn spawn_turn(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let thread_sink = sink.clone();
-    let spawned = spawn_worker("gui-agent-turn", move |runtime| {
-        let sink = thread_sink;
-        runtime.block_on(async move {
-            // Before the turn writes its rows: a resend of the text an
-            // unanswered turn left behind must not stack a second copy of
-            // it in history (#2697).
-            // Compare against the row history will actually hold, which is
-            // the display line when a turn hides its prompt (#2756).
-            let persisted = display.as_deref().unwrap_or(&content);
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            drop_unanswered_duplicate(&messages, session_id, persisted).await;
-            let turn = service.send_message_with_tools_and_display(
-                session_id,
-                content,
-                display,
-                None,
-                Some(cancel.clone()),
-                None,
-                None,
-                "tui",
-                None,
-                None,
-            );
-            // A cooperative token only lands where the service looks for
-            // it, and inside one provider stream it never looks (#2657).
-            let Some(outcome) = race_turn(turn, &cancel).await else {
-                let _ = sink.send(TurnEvent::Cancelled {
+    let spawned = backend.spawn(
+        opencrabs::backend::turn::TurnSend {
+            session_id,
+            content,
+            display,
+            voice,
+            cancel,
+        },
+        move |result| {
+            let event = match result {
+                Ok(Some(response)) => TurnEvent::Done {
                     session: session_id,
-                });
-                return;
+                    content: response.content,
+                    context_tokens: response.context_tokens,
+                    tokens_per_second: response.tokens_per_second,
+                    voice: response.voice,
+                },
+                // The stop dropped the turn where it stood (#2657): no Done
+                // and no Failed will come, so this is what settles the card.
+                Ok(None) => TurnEvent::Cancelled {
+                    session: session_id,
+                },
+                Err(e) => TurnEvent::Failed {
+                    session: session_id,
+                    text: e.into_message(),
+                },
             };
-            match outcome {
-                Ok(response) => {
-                    // A text turn never carries a spoken block (#3096). The
-                    // model is told to write one only when the message
-                    // begins with the voice note, and a model that drifts
-                    // must not print it into the card or hand it to any
-                    // later reader. Stripped here, before the settle draws
-                    // the answer and before anything can speak it.
-                    let content = if voice {
-                        response.content
-                    } else {
-                        opencrabs::channels::voice::spoken::visible(&response.content)
-                    };
-                    let _ = sink.send(TurnEvent::Done {
-                        session: session_id,
-                        content,
-                        context_tokens: response.context_tokens,
-                        tokens_per_second: response.tokens_per_second,
-                        voice,
-                    });
-                }
-                Err(e) => {
-                    let msg = opencrabs::brain::agent::format_user_error(&e);
-                    let _ = sink.send(TurnEvent::Failed {
-                        session: session_id,
-                        text: msg,
-                    });
-                }
-            }
-        });
-    });
+            let _ = thread_sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = sink.send(TurnEvent::Failed {
             session: session_id,
@@ -1307,75 +1120,73 @@ pub fn spawn_turn(
     }
 }
 
-/// Re-run one interrupted turn on a 4 MB thread (#2627).
+/// Re-run one interrupted turn as the backend's `TurnResume` (#2627).
 ///
-/// `resume_interrupted_turn`, not `send_message_with_tools_and_mode`: a resume
-/// is a one-shot recovery and must never re-track itself. If this turn is
-/// interrupted too (a stop, another crash) the session has already been
-/// cleared from `pending_requests`, so it cannot resume forever (#729).
+/// The turn itself is the crab's (`backend::turn`). What stays here is this
+/// window's boot accounting: the outcome is counted in the boot report before
+/// the card settles, and the summary goes out once the last resume is done.
 fn spawn_resume(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     content: String,
     sink: EventSink,
     cancel: tokio_util::sync::CancellationToken,
     pending: Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    use opencrabs::brain::agent::service::boot_report;
+
     let thread_sink = sink.clone();
     let thread_pending = pending.clone();
-    let spawned = spawn_worker("gui-agent-resume", move |runtime| {
-        let sink = thread_sink;
-        let turn_sink = sink.clone();
-        runtime.block_on(async move {
-            let turn = service.resume_interrupted_turn(
-                session_id,
-                content,
-                None,
-                Some(cancel.clone()),
-                None,
-                None,
-                "tui",
-                None,
-            );
-            // A resumed turn is a turn: the same stop applies, and the
-            // same cooperative gap (#2657).
-            let Some(outcome) = race_turn(turn, &cancel).await else {
-                // It answered nobody, so it is not a delivered resume; the
-                // summary must not claim otherwise.
-                opencrabs::brain::agent::service::boot_report::record_failed();
-                let _ = turn_sink.send(TurnEvent::Cancelled {
-                    session: session_id,
-                });
+    let spawned = backend.spawn(
+        opencrabs::backend::turn::TurnResume {
+            session_id,
+            content,
+            cancel,
+        },
+        move |result| {
+            // Busy here can only be this crab's own turn on the session
+            // (`Ctx::claim_own_turn`): that turn is answering it already and
+            // settles the card itself, so the resume steps aside without a
+            // Failed card of its own.
+            if matches!(result, Err(opencrabs::backend::BackendError::Busy)) {
+                tracing::info!(
+                    session = %session_id,
+                    "boot resume skipped: the window already runs a turn on this session"
+                );
+                finish_boot_resume(&thread_pending, &thread_sink);
                 return;
-            };
-            match outcome {
-                Ok(response) => {
-                    opencrabs::brain::agent::service::boot_report::record_delivered();
-                    let _ = turn_sink.send(TurnEvent::Done {
+            }
+            let event = match result {
+                Ok(Some(response)) => {
+                    boot_report::record_delivered();
+                    TurnEvent::Done {
                         session: session_id,
                         content: response.content,
                         context_tokens: response.context_tokens,
                         tokens_per_second: response.tokens_per_second,
-                        // A resumed turn re-runs a prompt parked by a dead
-                        // process, and that prompt is the words only: the
-                        // recording it came from is not in hand here. It
-                        // answers in text rather than guessing at speech
-                        // (#3096).
-                        voice: false,
-                    });
+                        voice: response.voice,
+                    }
+                }
+                // It answered nobody, so it is not a delivered resume; the
+                // summary must not claim otherwise.
+                Ok(None) => {
+                    boot_report::record_failed();
+                    TurnEvent::Cancelled {
+                        session: session_id,
+                    }
                 }
                 Err(e) => {
-                    opencrabs::brain::agent::service::boot_report::record_failed();
-                    let msg = opencrabs::brain::agent::format_user_error(&e);
-                    let _ = turn_sink.send(TurnEvent::Failed {
+                    boot_report::record_failed();
+                    TurnEvent::Failed {
                         session: session_id,
-                        text: msg,
-                    });
+                        text: e.into_message(),
+                    }
                 }
-            }
-        });
-        finish_boot_resume(&thread_pending, &sink);
-    });
+            };
+            let _ = thread_sink.send(event);
+            finish_boot_resume(&thread_pending, &thread_sink);
+        },
+    );
     if let Err(e) = spawned {
         // A worker that never took the job must still resolve the boot line, or
         // the summary is never emitted at all.
@@ -1575,6 +1386,11 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         boot_report::record_interrupted(*session_id);
     }
     let pending = Arc::new(AtomicUsize::new(0));
+    // The window's own crab runs the resumes, so a resumed turn holds its
+    // session on the same crab a sent one does.
+    let resume_backend = opencrabs::backend::primary()
+        .map(crate::backend_glue::Backend::Local)
+        .unwrap_or_else(|| service_backend(service.clone()));
     for (session_id, message) in plan.pushes {
         // A push turn killed mid-tool: re-deliver the push, never replay the
         // tool call it was inside (#12). The window's local route claims it,
@@ -1684,7 +1500,7 @@ async fn boot_resume(service: Arc<AgentService>, pool: opencrabs::db::Pool, sink
         // would run it twice (#2627, same rule as the terminal at
         // `resume_delivery.rs`).
         spawn_resume(
-            service.clone(),
+            resume_backend.clone(),
             session_id,
             opencrabs::brain::agent::service::restart_recovery::CONTINUATION_PROMPT.to_string(),
             sink.clone(),
@@ -1921,27 +1737,49 @@ pub type PendingMessage = QueuedUserMessage;
 /// network work (a handshake per candidate), which is why it never runs on the
 /// UI thread and never on a gpui worker (tiny stacks, #2299).
 pub fn spawn_switch_model(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     pair: String,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-model-switch", move |runtime| {
-        let line = runtime.block_on(opencrabs::channels::commands::direct_model_switch(
-            &service, session_id, &pair,
-        ));
-        let _ = sink.send(TurnEvent::ModelSwitched {
-            session: session_id,
-            line,
-        });
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::SwitchModel { session_id, pair },
+        move |result| {
+            let event = match result {
+                Ok(line) => TurnEvent::ModelSwitched {
+                    session: session_id,
+                    line,
+                },
+                Err(e) => TurnEvent::ModelSwitchFailed {
+                    session: session_id,
+                    error: e.into_message(),
+                },
+            };
+            let _ = sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
             error: format!("switch thread: {e}"),
         });
     }
+}
+
+/// A backend on the crab the window already holds: `service` and the pool it
+/// was built on.
+///
+/// The boot resume's fallback when no primary crab was recorded: the ledger
+/// is the service's own pool, never a second connection, so the operation
+/// reads and writes exactly what the service did when it ran the work inline.
+fn service_backend(service: Arc<AgentService>) -> crate::backend_glue::Backend {
+    let db_path = opencrabs::backend::primary()
+        .map(|ctx| ctx.db_path().to_path_buf())
+        .unwrap_or_default();
+    let ctx = opencrabs::backend::Ctx::new(db_path).with_pool(service.context().pool());
+    ctx.set_service(service);
+    crate::backend_glue::Backend::Local(Arc::new(ctx))
 }
 
 /// Count what a scope-all pick would change, so the window can ask before it
@@ -1952,29 +1790,29 @@ pub fn spawn_switch_model(
 /// event sink. Nothing is written here; the switch itself still goes through
 /// `direct_model_switch`, which owns the bulk write and its receipt.
 pub fn spawn_scope_count(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     pair: String,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-model-scope", move |runtime| {
-        let count = runtime.block_on(async {
-            let Some((provider, model)) = pair.split_once('/') else {
-                return 0;
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::ScopeCount { pair: pair.clone() },
+        move |result| {
+            let event = match result {
+                Ok(count) => TurnEvent::ModelScopeCounted {
+                    session: session_id,
+                    pair,
+                    count,
+                },
+                Err(e) => TurnEvent::ModelSwitchFailed {
+                    session: session_id,
+                    error: format!("scope count: {}", e.into_message()),
+                },
             };
-            let sessions = opencrabs::services::SessionService::new(service.context().clone());
-            sessions
-                .count_provider_model_all_sessions(provider, model)
-                .await
-                .unwrap_or(0)
-        });
-        let _ = sink.send(TurnEvent::ModelScopeCounted {
-            session: session_id,
-            pair,
-            count,
-        });
-    });
+            let _ = sink.send(event);
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::ModelSwitchFailed {
             session: session_id,
@@ -1991,48 +1829,28 @@ pub fn spawn_scope_count(
 /// would redraw the bubble the user just took back on the next reload. The
 /// trailing pair is cut only when it is the pair the turn opened: a finished
 /// turn, or anything a tool wrote, stops the walk.
-pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: EventSink) {
+pub fn spawn_undo_last_turn(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    sink: EventSink,
+) {
     let done_sink = sink.clone();
-    let spawned = spawn_worker("gui-turn-undo", move |runtime| {
-        runtime.block_on(async move {
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            let rows = match messages.list_messages_for_session(session_id).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    crate::logging::error(&format!("turn undo read: {e}"));
-                    return;
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::UndoLastTurn { session_id },
+        move |result| match result {
+            Ok(reply) => {
+                for line in &reply.errors {
+                    crate::logging::error(line);
                 }
-            };
-            // Newest first: the placeholder, then the question it echoed.
-            let Some(placeholder) = rows.last() else {
-                return;
-            };
-            if placeholder.role != "assistant" || !placeholder.content.trim().is_empty() {
-                // The turn had already answered, or wrote nothing yet. An
-                // answer that landed between the stop and this thread is
-                // the user's: only the empty placeholder is ever cut.
-                return;
+                if reply.reverted {
+                    let _ = done_sink.send(TurnEvent::TurnReverted {
+                        session: session_id,
+                    });
+                }
             }
-            if let Err(e) = messages.delete_message(placeholder.id).await {
-                crate::logging::error(&format!("turn undo assistant row: {e}"));
-                return;
-            }
-            let Some(question) = rows.get(rows.len().saturating_sub(2)) else {
-                let _ = done_sink.send(TurnEvent::TurnReverted {
-                    session: session_id,
-                });
-                return;
-            };
-            if question.role == "user"
-                && let Err(e) = messages.delete_message(question.id).await
-            {
-                crate::logging::error(&format!("turn undo user row: {e}"));
-            }
-            let _ = done_sink.send(TurnEvent::TurnReverted {
-                session: session_id,
-            });
-        });
-    });
+            Err(e) => crate::logging::error(&format!("turn undo: {}", e.into_message())),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn undo thread: {e}"));
         let _ = sink.send(TurnEvent::TurnReverted {
@@ -2064,28 +1882,55 @@ pub fn spawn_undo_last_turn(service: Arc<AgentService>, session_id: Uuid, sink: 
 /// marker keeps the exchange in the order it happened, so the reloaded turn
 /// carries the answer the user was reading.
 pub fn spawn_record_turn_stopped(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     answer: Option<String>,
 ) {
-    let spawned = spawn_worker("gui-turn-stopped", move |runtime| {
-        runtime.block_on(async move {
-            let messages = opencrabs::services::MessageService::new(service.context().clone());
-            // What the card streamed goes in first (#2851), so the turn
-            // reads question, answer, verdict, the order the user saw.
-            if let Err(e) = messages.record_stopped_turn(session_id, answer).await {
-                crate::logging::error(&format!("turn stopped row: {e}"));
+    // The two writes are the crab's (`RecordTurnStopped`): the answer the card
+    // streamed, then the marker (#2851), then the recovery ticket (#2850).
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::RecordTurnStopped { session_id, answer },
+        |result| match result {
+            Ok(errors) => {
+                for line in &errors {
+                    crate::logging::error(line);
+                }
             }
-            // The recovery ticket goes with it (#2850): the turn is over
-            // because the user ended it, so no later boot may replay it.
-            let pending = opencrabs::db::PendingRequestRepository::new(service.context().pool());
-            if let Err(e) = pending.delete_session(session_id).await {
-                crate::logging::error(&format!("turn stopped recovery row: {e}"));
-            }
-        });
-    });
+            Err(e) => crate::logging::error(&format!("turn stopped: {}", e.into_message())),
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("turn stopped thread: {e}"));
+    }
+}
+
+/// Make the service's sticky fallback stick on the crab that ran the turn
+/// (#3189): the session row takes the new pair and the in-memory pin is
+/// rebuilt from config (`PinFallbackProvider`). The card's notice is the live
+/// signal; this only logs what failed.
+pub fn spawn_pin_fallback_provider(
+    backend: crate::backend_glue::Backend,
+    session_id: Uuid,
+    provider: String,
+    model: String,
+) {
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::PinFallbackProvider {
+            session_id,
+            provider,
+            model,
+        },
+        |result| match result {
+            Ok(errors) => {
+                for line in &errors {
+                    crate::logging::error(line);
+                }
+            }
+            Err(e) => crate::logging::error(&format!("provider swap: {}", e.into_message())),
+        },
+    );
+    if let Err(e) = spawned {
+        crate::logging::error(&format!("provider swap thread: {e}"));
     }
 }
 
@@ -2097,68 +1942,23 @@ pub fn spawn_record_turn_stopped(
 /// workspace. The terminal runs it in the background after setup so nobody
 /// waits on it; the window does the same and reports the outcome as a notice.
 pub fn spawn_brain_generation(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     prompt: String,
     workspace: PathBuf,
     sink: EventSink,
 ) {
     let error_sink = sink.clone();
-    let spawned = spawn_worker("gui-brain-gen", move |runtime| {
-        let provider = service.provider().clone();
-        let model = service.provider_model().to_string();
-        let request = opencrabs::brain::provider::LLMRequest::new(
-            model,
-            vec![opencrabs::brain::provider::Message::user(prompt)],
-        )
-        .with_max_tokens(65536);
-        let result = runtime.block_on(async move {
-            match tokio::time::timeout(Duration::from_secs(120), provider.complete(request)).await {
-                Ok(Ok(response)) => {
-                    let text: String = response
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            opencrabs::brain::provider::ContentBlock::Text { text } => {
-                                Some(text.as_str())
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    let parsed = opencrabs::tui::onboarding::parse_brain_sections(&text);
-                    // SOUL and USER are the two a setup cannot do without;
-                    // without them the reply was prose, not sections.
-                    if parsed[0].is_none() || parsed[1].is_none() {
-                        return Err("the answer had no brain sections".to_string());
-                    }
-                    let files = [
-                        ("SOUL.md", &parsed[0]),
-                        ("USER.md", &parsed[1]),
-                        ("AGENTS.md", &parsed[2]),
-                        ("TOOLS.md", &parsed[3]),
-                        ("MEMORY.md", &parsed[4]),
-                    ];
-                    let mut written = 0;
-                    for (name, content) in &files {
-                        if let Some(content) = content {
-                            if let Err(e) = std::fs::write(workspace.join(name), content) {
-                                return Err(format!("writing {name}: {e}"));
-                            }
-                            written += 1;
-                        }
-                    }
-                    Ok(written)
-                }
-                Ok(Err(e)) => Err(format!("generation failed: {e}")),
-                Err(_) => Err("generation timed out after 120s".to_string()),
-            }
-        });
-        let _ = match result {
-            Ok(written) => sink.send(TurnEvent::BrainReady(format!(
-                "{written} brain files personalized"
-            ))),
-            Err(e) => sink.send(TurnEvent::BrainFailed(e)),
-        };
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::BrainGenerate { prompt, workspace },
+        move |result| {
+            let _ = match result {
+                Ok(written) => sink.send(TurnEvent::BrainReady(format!(
+                    "{written} brain files personalized"
+                ))),
+                Err(e) => sink.send(TurnEvent::BrainFailed(e.into_message())),
+            };
+        },
+    );
     if let Err(e) = spawned {
         let _ = error_sink.send(TurnEvent::BrainFailed(format!("thread: {e}")));
     }
@@ -2181,23 +1981,31 @@ pub fn spawn_brain_generation(
 /// this file uses, and the receipt comes back as a `CommandReply` on the
 /// session that asked, which the notice strip already knows how to paint.
 pub fn spawn_apply_operator_cd(
-    service: Arc<AgentService>,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     dir: PathBuf,
     sink: EventSink,
 ) {
     let done_sink = sink.clone();
-    let spawned = spawn_worker("gui-operator-cd", move |runtime| {
-        let applied = runtime.block_on(service.apply_operator_cd(session_id, &dir));
-        crate::logging::info(&format!(
-            "operator cd: session {session_id} -> {}",
-            applied.display()
-        ));
-        let _ = done_sink.send(TurnEvent::CommandReply {
-            session: Some(session_id),
-            text: super::text_commands::cd_reply(&applied.display().to_string()),
-        });
-    });
+    let spawned = backend.spawn(
+        opencrabs::backend::session_ops::ApplyCd { session_id, dir },
+        move |result| {
+            let text = match result {
+                Ok(applied) => {
+                    crate::logging::info(&format!(
+                        "operator cd: session {session_id} -> {}",
+                        applied.display()
+                    ));
+                    super::text_commands::cd_reply(&applied.display().to_string())
+                }
+                Err(e) => format!("/cd: {}", e.into_message()),
+            };
+            let _ = done_sink.send(TurnEvent::CommandReply {
+                session: Some(session_id),
+                text,
+            });
+        },
+    );
     if let Err(e) = spawned {
         crate::logging::error(&format!("operator cd thread: {e}"));
         let _ = sink.send(TurnEvent::CommandReply {
@@ -2216,7 +2024,7 @@ pub fn spawn_apply_operator_cd(
 /// Nothing here re-implements a command; it only decides which engine call
 /// answers the line and what the window should paint.
 pub fn spawn_text_command(
-    db_path: PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: Uuid,
     name: String,
     arg: String,
@@ -2224,7 +2032,7 @@ pub fn spawn_text_command(
 ) {
     let thread_sink = sink.clone();
     let spawned = spawn_worker("gui-text-command", move |runtime| {
-        let events = runtime.block_on(run_text_command(&db_path, session_id, &name, &arg));
+        let events = runtime.block_on(run_text_command(&backend, session_id, &name, &arg));
         for event in events {
             if let Err(e) = thread_sink.send(event) {
                 crate::logging::error(&format!("command result not delivered: {e}"));
@@ -2243,12 +2051,13 @@ pub fn spawn_text_command(
 
 /// The engine calls behind one text command, in order.
 async fn run_text_command(
-    db_path: &std::path::Path,
+    backend: &crate::backend_glue::Backend,
     session_id: Uuid,
     name: &str,
     arg: &str,
 ) -> Vec<TurnEvent> {
     use super::text_commands as tc;
+    use opencrabs::backend::session_ops::CrabCommand;
 
     let Some(command) = tc::classify(name) else {
         return vec![TurnEvent::CommandReply {
@@ -2303,116 +2112,36 @@ async fn run_text_command(
                 }]
             }
         },
-        tc::TextCommand::Discard => {
-            let pool = match Database::connect(db_path).await {
-                Ok(db) => db.pool().clone(),
-                Err(e) => {
-                    return vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("/discard could not open the database: {e}"),
-                    }];
-                }
-            };
-            let svc = ServiceContext::new(pool);
-            vec![TurnEvent::CommandReply {
-                session: Some(session_id),
-                text: opencrabs::utils::plan_mode::discard(session_id, &svc).await,
-            }]
-        }
-        tc::TextCommand::Clear => match bridge() {
-            Some(bridge) => match bridge.service.clear_context(session_id).await {
-                Ok(receipt) => vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: opencrabs::tui::clear_notice::cleared(&receipt),
-                }],
-                Err(e) => vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: opencrabs::tui::clear_notice::failed(&e),
-                }],
-            },
-            None => vec![TurnEvent::CommandReply {
-                session: Some(session_id),
-                text: "/clear needs the agent running; it is offline right now.".to_string(),
-            }],
-        },
-        tc::TextCommand::Rtk => {
-            #[cfg(feature = "rtk")]
-            {
-                if !opencrabs::rtk::is_rtk_available().await {
-                    return vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: opencrabs::rtk::RTK_NOT_INSTALLED_HELP.to_string(),
-                    }];
-                }
-                match tokio::process::Command::new("rtk")
-                    .arg("gain")
-                    .output()
-                    .await
-                {
-                    Ok(output) => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: tc::rtk_reply(
-                            output.status.success(),
-                            &String::from_utf8_lossy(&output.stdout),
-                            &String::from_utf8_lossy(&output.stderr),
-                        ),
-                    }],
-                    Err(e) => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: format!("rtk gain: {e}"),
-                    }],
-                }
-            }
-            #[cfg(not(feature = "rtk"))]
-            {
-                vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: "RTK is not compiled into this build.".to_string(),
-                }]
-            }
-        }
+        tc::TextCommand::Discard => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Discard).await,
+        }],
+        tc::TextCommand::Clear => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Clear).await,
+        }],
+        tc::TextCommand::Rtk => vec![TurnEvent::CommandReply {
+            session: Some(session_id),
+            text: crab_command(backend, session_id, CrabCommand::Rtk).await,
+        }],
         tc::TextCommand::Approve => {
-            if arg.is_empty() {
-                let policy = opencrabs::config::Config::load()
-                    .map(|cfg| cfg.agent.approval_policy)
-                    .unwrap_or_else(|_| "ask".to_string());
-                vec![TurnEvent::CommandReply {
-                    session: Some(session_id),
-                    text: tc::approval_reply(&policy),
-                }]
+            let text = if arg.is_empty() {
+                crab_command(backend, session_id, CrabCommand::ApprovalPolicy).await
             } else {
                 match tc::approval_target(arg) {
-                    Some(policy) => match opencrabs::config::Config::write_key(
-                        "agent",
-                        "approval_policy",
-                        policy,
-                    ) {
-                        Ok(_) => {
-                            // Both halves: the file and the live service. A
-                            // written key alone would leave the running window
-                            // gating tools by the policy it started with, which
-                            // is the staleness the terminal had to rebuild for.
-                            if let Some(b) = bridge() {
-                                b.service.set_auto_approve_tools(
-                                    opencrabs::utils::approval::policy_auto_approves(policy),
-                                );
-                            }
-                            vec![TurnEvent::CommandReply {
-                                session: Some(session_id),
-                                text: tc::approval_set(policy),
-                            }]
-                        }
-                        Err(e) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: format!("/approve could not write the policy: {e}"),
-                        }],
-                    },
-                    None => vec![TurnEvent::CommandReply {
-                        session: Some(session_id),
-                        text: tc::approval_unknown(arg),
-                    }],
+                    Some(policy) => {
+                        let command = CrabCommand::SetApprovalPolicy {
+                            policy: policy.to_string(),
+                        };
+                        crab_command(backend, session_id, command).await
+                    }
+                    None => tc::approval_unknown(arg),
                 }
-            }
+            };
+            vec![TurnEvent::CommandReply {
+                session: Some(session_id),
+                text,
+            }]
         }
         // `Cd` has no arm here any more (#2527): the window intercepts it in
         // `run_text_command` (the picker screen for a bare `/cd`, the local
@@ -2449,25 +2178,16 @@ async fn run_text_command(
             // The terminal's own installer and its own binary, launched the
             // same way: `/whisper` must not grow a second downloader here.
             match opencrabs::tui::app::ensure_whispercrabs().await {
-                Ok(binary) => {
-                    match std::process::Command::new(&binary)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                    {
-                        Ok(_) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: tc::whisper_reply(),
-                        }],
-                        Err(e) => vec![TurnEvent::CommandReply {
-                            session: Some(session_id),
-                            text: tc::whisper_failed(&format!(
-                                "Failed to launch WhisperCrabs: {e}"
-                            )),
-                        }],
-                    }
-                }
+                Ok(binary) => match launch_whispercrabs(&binary) {
+                    Ok(()) => vec![TurnEvent::CommandReply {
+                        session: Some(session_id),
+                        text: tc::whisper_reply(),
+                    }],
+                    Err(e) => vec![TurnEvent::CommandReply {
+                        session: Some(session_id),
+                        text: tc::whisper_failed(&format!("Failed to launch WhisperCrabs: {e}")),
+                    }],
+                },
                 Err(e) => vec![TurnEvent::CommandReply {
                     session: Some(session_id),
                     text: tc::whisper_failed(&e.to_string()),
@@ -2485,9 +2205,58 @@ async fn run_text_command(
     }
 }
 
+/// Start the WhisperCrabs mic, detached from this process.
+///
+/// Local by nature: the mic floats over this machine's screen and types into
+/// whatever has focus here, whichever crab the window holds. It is the
+/// window's tool, like the voice clip recorder, never the crab's, so it is a
+/// `LOCAL_ONLY` entry of the seam check rather than an operation.
+fn launch_whispercrabs(binary: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(binary)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+/// Run the crab's half of a text command and word its answer the way the
+/// window always has. The crab runs it; the lines are the window's.
+async fn crab_command(
+    backend: &crate::backend_glue::Backend,
+    session_id: Uuid,
+    command: opencrabs::backend::session_ops::CrabCommand,
+) -> String {
+    use super::text_commands as tc;
+    use opencrabs::backend::session_ops::{CommandAnswer, CrabCommand};
+
+    let policy = match &command {
+        CrabCommand::SetApprovalPolicy { policy } => Some(policy.clone()),
+        _ => None,
+    };
+    let answer = backend
+        .call(opencrabs::backend::session_ops::TextCommand {
+            session_id,
+            command,
+        })
+        .await;
+    match answer {
+        Ok(CommandAnswer::Line(text)) => text,
+        Ok(CommandAnswer::RtkGain {
+            success,
+            stdout,
+            stderr,
+        }) => tc::rtk_reply(success, &stdout, &stderr),
+        Ok(CommandAnswer::ApprovalPolicy(current)) => tc::approval_reply(&current),
+        Ok(CommandAnswer::ApprovalSet) => tc::approval_set(policy.as_deref().unwrap_or_default()),
+        Err(e) => format!("command: {}", e.into_message()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrabs::backend::turn::{drop_unanswered_duplicate, race_turn};
     use opencrabs::brain::tools::suggest_options::SuggestionStyle;
 
     /// The surface claim must wait for the window and fire exactly once,
@@ -2773,10 +2542,34 @@ mod tests {
             "rows are cleared before any resume runs, or a crash mid-resume replays them (#729)"
         );
 
-        let resume = src
+        // Read the shipped source only: this test spells its own needles, so
+        // on the whole file every one of them is found in the test itself.
+        let shipped = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped source before the tests");
+        let door = shipped
             .split("fn spawn_resume(")
             .nth(1)
-            .expect("the resume runner");
+            .expect("the resume runner")
+            .split("/// Resolve the boot accounting")
+            .next()
+            .expect("the resume runner has an end");
+        assert!(
+            door.contains("turn::TurnResume {"),
+            "the resume runner hands the turn to the backend's resume"
+        );
+        // The turn itself runs in the backend's `TurnResume`.
+        let resume = include_str!("../backend/turn.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped turn source before the tests")
+            .split("impl Op for TurnResume")
+            .nth(1)
+            .expect("the resume runner")
+            .split("/// Race a turn against its stop token")
+            .next()
+            .expect("the resume runner has an end");
         assert!(
             resume.contains("resume_interrupted_turn("),
             "a resume goes through the untracked path"
@@ -2786,7 +2579,7 @@ mod tests {
             "a resume that re-tracked itself would resume forever (#729)"
         );
         assert!(
-            src.contains("spawn_boot_resume(bridge.service.clone()"),
+            shipped.contains("spawn_boot_resume(bridge.service.clone()"),
             "the window's boot actually runs the scan"
         );
     }
@@ -2962,18 +2755,39 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("the shipped source before the tests");
+        // The turns themselves run in `backend::turn`: the race is there, and
+        // the settle of a dropped turn stays with the window's runners.
+        let turn_shipped = include_str!("../backend/turn.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the shipped turn source before the tests");
         let mut raced = 0usize;
-        for (runner, end) in [
-            ("fn spawn_turn(", "/// Re-run one interrupted turn"),
-            ("fn spawn_resume(", "/// Resolve the boot accounting"),
+        for (runner, end, op, op_end) in [
+            (
+                "fn spawn_turn(",
+                "/// Re-run one interrupted turn",
+                "impl Op for TurnSend",
+                "impl Op for TurnResume",
+            ),
+            (
+                "fn spawn_resume(",
+                "/// Resolve the boot accounting",
+                "impl Op for TurnResume",
+                "/// Race a turn against its stop token",
+            ),
         ] {
             let body = shipped
                 .split(runner)
                 .nth(1)
                 .expect("the runner is in the shipped source");
             let body = body.split(end).next().expect("the runner has an end");
+            let turn = turn_shipped
+                .split(op)
+                .nth(1)
+                .expect("the runner's turn is in the shipped source");
+            let turn = turn.split(op_end).next().expect("the turn has an end");
             assert!(
-                body.contains("race_turn(turn, &cancel)"),
+                turn.contains("race_turn(turn, &cancel)"),
                 "{runner} must race the turn against its stop token, or the stop \
                  only lands when the provider finishes (#2657)"
             );
@@ -3173,17 +2987,18 @@ mod tests {
     /// The guard is wired into the send path, ahead of the turn's first write.
     #[test]
     fn dedup_runs_before_the_turn_persists() {
-        let src = include_str!("agent_bridge.rs");
+        // The send path's body runs in the backend's `TurnSend`.
+        let src = include_str!("../backend/turn.rs");
         let shipped = src
             .split("#[cfg(test)]")
             .next()
             .expect("the shipped source before the tests");
         let body = shipped
-            .split("pub fn spawn_turn(")
+            .split("impl Op for TurnSend")
             .nth(1)
             .expect("spawn_turn is in the shipped source");
         let body = body
-            .split("/// Re-run one interrupted turn")
+            .split("impl Op for TurnResume")
             .next()
             .expect("spawn_turn has an end");
         let guard = body

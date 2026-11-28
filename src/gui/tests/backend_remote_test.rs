@@ -1,0 +1,923 @@
+//! The remote door (`backend_remote.rs`): operations over `gui/call`, events
+//! over `/gui/events`, and the refusals of both, against a mock gateway.
+//!
+//! These lived in an inline `mod tests` at the bottom of `backend_remote.rs`.
+//! The layout guard (#3062) freezes inline modules under `gui/` and says
+//! where their tests go: beside the module they exercise, reached through
+//! `crate::` paths. The tests moved whole.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use axum::Router;
+use axum::extract::State;
+use axum::extract::ws::{Message, WebSocketUpgrade};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response, Sse, sse};
+use axum::routing::{get, post};
+use opencrabs::backend::sessions::LoadSessions;
+use opencrabs::backend::{BackendError, Ctx, Event, Scope};
+use opencrabs::brain::agent::ProgressEvent;
+use opencrabs::remote::instance_client;
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::agent_bridge::TurnEvent;
+use crate::backend_glue::Backend;
+use crate::backend_remote::{
+    Frames, RemoteCrab, call_json, decode_reply, socket_url, to_turn_event, watch,
+};
+
+/// A stand-in for a crab's gateway. `POST /a2a/v1` answers `gui/call`
+/// in the gateway's shape (`src/a2a/handler/gui.rs`): the operation runs
+/// through `backend::dispatch_as` for a caller holding `granted`, a
+/// failure carries the typed error in `data`, and a refused scope is an
+/// HTTP 403. `GET /gui/events` serves `events` once per connection and
+/// closes, or answers `events_status` when that is not 200.
+struct Mock {
+    ctx: Ctx,
+    granted: Vec<Scope>,
+    events: Vec<Event>,
+    events_status: StatusCode,
+    dials: AtomicUsize,
+    /// Whether `GET /gui/events/ws` exists. Off, it answers 404, the way a
+    /// crab built before that route does.
+    socket: bool,
+    /// Every WebSocket it accepted on `/gui/events/ws`.
+    socket_dials: AtomicUsize,
+    /// Every `POST /a2a/v1` it answered: one per round trip.
+    calls: AtomicUsize,
+}
+
+async fn rpc(State(mock): State<Arc<Mock>>, Json(req): Json<Value>) -> Response {
+    mock.calls.fetch_add(1, Ordering::SeqCst);
+    let id = req["id"].clone();
+    let name = req["params"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let params = req["params"]["params"].clone();
+    match opencrabs::backend::dispatch_as(&mock.ctx, &mock.granted, &name, params).await {
+        Ok(result) => Json(serde_json::json!({ "jsonrpc": "2.0", "result": result, "id": id }))
+            .into_response(),
+        Err(err) => {
+            let (status, code) = match &err {
+                BackendError::UnknownOp(_) => (StatusCode::OK, -32601),
+                BackendError::Forbidden { .. } => (StatusCode::FORBIDDEN, -32003),
+                BackendError::BadParams(_) => (StatusCode::OK, -32602),
+                _ => (StatusCode::OK, -32603),
+            };
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "error": { "code": code, "message": err.to_string(), "data": err },
+                "id": id,
+            });
+            (status, Json(body)).into_response()
+        }
+    }
+}
+
+async fn events(State(mock): State<Arc<Mock>>) -> Response {
+    mock.dials.fetch_add(1, Ordering::SeqCst);
+    if mock.events_status != StatusCode::OK {
+        return mock.events_status.into_response();
+    }
+    let frames: Vec<_> = mock
+        .events
+        .iter()
+        .map(|event| sse::Event::default().json_data(event))
+        .collect();
+    Sse::new(futures::stream::iter(frames)).into_response()
+}
+
+/// `GET /gui/events/ws`: `events` as WebSocket text messages, then the
+/// socket stays open until the client leaves, so a test sees them arrive
+/// on a connection that has not ended.
+async fn events_ws(State(mock): State<Arc<Mock>>, upgrade: WebSocketUpgrade) -> Response {
+    if !mock.socket {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if mock.events_status != StatusCode::OK {
+        return mock.events_status.into_response();
+    }
+    mock.socket_dials.fetch_add(1, Ordering::SeqCst);
+    upgrade.on_upgrade(move |mut socket| async move {
+        for event in &mock.events {
+            let text = serde_json::to_string(event).expect("an Event encodes");
+            if socket.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
+        }
+        while let Some(Ok(_)) = socket.recv().await {}
+    })
+}
+
+/// A served mock and the runtime it runs on; the runtime must outlive
+/// the test's calls.
+struct Served {
+    runtime: tokio::runtime::Runtime,
+    mock: Arc<Mock>,
+    crab: Arc<RemoteCrab>,
+}
+
+fn serve(mock: Mock) -> Served {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let mock = Arc::new(mock);
+    let app = Router::new()
+        .route("/a2a/v1", post(rpc))
+        .route("/gui/events", get(events))
+        .route("/gui/events/ws", get(events_ws))
+        .with_state(mock.clone());
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    runtime.spawn(async move { axum::serve(listener, app).await });
+    let crab = Arc::new(RemoteCrab::new(
+        "mock",
+        format!("http://{addr}/"),
+        Some("t0ken".into()),
+        PathBuf::from("unused.db"),
+    ));
+    Served {
+        runtime,
+        mock,
+        crab,
+    }
+}
+
+fn mock(ctx: Ctx, granted: &[Scope]) -> Mock {
+    Mock {
+        ctx,
+        granted: granted.to_vec(),
+        events: Vec::new(),
+        events_status: StatusCode::OK,
+        dials: AtomicUsize::new(0),
+        socket: false,
+        socket_dials: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
+    }
+}
+
+/// Each operation's fixture request, by wire name.
+fn fixture_requests() -> std::collections::HashMap<String, Value> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gui_backend");
+    let mut out = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(&dir).expect("fixtures dir") {
+        let path = entry.expect("fixture entry").path();
+        let text = std::fs::read_to_string(&path).expect("fixture");
+        let fixture: Value = serde_json::from_str(&text).expect("fixture json");
+        if let Some(op) = fixture["op"].as_str() {
+            out.insert(op.to_string(), fixture["request"].clone());
+        }
+    }
+    out
+}
+
+fn by_remote(
+    served: &Served,
+    name: &str,
+    scope: Scope,
+    params: Value,
+) -> Result<Value, BackendError> {
+    instance_client::block_on(async {
+        anyhow::Ok(call_json(&served.crab, name, Some(scope), params).await)
+    })
+    .expect("the shared runtime ran the call")
+}
+
+#[test]
+fn the_registry_has_operations_to_carry() {
+    assert!(
+        !opencrabs::backend::registry().is_empty(),
+        "the per-operation tests below would pass vacuously"
+    );
+}
+
+/// Every registered operation, with its own fixture request, crosses the
+/// remote door and comes back refused exactly as the local door refuses
+/// a caller without its scope. Nothing runs: the gate is first.
+#[test]
+fn every_operation_is_refused_alike_by_both_doors() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), &[]));
+    let requests = fixture_requests();
+    for (name, scope) in opencrabs::backend::registry() {
+        let params = requests.get(name).cloned().unwrap_or(Value::Null);
+        let local = served.runtime.block_on(opencrabs::backend::dispatch_as(
+            &served.mock.ctx,
+            &[],
+            name,
+            params.clone(),
+        ));
+        let remote = by_remote(&served, name, scope, params);
+        assert_eq!(remote, local, "{name}");
+        assert_eq!(remote, Err(BackendError::Forbidden { scope }), "{name}");
+    }
+}
+
+/// Every registered operation, holding every scope, reaches its params by
+/// the remote door and is answered as the local door answers it. The
+/// params are a JSON string, which no operation decodes, so nothing runs.
+#[test]
+fn every_operation_reaches_its_params_alike_by_both_doors() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let probe = Value::String("remote door probe".into());
+    for (name, scope) in opencrabs::backend::registry() {
+        let local = served.runtime.block_on(opencrabs::backend::dispatch_as(
+            &served.mock.ctx,
+            Scope::ALL,
+            name,
+            probe.clone(),
+        ));
+        let remote = by_remote(&served, name, scope, probe.clone());
+        assert_eq!(remote, local, "{name}");
+        assert!(
+            matches!(remote, Err(BackendError::BadParams(_))),
+            "{name}: {remote:?}"
+        );
+    }
+}
+
+/// A real reply crosses typed: `Backend::Remote` and `Backend::Local` on
+/// the same ledger list the same sessions.
+#[test]
+fn a_reply_crosses_the_remote_door_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("remote-door.db");
+    let served = serve(mock(Ctx::new(db_path.clone()), Scope::ALL));
+    served.runtime.block_on(async {
+        let db = opencrabs::db::Database::connect(&db_path)
+            .await
+            .expect("connect");
+        db.run_migrations().await.expect("migrate");
+        let repo = opencrabs::db::repository::SessionRepository::new(db.pool().clone());
+        for title in ["one", "two"] {
+            repo.create(&opencrabs::db::models::Session::new(
+                Some(title.into()),
+                None,
+                None,
+            ))
+            .await
+            .expect("create");
+        }
+    });
+    let local = Backend::Local(Arc::new(Ctx::new(db_path)));
+    let remote = Backend::Remote(served.crab.clone());
+    let local = futures::executor::block_on(local.call(LoadSessions {})).expect("local");
+    let remote = futures::executor::block_on(remote.call(LoadSessions {})).expect("remote");
+    assert_eq!(remote.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&remote).expect("encode"),
+        serde_json::to_value(&local).expect("encode")
+    );
+}
+
+#[test]
+fn a_crab_that_is_not_there_is_a_failure_naming_it() {
+    // Port 9 on loopback: nothing listens, the connect is refused.
+    let crab = Arc::new(RemoteCrab::new(
+        "gone",
+        "http://127.0.0.1:9",
+        None,
+        PathBuf::from("unused.db"),
+    ));
+    let err = futures::executor::block_on(Backend::Remote(crab).call(LoadSessions {}))
+        .expect_err("nothing listens");
+    match err {
+        BackendError::Failed(text) => {
+            assert!(text.starts_with("gone: sessions.load: "), "{text}")
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_typed_error_in_data_comes_back_as_itself() {
+    let refused = BackendError::Forbidden {
+        scope: Scope::Admin,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": { "code": -32003, "message": "forbidden", "data": refused },
+        "id": 1,
+    });
+    assert_eq!(
+        decode_reply("c", "x.y", 403, &body.to_string()),
+        Err(BackendError::Forbidden {
+            scope: Scope::Admin
+        })
+    );
+}
+
+#[test]
+fn a_crab_without_gui_call_does_not_know_the_operation() {
+    let body = r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":1}"#;
+    assert_eq!(
+        decode_reply("c", "sessions.load", 200, body),
+        Err(BackendError::UnknownOp("sessions.load".into()))
+    );
+}
+
+#[test]
+fn a_refused_bearer_is_a_failure_with_its_status() {
+    assert_eq!(
+        decode_reply("c", "sessions.load", 401, "unauthorized"),
+        Err(BackendError::Failed(
+            "c: sessions.load: credential refused (HTTP 401)".into()
+        ))
+    );
+}
+
+#[test]
+fn a_null_result_is_a_reply() {
+    let body = r#"{"jsonrpc":"2.0","result":null,"id":1}"#;
+    assert_eq!(decode_reply("c", "x.y", 200, body), Ok(Value::Null));
+}
+
+#[test]
+fn frames_survive_any_split() {
+    let session = Uuid::new_v4();
+    let first = Event::TurnDone {
+        session_id: session,
+    };
+    let second = Event::RailChanged;
+    let wire = format!(
+        ":keep-alive\r\n\r\ndata: {}\r\n\r\nevent: x\ndata:{}\n\n",
+        serde_json::to_string(&first).expect("encode"),
+        serde_json::to_string(&second).expect("encode"),
+    );
+    let wire = wire.as_bytes();
+    for cut in 0..wire.len() {
+        let mut frames = Frames::default();
+        let mut got = frames.push(&wire[..cut]);
+        got.extend(frames.push(&wire[cut..]));
+        assert_eq!(got, vec![first.clone(), second.clone()], "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_data_field_may_span_lines() {
+    let mut frames = Frames::default();
+    let got = frames.push(b"data: {\"kind\":\ndata: \"rail_changed\"}\n\n");
+    assert_eq!(got, vec![Event::RailChanged]);
+}
+
+#[test]
+fn a_frame_that_does_not_decode_is_skipped() {
+    let mut frames = Frames::default();
+    let got =
+        frames.push(b"data: {\"kind\":\"no_such\"}\n\ndata: {\"kind\":\"tasks_changed\"}\n\n");
+    assert_eq!(got, vec![Event::TasksChanged]);
+}
+
+#[test]
+fn turn_progress_reaches_the_window_and_settles_do_not() {
+    let session = Uuid::new_v4();
+    let progress = ProgressEvent::StreamingChunk { text: "wor".into() };
+    match to_turn_event(Event::Turn {
+        session_id: session,
+        progress: progress.clone(),
+    }) {
+        Some(TurnEvent::ProgressFor(id, got, _)) => {
+            assert_eq!(id, session);
+            assert_eq!(got, progress);
+        }
+        _ => panic!("turn progress must reach the window"),
+    }
+    assert!(
+        to_turn_event(Event::TurnDone {
+            session_id: session
+        })
+        .is_none()
+    );
+    assert!(
+        to_turn_event(Event::TurnFailed {
+            session_id: session,
+            message: "x".into()
+        })
+        .is_none()
+    );
+    assert!(
+        to_turn_event(Event::TurnCancelled {
+            session_id: session
+        })
+        .is_none()
+    );
+}
+
+fn next(rx: &std::sync::mpsc::Receiver<TurnEvent>) -> TurnEvent {
+    rx.recv_timeout(Duration::from_secs(20))
+        .expect("the reader delivered in time")
+}
+
+/// The reader delivers the stream's events, says once that it dropped,
+/// dials again, and says it is back.
+#[test]
+fn the_reader_delivers_and_reconnects() {
+    let session = Uuid::new_v4();
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL);
+    m.events = vec![Event::Turn {
+        session_id: session,
+        progress: ProgressEvent::Thinking,
+    }];
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let backend = Backend::Remote(served.crab.clone());
+    let watch = backend
+        .watch(session, sink)
+        .expect("reader started")
+        .expect("a remote backend has a reader");
+
+    assert!(
+        matches!(next(&rx), TurnEvent::ProgressFor(id, ProgressEvent::Thinking, _) if id == session)
+    );
+    match next(&rx) {
+        TurnEvent::CommandReply {
+            session: None,
+            text,
+        } => {
+            assert!(text.contains("reconnecting"), "{text}")
+        }
+        _ => panic!("the drop is told to the notices"),
+    }
+    match next(&rx) {
+        TurnEvent::CommandReply {
+            session: None,
+            text,
+        } => {
+            assert!(text.contains("back"), "{text}")
+        }
+        _ => panic!("the reconnect is told to the notices"),
+    }
+    assert!(
+        matches!(next(&rx), TurnEvent::ProgressFor(id, ProgressEvent::Thinking, _) if id == session)
+    );
+    assert!(served.mock.dials.load(Ordering::SeqCst) >= 2);
+    drop(watch);
+}
+
+/// A refused credential ends the reader with one notice.
+#[test]
+fn a_refused_reader_says_so_and_stops() {
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), &[]);
+    m.events_status = StatusCode::FORBIDDEN;
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let _watch = watch(served.crab.clone(), Uuid::new_v4(), sink).expect("reader started");
+    match next(&rx) {
+        TurnEvent::CommandReply {
+            session: None,
+            text,
+        } => {
+            assert!(text.contains("HTTP 403"), "{text}")
+        }
+        _ => panic!("the refusal is told to the notices"),
+    }
+    // The reader ended and dropped its sink: the channel disconnects.
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(20)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(served.mock.dials.load(Ordering::SeqCst), 1);
+}
+
+/// A crab with the WebSocket route is read over it, and its events reach
+/// the window while that connection is still open. That is the property a
+/// Cloudflare quick tunnel takes from SSE: it holds the SSE body back until
+/// the response ends, so over SSE a turn's progress arrived only with its
+/// final reply.
+#[test]
+fn the_reader_takes_the_socket_and_delivers_while_it_is_open() {
+    let session = Uuid::new_v4();
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL);
+    m.socket = true;
+    m.events = vec![
+        Event::Turn {
+            session_id: session,
+            progress: ProgressEvent::Thinking,
+        },
+        Event::Turn {
+            session_id: session,
+            progress: ProgressEvent::StreamingChunk { text: "hel".into() },
+        },
+    ];
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let watch = watch(served.crab.clone(), session, sink).expect("reader started");
+    assert!(
+        matches!(next(&rx), TurnEvent::ProgressFor(id, ProgressEvent::Thinking, _) if id == session)
+    );
+    match next(&rx) {
+        TurnEvent::ProgressFor(id, ProgressEvent::StreamingChunk { text }, _) => {
+            assert_eq!(id, session);
+            assert_eq!(text, "hel");
+        }
+        _ => panic!("the second event arrives on the same open socket"),
+    }
+    assert_eq!(served.mock.socket_dials.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        served.mock.dials.load(Ordering::SeqCst),
+        0,
+        "a crab with the socket route was read over SSE"
+    );
+    drop(watch);
+}
+
+/// A refusal on the socket route ends the reader there: the same
+/// credential is not tried again over SSE.
+#[test]
+fn a_socket_refusal_is_not_retried_over_sse() {
+    let mut m = mock(Ctx::new(PathBuf::from("unused.db")), &[]);
+    m.socket = true;
+    m.events_status = StatusCode::FORBIDDEN;
+    let served = serve(m);
+    let (sink, rx) = std::sync::mpsc::channel();
+    let _watch = watch(served.crab.clone(), Uuid::new_v4(), sink).expect("reader started");
+    match next(&rx) {
+        TurnEvent::CommandReply {
+            session: None,
+            text,
+        } => assert!(text.contains("HTTP 403"), "{text}"),
+        _ => panic!("the refusal is told to the notices"),
+    }
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(20)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(served.mock.dials.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_crab_url_becomes_its_socket_url() {
+    assert_eq!(
+        socket_url("https://a-b.trycloudflare.com/gui/events/ws?session=x"),
+        "wss://a-b.trycloudflare.com/gui/events/ws?session=x"
+    );
+    assert_eq!(
+        socket_url("http://127.0.0.1:18799/gui/events/ws"),
+        "ws://127.0.0.1:18799/gui/events/ws"
+    );
+}
+
+#[test]
+fn a_local_backend_has_no_reader() {
+    let (sink, _rx) = std::sync::mpsc::channel();
+    let local = Backend::local(PathBuf::from("unused.db"));
+    assert!(
+        local
+            .watch(Uuid::new_v4(), sink)
+            .expect("no thread")
+            .is_none()
+    );
+}
+
+/// The acceptance of C4: what the window reads while it renders (the facts
+/// and the running tasks) never reaches the network. A thousand frames of
+/// reads cost no `gui/call`; opening the session's events is what reads the
+/// crab, off the window's thread.
+#[test]
+fn render_reads_cost_zero_network_calls() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let session = Uuid::new_v4();
+
+    for _ in 0..1000 {
+        assert_eq!(backend.facts(Some(session)), None);
+        assert_eq!(backend.facts(None), None);
+        assert!(backend.tasks_snapshot(vec![session]).is_empty());
+    }
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        0,
+        "a read inside a frame went over the wire"
+    );
+
+    // Opening the events reads what the frames asked about, off this thread.
+    let (sink, _rx) = std::sync::mpsc::channel();
+    let watch = backend
+        .watch(session, sink)
+        .expect("reader started")
+        .expect("a remote backend has a reader");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while served.mock.calls.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        served.mock.calls.load(Ordering::SeqCst) > 0,
+        "the cache was never read"
+    );
+
+    drop(watch);
+}
+
+/// The first `BangOutput` the sink receives, or a failure naming what came.
+fn bang_output(rx: &std::sync::mpsc::Receiver<TurnEvent>) -> String {
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(TurnEvent::BangOutput { text, .. }) => text,
+        Ok(_) => panic!("the sink got another event first"),
+        Err(e) => panic!("no bang output: {e}"),
+    }
+}
+
+/// `!ls` with a remote crab is the crab's to run. A token without admin is
+/// refused at its gateway: the sink gets the 403 in `cap::notice` words,
+/// which a run on this machine could never produce.
+#[test]
+fn a_bang_command_goes_to_the_remote_crab_and_its_refusal_comes_back() {
+    let served = serve(mock(
+        Ctx::new(PathBuf::from("unused.db")),
+        &[Scope::Read, Scope::Send, Scope::Manage],
+    ));
+    let backend = Backend::Remote(served.crab.clone());
+    let (sink, rx) = std::sync::mpsc::channel();
+    crate::bang::spawn(&backend, "ls".to_string(), None, sink);
+    let text = bang_output(&rx);
+    assert_eq!(
+        text,
+        "$ ls\nshell.run: needs a2a:admin: this crab's token does not grant it"
+    );
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        1,
+        "the command crossed the wire once"
+    );
+}
+
+/// An editor needs a terminal on this machine: with a remote crab the sink
+/// gets the reason, and nothing is asked of the crab or opened here.
+#[test]
+fn an_editor_with_a_remote_crab_answers_with_the_reason() {
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let (sink, rx) = std::sync::mpsc::channel();
+    crate::bang::spawn(&backend, "vim notes.txt".to_string(), None, sink);
+    assert_eq!(
+        bang_output(&rx),
+        "$ vim notes.txt\nonly on a crab on this machine"
+    );
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 0);
+}
+
+/// The /cd picker's rows come from the crab's `ListDir`. A folder that does
+/// exist on this machine is refused by a remote crab without admin: the
+/// answer is the crab's 403, never this disk's listing.
+#[test]
+fn the_cd_listing_is_asked_of_the_remote_crab() {
+    use opencrabs::backend::fs_list::ListDir;
+
+    let here = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(here.path().join("only-here")).expect("mkdir");
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), &[Scope::Read]));
+    let backend = Backend::Remote(served.crab.clone());
+    let reply = futures::executor::block_on(backend.call(ListDir {
+        dir: here.path().to_path_buf(),
+        show_hidden: false,
+    }));
+    let err = reply.expect_err("the crab refuses a reader");
+    assert_eq!(
+        err,
+        BackendError::Forbidden {
+            scope: Scope::Admin
+        }
+    );
+    assert_eq!(
+        opencrabs::backend::cap::notice("fs_list.list_dir", &err),
+        "fs_list.list_dir: needs a2a:admin: this crab's token does not grant it"
+    );
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 1);
+}
+
+/// `/cd /nao/existe` is checked on the crab: the remote door answers the
+/// line the window used to print after looking at its own disk.
+#[test]
+fn a_cd_to_a_missing_folder_is_refused_by_the_crab_in_the_windows_words() {
+    use opencrabs::backend::session_ops::ApplyCd;
+
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let reply = futures::executor::block_on(backend.call(ApplyCd {
+        session_id: Uuid::new_v4(),
+        dir: PathBuf::from("/nao/existe"),
+    }));
+    assert_eq!(
+        reply,
+        Err(BackendError::Failed(
+            opencrabs::backend::session_ops::cd_not_a_directory("/nao/existe")
+        ))
+    );
+}
+
+/// The window's halves of the three doors, read off the source: `/cd` with
+/// a path never asks this disk, the picker never lists it or falls back to
+/// this process's folder, and the footer's branch is never read through the
+/// synchronous local door.
+#[test]
+fn the_cd_and_footer_doors_never_read_this_machine() {
+    let src = crate::dashboard_source::DASHBOARD;
+    let cd = src
+        .split("C::Cd => {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n            other => {").next())
+        .expect("the /cd arm");
+    assert!(
+        !cd.contains(".is_dir()"),
+        "the /cd arm probes no folder here"
+    );
+
+    let picker = src
+        .split("pub(crate) fn open_cd_picker(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub(crate) fn toggle_help(").next())
+        .expect("the picker's functions");
+    for local in ["cd_entries_for(", "current_dir(", "ask_crab("] {
+        assert!(!picker.contains(local), "the picker calls {local}");
+    }
+    assert!(
+        picker.contains("backend.call(op)"),
+        "the picker asks the crab the window holds"
+    );
+
+    let footer = src
+        .split("fn footer_place(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    pub(crate) fn ").next())
+        .expect("the footer's place");
+    assert!(!footer.contains("ask_crab("));
+    let status = include_str!("../status.rs");
+    let branch = status
+        .split("pub(crate) fn git_branch(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("git_branch");
+    assert!(!branch.contains("ask_crab("), "git_branch waits on no crab");
+}
+
+/// A crab whose uploads land under its own temp home, never `~/.opencrabs`.
+fn upload_crab() -> (Served, tempfile::TempDir) {
+    let home = tempfile::tempdir().expect("crab home");
+    let ctx = Ctx::new(home.path().join("unused.db")).with_home(home.path().to_path_buf());
+    (serve(mock(ctx, Scope::ALL)), home)
+}
+
+/// An attachment sent to a remote crab (P8): its bytes go by `blob.put`, and
+/// the message the turn carries names the crab's copy and no path on this
+/// machine. A marker in the quoted reply is the crab's own text: this machine
+/// neither reads nor uploads the file it names.
+#[test]
+fn an_attachment_reaches_a_remote_crab_as_its_own_copy() {
+    let (served, crab_home) = upload_crab();
+    let backend = Backend::Remote(served.crab.clone());
+    let here = tempfile::tempdir().expect("tempdir");
+    let image = here.path().join("a.png");
+    std::fs::write(&image, b"png bytes").expect("write a.png");
+    let text = format!("> <<IMG:/etc/hostname>>\nlook <<IMG:{}>>", image.display());
+
+    let carried =
+        futures::executor::block_on(backend.carry(text, vec![image.clone()])).expect("carried");
+
+    let local = here.path().display().to_string();
+    assert!(
+        !carried.contains(&local),
+        "a local path went out: {carried}"
+    );
+    assert!(
+        carried.starts_with("> <<IMG:/etc/hostname>>\nlook <<IMG:"),
+        "only the sent file's marker changed: {carried}"
+    );
+    let crab_path = carried
+        .rsplit("<<IMG:")
+        .next()
+        .and_then(|rest| rest.strip_suffix(">>"))
+        .expect("the crab's marker");
+    assert!(
+        Path::new(crab_path).starts_with(crab_home.path().canonicalize().expect("real home")),
+        "{crab_path} is the crab's copy"
+    );
+    assert_eq!(
+        std::fs::read(crab_path).expect("the crab kept it"),
+        b"png bytes"
+    );
+    assert_eq!(
+        served.mock.calls.load(Ordering::SeqCst),
+        1,
+        "one upload, for the one attached file; the quote's path was not sent"
+    );
+}
+
+/// A file over the blob ceiling refuses the whole message before anything is
+/// uploaded: the crab sees no call at all.
+#[test]
+fn a_file_over_the_ceiling_sends_nothing() {
+    let (served, _crab_home) = upload_crab();
+    let backend = Backend::Remote(served.crab.clone());
+    let here = tempfile::tempdir().expect("tempdir");
+    let small = here.path().join("small.png");
+    std::fs::write(&small, b"ok").expect("write small");
+    let big = here.path().join("big.mp4");
+    let file = std::fs::File::create(&big).expect("create big");
+    file.set_len(opencrabs::backend::blob::MAX_BLOB_BYTES + 1)
+        .expect("size big");
+    let text = format!("two <<IMG:{}>> <<VID:{}>>", small.display(), big.display());
+
+    let refused = futures::executor::block_on(backend.carry(text, vec![small, big]))
+        .expect_err("over the ceiling");
+
+    assert!(refused.contains("big.mp4"), "{refused}");
+    assert!(refused.contains("nothing was sent"), "{refused}");
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 0);
+}
+
+/// The local crab reads this disk itself: the message is carried as it is,
+/// on the first poll, and nothing is read or uploaded.
+#[test]
+fn a_local_crab_carries_the_message_unchanged() {
+    use futures::FutureExt as _;
+    let backend = Backend::local(PathBuf::from("unused.db"));
+    let text = "look <<IMG:/nowhere/a.png>>".to_string();
+    let carried = backend
+        .carry(text.clone(), vec![PathBuf::from("/nowhere/a.png")])
+        .now_or_never()
+        .expect("ready at once");
+    assert_eq!(carried, Ok(text));
+}
+
+/// Only the marker this send appended moves; the same path quoted earlier
+/// in the text, and every other word, stay as they were.
+#[test]
+fn the_swap_touches_the_last_marker_for_the_file_only() {
+    let local = Path::new("/home/me/a b.png");
+    let text = "> <<IMG:/home/me/a b.png>>\nsee <<VID:/x.mp4>> <<IMG:/home/me/a b.png>>";
+    assert_eq!(
+        crate::backend_glue::swap_marker(text, local, "/crab/tmp/gui-uploads/1-a_b.png"),
+        "> <<IMG:/home/me/a b.png>>\nsee <<VID:/x.mp4>> <<IMG:/crab/tmp/gui-uploads/1-a_b.png>>"
+    );
+    assert_eq!(
+        crate::backend_glue::swap_marker("no marker", local, "/crab/x"),
+        "no marker"
+    );
+}
+
+/// The card's answer is `turn.approval_answer` over the remote door. A token
+/// without `manage` is refused at the gateway, and the card gets the refusal
+/// in the words every refused action uses instead of failing silently (C8).
+#[test]
+fn an_approval_answer_without_manage_comes_back_refused() {
+    use opencrabs::backend::turn::ApprovalAnswer;
+
+    let served = serve(mock(
+        Ctx::new(PathBuf::from("unused.db")),
+        &[Scope::Read, Scope::Send],
+    ));
+    let backend = Backend::Remote(served.crab.clone());
+    let answer = ApprovalAnswer {
+        session_id: Uuid::new_v4(),
+        request_id: Uuid::new_v4(),
+        approved: true,
+        always: false,
+    };
+    let asked = answer.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    backend
+        .spawn(answer, move |reply| {
+            let _ = tx.send(crate::remote_approval::settled_event(&asked, reply));
+        })
+        .expect("the answer left");
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(TurnEvent::ApprovalSettled { outcome, .. }) => assert_eq!(
+            outcome,
+            Err(
+                "turn.approval_answer: needs a2a:manage: this crab's token does not grant it"
+                    .into()
+            )
+        ),
+        Ok(_) => panic!("another event came back"),
+        Err(e) => panic!("no reply: {e}"),
+    }
+    assert_eq!(served.mock.calls.load(Ordering::SeqCst), 1);
+}
+
+/// With `manage`, an answer for a request nothing waits on reaches the crab
+/// and comes back `false`: the card goes and the notices say why.
+#[test]
+fn an_approval_answer_with_manage_reaches_the_crab() {
+    use opencrabs::backend::turn::ApprovalAnswer;
+
+    let served = serve(mock(Ctx::new(PathBuf::from("unused.db")), Scope::ALL));
+    let backend = Backend::Remote(served.crab.clone());
+    let answer = ApprovalAnswer {
+        session_id: Uuid::new_v4(),
+        request_id: Uuid::new_v4(),
+        approved: false,
+        always: false,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    backend
+        .spawn(answer, move |reply| {
+            let _ = tx.send(reply);
+        })
+        .expect("the answer left");
+    let reply = rx.recv_timeout(Duration::from_secs(20)).expect("a reply");
+    assert_eq!(reply, Ok(false));
+}

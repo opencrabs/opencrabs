@@ -29,7 +29,11 @@ mod accent;
 mod agent_bridge;
 mod app;
 mod attachment_view;
+mod backend_glue;
+mod backend_remote;
 mod bang;
+mod blob_cache;
+mod blob_cache_store;
 mod boot;
 mod breakdown;
 mod channel_chip;
@@ -103,7 +107,7 @@ mod rail_activity;
 // the last one replays the prepaint instead of rebuilding every listener.
 mod composer_orb;
 mod rail_view;
-mod remote_panel;
+mod remote_approval;
 mod screen_keys;
 mod seeker_orb;
 mod sessions;
@@ -147,9 +151,9 @@ use crate::mission_control_view::{
     mission_control_body, mission_control_detail, mission_control_logs,
 };
 use crate::overlays::{
-    DEFAULT_TOPIC_ICON, TopicPick, cd_entries_for, confirm_delete_overlay,
-    confirm_disable_topics_overlay, split_pick_overlay, topic_info_overlay, topic_pick,
-    topic_prompt_overlay, update_prompt_overlay, warning_overlay,
+    DEFAULT_TOPIC_ICON, TopicPick, confirm_delete_overlay, confirm_disable_topics_overlay,
+    split_pick_overlay, topic_info_overlay, topic_pick, topic_prompt_overlay,
+    update_prompt_overlay, warning_overlay,
 };
 use crate::pane_chrome::{
     central, chat_measure, pane_composer_dim, rotation_chord, split_chord, split_pane_width,
@@ -215,8 +219,6 @@ use opencrabs::ui_core::palette::{
 use opencrabs::ui_core::docs;
 use opencrabs::ui_core::help_keys;
 
-use futures::channel::oneshot;
-
 use gpui::{
     AnyElement, AnyView, App, Application, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent,
     Entity, ExternalPaths, FocusHandle, Image, KeyDownEvent, KeystrokeEvent, MouseButton,
@@ -244,7 +246,6 @@ use opencrabs::tui::app::mission_control::log_viewer::LogViewerState;
 use opencrabs::ui_core::keys::UiKey;
 use opencrabs::ui_core::usage::data::Period;
 use opencrabs::ui_core::usage::input::{self, DashboardState, UsageKeyOutcome};
-use opencrabs::ui_core::usage::loader::usage_view;
 use opencrabs::ui_core::usage::view_model::UsageViewModel;
 use opencrabs::ui_core::window_controls::{
     TITLEBAR_APPEARS_TRANSPARENT, effective_decorations, platform_draws_caption,

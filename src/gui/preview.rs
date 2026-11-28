@@ -19,6 +19,7 @@ use gpui::{
 };
 
 use crate::attachment_view;
+use crate::backend_glue::Backend;
 use crate::logging;
 use crate::modal_shell;
 use crate::palette;
@@ -67,6 +68,39 @@ impl Preview {
         match self.kind {
             PreviewKind::Video => "play",
             PreviewKind::Image | PreviewKind::File | PreviewKind::Message => "open",
+        }
+    }
+
+    /// The same preview, its path the one `backend` answers on this machine.
+    pub fn localized(&self, backend: &Backend) -> Self {
+        Self {
+            path: backend.localize(&self.path),
+            ..self.clone()
+        }
+    }
+
+    /// The same preview as the overlay may decode it on this machine (SEC5).
+    ///
+    /// An image or a clip is drawn from [`Backend::localize_allowed`], and
+    /// what it is drawn as is decided by that copy's own extension. A remote
+    /// crab's copy the allowlist does not let open (a `.bmp`, a `.mkv`, kept
+    /// here as `.bin`) is `None` there: the preview becomes a file, shown and
+    /// never decoded. Any other kind is [`localized`](Self::localized), as it
+    /// was. The local crab's copy is its own path, so its preview is the same.
+    pub fn localized_allowed(&self, backend: &Backend) -> Self {
+        match self.kind {
+            PreviewKind::Image | PreviewKind::Video => match backend.localize_allowed(&self.path) {
+                Some(copy) => Self {
+                    kind: kind_of(&copy),
+                    path: copy,
+                    ..self.clone()
+                },
+                None => Self {
+                    kind: PreviewKind::File,
+                    ..self.localized(backend)
+                },
+            },
+            PreviewKind::File | PreviewKind::Message => self.localized(backend),
         }
     }
 
@@ -161,6 +195,163 @@ pub fn url_command(url: &str) -> Vec<String> {
     } else {
         vec!["xdg-open".to_string(), url.to_string()]
     }
+}
+
+/// The links a remote crab's transcript may hand [`url_command`]: a web page
+/// or a mail draft. The crab is not trusted by this machine, and the system
+/// handler runs whatever a scheme is bound to (`file:` opens a file here, a
+/// custom scheme starts its app), so everything else is refused.
+pub const REMOTE_URL_SCHEMES: &[&str] = &["http://", "https://", "mailto:"];
+
+/// What the window says instead of opening a remote crab's link it refuses.
+pub const REMOTE_URL_NOT_OPENED: &str =
+    "a remote crab's link: only http, https and mailto links are opened here";
+
+/// The fields a remote crab's `mailto:` link may carry. Some mail clients
+/// honour `attach=<path>`, which would send a file of this machine; only
+/// the draft's addressees and text are let through.
+pub const REMOTE_MAILTO_FIELDS: &[&str] = &["to", "cc", "bcc", "subject", "body", "in-reply-to"];
+
+/// Whether a link from a remote crab's transcript may reach [`url_command`]:
+/// it starts with one of [`REMOTE_URL_SCHEMES`] in any case, something
+/// follows the scheme, it holds no whitespace or control character, and a
+/// `mailto:` is already the draft [`remote_mailto`] rebuilds from it after
+/// the scheme (ASCII case aside, so a field name or a hex digit may be in
+/// upper case; no delimiter or escape may differ). A mail client reads the
+/// link it is handed with its own parser; only the rebuilt draft is let
+/// through, so what the client parses is what was checked here, never a
+/// field hidden behind a percent escape (`x%3Fattach=`, `%26attach=`,
+/// `%253F`). Pure.
+pub fn remote_url_opens(url: &str) -> bool {
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    let Some(scheme) = REMOTE_URL_SCHEMES
+        .iter()
+        .find(|scheme| lower.starts_with(*scheme) && lower.len() > scheme.len())
+    else {
+        return false;
+    };
+    if *scheme != "mailto:" {
+        return true;
+    }
+    // The scheme is ASCII and already matched in any case, so comparing the
+    // whole link is comparing what follows it.
+    remote_mailto(url).is_some_and(|draft| draft.eq_ignore_ascii_case(url))
+}
+
+/// How many times a `mailto:` part is percent-decoded before it must have
+/// stopped changing. A part still changing after this many rounds is
+/// refused rather than guessed at.
+const MAILTO_DECODE_ROUNDS: usize = 4;
+
+/// The canonical `mailto:` draft rebuilt from a remote crab's link, or
+/// `None` when the link is refused.
+///
+/// The link is parsed here, not by the mail client: each part (address,
+/// field name, field value) is percent-decoded until it stops changing
+/// (at most [`MAILTO_DECODE_ROUNDS`] rounds), an addressee (the address and
+/// `to`, `cc`, `bcc`) holding `?`, `&`, `=`, `/`, `\`, whitespace or a
+/// control character after decoding is refused, every field name must
+/// decode, in lower case, to one of [`REMOTE_MAILTO_FIELDS`], and a field
+/// with no `=` is refused. The draft is then written back with every part
+/// re-encoded and the field names in lower case. Pure.
+pub fn remote_mailto(url: &str) -> Option<String> {
+    let scheme = "mailto:";
+    let rest = match (url.get(..scheme.len()), url.get(scheme.len()..)) {
+        (Some(head), Some(rest)) if head.eq_ignore_ascii_case(scheme) && !rest.is_empty() => rest,
+        _ => return None,
+    };
+    let (address, query) = match rest.split_once('?') {
+        Some((address, query)) => (address, Some(query)),
+        None => (rest, None),
+    };
+    let address = mailto_decoded(address)?;
+    if !mailto_addressee_ok(&address) {
+        return None;
+    }
+    let mut draft = format!("{scheme}{}", mailto_encoded(&address));
+    let Some(query) = query else {
+        return Some(draft);
+    };
+    for (index, field) in query.split('&').enumerate() {
+        let (name, value) = field.split_once('=')?;
+        let name = mailto_decoded(name)?.to_ascii_lowercase();
+        if !REMOTE_MAILTO_FIELDS.contains(&name.as_str()) {
+            return None;
+        }
+        let value = mailto_decoded(value)?;
+        if matches!(name.as_str(), "to" | "cc" | "bcc") && !mailto_addressee_ok(&value) {
+            return None;
+        }
+        draft.push(if index == 0 { '?' } else { '&' });
+        draft.push_str(&name);
+        draft.push('=');
+        draft.push_str(&mailto_encoded(&value));
+    }
+    Some(draft)
+}
+
+/// Whether a decoded addressee names only addresses: no character that
+/// would start a field (`?`, `&`, `=`), a path (`/`, `\`), or split the
+/// link (whitespace, control).
+fn mailto_addressee_ok(addressee: &str) -> bool {
+    !addressee
+        .chars()
+        .any(|c| matches!(c, '?' | '&' | '=' | '/' | '\\') || c.is_whitespace() || c.is_control())
+}
+
+/// `part` percent-decoded until it stops changing, or `None` when it holds a
+/// broken escape, is not UTF-8 once decoded, or still changes after
+/// [`MAILTO_DECODE_ROUNDS`] rounds.
+fn mailto_decoded(part: &str) -> Option<String> {
+    let mut current = part.to_string();
+    for _ in 0..MAILTO_DECODE_ROUNDS {
+        let next = percent_decoded_once(&current)?;
+        if next == current {
+            return Some(current);
+        }
+        current = next;
+    }
+    None
+}
+
+/// One round of percent-decoding, or `None` for a `%` not followed by two
+/// hex digits or bytes that are not UTF-8.
+fn percent_decoded_once(part: &str) -> Option<String> {
+    let bytes = part.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `part` percent-encoded for a `mailto:` draft: letters, digits,
+/// `-._~` and `!$'()*+,;:@` are written as they are, every other byte as an
+/// upper-case `%XX`.
+fn mailto_encoded(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    for byte in part.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~!$'()*+,;:@".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// The command that shows a file in its folder with the file selected.
@@ -315,8 +506,19 @@ impl VideoFacts {
     /// `ffmpeg` is probed here, once, and its absence is a log line and a
     /// glyph, never an error the user has to act on: the clip still plays in
     /// the system player, which is what they wanted in the first place.
-    pub fn probe(home: &Path, source: &Path) -> Self {
+    ///
+    /// The clip is read from [`Backend::localize_allowed`], and only when that
+    /// copy is a video by its own extension (SEC5): a remote crab's copy
+    /// outside the allowlist is never stat'ed nor handed to `ffmpeg`.
+    pub fn probe(backend: &Backend, home: &Path, source: &Path) -> Self {
         let mut facts = Self::default();
+        let Some(source) = backend
+            .localize_allowed(source)
+            .filter(|copy| kind_of(copy) == PreviewKind::Video)
+        else {
+            return facts;
+        };
+        let source = &source;
         if !source.is_file() {
             return facts;
         }
@@ -561,7 +763,9 @@ pub struct DocumentBody<'a> {
 /// What the shell holds for this file. `actions` is the shared button row, so
 /// the caller mints the listeners and this only decides the content. A message
 /// preview passes `None`: it has no file to open or reveal (#3053).
+#[allow(clippy::too_many_arguments)] // the backend joins the seven the shell already took
 pub fn body(
+    backend: &Backend,
     preview: &Preview,
     actions: Option<AnyElement>,
     zoom: f32,
@@ -571,10 +775,18 @@ pub fn body(
     middle_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let content = match preview.kind {
-        PreviewKind::Image => image_body(preview, zoom, wheel),
-        PreviewKind::Video => video_body(preview, facts.and_then(|f| f.poster.as_deref())),
         PreviewKind::File => file_body(preview, document, middle_click),
         PreviewKind::Message => message_body(document, middle_click),
+        // A picture or a clip is decoded from the copy `localized_allowed`
+        // answers, as the kind that copy's extension says; one the allowlist
+        // refuses is a file (SEC5).
+        PreviewKind::Image | PreviewKind::Video => match preview.localized_allowed(backend).kind {
+            PreviewKind::Image => image_body(backend, preview, zoom, wheel),
+            PreviewKind::Video => {
+                video_body(backend, preview, facts.and_then(|f| f.poster.as_deref()))
+            }
+            PreviewKind::File | PreviewKind::Message => file_body(preview, None, middle_click),
+        },
     };
     let document_open =
         matches!(preview.kind, PreviewKind::File | PreviewKind::Message) && document.is_some();
@@ -596,10 +808,12 @@ pub fn body(
 const IMAGE_BOX: (f32, f32) = (720.0, 480.0);
 
 fn image_body(
+    backend: &Backend,
     preview: &Preview,
     zoom: f32,
     wheel: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let preview = &preview.localized_allowed(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }
@@ -642,7 +856,12 @@ fn image_body(
 pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> String {
     match preview.kind {
         PreviewKind::Image => {
-            let dims = image_dims(&preview.path);
+            // The header measures the copy only when its own extension is an
+            // image's: a remote crab's `.bin` is never decoded here (SEC5).
+            let dims = match kind_of(&preview.path) {
+                PreviewKind::Image => image_dims(&preview.path),
+                _ => None,
+            };
             let percent = (zoom * 100.0).round() as i32;
             format!(
                 "{} \u{b7} {percent}% \u{b7} scroll to zoom",
@@ -664,7 +883,8 @@ pub fn detail_line(preview: &Preview, zoom: f32, facts: Option<&VideoFacts>) -> 
     }
 }
 
-fn video_body(preview: &Preview, poster: Option<&Path>) -> AnyElement {
+fn video_body(backend: &Backend, preview: &Preview, poster: Option<&Path>) -> AnyElement {
+    let preview = &preview.localized_allowed(backend);
     if !preview.path.exists() {
         return missing_body(preview);
     }

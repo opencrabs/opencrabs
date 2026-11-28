@@ -1,0 +1,20 @@
+{
+  "op": "sessions.topic_icons",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": [
+      {
+        "id": "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e02",
+        "stored": "img:crab.png",
+        "blob": {
+          "path": "/home/crab/.opencrabs/gui-icons/crab.png"
+        }
+      },
+      {
+        "id": "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e03",
+        "stored": "topic:ops"
+      }
+    ]
+  }
+}

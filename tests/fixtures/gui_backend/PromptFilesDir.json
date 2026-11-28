@@ -1,0 +1,9 @@
+{
+  "op": "prompt_files.dir",
+  "scope": "a2a:read",
+  "request": {
+    "session": "0b7e7c1e-6a43-4d55-9d2a-2f1f7a3c9e01"
+  },
+  "reply": { "Ok": "/home/crab/.opencrabs/projects/unfiled/files/prompts" },
+  "reply_not_created": { "Ok": null }
+}

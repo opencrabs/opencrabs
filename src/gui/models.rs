@@ -9,10 +9,11 @@
 //! The row list and panel model are pure, which makes the picker testable
 //! without a window.
 
+use opencrabs::backend::models::{CatalogueProvider, catalogue_entry, saved_provider};
 use opencrabs::tui::onboarding_render::visible_window;
 use opencrabs::ui_core::model_selector::{
-    CUSTOM_PROVIDER_IDX, ProviderSelectorState, normalize_filter_query, single_model_choice,
-    sort_newest_first,
+    CUSTOM_INSTANCES_START, CUSTOM_PROVIDER_IDX, FetchRequest, ProviderSelectorState,
+    index_of_provider, normalize_filter_query, single_model_choice, sort_newest_first,
 };
 
 /// One selectable pair.
@@ -189,11 +190,17 @@ pub fn panel(rows: &[Row], query: &str, selected: usize, max_models: usize) -> P
     }
 }
 
-/// Build the shared catalogue in provider order, substituting the wizard's
-/// live provider state for its saved counterpart and marking the current pair.
-/// Saved custom instances use their runtime name and models; the empty "new
-/// custom" sentinel is skipped. Search text never removes entries here: it is
-/// applied only by `filtered_rows`, so counts and discovery keep the full set.
+/// Build the wizard's catalogue in provider order, substituting its live
+/// provider state for the saved counterpart and marking the current pair.
+///
+/// This machine's config, read here: the wizard edits this machine and only
+/// runs on it. The standalone picker reads the crab's catalogue instead
+/// (`ModelCatalogue`, through [`rows_from_catalogue`]); both build each
+/// provider's entry with the same `backend::models` code, so the two lists
+/// cannot drift. Saved custom instances use their runtime name and models;
+/// the empty "new custom" sentinel is skipped. Search text never removes
+/// entries here: it is applied only by `filtered_rows`, so counts and
+/// discovery keep the full set.
 pub fn rows_for_picker(
     current: Option<(&str, &str)>,
     edited: Option<&ProviderSelectorState>,
@@ -210,11 +217,7 @@ pub fn rows_for_picker(
                 if index == CUSTOM_PROVIDER_IDX {
                     continue;
                 }
-                let mut saved = catalogue.clone();
-                saved.selected_provider = index;
-                saved.detect_existing_key();
-                saved.reload_config_models();
-                saved
+                saved_provider(&catalogue, index)
             };
         if index == CUSTOM_PROVIDER_IDX && selector.custom_name.trim().is_empty() {
             continue;
@@ -224,26 +227,80 @@ pub fn rows_for_picker(
     out
 }
 
+/// The standalone picker's rows from the crab's catalogue, in the order the
+/// crab sent it, with the current pair marked.
+pub fn rows_from_catalogue(
+    catalogue: &[CatalogueProvider],
+    current: Option<(&str, &str)>,
+) -> Vec<Row> {
+    catalogue
+        .iter()
+        .flat_map(|entry| entry_rows(entry, current))
+        .collect()
+}
+
+/// The live-discovery queue for the crab's catalogue: one request per
+/// provider that has a list endpoint, the active provider first, in the
+/// order `refresh_order` gives the wizard's queue.
+///
+/// Each request names its provider and nothing else. No key and no endpoint
+/// are in it: the crab builds the real request from its own config
+/// (`ModelDiscover`), and answers an empty list for a provider it cannot ask.
+/// `provider_index` is the request's identity in this window only, the one
+/// `FetchLifecycle` matches a reply against.
+pub fn discovery_queue(
+    catalogue: &[CatalogueProvider],
+    active_provider: &str,
+) -> Vec<FetchRequest> {
+    let mut queue: Vec<FetchRequest> = catalogue
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            // A built-in provider without a list endpoint is never asked; a
+            // custom one is, since only the crab knows its endpoint.
+            index_of_provider(&entry.provider).is_none_or(|index| {
+                ProviderSelectorState {
+                    selected_provider: index,
+                    ..Default::default()
+                }
+                .supports_model_fetch()
+            })
+        })
+        .map(|(position, entry)| FetchRequest {
+            provider_index: index_of_provider(&entry.provider)
+                .unwrap_or(CUSTOM_INSTANCES_START + position),
+            provider_id: entry.provider.clone(),
+            provider_name: entry.provider_name.clone(),
+            ..Default::default()
+        })
+        .collect();
+    if let Some(position) = queue
+        .iter()
+        .position(|request| request.provider_id == active_provider)
+    {
+        queue.swap(0, position);
+    }
+    queue
+}
+
 /// Build one provider's rows from an immutable selector snapshot. Keeping this
 /// separate makes edited-provider behavior testable without reading a live HOME.
 fn provider_rows(selector: &ProviderSelectorState, current: Option<(&str, &str)>) -> Vec<Row> {
-    let (provider, provider_name) = if selector.selected_provider >= CUSTOM_PROVIDER_IDX {
-        (selector.custom_name.clone(), selector.custom_name.clone())
-    } else {
-        (
-            selector.current_provider().id.to_string(),
-            selector.current_provider().name.to_string(),
-        )
-    };
-    selector
-        .all_model_names()
-        .into_iter()
+    entry_rows(&catalogue_entry(selector), current)
+}
+
+/// One catalogue entry's rows, the current pair marked.
+fn entry_rows(entry: &CatalogueProvider, current: Option<(&str, &str)>) -> Vec<Row> {
+    entry
+        .models
+        .iter()
         .map(|model| Row {
-            current: current
-                .is_some_and(|(active, active_model)| active == provider && active_model == model),
-            model: model.to_string(),
-            provider: provider.clone(),
-            provider_name: provider_name.clone(),
+            current: current.is_some_and(|(active, active_model)| {
+                active == entry.provider && active_model == model
+            }),
+            model: model.clone(),
+            provider: entry.provider.clone(),
+            provider_name: entry.provider_name.clone(),
         })
         .collect()
 }

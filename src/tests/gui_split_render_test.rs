@@ -706,9 +706,11 @@ fn the_keyboard_follows_the_caret_between_panes() {
             .expect("the root arm follows the composer arm"),
     );
     assert!(
-        composer_target.contains("self.keyboard_field(cx)"),
-        "the composer target resolves the focused pane's own field (#3133: \
-         while a remote is open the field drawn is the remote's)"
+        composer_target.contains("self.composer_entity(cx)"),
+        "the composer target resolves the focused pane's own field (#2610). \
+         Upstream's #3133 `keyboard_field` chose a remote panel's field here; \
+         on this branch a remote crab is drawn by the same composer, so the \
+         pane's field is the one on screen either way"
     );
 }
 
@@ -763,7 +765,7 @@ fn a_pane_send_stays_in_its_own_leaf() {
     // The call is reflowed across lines by rustfmt, so the argument list is
     // matched as text rather than as one unbroken line.
     assert!(
-        send.contains("spawn_turn(") && send.contains("bridge.service.clone(), session,"),
+        send.contains("spawn_turn(") && send.contains("self.backend.clone(), session,"),
         "the turn runs against the pane's session, not the window's"
     );
 }

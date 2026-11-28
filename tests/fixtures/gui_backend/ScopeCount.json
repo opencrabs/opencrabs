@@ -1,0 +1,10 @@
+{
+  "op": "session_ops.scope_count",
+  "scope": "a2a:read",
+  "request": {
+    "pair": "anthropic/claude-x"
+  },
+  "response": {
+    "Ok": 3
+  }
+}

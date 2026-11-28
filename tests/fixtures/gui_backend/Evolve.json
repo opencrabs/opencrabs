@@ -1,0 +1,6 @@
+{
+  "op": "update.evolve",
+  "scope": "a2a:admin",
+  "request": { "session_id": "00000000-0000-0000-0000-000000000000" },
+  "reply": { "Ok": "Evolve finished." }
+}

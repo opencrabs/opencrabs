@@ -1,0 +1,14 @@
+{
+  "op": "session_ops.brain_generate",
+  "scope": "a2a:admin",
+  "request": {
+    "prompt": "notes",
+    "workspace": "/home/crab/.opencrabs"
+  },
+  "response": {
+    "Err": {
+      "kind": "failed",
+      "detail": "the answer had no brain sections"
+    }
+  }
+}

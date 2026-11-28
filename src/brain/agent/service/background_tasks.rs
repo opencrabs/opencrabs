@@ -134,7 +134,9 @@ impl RunningTask {
             return Some(path.clone());
         }
         match &self.source {
-            TaskSource::Claude { id } => claude_task_output(&std::env::temp_dir(), id),
+            TaskSource::Claude { id } => {
+                claude_task_output_in(&std::env::temp_dir(), claude_projects_dir().as_deref(), id)
+            }
             _ => None,
         }
     }
@@ -351,6 +353,33 @@ impl BackgroundTaskManager {
                 source: TaskSource::Claude { id: id.to_string() },
                 key: Some(key),
                 output: None,
+                cancel: None,
+            },
+        );
+    }
+
+    /// Mirror work a turn left running after it ended (#3219): a process it
+    /// detached or a `systemd-run` unit it started. `key` is the identity the
+    /// row is removed by ([`Self::mirror_finished`]), `label` what a surface
+    /// prints, `output` the log the work writes to when one is known. No
+    /// cancel: the process is not this one's child.
+    pub fn mirror_started_external(
+        &self,
+        session_id: Uuid,
+        key: String,
+        label: String,
+        output: Option<PathBuf>,
+    ) {
+        self.push_row(
+            session_id,
+            RunningTask {
+                task_id: Uuid::new_v4(),
+                label,
+                started: std::time::Instant::now(),
+                progress: None,
+                source: TaskSource::Mirror,
+                key: Some(key),
+                output,
                 cancel: None,
             },
         );
@@ -959,6 +988,16 @@ pub fn output_history(path: &std::path::Path) -> String {
 /// [`output_tail`] reading at most `max_bytes` off the end of the file.
 pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
+    // A sub-agent's output is its JSONL transcript (see
+    // [`claude_task_output_in`]). One record can carry a whole tool result,
+    // so the window is wider, and the records are drawn as the lines a
+    // person reads instead of raw JSON.
+    let transcript = path.extension().is_some_and(|e| e == "jsonl");
+    let max_bytes = if transcript {
+        max_bytes.max(TRANSCRIPT_BYTES)
+    } else {
+        max_bytes
+    };
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
@@ -969,7 +1008,18 @@ pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u
     }
     let mut buf = Vec::new();
     let _ = file.take(max_bytes).read_to_end(&mut buf);
-    let raw = String::from_utf8_lossy(&buf);
+    let mut raw = String::from_utf8_lossy(&buf).into_owned();
+    let mut clipped = clipped;
+    if transcript {
+        // A fragment cut by the seek does not parse, so it drops out here
+        // and no rendered line has to be discarded for it.
+        raw = raw
+            .lines()
+            .filter_map(transcript_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        clipped = false;
+    }
     let plain = super::tool_loop::strip_ansi_output(&raw);
     let mut lines: Vec<&str> = plain
         .lines()
@@ -990,6 +1040,62 @@ pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u
     crate::logging::redact::scrub(&text).into_owned()
 }
 
+/// How many bytes off the end of a sub-agent transcript a tail reads.
+const TRANSCRIPT_BYTES: u64 = 256 * 1024;
+
+/// How much of a tool call's argument one transcript line keeps.
+const TRANSCRIPT_HINT_CHARS: usize = 120;
+
+/// One record of a claude-cli sub-agent transcript as the lines a person
+/// reads: the agent's own text, and one `> Tool: what` line per tool call.
+/// Everything else (thinking, tool results, request bookkeeping, a line that
+/// does not parse) is `None`, so the tail shows what the agent is doing
+/// rather than what it is reading.
+pub(crate) fn transcript_line(record: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(record).ok()?;
+    if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    let blocks = value.get("message")?.get("content")?.as_array()?;
+    let mut out: Vec<String> = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                let text = text.trim();
+                if !text.is_empty() {
+                    out.push(text.to_string());
+                }
+            }
+            Some("tool_use") => {
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                let input = block.get("input");
+                let hint = ["description", "command", "file_path", "pattern", "prompt"]
+                    .iter()
+                    .find_map(|k| input.and_then(|i| i.get(*k)).and_then(|v| v.as_str()))
+                    .and_then(|h| h.lines().map(str::trim).find(|l| !l.is_empty()))
+                    .map(|h| {
+                        let mut cut: String = h.chars().take(TRANSCRIPT_HINT_CHARS).collect();
+                        if h.chars().count() > TRANSCRIPT_HINT_CHARS {
+                            cut.push('\u{2026}');
+                        }
+                        cut
+                    });
+                out.push(match hint {
+                    Some(hint) => format!("> {name}: {hint}"),
+                    None => format!("> {name}"),
+                });
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
+}
+
 /// Find a claude-cli background task's output file under `temp`.
 ///
 /// The CLI writes it to `<temp>/claude-<uid>/<cwd slug>/<session>/tasks/<id>.output`
@@ -1003,7 +1109,26 @@ pub fn output_tail_within(path: &std::path::Path, max_lines: usize, max_bytes: u
 /// else, or reached through a symlink, is skipped, and the match must be a
 /// regular file. Otherwise anyone could plant a `claude-x` tree whose
 /// "output" is a link to a file only we can read, or a pipe that never ends.
+#[cfg(test)]
 pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
+    claude_task_output_in(temp, None, id)
+}
+
+/// The lookup `claude_task_output` documents, plus the sub-agent case.
+///
+/// For a task the `Agent` tool spawned, the CLI's `tasks/<id>.output` is not
+/// a file but a link to the sub-agent's transcript,
+/// `<projects>/<cwd slug>/<session>/subagents/agent-<id>.jsonl`. The link is
+/// still never followed, because anyone can plant one in the shared temp
+/// tree. Instead the transcript path is rebuilt from the slug and session the
+/// walk already proved are ours, under `projects` (the CLI's own directory
+/// in this user's home), and taken only when it is a regular file of ours
+/// there. Without `projects` a link stays refused, exactly as before.
+pub fn claude_task_output_in(
+    temp: &std::path::Path,
+    projects: Option<&std::path::Path>,
+    id: &str,
+) -> Option<PathBuf> {
     if id.is_empty()
         || !id
             .chars()
@@ -1037,8 +1162,22 @@ pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
                 if !ours_and_real(&tasks).is_some_and(|m| m.is_dir()) {
                     continue;
                 }
-                let candidate = tasks.join(&file);
-                let Some(meta) = ours_and_real(&candidate).filter(|m| m.is_file()) else {
+                let mut candidate = tasks.join(&file);
+                let mut meta = ours_and_real(&candidate).filter(|m| m.is_file());
+                if meta.is_none()
+                    && let Some(projects) = projects
+                    && is_link(&candidate)
+                    && let (Some(slug), Some(sid)) = (cwd.file_name(), session.file_name())
+                {
+                    let transcript = projects
+                        .join(slug)
+                        .join(sid)
+                        .join("subagents")
+                        .join(format!("agent-{id}.jsonl"));
+                    meta = ours_and_real(&transcript).filter(|m| m.is_file());
+                    candidate = transcript;
+                }
+                let Some(meta) = meta else {
                     continue;
                 };
                 let at = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -1049,6 +1188,21 @@ pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
         }
     }
     best.map(|(_, path)| path)
+}
+
+/// Whether `path` itself is a symlink, without following it.
+fn is_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Where the claude CLI keeps its per-project transcripts:
+/// `$CLAUDE_CONFIG_DIR/projects`, or `~/.claude/projects` when that is unset.
+pub fn claude_projects_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
+    Some(base.join("projects"))
 }
 
 /// The metadata of `path` itself when it is not a symlink and, on unix,

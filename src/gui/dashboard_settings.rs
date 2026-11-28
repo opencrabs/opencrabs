@@ -8,8 +8,9 @@ use super::*;
 impl Dashboard {
     /// ctrl+comma: the settings modal (#2878). It opens over the conversation,
     /// centred like the theme modal, and every change writes at once through
-    /// the config file's own locked, revalidating path. Values are read fresh
-    /// on open, so a hand edit between opens shows up.
+    /// the config file's own locked, revalidating path, on the crab the window
+    /// holds. Values are read fresh on open, so a hand edit between opens
+    /// shows up; until the crab answers the modal says it is reading.
     pub(crate) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         if self.settings_open {
             self.close_settings(cx);
@@ -19,23 +20,81 @@ impl Dashboard {
         self.settings_cursor = 0;
         self.settings_scroll.scroll_to_item(0);
         self.settings_secret = None;
-        self.settings_status = match Config::load() {
-            Ok(config) => {
-                self.settings_values = settings_view::current_values(&config);
-                self.settings_creds = settings_view::credential_rows(&config);
-                None
-            }
-            Err(e) => {
-                self.settings_values = Vec::new();
-                self.settings_creds = Vec::new();
-                Some(format!("config load failed: {e}"))
-            }
-        };
+        self.settings_values = Vec::new();
+        self.settings_creds = Vec::new();
+        self.settings_status = Some(settings_view::READING.to_string());
         self.settings_open = true;
         // The modal owns the arrows and Enter, so the root takes the keyboard
         // rather than a stale editor focus (#2619's rule).
         self.refocus_overlay();
+        self.load_settings(cx);
         cx.notify();
+    }
+
+    /// Ask the crab for the modal's rows. A reply for a crab the window has
+    /// since left, or one landing after the modal closed, is dropped.
+    fn load_settings(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let reply = settings_view::load(&backend).await;
+            this.update(cx, |this, cx| {
+                if !this.settings_open || this.instance_epoch != epoch {
+                    return;
+                }
+                this.settings_status = match reply {
+                    Ok((values, creds)) => {
+                        this.settings_values = values;
+                        this.settings_creds = creds;
+                        None
+                    }
+                    Err(e) => {
+                        this.settings_values = Vec::new();
+                        this.settings_creds = Vec::new();
+                        Some(settings_view::failure_line(
+                            settings_view::LOAD_OP,
+                            "config load failed",
+                            e,
+                        ))
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A config reload while the modal is open: re-read the rows from the
+    /// crab. Unlike opening, the status line (a "saved ..." just printed) is
+    /// kept; only a failed read replaces it, and the rows stay as they were.
+    pub(crate) fn reload_settings(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let reply = settings_view::load(&backend).await;
+            this.update(cx, |this, cx| {
+                if !this.settings_open || this.instance_epoch != epoch {
+                    return;
+                }
+                match reply {
+                    Ok((values, creds)) => {
+                        this.settings_values = values;
+                        this.settings_creds = creds;
+                    }
+                    Err(e) => {
+                        this.settings_status = Some(settings_view::failure_line(
+                            settings_view::LOAD_OP,
+                            "config load failed",
+                            e,
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -51,9 +110,9 @@ impl Dashboard {
         self.settings_values.len() + self.settings_creds.len()
     }
 
-    /// Execute one row's write and repaint the row with what the file now
-    /// holds. The status line names the key, and for a credential never the
-    /// value.
+    /// Execute one row's write on the crab and repaint the row with what the
+    /// file now holds. The status line names the key, and for a credential
+    /// never the value. A refused or failed write leaves the row as it was.
     fn settings_write(
         &mut self,
         index: usize,
@@ -63,37 +122,47 @@ impl Dashboard {
         let Some(spec) = settings_view::SPECS.get(index) else {
             return;
         };
-        let Some(op) = settings_view::write_op(spec, &value) else {
+        // A window preference never travels to the crab, which would refuse
+        // it anyway: it is not one of the crab's settable keys.
+        if settings_view::is_window_pref(spec) || settings_view::write_op(spec, &value).is_none() {
             return;
-        };
-        let result = match op {
-            settings_view::WriteOp::SetScalar(v) => Config::write_key(spec.section, spec.key, &v),
-            settings_view::WriteOp::SetString(v) => {
-                Config::write_key_string(spec.section, spec.key, &v).map(|()| String::new())
-            }
-            settings_view::WriteOp::Remove => {
-                Config::remove_key(spec.section, spec.key).map(|()| String::new())
-            }
-        };
-        match result {
-            Ok(_) => {
-                let shown = settings_view::value_label(&value);
-                self.settings_status = Some(match spec.restart {
-                    true => format!(
-                        "saved {}.{} = {shown}; restart the window to apply",
-                        spec.section, spec.key
-                    ),
-                    false => format!("saved {}.{} = {shown}", spec.section, spec.key),
-                });
-                if let Some(slot) = self.settings_values.get_mut(index) {
-                    *slot = value;
-                }
-            }
-            Err(e) => {
-                self.settings_status = Some(format!("write failed: {e}"));
-            }
         }
-        cx.notify();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let result = settings_view::write(&backend, spec, &value).await;
+            this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
+                match result {
+                    Ok(None) => return,
+                    Ok(Some(_)) => {
+                        let shown = settings_view::value_label(&value);
+                        this.settings_status = Some(match spec.restart {
+                            true => format!(
+                                "saved {}.{} = {shown}; restart the crab to apply",
+                                spec.section, spec.key
+                            ),
+                            false => format!("saved {}.{} = {shown}", spec.section, spec.key),
+                        });
+                        if let Some(slot) = this.settings_values.get_mut(index) {
+                            *slot = value;
+                        }
+                    }
+                    Err(e) => {
+                        this.settings_status = Some(settings_view::failure_line(
+                            settings_view::WRITE_OP,
+                            "write failed",
+                            e,
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Enter, space, or a row click: flip a toggle, cycle a choice, arm a
@@ -104,6 +173,16 @@ impl Dashboard {
             let Some(spec) = settings_view::SPECS.get(index) else {
                 return;
             };
+            // `[gui] instance_rail` is this window's switch: it writes this
+            // machine's config and applies at once, whichever crab is held.
+            if settings_view::is_window_pref(spec) {
+                self.settings_status = Some(match self.toggle_instance_rail(cx) {
+                    Ok(on) => format!("saved gui.instance_rail = {on}"),
+                    Err(e) => e,
+                });
+                cx.notify();
+                return;
+            }
             let Some(current) = self.settings_values.get(index).cloned() else {
                 return;
             };
@@ -157,18 +236,38 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        match Config::write_keys_key(&cred.section, "api_key", typed) {
-            Ok(()) => {
-                self.settings_status = Some(format!("saved {}.api_key", cred.section));
-                if let Some(cred) = self.settings_creds.get_mut(row) {
-                    cred.configured = true;
+        let section = cred.section.clone();
+        let api_key = typed.to_string();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let result = settings_view::write_credential(&backend, &section, &api_key).await;
+            this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
                 }
-            }
-            Err(e) => {
-                self.settings_status = Some(format!("write failed: {e}"));
-            }
-        }
-        cx.notify();
+                match result {
+                    Ok(()) => {
+                        this.settings_status = Some(format!("saved {section}.api_key"));
+                        if let Some(cred) = this.settings_creds.get_mut(row)
+                            && cred.section == section
+                        {
+                            cred.configured = true;
+                        }
+                    }
+                    Err(e) => {
+                        this.settings_status = Some(settings_view::failure_line(
+                            settings_view::CREDENTIAL_OP,
+                            "write failed",
+                            e,
+                        ));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The modal owns every key while it is open (#2878), exactly the theme
@@ -305,7 +404,9 @@ impl Dashboard {
         if rows.is_empty() {
             body.push(
                 text(
-                    if self.settings_row_count() == 0 {
+                    if self.settings_status.as_deref() == Some(settings_view::READING) {
+                        "Reading the crab's settings."
+                    } else if self.settings_row_count() == 0 {
                         "The config could not be read; the error is below."
                     } else {
                         "Nothing in this section."
@@ -323,6 +424,13 @@ impl Dashboard {
                 };
                 let Some(value) = self.settings_values.get(index).cloned() else {
                     continue;
+                };
+                // The window's own preference paints what this window holds,
+                // not what the crab answered (#3178).
+                let value = if settings_view::is_window_pref(spec) {
+                    settings_view::RowValue::Bool(self.instance_rail)
+                } else {
+                    value
                 };
                 let control = if matches!(spec.kind, settings_view::SettingKind::Number { .. }) {
                     let minus = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
@@ -373,7 +481,9 @@ impl Dashboard {
                     self.settings_cursor == index,
                     spec.label,
                     spec.blurb,
-                    spec.restart,
+                    // The window's own switch applies at once (#3178), so
+                    // its row does not ask for a restart it does not need.
+                    spec.restart && !settings_view::is_window_pref(spec),
                     control,
                 );
                 let pick = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {

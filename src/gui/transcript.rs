@@ -2,8 +2,8 @@
 //! way the TUI renders it. Three hard rules carry over from the TUI's own
 //! message pipeline:
 //!
-//! 1. Only the newest `WINDOW` rows are read, `LIMIT` pushed into SQL via
-//!    `find_recent_by_session`, and the hidden count comes from
+//! 1. Only the newest `RECENT_WINDOW` rows are read (`backend::transcript`),
+//!    `LIMIT` pushed into SQL via `find_recent_by_session`, and the hidden count comes from
 //!    `count_by_session`. Reading a 10k-message session no longer pulls the
 //!    whole history to show the tail of it (`DISPLAY_MESSAGE_WINDOW` in
 //!    `tui/app/messaging.rs` is the same contract).
@@ -25,7 +25,6 @@ use opencrabs::ui_core::copy_select::{self, TextPoint};
 use opencrabs::ui_core::links::{self, ClickTarget};
 use opencrabs::ui_core::message_reader;
 use opencrabs::ui_core::plan_history::CompletedPlanView;
-use opencrabs::ui_core::rail;
 use opencrabs::utils::is_internal_system_message;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -40,11 +39,7 @@ use gpui::{
 };
 
 use opencrabs::channels::voice::spoken;
-use opencrabs::db::Database;
 use opencrabs::db::models::Message;
-use opencrabs::db::repository::message::MessageRepository;
-use opencrabs::db::repository::message_reaction::MessageReactionRepository;
-use opencrabs::db::repository::session::SessionRepository;
 use opencrabs::tui::app::ledger_scan::next_ledger;
 use opencrabs::tui::app::reasoning_split::{self, Segment, is_intermediate, split_segments};
 // The fold header's wording is the TUI's own (#759), re-exported from the lib
@@ -69,10 +64,6 @@ impl markdown::MdPalette for palette::Palette {
         }
     }
 }
-
-/// Newest rows shown per load, matching the TUI display window. Older
-/// history stays behind the `Marker` block.
-const WINDOW: usize = 200;
 
 /// Lines of one working-out body a folded turn draws before it hands the rest
 /// to the reader (#2805). The pane builds one element per line, so a window
@@ -1113,7 +1104,8 @@ pub struct Loaded {
     pub reactions: HashMap<uuid::Uuid, Vec<(String, usize)>>,
 }
 
-/// Every reaction on the rows one read loaded, in a single query (#2825).
+/// Every reaction on the rows one read loaded, in a single query (#2825),
+/// through the backend (`ReactionsFor`).
 ///
 /// A transcript read is the only place the map is built: a toggle edits the
 /// entry it touched, so drawing a chip never goes back to the ledger.
@@ -1128,15 +1120,18 @@ pub struct Loaded {
 /// sidecar reads in `main.rs` (`favorites`, `topics`, `closed`, `parents`,
 /// `topic_icons`) take the same posture for the same reason.
 async fn reactions_for(
-    db: &Database,
+    backend: &crate::backend_glue::Backend,
     rows: &[Message],
 ) -> HashMap<uuid::Uuid, Vec<(String, usize)>> {
-    let ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
-    match MessageReactionRepository::new(db.pool().clone())
-        .for_messages(&ids)
+    let message_ids: Vec<uuid::Uuid> = rows.iter().map(|m| m.id).collect();
+    match backend
+        .call(opencrabs::backend::transcript::ReactionsFor { message_ids })
         .await
     {
         Ok(reactions) => reactions,
+        // The op formats the repository's chain with `{e:#}` into
+        // `Failed`, and `BackendError`'s Display is that text, so the line
+        // carries the whole chain.
         Err(e) => {
             crate::logging::error(&format!("reactions load: {e:#}"));
             HashMap::new()
@@ -1144,164 +1139,68 @@ async fn reactions_for(
     }
 }
 
-/// Toggle one reaction on one stored row (#2825).
+/// Toggle one reaction on one stored row (#2825), through the backend
+/// (`ToggleReaction`).
 ///
-/// Its own worker thread with a real stack and its own runtime, the same shape
-/// as [`load_recent`]: the window never blocks a frame on a write, and the reply
+/// Locally the op runs on its own `spawn_worker` lane, the same shape as
+/// [`load_recent`]: the window never blocks a frame on a write, and the reply
 /// is whether the reaction is there afterwards so the caller can say which way
 /// the click went without a second read.
 pub async fn toggle_reaction(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     message_id: uuid::Uuid,
     emoji: String,
 ) -> Result<bool, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<bool, String>>();
-    let spawned = super::agent_bridge::spawn_worker("message-reaction", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                MessageReactionRepository::new(db.pool().clone())
-                    .toggle(message_id, &emoji)
-                    .await
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("reaction write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("reaction write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::transcript::ToggleReaction { message_id, emoji })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
-/// Drop every row after a point in one session (#2826), off the UI thread the
-/// same way [`load_recent`] reads: a worker thread carrying its own runtime, so
-/// the window's executor never blocks on the pool.
+/// Drop every row after a point in one session (#2826), through the backend
+/// (`TruncateAfter`), off the UI thread the same way [`load_recent`] reads.
 ///
 /// The row at `sequence` survives, because the edit replaces it and the resend
 /// speaks for everything that followed. Returns how many rows went.
 pub async fn truncate_after(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: uuid::Uuid,
     sequence: i32,
 ) -> Result<usize, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
-    let spawned = super::agent_bridge::spawn_worker("transcript-truncate", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                let repo = MessageRepository::new(db.pool().clone());
-                repo.delete_after(session_id, sequence).await
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("truncate thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("truncate thread failed to spawn: {e}")),
-    }
-}
-
-/// The order a topic family's rows are drawn in (#3018).
-///
-/// `created_at` places rows from different sessions in one stream. Within a
-/// session it cannot order a turn: the assistant row is created at turn start
-/// and updated in place, so it carries the same second as the question it
-/// answers. Breaking that tie on `id` is a coin flip, and the losing side puts
-/// the answer above its question, which leaves the question at the bottom of
-/// the transcript in a turn of its own. `sequence` is the per-session order
-/// the single-session read already uses, so it decides the tie; `id` stays as
-/// the last resort for two different sessions stamped the same second.
-fn family_row_order(m: &Message) -> (chrono::DateTime<chrono::Utc>, i32, uuid::Uuid) {
-    (m.created_at, m.sequence, m.id)
+    backend
+        .call(opencrabs::backend::transcript::TruncateAfter {
+            session_id,
+            sequence,
+        })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Fetch the newest window of the conversation plus the session's total row
-/// count, on a worker thread with a real stack (crash receipt in `main.rs`).
-/// `Database::connect` runs pragmas only, never migrations.
+/// count, through the backend (`LoadRecent`), then the reactions those rows
+/// carry (`ReactionsFor`). Locally each op runs on its own `spawn_worker` lane
+/// with a real stack (crash receipt in `main.rs`); `Ctx::db` runs pragmas
+/// only, never migrations.
 ///
 /// A session that has topics comes back as its whole family: the parent plus
 /// every topic under it, merged by time, with each row's topic recorded in
 /// [`Loaded::origins`] (#2762). That is what `All` shows. A topic opened on its
 /// own has no children, so it reads alone and carries no labels at all.
 pub async fn load_recent(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     session_id: uuid::Uuid,
 ) -> Result<Loaded, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Loaded, String>>();
-    let spawned = super::agent_bridge::spawn_worker("transcript-fetch", move |runtime| {
-        let result = runtime
-            .block_on(async {
-                let db = Database::connect(&db_path).await?;
-                let repo = MessageRepository::new(db.pool().clone());
-                let sessions = SessionRepository::new(db.pool().clone());
-                let family = sessions.family_of(session_id).await?;
-                // One row in the family is the ordinary read this
-                // function has always made.
-                if family.len() <= 1 {
-                    let rows = repo.find_recent_by_session(session_id, WINDOW).await?;
-                    let total = repo.count_by_session(session_id).await?;
-                    let reactions = reactions_for(&db, &rows).await;
-                    return Ok::<_, anyhow::Error>(Loaded {
-                        rows,
-                        total,
-                        origins: HashMap::new(),
-                        reactions,
-                    });
-                }
-                let ids: Vec<uuid::Uuid> = family.iter().map(|(id, _)| *id).collect();
-                let mut total: i64 = 0;
-                for id in &ids {
-                    total += repo.count_by_session(*id).await?;
-                }
-                // One conversation, one window (#2805). A window per
-                // member drew 3,627 rows for a 44-member family into a
-                // pane built to show 200, and every one of them was
-                // rebuilt on every keystroke.
-                let mut rows = repo.find_recent_by_sessions(&ids, WINDOW).await?;
-                let labels: HashMap<uuid::Uuid, String> = family
-                    .iter()
-                    .filter_map(|(id, title)| topic_family_label(title).map(|label| (*id, label)))
-                    .collect();
-                let mut origins: HashMap<uuid::Uuid, String> = HashMap::new();
-                for row in &rows {
-                    if let Some(label) = labels.get(&row.session_id) {
-                        origins.insert(row.id, label.clone());
-                    }
-                }
-                // Same order the TUI's reader gets from SQL (#3018).
-                // `created_at` places rows from different topics in
-                // one stream, but it cannot order a turn: the answer
-                // row is created at turn start, so it is stamped the
-                // same second as the question it answers. `sequence`
-                // is the per-session order the single-session read
-                // already trusts, and `id` only keeps two different
-                // sessions stamped the same second stable.
-                rows.sort_by_key(family_row_order);
-                let reactions = reactions_for(&db, &rows).await;
-                Ok::<_, anyhow::Error>(Loaded {
-                    rows,
-                    total,
-                    origins,
-                    reactions,
-                })
-            })
-            .map_err(|e| format!("{e:#}"));
-        let _ = tx.send(result);
-    });
-    let result = match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("transcript fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("transcript fetch thread failed to spawn: {e}")),
-    };
-    result.map_err(|e| read_failed(session_id, e))
+    let recent = backend
+        .call(opencrabs::backend::transcript::LoadRecent { session_id })
+        .await
+        .map_err(|e| read_failed(session_id, e.into_message()))?;
+    let reactions = reactions_for(&backend, &recent.rows).await;
+    Ok(Loaded {
+        rows: recent.rows,
+        total: recent.total,
+        origins: recent.origins,
+        reactions,
+    })
 }
 
 /// One line whenever a read comes back with nothing (#2981).
@@ -1314,23 +1213,6 @@ pub async fn load_recent(
 fn read_failed(session: uuid::Uuid, error: String) -> String {
     crate::logging::warn(&format!("transcript read failed for {session}: {error}"));
     error
-}
-
-/// What a stored session title reads as once the bookkeeping is off it. `All`
-/// labels every row with this, and the label names the conversation the row
-/// came from, never the transport (#2766): a topic reads `Memes`, and a row
-/// from the base chat reads `OpenCrabs Dev`. Before this the platform word and
-/// its key came through whole, so every divider printed `Telegram: OpenCrabs
-/// Dev / Memes [chat:-100:topic:42]` above the rows it was labelling.
-fn topic_family_label(title: &str) -> Option<String> {
-    let trimmed = title.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(topic) = rail::topic_name(Some(trimmed)) {
-        return Some(topic);
-    }
-    Some(rail::chat_name(Some(trimmed)))
 }
 
 /// A model-switch receipt used to be persisted with the user role. Draw the
@@ -2764,7 +2646,7 @@ fn bubble(
     message_id: Option<uuid::Uuid>,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     full: bool,
     open: Option<&ClickHandler>,
@@ -3055,7 +2937,7 @@ fn forward_block(
     _time: &str,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     full: bool,
 ) -> Div {
@@ -3259,11 +3141,36 @@ fn transcript_toggle(key: &str, open: bool) -> impl IntoElement {
         .child(SharedString::from(label))
 }
 
-fn history_attachments(
-    paths: &[std::path::PathBuf],
-    content_width: f32,
-    handlers: &HashMap<String, ClickHandler>,
-) -> Div {
+/// What an attachment tile needs from the row's owner: the click minted per
+/// file, keyed by the crab's path, and where that path is on this machine
+/// (`Backend::localize`). A tile is keyed and named by the crab's path and is
+/// drawn, stat'ed and played from the local one, so a crab on another machine
+/// never has its path stat'ed or decoded on this disk. What a tile decodes
+/// (a picture, a clip's sound) comes from `allowed` (`Backend::localize_allowed`):
+/// a remote crab's copy of a kind outside the allowlist is `None`, and the tile
+/// draws its kind glyph instead.
+#[derive(Clone, Copy)]
+struct Tiles<'a> {
+    clicks: &'a HashMap<String, ClickHandler>,
+    localize: &'a dyn Fn(&std::path::Path) -> std::path::PathBuf,
+    allowed: &'a dyn Fn(&std::path::Path) -> Option<std::path::PathBuf>,
+}
+
+/// The copy a tile paints as a picture: the allowed copy of the crab's file
+/// (`Backend::localize_allowed`), and only when that copy's own extension is
+/// an image's. `None` draws the kind glyph and decodes nothing, which is what
+/// a remote crab's `.svg`, `.desktop` or `.bin` gets. The local crab's copy is
+/// its own path, so its tiles are what they were.
+pub(crate) fn tile_picture(copy: Option<&std::path::Path>) -> Option<&std::path::Path> {
+    copy.filter(|copy| Attachment::for_display(copy.to_path_buf()).is_image())
+}
+
+fn history_attachments(paths: &[std::path::PathBuf], content_width: f32, tiles: Tiles<'_>) -> Div {
+    let Tiles {
+        clicks: handlers,
+        localize,
+        allowed,
+    } = tiles;
     if paths.is_empty() {
         return div();
     }
@@ -3272,7 +3179,7 @@ fn history_attachments(
     // kinds of preview without squeezing a player into a thumbnail (#3054).
     let (audio, files): (Vec<_>, Vec<_>) = paths
         .iter()
-        .partition(|path| Attachment::for_display((*path).to_path_buf()).is_audio());
+        .partition(|path| plays_as_audio(allowed(path.as_path()).as_deref()));
     let mut strip = div()
         .flex()
         .flex_col()
@@ -3282,6 +3189,12 @@ fn history_attachments(
         .pt_1();
     for (index, path) in audio.into_iter().enumerate() {
         let key = path.to_string_lossy();
+        // The marker names the crab's path. The player opens the window's
+        // copy of it: the same path for this process's crab, the blob cache's
+        // copy for a crab on another machine, never the crab's path on this
+        // disk.
+        let here = crate::voice_input::here(path);
+        let path = here.as_path();
         // The same glass block the composer shows for a take, so a sent clip
         // and the take that produced it are one element with one behaviour.
         // The transcript builds its rows from plain functions with no `App` in
@@ -3299,7 +3212,7 @@ fn history_attachments(
                 .gap_1()
                 .child(crate::composer_orb::player_plain(
                     &format!("history-{key}-{index}"),
-                    path,
+                    &localize(path),
                     None,
                     &[],
                     content_width,
@@ -3333,13 +3246,15 @@ fn history_attachments(
                 let key = path.to_string_lossy().to_string();
                 // Cloned, not taken: the same file can appear in more than one
                 // message, and every tile of it must open it.
+                let local = localize(path);
+                let copy = allowed(path);
                 match handlers.get(&key).cloned() {
-                    Some(handler) => attachment_cell(path, side)
+                    Some(handler) => attachment_cell(path, &local, copy.as_deref(), side)
                         .id(SharedString::from(format!("attachment-{key}")))
                         .cursor_pointer()
                         .on_click(move |event, window, cx| handler(event, window, cx))
                         .into_any_element(),
-                    None => attachment_cell(path, side).into_any_element(),
+                    None => attachment_cell(path, &local, copy.as_deref(), side).into_any_element(),
                 }
             } else {
                 fold_cell(plan.folded, side)
@@ -3351,11 +3266,27 @@ fn history_attachments(
     strip
 }
 
+/// Whether the strip hands the crab's file to the audio player: the allowed
+/// copy (`Backend::localize_allowed`) is a sound by its own extension. A
+/// remote copy outside the allowlist is never played; it is a file tile.
+pub(crate) fn plays_as_audio(copy: Option<&std::path::Path>) -> bool {
+    copy.is_some_and(|copy| Attachment::for_display(copy.to_path_buf()).is_audio())
+}
+
 /// One non-audio attachment: the picture or kind glyph in a square box, with
-/// the file name under it. The box owns the size, not the caption.
-fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
+/// the file name under it. The box owns the size, not the caption. The kind is
+/// read from the crab's `path`; the facts from `local`, where that file is on
+/// this machine. The picture is drawn only from `copy`, the allowed copy
+/// (`Backend::localize_allowed`), when its own extension is an image's
+/// (`tile_picture`); without one the box shows the kind glyph.
+fn attachment_cell(
+    path: &std::path::Path,
+    local: &std::path::Path,
+    copy: Option<&std::path::Path>,
+    side: f32,
+) -> Div {
     let attachment = Attachment::for_display(path.to_path_buf());
-    let tile: AnyElement = if attachment.is_image() {
+    let tile: AnyElement = if let Some(local) = tile_picture(copy) {
         div()
             .w(px(side))
             .h(px(side))
@@ -3369,14 +3300,14 @@ fn attachment_cell(path: &std::path::Path, side: f32) -> Div {
             // box and the radius lands inside the tile's own arc. `Cover` on
             // the original painted a larger quad and its arc sat outside the
             // tile's, which is what let pixels past the corner (#2796).
-            .child(crate::thumbs::picture(path, px(concentric_radius(1.0))))
+            .child(crate::thumbs::picture(local, px(concentric_radius(1.0))))
             .into_any_element()
     } else {
         // A document and a clip have nothing to draw, so the box states what a
         // thumbnail would have shown: the kind by its glyph, then how big it
         // is and the day it changed. One `stat`, on the same pass that already
         // loads the images beside it.
-        let caption = crate::preview::FileFacts::probe(path).tile_caption();
+        let caption = crate::preview::FileFacts::probe(local).tile_caption();
         let mut boxed = div()
             .flex()
             .flex_col()
@@ -3869,9 +3800,10 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
                     },
                 ));
             }
-            LiveEntry::Narration(text) => {
-                lines.push((entry_index, LiveCardLine::Narration(text.clone())))
-            }
+            LiveEntry::Narration(text) => lines.push((
+                entry_index,
+                LiveCardLine::Narration(spoken::while_streaming(text).into_owned()),
+            )),
             LiveEntry::Reasoning(text) => {
                 lines.push((entry_index, LiveCardLine::Reasoning(fit(text.trim(), 600))));
             }
@@ -3881,8 +3813,13 @@ pub(crate) fn live_card_lines(live: &LiveTurn) -> Vec<(usize, LiveCardLine)> {
     // happens (#3190). The index is past the entries, so it never collides
     // with a real one and a menu on it resolves to nothing the way a stale
     // tool index already does.
-    if let Some(text) = live.pending() {
-        lines.push((live.entries.len(), LiveCardLine::Pending(text.to_string())));
+    // A spoken block is for the ear (#3096): the stream carries it raw so the
+    // voice path can read it, and the card hides it in every state it passes
+    // through while it arrives.
+    if let Some(text) = live.pending().map(spoken::while_streaming)
+        && !text.is_empty()
+    {
+        lines.push((live.entries.len(), LiveCardLine::Pending(text.into_owned())));
     }
     lines
 }
@@ -4399,7 +4336,7 @@ fn block_view(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     selection: Option<&SelectionContext>,
     mode: RowMode<'_>,
 ) -> Div {
@@ -4644,7 +4581,7 @@ fn live_block(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
 ) -> Option<AnyElement> {
     let text = block_text(block);
     let d = drag.filter(|_| !text.trim().is_empty())?;
@@ -4699,7 +4636,8 @@ pub(crate) fn collapsed_narration(live: &LiveTurn) -> Option<String> {
     // the paragraph it already owns is what it falls back to.
     live.pending()
         .or_else(|| live.narration().last())
-        .map(collapsed_paragraph)
+        .map(spoken::while_streaming)
+        .map(|text| collapsed_paragraph(&text))
         .filter(|text| !text.is_empty())
 }
 
@@ -4755,7 +4693,7 @@ fn live_row_body(
     block: &Block,
     content_width: f32,
     row_cap: f32,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     edit_row: Option<&InlineEditView>,
 ) -> AnyElement {
     if let Some(editing) = edit_row.filter(|editing| editing.id == live_edit_id(slot)) {
@@ -4872,7 +4810,7 @@ fn live_view(
     expanded: bool,
     ctx: (Option<u32>, u32),
     live_click: Option<&ClickHandler>,
-    handlers: &HashMap<String, ClickHandler>,
+    handlers: Tiles<'_>,
     interaction: LiveInteraction<'_>,
 ) -> Div {
     let LiveInteraction {
@@ -5999,6 +5937,10 @@ pub struct InlineEditView {
 #[derive(Default)]
 pub struct ViewHooks {
     pub attachments: HashMap<String, ClickHandler>,
+    /// The crab this transcript shows, so an attachment tile is drawn from
+    /// where `Backend::localize` puts that crab's file on this machine. `None`
+    /// draws the paths as they are.
+    pub backend: Option<crate::backend_glue::Backend>,
     pub drag: Option<Rc<CopyDrag>>,
     /// The wheel over the transcript, minted by the owning view so a tick up
     /// releases its follow and a tick down re-arms it (#2698).
@@ -6329,6 +6271,7 @@ pub fn view(
     let row_cap = message_max_width(content_width);
     let ViewHooks {
         attachments: attachment_handlers,
+        backend,
         drag,
         wheel,
         middle_click,
@@ -6352,6 +6295,19 @@ pub fn view(
         voice_pending,
         trailing,
     } = hooks;
+    let localize = |path: &std::path::Path| match &backend {
+        Some(backend) => backend.localize(path),
+        None => path.to_path_buf(),
+    };
+    let allowed = |path: &std::path::Path| match &backend {
+        Some(backend) => backend.localize_allowed(path),
+        None => Some(path.to_path_buf()),
+    };
+    let tiles = Tiles {
+        clicks: &attachment_handlers,
+        localize: &localize,
+        allowed: &allowed,
+    };
     if let Some(d) = &drag {
         d.texts.borrow_mut().clear();
     }
@@ -6526,7 +6482,7 @@ pub fn view(
             },
             content_width,
             row_cap,
-            &attachment_handlers,
+            tiles,
             None,
             RowMode {
                 full: true,
@@ -6662,7 +6618,7 @@ pub fn view(
                             block,
                             content_width,
                             row_cap,
-                            &attachment_handlers,
+                            tiles,
                             Some(&selection),
                             RowMode {
                                 full: full_body,
@@ -6681,7 +6637,7 @@ pub fn view(
                         block,
                         content_width,
                         row_cap,
-                        &attachment_handlers,
+                        tiles,
                         None,
                         RowMode {
                             full: full_body,
@@ -6811,7 +6767,7 @@ pub fn view(
             state.live_expanded,
             (ctx_used, ctx_max),
             live_click.as_ref(),
-            &attachment_handlers,
+            tiles,
             LiveInteraction {
                 drag: drag.as_ref(),
                 press: &live_press,
@@ -6849,6 +6805,8 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The family order lives with the read that uses it, in the backend.
+    use opencrabs::backend::transcript::family_row_order;
 
     /// A turn's answer must never sort above its own question (#3018).
     ///
@@ -8989,6 +8947,40 @@ mod tests {
         live.clear();
         assert!(live.is_empty());
         assert_eq!(live.answer(), None);
+    }
+
+    /// A spoken block streamed into a turn stays in the raw stream for the
+    /// voice path and never reaches the card, neither its body lines nor the
+    /// collapsed one-line preview (#3096): every painter of the live prose
+    /// goes through the same filter.
+    #[test]
+    fn a_streamed_spoken_block_is_painted_nowhere_on_the_live_card() {
+        let mut live = LiveTurn::default();
+        live.begin("enquanto o outro corre".into());
+        for stream in [
+            "Feito.\n\n<<SPOKEN:Feito. Diz se avanço.>>",
+            "Feito.\n\n<<SPOKEN:Feito. Diz se",
+            "Feito.\n\n<<SPO",
+        ] {
+            live.stream = stream.to_string();
+            assert!(
+                live.answer().is_some_and(|raw| raw.contains("<<")),
+                "the raw stream keeps the block for the voice path"
+            );
+            for (_, line) in live_card_lines(&live) {
+                if let LiveCardLine::Pending(text) | LiveCardLine::Narration(text) = line {
+                    assert!(
+                        !text.contains("<<"),
+                        "card painted {text:?} from {stream:?}"
+                    );
+                }
+            }
+            let preview = collapsed_narration(&live).unwrap_or_default();
+            assert!(
+                !preview.contains("<<"),
+                "preview painted {preview:?} from {stream:?}"
+            );
+        }
     }
 
     /// A notice is a line ABOUT a turn, not a turn (#2895). Model switches,

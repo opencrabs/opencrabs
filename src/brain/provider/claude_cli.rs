@@ -843,6 +843,13 @@ impl Provider for ClaudeCliProvider {
         // a direct child.kill() would orphan.
         #[cfg(unix)]
         command.process_group(0);
+        // #3219: tag the CLI's whole process tree with the session, so work a
+        // tool detaches (`nohup`, `setsid`) can be traced back to it after
+        // the turn ends. Descendants inherit the variable; see brain::detached.
+        let note_session = request.session_id;
+        if let Some(sid) = note_session {
+            command.env(crate::brain::detached::SESSION_ENV, sid.to_string());
+        }
         let mut child = command
             .spawn()
             .map_err(|e| ProviderError::Internal(format!("failed to spawn claude CLI: {}", e)))?;
@@ -1539,6 +1546,12 @@ impl Provider for ClaudeCliProvider {
 
                     CliMessage::User { .. } => {
                         tracing::debug!("CLI → user turn (tool_result)");
+                        // #3219: a `systemd-run` unit does not inherit the
+                        // session tag, so it is found by the line systemd-run
+                        // prints into the tool result.
+                        if let Some(sid) = note_session {
+                            crate::brain::detached::note_units(sid, &line);
+                        }
                         // Keep the stream alive — tool results arrive during internal
                         // tool execution which can take >60s for complex tasks.
                         if tx.send(Ok(StreamEvent::Ping)).await.is_err() {

@@ -109,7 +109,12 @@ impl Dashboard {
             // output, so the two lines stay together: a pane's `!cmd` reads
             // its own line and its own output, and never a neighbour's.
             self.push_session_notice(session, format!("! {cmd}"), cx);
-            bang::spawn(cmd.to_string(), Some(session), self.sink.clone());
+            bang::spawn(
+                &self.backend,
+                cmd.to_string(),
+                Some(session),
+                self.sink.clone(),
+            );
             cx.notify();
             return;
         }
@@ -133,11 +138,11 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             agent_bridge::queue_push(session, Self::pending_message(text, display.clone()));
             cx.notify();
             return;
-        };
+        }
         let cancel = tokio_util::sync::CancellationToken::new();
         let shown = display.clone().unwrap_or_else(|| text.clone());
         // A command can send into a conversation whose pane was switched away,
@@ -160,7 +165,7 @@ impl Dashboard {
         // lands in that conversation's artifacts, exactly as the window's does.
         let attached = editor::marker_paths(&original);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session,
             text,
             display,
@@ -171,9 +176,76 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session, attached);
         }
         cx.notify();
+    }
+
+    /// Hand a composer's message to `send` once its files are on the crab (P8).
+    ///
+    /// A message with no files goes at once, as it always did. With files,
+    /// [`Backend::carry`](crate::backend_glue::Backend::carry) puts them on the
+    /// crab and points their markers there; the local crab answers on the
+    /// first poll, so a local send is never deferred. A remote upload runs off
+    /// this thread and `send` gets the rewritten text, so the file tracker
+    /// downstream reads the crab's paths. A failed upload, or a crab swapped
+    /// out while it ran, sends nothing: the message goes back to `field`, the
+    /// composer it came from, with the reason.
+    pub(crate) fn send_carried(
+        &mut self,
+        outgoing: editor::Outgoing,
+        field: gpui::WeakEntity<editor::Editor>,
+        send: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if outgoing.files.is_empty() {
+            send(self, outgoing.text, cx);
+            return;
+        }
+        let mut carried = self
+            .backend
+            .carry(outgoing.text.clone(), outgoing.files.clone());
+        if let Some(result) = futures::FutureExt::now_or_never(&mut carried) {
+            self.settle_carry(outgoing, result, field, send, cx);
+            return;
+        }
+        let epoch = self.instance_epoch;
+        cx.spawn(async move |this, cx| {
+            let result = carried.await;
+            this.update(cx, |this, cx| {
+                let result = if this.instance_epoch == epoch {
+                    result
+                } else {
+                    Err("the crab changed while the files were sent; nothing was sent".to_string())
+                };
+                this.settle_carry(outgoing, result, field, send, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The end of [`send_carried`](Self::send_carried): the rewritten text to
+    /// `send`, or the whole message back to the composer it came from.
+    fn settle_carry(
+        &mut self,
+        outgoing: editor::Outgoing,
+        result: Result<String, String>,
+        field: gpui::WeakEntity<editor::Editor>,
+        send: impl FnOnce(&mut Self, String, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(text) => send(self, text, cx),
+            Err(reason) => {
+                logging::info(&format!("send refused: {reason}"));
+                let returned = field.update(cx, |field, cx| field.give_back(outgoing, reason, cx));
+                if returned.is_err() {
+                    logging::info("send refused: its composer is gone");
+                }
+                cx.notify();
+            }
+        }
     }
 
     /// What this session's card should say it is doing right now (#2718), from
@@ -365,10 +437,10 @@ impl Dashboard {
         if waiting.is_empty() {
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the text, the same rule the window keeps.
             return;
-        };
+        }
         let msgs = agent_bridge::queue_take(session);
         let Some(joined) = agent_bridge::PendingMessage::join(&msgs) else {
             return;
@@ -394,7 +466,7 @@ impl Dashboard {
         }
         let attached = editor::marker_paths(&joined.context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session,
             joined.context_text,
             Some(joined.display_text),
@@ -406,7 +478,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session, attached);
         }
         cx.notify();
     }
@@ -414,9 +486,9 @@ impl Dashboard {
     /// Re-read one pane's rows from the ledger, the same read `add_pane` makes
     /// when it first draws the leaf (#2614).
     pub(crate) fn reload_pane(&mut self, session: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, session).await;
+            let result = transcript::load_recent(backend, session).await;
             this.update(cx, |this, cx| match result {
                 Ok(loaded) => {
                     let (hidden, turns) = transcript::turns_with_origins(
@@ -589,7 +661,7 @@ impl Dashboard {
                 // line, so it stays on the window's own strip.
                 None => self.turn.live.notices.push(format!("! {cmd}")),
             }
-            bang::spawn(cmd.to_string(), session, self.sink.clone());
+            bang::spawn(&self.backend, cmd.to_string(), session, self.sink.clone());
             cx.notify();
             return;
         }
@@ -646,7 +718,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the message, it fires on Ready. The queue
             // strip is where the user sees it.
             self.composer
@@ -655,7 +727,7 @@ impl Dashboard {
             self.sync_composer_hint(cx);
             cx.notify();
             return;
-        };
+        }
         // The turn goes to the conversation on screen. With none open there
         // is nothing to write into, so one is created and the text waits in
         // the queue rather than vanishing into a session nobody is looking at.
@@ -690,7 +762,7 @@ impl Dashboard {
         // the session's artifacts, not just in the message text.
         let attached = editor::marker_paths(&original);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             sid,
             text,
             display,
@@ -701,7 +773,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), sid, attached);
         }
         cx.notify();
     }
@@ -722,7 +794,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.stop_turn_for_edit(target.session, cx);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
@@ -739,9 +811,9 @@ impl Dashboard {
                 .ok();
                 return;
             };
-            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let truncated = transcript::truncate_after(backend.clone(), session, sequence).await;
             let loaded = match &truncated {
-                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Ok(_) => Some(transcript::load_recent(backend, session).await),
                 Err(_) => None,
             };
             this.update(cx, |this, cx| match truncated {
@@ -780,7 +852,7 @@ impl Dashboard {
         cx: &mut Context<Self>,
     ) {
         self.stop_turn_for_edit(target.session, cx);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let session = target.session;
         let sequence = target.sequence;
         cx.spawn(async move |this, cx| {
@@ -797,9 +869,9 @@ impl Dashboard {
                 .ok();
                 return;
             };
-            let truncated = transcript::truncate_after(db_path.clone(), session, sequence).await;
+            let truncated = transcript::truncate_after(backend.clone(), session, sequence).await;
             let loaded = match &truncated {
-                Ok(_) => Some(transcript::load_recent(db_path, session).await),
+                Ok(_) => Some(transcript::load_recent(backend, session).await),
                 Err(_) => None,
             };
             this.update(cx, |this, cx| match truncated {
@@ -930,9 +1002,9 @@ impl Dashboard {
         if documents.is_empty() {
             return;
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let paths = prompt_files::persist_off_thread(db_path, documents).await;
+            let paths = prompt_files::persist_off_thread(backend, documents).await;
             if paths.is_empty() {
                 return;
             }
@@ -988,6 +1060,10 @@ impl Dashboard {
         // the file and published it to `Config::current()`, so this tick only
         // re-derives the values the window cached at boot.
         self.drain_config_reloads(cx);
+        // The microphone, the hint and a take speak to the crab the window
+        // holds (P4). A swap is a new epoch, which asks the new crab what it
+        // can hear; every other tick is one comparison.
+        crate::voice_input::hold(&self.backend, self.instance_epoch);
         // Report window focus to the notification transport (#3005). Nothing
         // in the GUI ever called `set_surface_focused`, so the transport read
         // "unknown", and `should_raise` treats unknown as "the user is not
@@ -1105,6 +1181,13 @@ impl Dashboard {
         }
         let mut reload: Option<Uuid> = None;
         for ev in events {
+            // A settled turn takes its remote approval cards with it, whichever
+            // card or pane the settle goes on to: the crab stopped waiting.
+            if let Some(sid) = crate::remote_approval::ends_turn(&ev)
+                && self.approvals.turn_ended(sid)
+            {
+                cx.notify();
+            }
             // The tool's follow-up offer is stored here, before the pane
             // filter below, because it belongs to a session and not to a card
             // (#2708). Handling it in the match further down would have sent a
@@ -1137,13 +1220,8 @@ impl Dashboard {
                     logging::info("agent ready");
                     // The footer's denominator comes from the service, the
                     // same number compaction enforces for this session.
-                    if let Some(b) = agent_bridge::bridge() {
-                        self.ctx_max = match self.chat_state.session() {
-                            Some(sid) => b.service.context_limit_for_session(sid),
-                            None => b
-                                .service
-                                .context_window_for_model(&b.service.provider_model()),
-                        };
+                    if let Some(facts) = self.backend.facts(self.chat_state.session()) {
+                        self.ctx_max = facts.context_limit;
                     }
                     // A window opened on an empty ledger has no conversation
                     // to send into: make one before the first message can be
@@ -1208,6 +1286,32 @@ impl Dashboard {
                         // With no conversation to own it, the line stays on
                         // the window's own strip.
                         None => self.turn.live.notices.push(text),
+                    }
+                    cx.notify();
+                }
+                // A remote crab's cache moved: the next frame reads it.
+                agent_bridge::TurnEvent::Refresh => {
+                    cx.notify();
+                }
+                // A remote crab asks before it runs a tool. Only a remote
+                // backend takes the card: the crab on this machine answers
+                // its own approvals by policy, and that does not change.
+                agent_bridge::TurnEvent::ApprovalAsked { session, approval } => {
+                    let remote = self.backend.remote_key().is_some();
+                    if self.approvals.ask(remote, session, approval) {
+                        cx.notify();
+                    }
+                }
+                // The crab's reply to an answer the card sent.
+                agent_bridge::TurnEvent::ApprovalSettled {
+                    session,
+                    request_id,
+                    outcome,
+                } => {
+                    if let crate::remote_approval::Settled::Stale(text) =
+                        self.approvals.settle(session, request_id, outcome)
+                    {
+                        self.push_session_notice(session, text, cx);
                     }
                     cx.notify();
                 }
@@ -1280,14 +1384,15 @@ impl Dashboard {
                     // DB read ran) are dropped, not painted. A pane's own
                     // lookup lands on that pane's strip (#2530).
                     if self.plan_for == Some(session) {
-                        self.plan.set_path(path);
+                        self.plan.set_crab_path(&self.backend, path);
                         cx.notify();
                     } else if let Some(pane) = self.pane_view(session) {
                         // The path belongs to the session the pane was opened
                         // for, so a leaf for another conversation ignores it.
                         if pane.read(cx).plan_for == Some(session) {
+                            let backend = self.backend.clone();
                             pane.update(cx, |pane, cx| {
-                                pane.plan.set_path(path);
+                                pane.plan.set_crab_path(&backend, path);
                                 cx.notify();
                             });
                         }
@@ -1316,9 +1421,9 @@ impl Dashboard {
                     // The last prompt size came from the old provider's
                     // tokenizer, so it goes with it (#2644).
                     if self.chat_state.session() == Some(session)
-                        && let Some(b) = agent_bridge::bridge()
+                        && let Some(facts) = self.backend.facts(Some(session))
                     {
-                        self.ctx_max = b.service.context_limit_for_session(session);
+                        self.ctx_max = facts.context_limit;
                         self.turn.ctx_tokens = None;
                     }
                     // A pick is a commitment: apply it, say so once, and put
@@ -1661,60 +1766,19 @@ impl Dashboard {
                         .live
                         .notices
                         .push(format!("provider: {} → {} ({})", to_name, to_model, reason));
-                    if let Some(bridge) = agent_bridge::bridge() {
-                        let db_path = self.db_path.clone();
-                        let persist_to = to_name.clone();
-                        let persist_model = to_model.clone();
-                        let _ = agent_bridge::spawn_worker("gui-provider-switch", move |rt| {
-                            rt.block_on(async {
-                                // Same 4 MB thread read the rest of the GUI
-                                // uses: one connection per job, service on top.
-                                let Ok(db) = opencrabs::db::Database::connect(&db_path).await
-                                else {
-                                    return;
-                                };
-                                let service = opencrabs::services::SessionService::new(
-                                    opencrabs::services::ServiceContext::new(db.pool().clone()),
-                                );
-                                if let Ok(Some(mut s)) = service.get_session(sid).await {
-                                    s.provider_name = Some(persist_to);
-                                    s.model = Some(persist_model);
-                                    if let Err(e) = service.update_session(&s).await {
-                                        tracing::warn!(
-                                            "Failed to persist provider swap to session {sid}: {e}"
-                                        );
-                                    }
-                                }
-                            });
-                        });
-                        // The rail's footer pair for this session follows the
-                        // row on the next fetch; the card notice is the live
-                        // signal. The in-memory pin must also be rebuilt from
-                        // config, or the next turn re-walks the dead primary:
-                        // the agent's own swap reuses the fallback Arc, which
-                        // still carries the failing primary internally. Same
-                        // rebuild the TUI does at `tui/app/state.rs`
-                        // (ProviderSwitched).
-                        let rebuild_service = bridge.service.clone();
-                        let rebuild_to = to_name.clone();
-                        let rebuild_model = to_model.clone();
-                        let _ = agent_bridge::spawn_worker("gui-provider-pin-rebuild", move |rt| {
-                            rt.block_on(async {
-                                if let Ok(config) = opencrabs::config::Config::load()
-                                    && let Ok(new_provider) = opencrabs::brain::provider::factory::create_provider_by_name(&config, &rebuild_to).await
-                                {
-                                    rebuild_service.swap_provider_for_session(
-                                        sid,
-                                        new_provider,
-                                        rebuild_model,
-                                    );
-                                    tracing::info!(
-                                        "[ProviderSwitched] rebuilt pinned provider for session {sid} → {rebuild_to}"
-                                    );
-                                }
-                            });
-                        });
-                    }
+                    // The row and the pin are the crab's: the session row
+                    // takes the new pair (the rail's footer follows it on the
+                    // next fetch) and the in-memory pin is rebuilt from
+                    // config, or the next turn re-walks the dead primary: the
+                    // agent's own swap reuses the fallback Arc, which still
+                    // carries the failing primary internally. Same two steps
+                    // the TUI takes at `tui/app/state.rs` (ProviderSwitched).
+                    agent_bridge::spawn_pin_fallback_provider(
+                        self.backend.clone(),
+                        sid,
+                        to_name,
+                        to_model,
+                    );
                     cx.notify();
                 }
                 // Self-healing fired: config recovery, emergency compaction,
@@ -1792,7 +1856,7 @@ impl Dashboard {
                                 content.clone()
                             };
                             agent_bridge::spawn_speak_reply(
-                                self.db_path.clone(),
+                                self.backend.clone(),
                                 self.sink.clone(),
                                 session,
                                 spoken,
@@ -1886,7 +1950,7 @@ impl Dashboard {
                             content.clone()
                         };
                         agent_bridge::spawn_speak_reply(
-                            self.db_path.clone(),
+                            self.backend.clone(),
                             self.sink.clone(),
                             session,
                             spoken,
@@ -2004,9 +2068,9 @@ impl Dashboard {
                     // future that would have written it is gone, so this call is
                     // the only thing that can put it in the ledger, and the
                     // reload after the stop reads nothing else.
-                    if let Some(bridge) = agent_bridge::bridge() {
+                    if agent_bridge::bridge().is_some() {
                         agent_bridge::spawn_record_turn_stopped(
-                            bridge.service.clone(),
+                            self.backend.clone(),
                             session,
                             stopped_answer,
                         );
@@ -2166,6 +2230,10 @@ impl Dashboard {
                 // lands while he is listening to another clip waits, and a
                 // conversation off screen starts silent.
                 agent_bridge::TurnEvent::VoiceReplySaved { session, path } => {
+                    // The path is the crab's. The local crab answers it as it
+                    // is; a crab on another machine answers its copy here, so
+                    // the player never opens a path this disk does not own.
+                    let path = self.backend.localize(&path);
                     if self.chat_state.session() == Some(session) {
                         // Every outcome leaves a line (#3092). The player
                         // reports a clip that would not open and nothing else,
@@ -2253,28 +2321,55 @@ impl Dashboard {
     /// The same roster for ANY session, not just the open conversation, so every
     /// pane prints its own detached commands above its composer (#2593).
     pub(crate) fn running_tasks_label_for(&self, session: Uuid) -> Option<String> {
-        let bridge = agent_bridge::bridge()?;
-        let mgr = bridge.service.background_manager()?;
-        let tasks: Vec<(String, u64)> = mgr
-            .running_tasks(session)
+        let tasks: Vec<(String, u64)> = self
+            .session_tasks(session)
             .into_iter()
-            .map(|t| (t.label, t.started.elapsed().as_secs()))
+            .map(|t| (t.label, t.secs))
             .collect();
         opencrabs::tui::render::format_background_tasks(&tasks, task_list::STRIP_LABEL_CHARS)
     }
 
+    /// What is running in each of `sessions`, now: the task roster is read
+    /// while the window paints, so it is asked synchronously, the way
+    /// `Backend::facts` is. A crab still booting, or one with no task
+    /// manager, runs nothing.
+    pub(crate) fn tasks_snapshot(
+        &self,
+        sessions: Vec<Uuid>,
+    ) -> Vec<opencrabs::backend::tasks::SessionTasks> {
+        self.backend.tasks_snapshot(sessions)
+    }
+
+    /// One session's running tasks, oldest first.
+    fn session_tasks(&self, session: Uuid) -> Vec<opencrabs::backend::tasks::TaskRow> {
+        self.tasks_snapshot(vec![session])
+            .into_iter()
+            .next()
+            .map(|entry| entry.tasks)
+            .unwrap_or_default()
+    }
+
+    /// Ask one task to stop. `None` when the crab has no task manager.
+    fn stop_task(
+        backend: &crate::backend_glue::Backend,
+        session: Uuid,
+        task: Uuid,
+    ) -> Option<opencrabs::backend::tasks::StopOutcome> {
+        opencrabs::backend::tasks::TaskStop { session, task }
+            .answer(tasks_ctx(backend)?)
+            .ok()
+            .flatten()
+    }
+
     /// One session's running tasks as the card prints them, oldest first.
     pub(crate) fn task_rows(&self, session: Uuid) -> Vec<task_list::TaskRow> {
-        let Some(mgr) = agent_bridge::bridge().and_then(|b| b.service.background_manager()) else {
-            return Vec::new();
-        };
-        mgr.running_tasks(session)
+        self.session_tasks(session)
             .into_iter()
             .map(|t| task_list::TaskRow {
                 id: t.task_id,
-                tag: t.source.tag(),
-                secs: t.started.elapsed().as_secs(),
-                ours: t.cancel.is_some(),
+                tag: t.kind.tag(),
+                secs: t.secs,
+                ours: t.ours,
                 label: t.label,
             })
             .collect()
@@ -2389,21 +2484,24 @@ impl Dashboard {
             .get(&task)
             .is_some_and(|tail| tail.read_at.elapsed() < task_list::TAIL_TICK);
         if !fresh {
-            let mgr = agent_bridge::bridge().and_then(|b| b.service.background_manager())?;
-            let path = self
-                .task_tails
-                .get(&task)
-                .and_then(|tail| tail.path.clone())
-                .or_else(|| mgr.output_path_for(session, task));
-            let text = path
-                .as_deref()
-                .map(|p| SharedString::from(mgr.output_tail(p, task_list::TAIL_LINES)));
+            let read = opencrabs::backend::tasks::TaskTail {
+                session,
+                task,
+                path: self
+                    .task_tails
+                    .get(&task)
+                    .and_then(|tail| tail.path.clone()),
+                lines: task_list::TAIL_LINES,
+            }
+            .answer(tasks_ctx(&self.backend)?)
+            .ok()
+            .flatten()?;
             self.task_tails.insert(
                 task,
                 TaskTail {
                     read_at: std::time::Instant::now(),
-                    path,
-                    text,
+                    path: read.path,
+                    text: read.text.map(SharedString::from),
                 },
             );
         }
@@ -2464,9 +2562,7 @@ impl Dashboard {
                 self.task_area_resized(session, cx);
             }
             task_list::KeyStep::Cancel(ix) => {
-                let outcome = agent_bridge::bridge()
-                    .and_then(|b| b.service.background_manager())
-                    .map(|mgr| mgr.cancel(session, rows[ix].id));
+                let outcome = Self::stop_task(&self.backend, session, rows[ix].id);
                 logging::debug(&format!(
                     "task list: esc on {:?} -> {outcome:?}",
                     rows[ix].label
@@ -2542,6 +2638,9 @@ impl Dashboard {
     /// Look at the open task again, at most once a [`task_detail::READ_TICK`]:
     /// whether it still runs, where its output is, and what it wrote since.
     fn refresh_task_detail(&mut self) {
+        let Some(ctx) = tasks_ctx(&self.backend) else {
+            return;
+        };
         let Some(detail) = self.task_detail.as_mut() else {
             return;
         };
@@ -2552,34 +2651,27 @@ impl Dashboard {
             return;
         }
         detail.read_at = Some(std::time::Instant::now());
-        let Some(mgr) = agent_bridge::bridge().and_then(|b| b.service.background_manager()) else {
+        // The crab finds the output file while the task runs, keeps it after,
+        // and re-reads it only when its stamp moved (see `TaskDetail`).
+        let Some(read) = opencrabs::backend::tasks::TaskDetail {
+            session: detail.session,
+            task: detail.task,
+            stamp: detail.stamp,
+        }
+        .answer(ctx)
+        .ok()
+        .flatten() else {
             return;
         };
-        let running = mgr
-            .running_tasks(detail.session)
-            .iter()
-            .any(|t| t.task_id == detail.task);
-        if !running && detail.ended.is_none() {
+        if !read.running && detail.ended.is_none() {
             detail.ended = Some(detail.started.elapsed().as_secs());
             detail.confirm_stop = false;
         }
-        if detail.path.is_none() && running {
-            detail.path = mgr.output_path_for(detail.session, detail.task);
+        detail.path = read.path;
+        if let Some(history) = read.history {
+            detail.stamp = read.stamp;
+            detail.absorb(history);
         }
-        let Some(path) = detail.path.clone() else {
-            return;
-        };
-        // A file that has not changed is not read again: the read scrubs up
-        // to half a megabyte, which is not worth doing once a second for a
-        // task that is thinking.
-        let stamp = std::fs::metadata(&path)
-            .ok()
-            .map(|m| (m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)));
-        if stamp.is_some() && stamp == detail.stamp {
-            return;
-        }
-        detail.stamp = stamp;
-        detail.absorb(mgr.output_history(&path));
     }
 
     /// One key while the full view holds the keyboard (see
@@ -2640,6 +2732,7 @@ impl Dashboard {
     /// The stop door: the first press asks, the second stops. The task then
     /// ends through its own exit path, and the view says so when it does.
     fn stop_task_detail(&mut self, cx: &mut Context<Self>) {
+        let backend = &self.backend;
         let Some(detail) = self.task_detail.as_mut() else {
             return;
         };
@@ -2652,9 +2745,7 @@ impl Dashboard {
             return;
         }
         detail.confirm_stop = false;
-        let outcome = agent_bridge::bridge()
-            .and_then(|b| b.service.background_manager())
-            .map(|mgr| mgr.cancel(detail.session, detail.task));
+        let outcome = Self::stop_task(backend, detail.session, detail.task);
         logging::info(&format!(
             "task detail: stop on {} -> {outcome:?}",
             detail.task
@@ -2807,5 +2898,22 @@ impl Dashboard {
             .any(|row| row.badge == Some(crate::rail_activity::Badge::Live) || row.ring);
         self.rail_anim_live = live;
         live
+    }
+}
+
+/// The crab the task doors read from inside a frame.
+///
+/// A free function over the field, not a method, so a caller can hold it
+/// while it changes another field of the window.
+///
+/// `None` for a remote crab: its tasks are not on this machine, and a frame
+/// never waits on the network, so the window shows it running nothing.
+pub(crate) fn tasks_ctx(
+    backend: &crate::backend_glue::Backend,
+) -> Option<&opencrabs::backend::Ctx> {
+    match backend {
+        crate::backend_glue::Backend::Local(ctx) => Some(ctx),
+        // The remote variant is named only in the glue (seam rule R5).
+        _ => None,
     }
 }

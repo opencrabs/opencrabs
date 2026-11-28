@@ -101,3 +101,36 @@ fn collect_interfaces_smoke() {
     assert!(ifaces.iter().all(|i| !i.name.starts_with("lo")));
     assert!(ifaces.iter().all(|i| !i.ipv4.is_loopback()));
 }
+
+/// The class: an announced route must be an address the gateway listens on.
+/// Every bind posture is checked against the same machine table, so a new
+/// posture that announces a door the socket never opened fails here.
+#[test]
+fn announced_routes_follow_the_bind_address() {
+    let machine = vec![
+        iface("eth0", "192.168.1.185"),
+        iface("tailscale0", "100.118.255.80"),
+    ];
+    let urls = |bind: &str| -> Vec<String> {
+        select_advertised_routes(&reachable_through_bind(&machine, bind), 18799, None)
+            .into_iter()
+            .map(|r| r.url)
+            .collect()
+    };
+
+    // Loopback listens on no interface another machine can reach.
+    assert!(urls("127.0.0.1").is_empty());
+    assert!(urls("::1").is_empty());
+    // A concrete address announces that address and nothing else.
+    assert_eq!(urls("100.118.255.80"), vec!["http://100.118.255.80:18799"]);
+    assert_eq!(urls("192.168.1.185"), vec!["http://192.168.1.185:18799"]);
+    // An address the machine does not hold announces nothing.
+    assert!(urls("10.9.9.9").is_empty());
+    // Unspecified listens everywhere.
+    assert_eq!(
+        urls("0.0.0.0"),
+        vec!["http://192.168.1.185:18799", "http://100.118.255.80:18799"]
+    );
+    // A hostname cannot be resolved here: unfiltered, as before the filter.
+    assert_eq!(urls("buildbox").len(), 2);
+}

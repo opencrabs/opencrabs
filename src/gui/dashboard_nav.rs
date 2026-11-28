@@ -10,15 +10,19 @@ use super::*;
 impl Dashboard {
     /// Re-read the channel chip now (#2452): after a Start click succeeds,
     /// the daemon appears within a second or two, so poll instead of
-    /// waiting for the next 5-second tick. All IO runs off the UI thread.
+    /// waiting for the next 5-second tick. The read is the crab's own, on its
+    /// backend lane, and an answer for a crab the window has since left is
+    /// dropped.
     pub(crate) fn refresh_channel_chip(&mut self, cx: &mut Context<Self>) {
         let names = self.chip_channel_names.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let line = cx
-                .background_executor()
-                .spawn(async move { channel_chip_line_from(&names) })
-                .await;
+            let line = channel_chip_line_from(backend, names).await;
             let _ = this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 if this.channel_chip != line {
                     logging::info(&format!(
                         "channel chip -> {}",
@@ -36,8 +40,16 @@ impl Dashboard {
     /// the onboarding path (launchd on macOS, systemd user unit on Linux).
     /// This is the only way the GUI ever starts one, and only on a click:
     /// nothing here spawns a ChannelManager or claims a channel lock.
+    ///
+    /// The service it installs is this machine's, so a crab elsewhere gets
+    /// the reason instead of an install here.
     pub(crate) fn start_daemon(&mut self, cx: &mut Context<Self>) {
         if self.daemon_starting {
+            return;
+        }
+        if let Some(why) = self.backend.lacks(opencrabs::backend::cap::Cap::Setup) {
+            self.daemon_error = Some(SharedString::from(why));
+            cx.notify();
             return;
         }
         self.daemon_starting = true;
@@ -156,8 +168,8 @@ impl Dashboard {
             if let Some(from) = self.chat_state.session() {
                 self.metrics.pending.remove(&from);
             }
-            if let Some(b) = agent_bridge::bridge() {
-                self.ctx_max = b.service.context_limit_for_session(id);
+            if let Some(facts) = self.backend.facts(Some(id)) {
+                self.ctx_max = facts.context_limit;
             }
             // A recall belongs to the conversation it started in too, so its
             // messages go back to wait instead of vanishing with the old draft
@@ -544,9 +556,9 @@ impl Dashboard {
         self.begin_conversation(id, cx);
         self.mark_rail_seen(id);
         self.screen = Screen::Chat;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, id).await;
+            let result = transcript::load_recent(backend, id).await;
             this.update(cx, |this, cx| {
                 // Apply only if the user still sits on this session; a slow
                 // fetch for an abandoned click paints nothing.
@@ -665,13 +677,6 @@ impl Dashboard {
             return Vec::new();
         }
         let mut open = Vec::new();
-        // A remote crab draws the only composer on screen, so it owns the
-        // keyboard before the local one does. It sits below the rail on
-        // purpose: Tab still arms the rail, and the rail's arrows keep
-        // answering while it holds the keys.
-        if self.instance_remote.is_some() {
-            open.push(OverlayId::RemoteCrab);
-        }
         if self.rail_open && self.rail_focused {
             open.push(OverlayId::Rail);
         }
@@ -713,16 +718,14 @@ impl Dashboard {
         if self.confirm_delete.is_some() {
             open.push(OverlayId::ConfirmDelete);
         }
-        // The two instance forms are fields the owner types into, and each is
-        // drawn over the panel it was opened from: they sit at the modal tier,
-        // above the rail that opened them. `on_key` already routes to them
-        // first; this is what moves focus to the root so the hidden local
-        // editor cannot take the characters instead (#3133).
-        if self.instance_pairing.is_some() {
+        // The strip's cards are fields the owner types into, drawn over the
+        // whole window: they sit at the modal tier, above the rail. `on_key`
+        // already routes to them first; this is what moves focus to the root
+        // so the hidden local editor cannot take the characters instead
+        // (#3133). The strip keeps the card and says whether one is up
+        // through the cell it shares with the window.
+        if self.instance_card.get() {
             open.push(OverlayId::InstancePair);
-        }
-        if self.instance_glyph.is_some() {
-            open.push(OverlayId::InstanceGlyph);
         }
         if self.group_target.is_some() {
             open.push(OverlayId::GroupPick);
@@ -788,11 +791,7 @@ impl Dashboard {
     /// being built, after that press is done. `refocus_screen` stays the one
     /// decision point, so the two can never disagree about who owns the keys.
     pub(crate) fn request_composer_caret(&mut self, cx: &mut Context<Self>) {
-        // The field on screen, which with a remote open is the remote's
-        // (#3133): asking the local composer to re-assert a caret nobody can
-        // see is what the remote panel's hand-written keyboard was working
-        // around.
-        let composer = self.keyboard_field(cx);
+        let composer = self.composer_entity(cx);
         composer.update(cx, |editor, cx| {
             editor.focus_pending = true;
             cx.notify();

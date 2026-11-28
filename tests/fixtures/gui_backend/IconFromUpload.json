@@ -1,0 +1,17 @@
+{
+  "op": "sessions.icon_from_upload",
+  "scope": "a2a:send",
+  "request": {
+    "upload": "/home/crab/.opencrabs/tmp/gui-uploads/4a8ff1c2d9e07b35-crab.png"
+  },
+  "response": {
+    "Ok": "img:4a8ff1c2d9e07b35-crab.png"
+  },
+  "refused": {
+    "Err": {
+      "Forbidden": {
+        "scope": "send"
+      }
+    }
+  }
+}

@@ -109,6 +109,15 @@ fn the_theme_round_trips_through_toml() {
 }
 
 #[test]
+fn instance_rail_is_off_unless_the_config_says_so() {
+    assert!(!GuiConfig::default().instance_rail);
+    let absent: GuiConfig = toml::from_str("theme = \"auto\"").unwrap();
+    assert!(!absent.instance_rail);
+    let on: GuiConfig = toml::from_str("instance_rail = true").unwrap();
+    assert!(on.instance_rail);
+}
+
+#[test]
 fn accents_parse_with_or_without_a_hash() {
     assert_eq!(parse_accent("#d76414"), Some(0xd76414));
     assert_eq!(parse_accent("d76414"), Some(0xd76414));

@@ -5,6 +5,7 @@
 //! `main.rs` so a rail change and an onboarding change stop sharing a file.
 
 use super::*;
+use crate::backend_glue::Kept;
 
 impl Dashboard {
     /// The chat's menu (#2480): what can be done to the conversation it
@@ -408,7 +409,7 @@ impl Dashboard {
         }
         // A rename prompt renames the topic in place and changes nothing else.
         if let Some(target) = self.topic_rename {
-            let db_path = self.db_path.clone();
+            let db_path = self.backend.clone();
             // The icon rides along with the rename (#2791): the draft was
             // seeded from the stored value, so only a real change writes.
             let stored_icon = self.sessions.topic_icons.get(&target).cloned();
@@ -464,7 +465,7 @@ impl Dashboard {
         let Some(parent) = self.topic_draft_parent() else {
             return;
         };
-        let db_path = self.db_path.clone();
+        let db_path = self.backend.clone();
         let icon = self
             .topic_draft_icon
             .clone()
@@ -531,7 +532,7 @@ impl Dashboard {
         self.group_warned = false;
         self.group_filter.clear();
         self.refocus_screen();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         // Taken rows: topics themselves, every child (a key) and every parent
         // (a value) already in the rail's tree. A session that carries the
         // topics flag is NOT taken: grouping it folds its topics into it
@@ -542,7 +543,7 @@ impl Dashboard {
             self.sessions.parents.keys().copied().collect();
         taken.extend(self.sessions.parents.values().copied());
         cx.spawn(async move |this, cx| {
-            match sessions::load_group_candidates(db_path, id).await {
+            match sessions::load_group_candidates(backend, id).await {
                 Ok(rows) => {
                     this.update(cx, |this, cx| {
                         // A stale open (target changed while loading) is dropped.
@@ -614,7 +615,7 @@ impl Dashboard {
         }
         self.group_busy = true;
         self.group_error = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             for child in children {
                 // Fold first when the candidate carries topics of its own:
@@ -622,7 +623,7 @@ impl Dashboard {
                 // children, and after the fold it has none (#2864). The fold
                 // is its own transaction, so a refusal below leaves a
                 // session with no topics rather than half a family.
-                if let Err(e) = sessions::merge_topics(db_path.clone(), child).await {
+                if let Err(e) = sessions::merge_topics(backend.clone(), child).await {
                     this.update(cx, |this, cx| {
                         this.group_busy = false;
                         this.group_error = Some(e);
@@ -631,7 +632,7 @@ impl Dashboard {
                     .ok();
                     return;
                 }
-                if let Err(e) = sessions::attach_topic(db_path.clone(), child, parent).await {
+                if let Err(e) = sessions::attach_topic(backend.clone(), child, parent).await {
                     this.update(cx, |this, cx| {
                         this.group_busy = false;
                         this.group_error = Some(e);
@@ -666,14 +667,21 @@ impl Dashboard {
     }
 
     /// Re-read which sessions are topics and what each topic's parent is.
+    ///
+    /// Like the rail's refetch, an answer from the crab the window has since
+    /// left is dropped before it reaches the store or the panes it notifies.
     pub(crate) fn refresh_topic_state(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let parents = sessions::load_topic_parents(db_path.clone()).await;
-            let closed = sessions::load_closed(db_path.clone()).await;
-            let icons = sessions::load_topic_icons(db_path.clone()).await;
-            let topics = sessions::load_topics(db_path).await;
+            let parents = sessions::load_topic_parents(backend.clone()).await;
+            let closed = sessions::load_closed(backend.clone()).await;
+            let icons = sessions::load_topic_icons(backend.clone()).await;
+            let topics = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match closed {
                     Ok(ids) => this.sessions.closed = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("closed refresh: {e}")),
@@ -687,7 +695,11 @@ impl Dashboard {
                     Err(e) => logging::error(&format!("topics refresh: {e}")),
                 }
                 match icons {
-                    Ok(pairs) => this.sessions.topic_icons = pairs.into_iter().collect(),
+                    Ok(icons) => {
+                        let (stored, files) = sessions::split_topic_icons(icons);
+                        this.sessions.topic_icons = stored;
+                        this.sessions.topic_icon_files = files;
+                    }
                     Err(e) => logging::error(&format!("topic icons refresh: {e}")),
                 }
                 // The custom images follow the stored values, so a rename
@@ -706,24 +718,15 @@ impl Dashboard {
     /// Re-read the custom icon images the rail and tabs draw (#2790). One
     /// file read per icon, at refresh time; the paint only clones an Arc.
     /// A missing or undecodable file logs and drops out, so the row falls
-    /// back to its platform mark instead of drawing a blank box.
+    /// back to its platform mark instead of drawing a blank box. A remote
+    /// crab's icon goes through `Backend::localize_allowed`: a kind outside
+    /// the blob cache's allowlist is never fetched nor read.
     pub(crate) fn refresh_icon_images(&mut self) {
-        let mut images = HashMap::new();
-        for stored in self.sessions.topic_icons.values() {
-            let Some(path) = topic_icons::stored_image_path(stored) else {
-                continue;
-            };
-            let Some(format) = topic_icons::image_format(stored) else {
-                continue;
-            };
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
-                }
-                Err(e) => logging::error(&format!("icon image {stored}: {e}")),
-            }
-        }
-        self.icon_images = images;
+        self.icon_images = read_icon_images(
+            &self.backend,
+            &self.sessions.topic_icons,
+            &self.sessions.topic_icon_files,
+        );
     }
 
     /// The cached picture for a stored `img:` value, or None for anything
@@ -785,26 +788,16 @@ impl Dashboard {
     /// The copy gets a fresh uuid name, so two picks of the same file never
     /// fight over one slot and an old icon stays untouched until the rename
     /// is submitted. Failures land in the notices, never silent.
+    ///
+    /// The file is read on this machine, where it was picked. Where it is
+    /// kept is the crab's: the local crab's icon store is on this disk and
+    /// is written here at once; a crab on another machine is sent the bytes
+    /// and the draft takes the icon when its reply lands.
     pub(crate) fn attach_icon_image(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
-        let meta = match std::fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                self.turn.live.notices.push(format!("icon image: {e}"));
-                cx.notify();
-                return;
-            }
-        };
-        if !topic_icons::image_pick_allowed(&path, meta.len()) {
-            self.turn.live.notices.push(
-                "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
-            );
-            cx.notify();
-            return;
-        }
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_picked_image(&path) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                self.turn.live.notices.push(format!("icon image: {e}"));
+            Err(notice) => {
+                self.turn.live.notices.push(notice);
                 cx.notify();
                 return;
             }
@@ -815,22 +808,114 @@ impl Dashboard {
             .unwrap_or("png")
             .to_ascii_lowercase();
         let filename = format!("{}.{ext}", uuid::Uuid::new_v4());
-        let dir = topic_icons::image_store_dir();
-        if let Err(e) =
-            std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&filename), &bytes))
+        match self
+            .backend
+            .keep_icon_image(&filename, &bytes, write_icon_here)
         {
-            self.turn.live.notices.push(format!("icon image: {e}"));
-            cx.notify();
-            return;
+            Kept::Now(kept) => self.icon_image_kept(kept, &filename, bytes, cx),
+            Kept::Later(reply) => {
+                cx.spawn(async move |this, cx| {
+                    let kept = reply.await;
+                    this.update(cx, |this, cx| {
+                        this.icon_image_kept(kept, &filename, bytes, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
-        let stored = topic_icons::img_store_name(&filename);
-        if let Some(format) = topic_icons::image_format(&filename) {
+    }
+
+    /// The picked icon was kept as `kept` (its stored value), or failed: the
+    /// draft takes it and its picture is cached from the bytes in hand.
+    fn icon_image_kept(
+        &mut self,
+        kept: Result<String, String>,
+        filename: &str,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        let stored = match kept {
+            Ok(stored) => stored,
+            Err(e) => {
+                self.turn.live.notices.push(format!("icon image: {e}"));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(format) = topic_icons::image_format(filename) {
             self.icon_images
                 .insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
         }
         self.topic_draft_icon = Some(stored);
         cx.notify();
     }
+}
+
+/// The pictures for `icons`, keyed by stored value, read where the crab's
+/// file is on this machine.
+///
+/// The file is the one the crab named for the topic (`files`, from
+/// `TopicIcon::blob`), so a remote crab's icon is fetched from that crab by
+/// its own path, never looked up in this window's icon store. A crab that
+/// sent no file falls back to the stored value resolved in the icon store,
+/// which is the local crab's own path. Either goes through
+/// `Backend::localize_allowed`: a remote copy is read only when it is of a
+/// kind this machine opens (no `svg`, no `.bin`), and it decodes as the kind
+/// of that same file.
+pub(crate) fn read_icon_images(
+    backend: &crate::backend_glue::Backend,
+    icons: &HashMap<uuid::Uuid, String>,
+    files: &HashMap<uuid::Uuid, std::path::PathBuf>,
+) -> HashMap<String, Arc<Image>> {
+    let mut images = HashMap::new();
+    for (id, stored) in icons {
+        let Some(path) = files
+            .get(id)
+            .cloned()
+            .or_else(|| topic_icons::stored_image_path(stored))
+        else {
+            continue;
+        };
+        // The decoder is told the kind of the file that is checked and read,
+        // never the kind the stored value claims: a crab that names
+        // `img:x.svg` beside a `.png` file gets a png decode or nothing.
+        let Some(format) = topic_icons::image_format(&path.to_string_lossy()) else {
+            continue;
+        };
+        let Some(path) = backend.localize_allowed(&path) else {
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                images.insert(stored.clone(), Arc::new(Image::from_bytes(format, bytes)));
+            }
+            Err(e) => logging::error(&format!("icon image {stored}: {e}")),
+        }
+    }
+    images
+}
+
+/// The bytes of an icon image picked on this machine, or the notice that
+/// refuses it: an unreadable file, or one the picker does not take.
+fn read_picked_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("icon image: {e}"))?;
+    if !topic_icons::image_pick_allowed(path, meta.len()) {
+        return Err(
+            "icon image: pick a png, jpg, webp, gif, bmp, tiff or svg under 5MB".to_string(),
+        );
+    }
+    std::fs::read(path).map_err(|e| format!("icon image: {e}"))
+}
+
+/// Keep `bytes` as `filename` in the local crab's icon store, on this disk,
+/// and answer the value a topic stores for it.
+fn write_icon_here(filename: &str, bytes: &[u8]) -> Result<String, String> {
+    let dir = topic_icons::image_store_dir();
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join(filename), bytes))
+        .map_err(|e| e.to_string())?;
+    Ok(topic_icons::img_store_name(filename))
 }
 
 /// The group picker's rows after the field is applied (#2864).

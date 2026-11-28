@@ -79,15 +79,29 @@ impl Dashboard {
             return;
         }
         logging::info(&format!("period -> {period:?}: fetching"));
+        self.reload_usage(cx);
+    }
+
+    /// Read the usage view for the period on screen from the crab the window
+    /// holds. A period switch asks for it, and so does a crab swap, whose
+    /// period did not change but whose ledger did.
+    pub(crate) fn reload_usage(&mut self, cx: &mut Context<Self>) {
+        let period = self.dash.period;
         self.pending += 1;
         let pending = self.pending;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             // The fetch runs on its own big-stack thread (see `load_view`):
             // gpui's background workers are dispatch-queue threads with tiny
             // stacks. The previous view stays visible until the result lands.
-            let state = load_view(db_path, period).await;
+            let state = load_view(backend, period).await;
             this.update(cx, |this, cx| {
+                // The view is the ledger of the crab the read went to: a swap
+                // while it was out drops it, whatever the counter says.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 if pending == this.pending {
                     this.state = state;
                     logging::info("period fetch applied");
@@ -125,17 +139,25 @@ impl Dashboard {
     /// Read the Mission Control snapshot on the bridge's DB thread and apply
     /// it only if the screen is still asking for that same window; a stale
     /// read paints nothing.
+    ///
+    /// A read of a crab the window has since left touches nothing, not even
+    /// `mc_loading`: the swap already cleared it and may have a read of the
+    /// new crab out, which this answer must neither overwrite nor unlock.
     pub(crate) fn fetch_mission_control(&mut self, cx: &mut Context<Self>) {
         if self.mc_loading {
             return;
         }
         self.mc_loading = true;
         self.mc_err = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let window = self.mc_window;
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let result = mission_control::load(db_path, window).await;
+            let result = mission_control::load(backend, window).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 this.mc_loading = false;
                 if this.mc_window == window {
                     match result {
@@ -199,13 +221,16 @@ impl Dashboard {
         }
         // Uppercase L opens the log viewer, because lowercase `l` cycles the
         // panels, exactly as the terminal binds it (#1528).
+        // The viewer reads this machine's log folder, so a remote crab leaves
+        // a note instead of showing these logs as if they were its own.
         if ks.modifiers.shift && ks.key == "l" {
-            let mut viewer = LogViewerState::open();
-            // Land on the newest entries: the thing just reproduced is at the
-            // end of the file, not the start of the window.
-            viewer.scroll_to_end();
-            self.mc_logs = Some(viewer);
-            self.mc_nav.detail = false;
+            match open_logs(&self.backend) {
+                Ok(viewer) => {
+                    self.mc_logs = Some(viewer);
+                    self.mc_nav.detail = false;
+                }
+                Err(notice) => self.mc_notice = Some(notice),
+            }
             cx.notify();
             return;
         }
@@ -286,18 +311,24 @@ impl Dashboard {
             mission_control::Decision::Apply => "Apply",
             mission_control::Decision::Reject => "Reject",
         };
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             self.mc_notice = Some(mission_control::Notice {
                 text: format!("{verb} failed: the agent is not running"),
                 ok: false,
             });
             cx.notify();
             return;
-        };
-        let service = bridge.service.clone();
+        }
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let result = mission_control::decide(service, item.id, item.kind, decision).await;
+            let result = mission_control::decide(backend, item.id, item.kind, decision).await;
             this.update(cx, |this, cx| {
+                // The decision was the crab's the window left: its notice and
+                // its reread would land on the one that replaced it.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 this.mc_notice = Some(match result {
                     Ok(text) => mission_control::Notice { text, ok: true },
                     Err(e) => mission_control::Notice {
@@ -889,15 +920,28 @@ impl Dashboard {
             cx.notify();
             return;
         };
-        let here = agent_bridge::bridge()
-            .map(|b| b.service.get_working_directory_for_session(session))
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        // The folder is the crab's, so the picker opens where the crab says
+        // the session works. Before the crab answers its first facts there is
+        // no such folder to name, and this machine's own would be a guess.
+        let Some(here) = self
+            .backend
+            .facts(Some(session))
+            .map(|facts| facts.working_directory)
+        else {
+            self.push_session_notice(
+                session,
+                "/cd: the crab is still starting; try again in a moment".to_string(),
+                cx,
+            );
+            cx.notify();
+            return;
+        };
         self.cd_dir = here;
         self.cd_show_hidden = false;
         self.cd_selected = 0;
         self.cd_session = Some(session);
-        self.cd_entries = cd_entries_for(&self.cd_dir, false);
         self.screen = Screen::DirectoryPicker;
+        self.cd_list(cx);
         // The screen takes the keyboard, the same rule as Themes: on this
         // screen the arrows walk the list, so a stale editor focus would
         // send a message instead.
@@ -937,8 +981,8 @@ impl Dashboard {
         self.refocus_screen();
         cx.notify();
         match agent_bridge::bridge() {
-            Some(b) => agent_bridge::spawn_apply_operator_cd(
-                b.service.clone(),
+            Some(_) => agent_bridge::spawn_apply_operator_cd(
+                self.backend.clone(),
                 session,
                 dir,
                 self.sink.clone(),
@@ -953,15 +997,15 @@ impl Dashboard {
     }
 
     /// Enter on a row: descend into it. `..` climbs back up one level.
-    /// Reads are synchronous and local, the way the terminal's dialog does
-    /// them, so the row list can never drift from what the screen shows.
+    /// The rows are the crab's: they are cleared at once and come back from
+    /// its `ListDir`, so a row of the folder just left can never be opened.
     pub(crate) fn cd_descend(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(next) = self.cd_entries.get(index) else {
             return;
         };
         self.cd_dir = next.clone();
         self.cd_selected = 0;
-        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        self.cd_list(cx);
         cx.notify();
     }
 
@@ -970,8 +1014,66 @@ impl Dashboard {
     pub(crate) fn cd_toggle_hidden(&mut self, cx: &mut Context<Self>) {
         self.cd_show_hidden = !self.cd_show_hidden;
         self.cd_selected = 0;
-        self.cd_entries = cd_entries_for(&self.cd_dir, self.cd_show_hidden);
+        self.cd_list(cx);
         cx.notify();
+    }
+
+    /// Ask the crab the window holds for the rows of `cd_dir`, off the
+    /// window's thread, and show them when they land.
+    ///
+    /// The rows are cleared first, so nothing of the folder just left stays
+    /// clickable. An answer is shown only while it is still the question:
+    /// the same crab (`instance_epoch`), the picker still open on the same
+    /// session, folder and hidden toggle. Anything else is an answer to a
+    /// screen the reader has left, and is dropped. A refusal (a token without
+    /// admin, a crab older than the window) lists nothing: the picker closes
+    /// and the conversation says why, in the words of `cap::notice`.
+    fn cd_list(&mut self, cx: &mut Context<Self>) {
+        use opencrabs::backend::fs_list::ListDir;
+
+        self.cd_entries = Vec::new();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
+        let session = self.cd_session;
+        let dir = self.cd_dir.clone();
+        let show_hidden = self.cd_show_hidden;
+        let op = ListDir {
+            dir: dir.clone(),
+            show_hidden,
+        };
+        cx.spawn(async move |this, cx| {
+            let reply = backend.call(op).await;
+            this.update(cx, |this, cx| {
+                let asked = this.instance_epoch == epoch
+                    && this.screen == Screen::DirectoryPicker
+                    && this.cd_session == session
+                    && this.cd_dir == dir
+                    && this.cd_show_hidden == show_hidden;
+                if !asked {
+                    return;
+                }
+                match reply {
+                    Ok(rows) => {
+                        this.cd_entries = rows;
+                        this.cd_selected = 0;
+                    }
+                    Err(e) => {
+                        let notice = opencrabs::backend::cap::notice(
+                            <ListDir as opencrabs::backend::Op>::NAME,
+                            &e,
+                        );
+                        this.close_cd_picker(cx);
+                        match session {
+                            Some(id) => this.push_session_notice(id, notice, cx),
+                            None => this.turn.live.notices.push(notice),
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ctrl+h, or Cmd+? on a Mac: the key reference, the window's door to the
@@ -1023,9 +1125,9 @@ impl Dashboard {
     /// them only if the user still sits on the files screen of the same
     /// session; a stale fetch paints nothing.
     pub(crate) fn fetch_files(&mut self, sid: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = agent_bridge::load_files(db_path, sid).await;
+            let result = agent_bridge::load_files(backend, sid).await;
             this.update(cx, |this, cx| {
                 if this.files_for == Some(sid) && this.screen == Screen::Files {
                     match result {
@@ -1162,4 +1264,25 @@ impl Dashboard {
             .as_ref()
             .is_some_and(|tree| tree.leaves().len() > 1)
     }
+}
+
+/// Shift+L on Mission Control: the log viewer on the newest entries, or the
+/// note that says why this crab has none to show.
+///
+/// The viewer reads this machine's log folder, and logs can hold what the
+/// remote door never hands out, so only a crab on this machine opens it.
+pub(crate) fn open_logs(
+    backend: &crate::backend_glue::Backend,
+) -> Result<LogViewerState, mission_control::Notice> {
+    if let Some(why) = backend.lacks(opencrabs::backend::Cap::Logs) {
+        return Err(mission_control::Notice {
+            text: format!("Logs: {why}"),
+            ok: false,
+        });
+    }
+    let mut viewer = LogViewerState::open();
+    // Land on the newest entries: the thing just reproduced is at the end of
+    // the file, not the start of the window.
+    viewer.scroll_to_end();
+    Ok(viewer)
 }

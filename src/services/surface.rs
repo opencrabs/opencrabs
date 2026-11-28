@@ -508,7 +508,7 @@ pub async fn boot_surface(config: &Config, deps: SurfaceDeps) -> Result<SurfaceS
         config_watcher::spawn(callbacks, Some(notify));
     }
 
-    let a2a_ready = spawn_a2a_gateway(config, &channel_factory, &service_context).await;
+    let a2a_ready = spawn_a2a_gateway(config, &channel_factory, &service_context, &pool).await;
     let (cron_spawned, scheduler_lock) =
         spawn_cron_scheduler(config, &channel_factory, &service_context, &pool, a2a_ready);
     spawn_background_maintenance(&pool, headless);
@@ -531,11 +531,13 @@ async fn spawn_a2a_gateway(
     config: &Config,
     channel_factory: &Arc<ChannelFactory>,
     service_context: &ServiceContext,
+    pool: &Pool,
 ) -> bool {
     if !config.a2a.enabled {
         return false;
     }
     let a2a_agent = channel_factory.create_agent_service().await;
+    adopt_gateway_service(config, pool, &a2a_agent);
     let a2a_ctx = service_context.clone();
     let a2a_config = config.a2a.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -563,6 +565,46 @@ async fn spawn_a2a_gateway(
             false
         }
     }
+}
+
+/// Give a process with no crab of its own the gateway's agent service as its
+/// primary [`crate::backend::Ctx`], so the gateway's `gui/*` operations run
+/// against the same service the process serves channels with.
+///
+/// The window records its own crab before anything boots and hands it the
+/// window's service, so there this is a no-op: the remote client and the
+/// window share one opinion about every session. A process that never
+/// recorded one (the daemon) gets the factory's.
+pub fn adopt_gateway_service(
+    config: &Config,
+    pool: &Pool,
+    agent: &Arc<crate::brain::agent::AgentService>,
+) {
+    let fresh = gateway_primary(
+        crate::backend::primary(),
+        config.database.path.clone(),
+        pool,
+        agent,
+    );
+    if let Some(ctx) = fresh {
+        crate::backend::set_primary(ctx);
+    }
+}
+
+/// The crab to record for the gateway, or `None` when the process already has
+/// one. Kept apart from the global so the rule is testable.
+fn gateway_primary(
+    existing: Option<Arc<crate::backend::Ctx>>,
+    db_path: PathBuf,
+    pool: &Pool,
+    agent: &Arc<crate::brain::agent::AgentService>,
+) -> Option<Arc<crate::backend::Ctx>> {
+    if existing.is_some() {
+        return None;
+    }
+    let ctx = crate::backend::Ctx::new(db_path).with_pool(pool.clone());
+    ctx.set_service(Arc::clone(agent));
+    Some(Arc::new(ctx))
 }
 
 /// Cron scheduler, one per profile machine wide (#444).
@@ -663,6 +705,83 @@ fn spawn_background_maintenance(pool: &Pool, headless: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn gateway_parts() -> (Pool, Arc<crate::brain::agent::AgentService>) {
+        let db = crate::db::Database::connect_in_memory()
+            .await
+            .expect("in-memory ledger");
+        db.run_migrations().await.expect("migrate");
+        let pool = db.pool().clone();
+        let context = ServiceContext::new(pool.clone());
+        let provider: Arc<dyn Provider> = Arc::new(crate::tests::agent_service_mocks::MockProvider);
+        let service = crate::brain::agent::AgentService::new_for_test(provider, context).await;
+        (pool, Arc::new(service))
+    }
+
+    /// A process with no crab of its own serves `gui/*` from the gateway's
+    /// service: the daemon side of the primary decision.
+    #[tokio::test]
+    async fn a_process_without_a_crab_takes_the_gateways_service() {
+        let (pool, agent) = gateway_parts().await;
+        let ctx = gateway_primary(None, PathBuf::from("gateway.db"), &pool, &agent)
+            .expect("no crab yet, so the gateway records one");
+        let service = ctx.service().expect("the gateway's service is in");
+        assert!(Arc::ptr_eq(service, &agent));
+        assert_eq!(ctx.db_path(), std::path::Path::new("gateway.db"));
+    }
+
+    /// The window recorded its crab first: the gateway never replaces it, so
+    /// a remote client lands on the window's own service.
+    #[tokio::test]
+    async fn the_windows_crab_is_never_replaced_by_the_gateway() {
+        let (pool, agent) = gateway_parts().await;
+        let window = Arc::new(crate::backend::Ctx::new(PathBuf::from("window.db")));
+        assert!(
+            gateway_primary(Some(window), PathBuf::from("gateway.db"), &pool, &agent).is_none()
+        );
+    }
+
+    /// Every process that starts the gateway records its primary crab first.
+    /// The TUI and the daemon spawn the gateway from `cmd_chat_inner`, apart
+    /// from this file; a spawner that skips the adoption leaves
+    /// `backend::primary()` empty and every `gui/call` answers `NotReady`.
+    #[test]
+    fn every_gateway_spawner_records_the_primary_first() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut spawners = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n != "tests") {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                let shipped = text.split("#[cfg(test)]").next().unwrap_or_default();
+                let lines: Vec<&str> = shipped.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if !line.contains("a2a::server::start_server(") {
+                        continue;
+                    }
+                    spawners += 1;
+                    let window = &lines[i.saturating_sub(15)..i];
+                    assert!(
+                        window.iter().any(|l| l.contains("adopt_gateway_service(")),
+                        "{}:{} starts the gateway without adopt_gateway_service",
+                        path.display(),
+                        i + 1
+                    );
+                }
+            }
+        }
+        assert!(spawners >= 2, "found {spawners} gateway spawners");
+    }
 
     fn inst(pid: u32, channels: &[&str], stopped: bool) -> PreemptedInstance {
         PreemptedInstance {

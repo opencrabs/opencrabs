@@ -1,0 +1,10 @@
+{
+  "op": "sessions.live_ids",
+  "scope": "a2a:read",
+  "request": {},
+  "response": {
+    "Ok": [
+      "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e01"
+    ]
+  }
+}

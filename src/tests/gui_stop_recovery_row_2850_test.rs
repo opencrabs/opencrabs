@@ -11,15 +11,17 @@
 //! `[boot] interrupted=1 resumed=[019ddc16-...]`. A stop is not a crash, so the
 //! stop site deletes the ticket itself. Crash recovery is untouched.
 
-const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+/// The stop's two writes moved behind the backend's `RecordTurnStopped`; the
+/// window's `spawn_record_turn_stopped` only hands it the session and answer.
+const SESSION_OPS: &str = include_str!("../backend/session_ops.rs");
 
 use crate::db::Database;
 use crate::db::repository::PendingRequestRepository;
 
 /// The stop's own thread body, cut where the next function starts.
 fn stop_body() -> &'static str {
-    AGENT_BRIDGE
-        .split_once("pub fn spawn_record_turn_stopped(")
+    SESSION_OPS
+        .split_once("pub struct RecordTurnStopped {")
         .expect("the stop records its verdict in one place")
         .1
         .split_once("/// Generate the personalized brain files")

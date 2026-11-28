@@ -1,0 +1,6 @@
+{
+  "op": "shell.run",
+  "scope": "a2a:admin",
+  "request": { "cmd": "git status --short" },
+  "reply": { "Ok": "$ git status --short\n M src/main.rs" }
+}

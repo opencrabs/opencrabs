@@ -1,0 +1,17 @@
+{
+  "op": "facts.load",
+  "scope": "a2a:read",
+  "request": {
+    "session": "6f1c2d3e-0000-4000-8000-000000000001"
+  },
+  "reply": {
+    "Ok": {
+      "working_directory": "/home/crab/project",
+      "context_limit": 200000,
+      "provider": "anthropic",
+      "model": "claude-x",
+      "served_model": "claude-x",
+      "base_context_tokens": 0
+    }
+  }
+}

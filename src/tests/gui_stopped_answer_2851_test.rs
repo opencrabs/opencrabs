@@ -11,7 +11,9 @@
 //! stop marker, from the one place that still has it: the card, captured as the
 //! stop lands.
 
-const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+/// The writer moved behind the backend's `RecordTurnStopped`; the window's
+/// `spawn_record_turn_stopped` only hands it the session and answer.
+const SESSION_OPS: &str = include_str!("../backend/session_ops.rs");
 const DASHBOARD_TURNS: &str = include_str!("../gui/dashboard_turns.rs");
 const MESSAGE_SERVICE: &str = include_str!("../services/message.rs");
 
@@ -78,8 +80,8 @@ fn the_cancel_arm_hands_the_streamed_answer_to_the_writer() {
 
 #[test]
 fn the_writer_puts_the_answer_before_the_stop_marker() {
-    let body = AGENT_BRIDGE
-        .split_once("pub fn spawn_record_turn_stopped(")
+    let body = SESSION_OPS
+        .split_once("pub struct RecordTurnStopped {")
         .expect("the stop is recorded in one place")
         .1
         .split_once("/// Generate the personalized brain files")

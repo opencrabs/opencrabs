@@ -8,7 +8,9 @@ use crate::brain::mission_control::ACTIVITY_LIMIT;
 // The panels are their own module since #2817 follow-up, so the parity scans
 // read where the rows are built rather than the crate root.
 const GUI_MISSION_VIEW: &str = include_str!("../gui/mission_control_view.rs");
-const GUI_MISSION: &str = include_str!("../gui/mission_control.rs");
+// The four reads moved behind the backend's `MissionLoad`; the window asks
+// for the snapshot and draws the same structs.
+const BACKEND_MISSION: &str = include_str!("../backend/mission.rs");
 const TERMINAL_ACTIONS: &str = include_str!("../tui/app/mission_control/actions.rs");
 
 fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -24,7 +26,7 @@ fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
 #[test]
 fn mission_control_activity_fetch_limit_is_shared() {
     assert_eq!(ACTIVITY_LIMIT, 100);
-    assert!(GUI_MISSION.contains("activity: activity_service::recent(ACTIVITY_LIMIT)"));
+    assert!(BACKEND_MISSION.contains("activity: activity_service::recent(ACTIVITY_LIMIT)"));
     assert!(TERMINAL_ACTIONS.contains("activity_service::recent(ACTIVITY_LIMIT)"));
     assert!(GUI_MISSION_VIEW.contains("mission_control::ACTIVITY_ROWS"));
 }

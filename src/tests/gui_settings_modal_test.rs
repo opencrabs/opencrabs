@@ -23,6 +23,7 @@ const GUI_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
 const GUI_NAV: &str = include_str!("../gui/dashboard_nav.rs");
 const SETTINGS_VIEW: &str = include_str!("../gui/settings_view.rs");
 const SETTINGS_MODAL: &str = include_str!("../gui/settings_modal.rs");
+const BACKEND_SETTINGS: &str = include_str!("../backend/settings.rs");
 
 #[test]
 fn ctrl_comma_is_listed_as_the_window_settings_chord() {
@@ -200,12 +201,36 @@ fn a_failed_config_load_paints_no_invented_settings() {
 
 #[test]
 fn writes_use_the_config_apis_and_credentials_stay_masked() {
+    // The file writes run on the crab the window holds, through the config
+    // file's own APIs.
     for needle in [
-        "Config::write_key(spec.section, spec.key",
-        "Config::write_key_string(spec.section, spec.key",
-        "Config::remove_key(spec.section, spec.key",
-        "Config::write_keys_key(&cred.section, \"api_key\"",
-        "format!(\"saved {}.api_key\", cred.section)",
+        "Config::write_key(&section, &key",
+        "Config::write_key_string(&section, &key",
+        "Config::remove_key(&section, &key",
+        "Config::write_keys_key(&section, \"api_key\"",
+        ".field(\"api_key\", &\"<redacted>\")",
+    ] {
+        assert!(
+            BACKEND_SETTINGS.contains(needle),
+            "missing write or mask: {needle}"
+        );
+    }
+    // The window reaches them only through the backend.
+    for needle in [
+        "backend.call(SettingsLoad {})",
+        "backend.call(write)",
+        ".call(CredentialWrite {",
+    ] {
+        assert!(
+            SETTINGS_VIEW.contains(needle),
+            "missing write or mask: {needle}"
+        );
+    }
+    for needle in [
+        "settings_view::load(&backend)",
+        "settings_view::write(&backend, spec, &value)",
+        "settings_view::write_credential(&backend, &section, &api_key)",
+        "format!(\"saved {section}.api_key\")",
         "cx.read_from_clipboard()",
         "buffer.chars().count()",
         "\"\\u{2022}\".repeat(len.max(1))",
@@ -215,10 +240,32 @@ fn writes_use_the_config_apis_and_credentials_stay_masked() {
             "missing write or mask: {needle}"
         );
     }
+    for needle in [
+        "Config::write_key(",
+        "Config::write_key_string(",
+        "Config::write_keys_key(",
+        "Config::remove_key(",
+    ] {
+        assert!(
+            !GUI_SETTINGS.contains(needle) && !SETTINGS_VIEW.contains(needle),
+            "the window must not write this machine's config: {needle}"
+        );
+    }
     assert!(
-        SETTINGS_VIEW.contains("pub struct CredSpec"),
+        SETTINGS_VIEW.contains("pub use opencrabs::backend::settings::Credential as CredSpec;"),
         "credential rows carry only section, label and configured state"
     );
+    for decl in ["pub struct Credential {", "pub struct SettingsLoaded {"] {
+        let body = BACKEND_SETTINGS
+            .split(decl)
+            .nth(1)
+            .and_then(|tail| tail.split('}').next())
+            .unwrap_or_else(|| panic!("{decl} is declared"));
+        assert!(
+            !body.contains("api_key"),
+            "credential rows must not retain the secret: {decl}"
+        );
+    }
     assert!(
         !SETTINGS_VIEW.contains("api_key: cfg"),
         "credential rows must not retain the secret"

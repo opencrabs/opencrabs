@@ -1,0 +1,12 @@
+{
+  "op": "mission.decide",
+  "scope": "a2a:manage",
+  "request": {
+    "id": "prop_tool_9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    "kind": "ProposedTool",
+    "decision": "Apply"
+  },
+  "reply": { "Ok": "Installed tool 'hello_tool' (proposal prop_tool_9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d). Live now in tools.toml." },
+  "reply_not_ready": { "Err": { "kind": "not_ready" } },
+  "reply_failed": { "Err": { "kind": "failed", "detail": "no tools.toml path for this instance" } }
+}

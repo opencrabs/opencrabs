@@ -1,0 +1,8 @@
+{
+  "op": "voice.status",
+  "scope": "a2a:read",
+  "request": {},
+  "reply": {
+    "Ok": { "stt_enabled": true, "tts_enabled": false }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "op": "status.channels",
+  "scope": "a2a:read",
+  "request": { "configured": true },
+  "reply": {
+    "Ok": {
+      "configured": ["Telegram", "WhatsApp"],
+      "lock_present": true,
+      "instance_live": false
+    }
+  }
+}

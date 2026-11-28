@@ -8,12 +8,15 @@
 //! - `session/list`   → list this host's sessions (instance rail)
 //! - `session/transcript` → one session's messages, read-only
 //! - `tasks/list`     → list A2A tasks, newest first
+//! - `gui/call`       → run one backend operation, scope checked per operation
+//!   (routed from `server.rs`, which owns the HTTP status)
 //!
 //! [`dispatch`] routes, [`stores`] holds the shared task maps, and each
 //! method has its own module. This file is declarations only — no function
 //! definitions live here (CONTRIBUTING.md).
 
 mod dispatch;
+pub(crate) mod gui;
 pub(crate) mod notify;
 mod send;
 mod sessions;

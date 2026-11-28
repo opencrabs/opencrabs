@@ -1,0 +1,25 @@
+{
+  "op": "voice.transcribe",
+  "scope": "a2a:send",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "ogg_base64": "T2dnUw==",
+    "keep": true
+  },
+  "reply": {
+    "Ok": {
+      "text": "what is on the plan today",
+      "language": "en",
+      "clip": {
+        "path": "/home/crab/.opencrabs/projects/voice-work/files/voice-1764064800000.ogg",
+        "size": 4
+      }
+    }
+  },
+  "reply_no_engine": {
+    "Err": {
+      "kind": "failed",
+      "detail": "no speech-to-text provider is configured yet: add one in Settings, and the microphone has somewhere to send the audio"
+    }
+  }
+}

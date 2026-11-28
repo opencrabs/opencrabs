@@ -110,6 +110,8 @@ pub(crate) struct PaneView {
     /// because a tick that releases this pane's follow is a change to the
     /// window's pane map and a leaf's own context cannot reach that.
     window: WeakEntity<Dashboard>,
+    /// The crab this leaf reads its session's facts from (its directory).
+    backend: crate::backend_glue::Backend,
     /// The width the walk measured for this leaf, written each frame it
     /// changes. `Render` takes no arguments beyond the window and the leaf's
     /// own context, so the number has to arrive as state.
@@ -129,6 +131,7 @@ pub(crate) struct PaneView {
 impl PaneView {
     /// Build one leaf's state. `width` starts at the window's content width
     /// and is corrected by the first walk that measures the leaf.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session: Uuid,
         title: String,
@@ -137,6 +140,7 @@ impl PaneView {
         width: f32,
         ctx_max: u32,
         window: WeakEntity<Dashboard>,
+        backend: crate::backend_glue::Backend,
     ) -> Self {
         Self {
             session,
@@ -158,6 +162,7 @@ impl PaneView {
             copy_drag,
             edit: None,
             window,
+            backend,
             width,
             stamp: 0,
         }
@@ -724,8 +729,10 @@ impl Render for PaneView {
         // The pane's own conversation directory (#2846): a relative name in
         // its transcript resolves against the session, not the process cwd,
         // which a desktop launch never sets.
-        let click_roots = agent_bridge::bridge()
-            .map(|b| b.service.get_working_directory_for_session(self.session))
+        let click_roots = self
+            .backend
+            .facts(Some(self.session))
+            .map(|facts| facts.working_directory)
             .into_iter()
             .collect();
         self.copy_drag.set_roots(click_roots);
@@ -757,6 +764,8 @@ impl Render for PaneView {
                 older: Some(older_click),
                 // Every tile in this leaf opens its own file (#2914).
                 attachments: pane_attachments,
+                // The crab whose files the tiles draw, localized on this machine.
+                backend: Some(self.backend.clone()),
                 // A pane draws the chips its rows carry (#2825). The toggle
                 // is minted by the row menu, which every pane now opens.
                 reactions: self.transcript.reactions.clone(),

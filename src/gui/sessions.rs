@@ -1,10 +1,10 @@
 //! The session rail: every real session from the ledger, most recent first,
-//! click to select. Three constraints shape this file: the fetch runs on a
-//! dedicated 4 MB thread (gpui's dispatch-queue workers have tiny stacks and
-//! the crash receipt lives in `main.rs`), the DB opens through
-//! `Database::connect`, the same no-migration read-only door the usage
-//! loader uses, and no string is ever sliced by byte index (#2271): the
-//! title truncation walks chars.
+//! click to select. Three constraints shape this file: every read and write
+//! goes through the backend (`opencrabs::backend::sessions`), whose local
+//! door runs on a dedicated 4 MB `spawn_worker` lane (gpui's dispatch-queue
+//! workers have tiny stacks and the crash receipt lives in `main.rs`), the
+//! ledger opens with pragmas only, never migrations, and no string is ever
+//! sliced by byte index (#2271): the title truncation walks chars.
 //!
 //! The split between `row` (pure data) and the click attach (the view's
 //! listener) exists because `Context::listener` needs `&mut cx`: the view
@@ -22,13 +22,9 @@ use gpui::{
 use std::sync::Arc;
 
 use opencrabs::config::gui_theme;
-use opencrabs::db::Database;
 use opencrabs::db::models::Session;
-use opencrabs::db::repository::session::{
-    SessionKind, SessionListOptions, SessionRepository, classify_session_title,
-};
-use opencrabs::db::repository::session_favorites::SessionFavoritesRepository;
-use opencrabs::db::repository::{ContentSearchRow, MessageRepository};
+use opencrabs::db::repository::ContentSearchRow;
+use opencrabs::db::repository::session::{SessionKind, classify_session_title};
 use opencrabs::ui_core::rail;
 
 // The menu primitives moved to `menu.rs` (#2613) so the transcript can draw
@@ -73,6 +69,11 @@ pub struct SessionsState {
     pub topics: HashSet<uuid::Uuid>,
     /// The icon each topic carries, shown before its name (#2414).
     pub topic_icons: HashMap<uuid::Uuid, String>,
+    /// For a topic whose icon is an image, the file on the crab that holds
+    /// it (`TopicIcon::blob`). The window localizes this path, never its own
+    /// icon store, so a remote crab's picture is its own. Keyed by topic, in
+    /// this crab's state: never a map by stored name shared across crabs.
+    pub topic_icon_files: HashMap<uuid::Uuid, std::path::PathBuf>,
     /// The live name each Telegram topic carries, resolved once per refresh
     /// pass in ONE query (#2490).
     ///
@@ -604,203 +605,76 @@ pub fn filter_bar(head: &RailHead) -> Stateful<Div> {
         )
 }
 
-/// The hard cap so a long history cannot make the rail unbounded.
-const RAIL_LIMIT: usize = 200;
-
-/// Every session id the ledger still holds, for the launch's boot pick (#3197).
+/// The rail's session list, through the backend (`LoadSessions`), capped at
+/// `opencrabs::backend::sessions::RAIL_LIMIT` rows by the op itself.
 ///
-/// The rail is capped at [`RAIL_LIMIT`] rows, so it cannot answer "does this
+/// Locally the op runs on its own `spawn_worker` lane: a 4 MB thread with a
+/// current-thread runtime, the shape this load always had. `Ctx::db` runs
+/// pragmas only, never migrations, so a read cannot race the daemon that owns
+/// the schema. A failure is the same `{e:#}` text the window showed before.
+pub async fn load_sessions(backend: crate::backend_glue::Backend) -> Result<Vec<Session>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LoadSessions {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+/// Every session id the ledger still holds, for the launch's boot pick
+/// (#3197), through the backend (`LiveSessionIds`).
+///
+/// The rail is capped at `RAIL_LIMIT` rows, so it cannot answer "does this
 /// conversation still exist": with more sessions than the cap, the chat the
 /// layout recorded or the pointer the last surface wrote can sit outside the
 /// newest page, and the launch would treat a live conversation as deleted and
-/// open the newest instead. Existence gets its own read, same thread shape as
+/// open the newest instead. Existence gets its own read, same door as
 /// [`load_sessions`].
-pub async fn load_live_session_ids(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("live-ids-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.live_ids().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("live session ids fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!(
-            "live session ids fetch thread failed to spawn: {e}"
-        )),
-    }
-}
-
-/// Fetch the real session list on a thread with a real stack, same shape as
-/// `load_view` in `main.rs`: tokio current-thread runtime on a 4 MB thread,
-/// result over a oneshot. `Database::connect` runs pragmas only, never
-/// migrations, so a read cannot race the daemon that owns the schema.
-pub async fn load_sessions(db_path: std::path::PathBuf) -> Result<Vec<Session>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<Session>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("sessions-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.list(SessionListOptions {
-                            limit: Some(RAIL_LIMIT),
-                            ..Default::default()
-                        })
-                        .await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("sessions fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("sessions fetch thread failed to spawn: {e}")),
-    }
+pub async fn load_live_session_ids(
+    backend: crate::backend_glue::Backend,
+) -> Result<Vec<uuid::Uuid>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LiveSessionIds {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// The rail's ledger signature, read through the same no-migration door as
 /// [`load_sessions`] (#2881). `None` when the read failed, which the caller
 /// must treat as "no news" rather than "the ledger is empty".
-pub async fn rail_ledger_signature(db_path: std::path::PathBuf) -> Option<(i64, i64)> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Option<(i64, i64)>>();
-    let spawned = std::thread::Builder::new()
-        .name("rail-ledger-sig".into())
-        .stack_size(2 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt.block_on(async {
-                    let db = Database::connect(&db_path).await.ok()?;
-                    let repo = SessionRepository::new(db.pool().clone());
-                    repo.ledger_signature().await.ok()
-                }),
-                Err(_) => None,
-            };
-            let _ = tx.send(result);
-        });
-    if spawned.is_err() {
-        return None;
-    }
-    rx.await.ok().flatten()
+pub async fn rail_ledger_signature(backend: crate::backend_glue::Backend) -> Option<(i64, i64)> {
+    backend
+        .call(opencrabs::backend::sessions::RailLedgerSignature {})
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The pinned set, read through the same 4 MB no-migration door as
 /// [`load_sessions`]. Returns ids: the rail already holds the rows, this only
 /// says which of them go on top.
-pub async fn load_favorites(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("favorites-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt.block_on(async {
-                    let db = Database::connect(&db_path)
-                        .await
-                        .map_err(|e| format!("db connect: {e}"))?;
-                    let repo = SessionFavoritesRepository::new(db.pool().clone());
-                    let ids = repo
-                        .all()
-                        .await
-                        .map_err(|e| format!("favorites read: {e}"))?;
-                    // The sidecar stores ids as text; a malformed one is a
-                    // foreign key that got past SQLite, so it is skipped
-                    // rather than failing the whole rail.
-                    // Both arms are `String`-errored, so the block's own
-                    // error type is stated rather than inferred: a
-                    // generic `?` target leaves it ambiguous.
-                    Ok::<Vec<uuid::Uuid>, String>(
-                        ids.iter()
-                            .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-                            .collect(),
-                    )
-                }),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("favorites fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("favorites fetch thread failed to spawn: {e}")),
-    }
+pub async fn load_favorites(
+    backend: crate::backend_glue::Backend,
+) -> Result<Vec<uuid::Uuid>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LoadFavorites {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// The preview line for every session in `ids`, through the same 4 MB
 /// no-migration door as [`load_sessions`]. One batched query per pass, so a
 /// rail of 200 cards costs one round trip rather than 200.
 pub async fn load_previews(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     ids: Vec<uuid::Uuid>,
 ) -> Result<HashMap<uuid::Uuid, SharedString>, String> {
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, SharedString>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("session-previews-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = MessageRepository::new(db.pool().clone());
-                        repo.last_messages_for(&ids).await
-                    })
-                    .map(|previews| {
-                        previews
-                            .into_iter()
-                            .map(|(id, p)| (id, preview_line(&p.role, &p.text)))
-                            .collect()
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("previews fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("previews fetch thread failed to spawn: {e}")),
-    }
+    let previews = backend
+        .call(opencrabs::backend::sessions::LoadPreviews { ids })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)?;
+    Ok(previews
+        .into_iter()
+        .map(|(id, p)| (id, preview_line(&p.role, &p.text)))
+        .collect())
 }
 
 /// ctrl+f's deep read (#2720): which sessions mention `query` in their
@@ -809,40 +683,14 @@ pub async fn load_previews(
 /// off the paint path, so a rail repaint never waits on the database. The row
 /// count is bounded so a common word cannot flood the rail.
 pub async fn load_content_matches(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     query: String,
 ) -> Result<Vec<ContentSearchRow>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<ContentSearchRow>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("session-content-find".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let messages = MessageRepository::new(db.pool().clone());
-                        let sessions = SessionRepository::new(db.pool().clone());
-                        opencrabs::db::repository::search_session_content(
-                            &messages, &sessions, &query, 50,
-                        )
-                        .await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("content find thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("content find thread failed to spawn: {e}")),
-    }
+    let rows = backend
+        .call(opencrabs::backend::sessions::LoadContentMatches { query })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)?;
+    Ok(rows.into_iter().map(ContentSearchRow::from).collect())
 }
 
 /// What the topic info panel shows (#2304). Read once per open, never edited.
@@ -857,221 +705,76 @@ pub struct TopicInfo {
 /// Read one session's info for the panel. A session that is not a topic
 /// reports no parent.
 pub async fn load_topic_info(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
 ) -> Result<Option<TopicInfo>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<TopicInfo>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-info-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        let Some((parent, created_at, messages)) = repo.topic_info(id).await?
-                        else {
-                            return Ok(None);
-                        };
-                        let parent_title = match parent {
-                            Some(p) => repo.find_by_id(p).await?.and_then(|s| s.title),
-                            None => None,
-                        };
-                        Ok::<_, anyhow::Error>(Some(TopicInfo {
-                            id,
-                            parent_title,
-                            created_at,
-                            messages,
-                        }))
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic info thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic info thread failed to spawn: {e}")),
-    }
+    let info = backend
+        .call(opencrabs::backend::sessions::LoadTopicInfo { id })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)?;
+    Ok(info.map(|info| TopicInfo {
+        id: info.id,
+        parent_title: info.parent_title,
+        created_at: info.created_at,
+        messages: info.messages,
+    }))
 }
 
-/// Rename a session or topic. The caller re-reads the rail afterwards.
+/// Rename a session or topic through the backend (`RenameSession`). The
+/// caller re-reads the rail afterwards.
 pub async fn rename_session(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     title: String,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("rename-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.rename(id, &title).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("rename thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("rename thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::RenameSession { id, title })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Every closed session. A closed topic is dimmed and refuses new turns (#2305).
-pub async fn load_closed(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("closed-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.closed_ids().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("closed fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("closed fetch thread failed to spawn: {e}")),
-    }
+pub async fn load_closed(backend: crate::backend_glue::Backend) -> Result<Vec<uuid::Uuid>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LoadClosed {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Close or reopen one topic. The caller re-reads the closed set afterwards.
 pub async fn set_closed(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     closed: bool,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("closed-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.set_closed(id, closed).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("closed write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("closed write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::SetClosed { id, closed })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Every (topic, parent) pair. Read separately from the rows, like favorites,
 /// so the grouping does not change the row model (#2303).
 pub async fn load_topic_parents(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
 ) -> Result<Vec<(uuid::Uuid, uuid::Uuid)>, String> {
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, uuid::Uuid)>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-parents-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.topic_parents().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic parents fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic parents fetch thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::LoadTopicParents {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Create a topic under a session and return its id. The database refuses a
 /// parent that is already a topic; that refusal comes back as the error.
 pub async fn create_topic(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     parent: uuid::Uuid,
     title: String,
 ) -> Result<uuid::Uuid, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<uuid::Uuid, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-create".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.create_topic(parent, &title).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic create thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic create thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::CreateTopic { parent, title })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Candidate sessions for the Group topics picker: live, non-subagent rows
@@ -1079,152 +782,69 @@ pub async fn create_topic(
 /// by the caller from the rail's own parent map, so this stays a plain list
 /// read on the same dedicated-stack thread the other rail loaders use.
 pub async fn load_group_candidates(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     target: uuid::Uuid,
 ) -> Result<Vec<(uuid::Uuid, String, String)>, String> {
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String, String)>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("group-candidates".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        let rows = repo.list(SessionListOptions::default()).await?;
-                        Ok::<_, anyhow::Error>(
-                            rows.into_iter()
-                                .filter(|s| s.id != target)
-                                .map(|s| {
-                                    let title = s.title.unwrap_or_else(|| "(untitled)".to_string());
-                                    let date = s.created_at.format("%m-%d %H:%M").to_string();
-                                    (s.id, title, date)
-                                })
-                                .collect(),
-                        )
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("group candidates thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("group candidates thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::LoadGroupCandidates { target })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Attach one existing session as a topic of `parent`. A guard refusal comes
 /// back as its plain sentence (the typed error's Display), so the picker can
 /// show why instead of a raw constraint error.
 pub async fn attach_topic(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     child: uuid::Uuid,
     parent: uuid::Uuid,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-attach".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.attach_topic(child, parent).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic attach thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic attach thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::AttachTopic { child, parent })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Every session with topics turned on. Read separately from the rows, the
 /// same way favorites are, so the row model does not carry the flag.
-pub async fn load_topics(db_path: std::path::PathBuf) -> Result<Vec<uuid::Uuid>, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<Vec<uuid::Uuid>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topics-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.topic_enabled_ids().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topics fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topics fetch thread failed to spawn: {e}")),
-    }
+pub async fn load_topics(backend: crate::backend_glue::Backend) -> Result<Vec<uuid::Uuid>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LoadTopics {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Every topic's own icon. Read with the topic state, the same way the flag is.
+/// An image icon carries the file the crab named for it.
 pub async fn load_topic_icons(
-    db_path: std::path::PathBuf,
-) -> Result<Vec<(uuid::Uuid, String)>, String> {
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<Vec<(uuid::Uuid, String)>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-icons-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.topic_icons().await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            if tx.send(result).is_err() {
-                crate::logging::error("topic icons result dropped: the window closed first");
-            }
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic icons fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic icons fetch thread failed to spawn: {e}")),
-    }
+    backend: crate::backend_glue::Backend,
+) -> Result<Vec<opencrabs::backend::sessions::TopicIcon>, String> {
+    backend
+        .call(opencrabs::backend::sessions::LoadTopicIcons {})
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
+}
+
+/// The two maps the state keeps from one icon read: the stored value of
+/// every topic, and the crab's file of every topic whose icon is an image.
+pub fn split_topic_icons(
+    icons: Vec<opencrabs::backend::sessions::TopicIcon>,
+) -> (
+    HashMap<uuid::Uuid, String>,
+    HashMap<uuid::Uuid, std::path::PathBuf>,
+) {
+    let files = icons
+        .iter()
+        .filter_map(|icon| {
+            let blob = icon.blob.as_ref()?;
+            Some((icon.id, std::path::PathBuf::from(&blob.path)))
+        })
+        .collect();
+    let stored = icons
+        .into_iter()
+        .map(|icon| (icon.id, icon.stored))
+        .collect();
+    (stored, files)
 }
 
 /// The live name of every Telegram topic session in `items`, in ONE query
@@ -1236,67 +856,23 @@ pub async fn load_topic_icons(
 /// pass with no restart, and batching the pairs into one query means a list of
 /// two hundred rows still costs one lookup per pass, not two hundred.
 pub async fn load_telegram_topic_titles(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     items: &[Session],
 ) -> Result<HashMap<uuid::Uuid, String>, String> {
-    use opencrabs::db::repository::channel_message::ChannelMessageRepository;
-    use opencrabs::ui_core::rail;
-
-    let mut wanted: Vec<(uuid::Uuid, String, String)> = Vec::new();
-    for session in items {
-        let Some(title) = session.title.as_deref() else {
-            continue;
-        };
-        let Some((chat_id, thread_id)) = rail::topic_thread(title) else {
-            continue;
-        };
-        wanted.push((session.id, chat_id.to_string(), thread_id.to_string()));
-    }
-    if wanted.is_empty() {
+    // Only the rows whose title names a topic thread travel; with none the
+    // backend is never asked, as the ledger was never opened before.
+    let titles: Vec<(uuid::Uuid, String)> = items
+        .iter()
+        .filter_map(|session| Some((session.id, session.title.clone()?)))
+        .filter(|(_, title)| rail::topic_thread(title).is_some())
+        .collect();
+    if titles.is_empty() {
         return Ok(HashMap::new());
     }
-
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<HashMap<uuid::Uuid, String>, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-titles-fetch".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = ChannelMessageRepository::new(db.pool().clone());
-                        let pairs: Vec<(String, String)> = wanted
-                            .iter()
-                            .map(|(_, chat, thread)| (chat.clone(), thread.clone()))
-                            .collect();
-                        let names = repo.topic_names("telegram", &pairs).await?;
-                        let mut out = HashMap::with_capacity(wanted.len());
-                        for (id, chat, thread) in wanted {
-                            if let Some(name) = names.get(&(chat, thread)) {
-                                out.insert(id, name.clone());
-                            }
-                        }
-                        Ok(out)
-                    })
-                    .map_err(|e: anyhow::Error| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            if tx.send(result).is_err() {
-                crate::logging::error("topic titles result dropped: the window closed first");
-            }
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic titles fetch thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic titles fetch thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::LoadTelegramTopicTitles { titles })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Whether a rename has to write the icon (#2791). The draft is seeded from
@@ -1312,74 +888,26 @@ pub fn icon_write_needed(stored: Option<&str>, draft: Option<&str>) -> bool {
 
 /// Give one topic an icon, or clear it with None. The caller re-reads afterwards.
 pub async fn set_topic_icon(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     icon: Option<String>,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topic-icon-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.set_topic_icon(id, icon.as_deref()).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            if tx.send(result).is_err() {
-                crate::logging::error("topic icon result dropped: the window closed first");
-            }
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topic icon write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topic icon write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::SetTopicIcon { id, icon })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Turn topics on or off for one session. The caller re-reads afterwards.
 pub async fn set_topics(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     enabled: bool,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topics-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.set_topics_enabled(id, enabled).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topics write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topics write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::SetTopics { id, enabled })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Fold every topic of `id` back into it and switch topics off (#2863).
@@ -1389,76 +917,28 @@ pub async fn set_topics(
 /// rail and the topic store afterwards rather than patching its own copy: a
 /// topic that moved is a session row that changed, and guessing at that in
 /// memory is how two surfaces end up disagreeing.
-pub async fn merge_topics(db_path: std::path::PathBuf, id: uuid::Uuid) -> Result<usize, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<usize, String>>();
-    let spawned = std::thread::Builder::new()
-        .name("topics-fold".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionRepository::new(db.pool().clone());
-                        repo.merge_topics_into_parent(id).await
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("topics fold thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("topics fold thread failed to spawn: {e}")),
-    }
+pub async fn merge_topics(
+    backend: crate::backend_glue::Backend,
+    id: uuid::Uuid,
+) -> Result<usize, String> {
+    backend
+        .call(opencrabs::backend::sessions::MergeTopics { id })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Pin or unpin one session in the shared sidecar table. The caller refetches
 /// afterwards instead of patching its own list, so the rail can never show a
 /// pin the ledger does not have.
 pub async fn set_favorite(
-    db_path: std::path::PathBuf,
+    backend: crate::backend_glue::Backend,
     id: uuid::Uuid,
     pinned: bool,
 ) -> Result<(), String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    let spawned = std::thread::Builder::new()
-        .name("favorite-write".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(rt) => rt
-                    .block_on(async {
-                        let db = Database::connect(&db_path).await?;
-                        let repo = SessionFavoritesRepository::new(db.pool().clone());
-                        let sid = id.to_string();
-                        if pinned {
-                            repo.add(&sid).await
-                        } else {
-                            repo.remove(&sid).await
-                        }
-                    })
-                    .map_err(|e| format!("{e:#}")),
-                Err(e) => Err(format!("tokio runtime failed: {e}")),
-            };
-            let _ = tx.send(result);
-        });
-    match spawned {
-        Ok(_) => match rx.await {
-            Ok(result) => result,
-            Err(_) => Err("favorite write thread dropped its result".into()),
-        },
-        Err(e) => Err(format!("favorite write thread failed to spawn: {e}")),
-    }
+    backend
+        .call(opencrabs::backend::sessions::SetFavorite { id, pinned })
+        .await
+        .map_err(opencrabs::backend::BackendError::into_message)
 }
 
 /// Char-safe truncation: walk chars, never slice bytes (#2271's whole class).
@@ -2469,9 +1949,9 @@ pub fn rail(
     width_rem: f32,
     scroll: &ScrollHandle,
     footer: Option<AnyElement>,
-    // The header's buttons (#2969), built by the view with their handlers and
-    // seated at the end of the brand row. None until the view supplies them.
-    rail_actions: Option<AnyElement>,
+    // The brand row's parts: its buttons (#2969) and the crabs under the
+    // logo (#3178), built by the view with their handlers.
+    brand: RailBrand,
     // The filter menu (#2719), built by the view with its click handlers and
     // pinned to the top-right of the rail. None until the view supplies it.
     filter_control: Option<AnyElement>,
@@ -2488,7 +1968,10 @@ pub fn rail(
         .h_full()
         .bg(rgb(palette::current().panel))
         .py_2()
-        .child(brand_header(rail_actions));
+        .child(brand_header(brand.actions, brand.crabs_toggle));
+    if let Some(list) = brand.crabs_list {
+        col = col.child(list);
+    }
 
     // The filter menu rides top-right, just under the brand (#2719). The
     // element carries its own gaps and clicks; the rail only seats it.
@@ -2534,6 +2017,21 @@ pub fn rail(
     col
 }
 
+/// What the view hands the rail's brand row, built with their handlers.
+///
+/// The crabs are both `None` with `[gui] instance_rail` off (#3178), and
+/// then the brand row is exactly main's: the bare logo, no arrow, no list.
+#[derive(Default)]
+pub struct RailBrand {
+    /// The header's buttons (#2969), seated at the end of the brand row.
+    /// None until the view supplies them.
+    pub actions: Option<AnyElement>,
+    /// The logo as a button, with the arrow that says which way it folds.
+    pub crabs_toggle: Option<AnyElement>,
+    /// The unfolded list of crabs, seated under the brand row.
+    pub crabs_list: Option<AnyElement>,
+}
+
 /// The closed rail keeps the brand and its reopen button in the same thin
 /// column, without resolving any session rows or filter chrome (#2982).
 pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
@@ -2565,7 +2063,7 @@ pub fn collapsed_rail(toggle: Stateful<Div>) -> Stateful<Div> {
 /// paid a band of nothing before the first one. `actions` is the view's own
 /// button row: the sidebar toggle and the menu, already carrying their
 /// handlers.
-fn brand_header(actions: Option<AnyElement>) -> Div {
+fn brand_header(actions: Option<AnyElement>, crabs_toggle: Option<AnyElement>) -> Div {
     let mut row = div()
         .w_full()
         .flex()
@@ -2589,7 +2087,12 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
                 .items_center()
                 .justify_center()
                 .size(rems(RAIL_MARK_REMS))
-                .child(icon::banner_logo()),
+                .child(match crabs_toggle {
+                    // The logo made the door to the crabs (#3178): the same
+                    // mark, with its arrow, as a button.
+                    Some(toggle) => toggle,
+                    None => icon::banner_logo().into_any_element(),
+                }),
         )
         .child(
             div()
@@ -2610,13 +2113,14 @@ fn brand_header(actions: Option<AnyElement>) -> Div {
 
 #[cfg(test)]
 mod tests {
+    use opencrabs::db::Database;
+
     use super::{ACCENT_BAR_PX, header_media_left, row_left_pad};
     use super::{
-        Database, FindMatch, MenuKind, PlanFilter, RailChip, RailFilter, SessionsState,
-        accent_bar_visible, chip_order_key, chip_width_at, filter_is_active, fit,
-        icon_write_needed, load_sessions, merge_find_results, pack_rows, palette, pin_mark,
-        placeholder_colour, placeholder_initial, preview_line, rail_cost, rail_filter_allows,
-        rail_menu_entries, rail_stamp, strip_budgets,
+        FindMatch, MenuKind, PlanFilter, RailChip, RailFilter, SessionsState, accent_bar_visible,
+        chip_order_key, chip_width_at, filter_is_active, fit, icon_write_needed, load_sessions,
+        merge_find_results, pack_rows, palette, pin_mark, placeholder_colour, placeholder_initial,
+        preview_line, rail_cost, rail_filter_allows, rail_menu_entries, rail_stamp, strip_budgets,
     };
 
     /// Where a row's media slot starts, measured from the rail's left edge.
@@ -2900,7 +2404,7 @@ mod tests {
                     .enable_all()
                     .build()
                     .expect("runtime");
-                rt.block_on(load_sessions(db_path))
+                rt.block_on(load_sessions(crate::backend_glue::Backend::local(db_path)))
             })
             .expect("spawn tiny caller");
         let result = handle.join().expect("tiny caller must survive");

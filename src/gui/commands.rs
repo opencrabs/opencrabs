@@ -17,6 +17,9 @@
 //! the window cannot run must not be answered by a model that will happily
 //! invent an answer.
 
+use opencrabs::backend::cap::{self, Cap, Need};
+use opencrabs::backend::hello::HelloReply;
+use opencrabs::backend::{Op, session_ops, sessions, tasks};
 use opencrabs::ui_core::commands::{self, Support};
 
 use super::text_commands::{self, TextCommand};
@@ -176,6 +179,44 @@ fn takes_argument(action: GuiAction) -> bool {
         action,
         GuiAction::OpenModels | GuiAction::OpenOnboard("/channels") | GuiAction::Text(_)
     )
+}
+
+/// What an action asks of the crab. Most ask nothing the handshake can
+/// refuse: they open a screen whose own operations answer for themselves.
+const NO_NEEDS: &[Need] = &[];
+const NEW_SESSION: &[Need] = &[Need::Op(<session_ops::CreateSession as Op>::NAME)];
+const OPEN_SESSIONS: &[Need] = &[Need::Op(<sessions::RailSnapshot as Op>::NAME)];
+const OPEN_TASKS: &[Need] = &[Need::Op(<tasks::TasksSnapshot as Op>::NAME)];
+/// The wizard writes this machine's config, keys and services.
+const OPEN_ONBOARD: &[Need] = &[Need::Cap(Cap::Setup)];
+const CD: &[Need] = &[Need::Op(<session_ops::ApplyCd as Op>::NAME)];
+/// `/evolve` replaces the binary of the crab that runs it.
+const EVOLVE: &[Need] = &[Need::Op(<opencrabs::backend::update::Evolve as Op>::NAME)];
+
+/// The operations and capabilities `action` needs before it can be picked.
+///
+/// Named by the op types themselves, so a renamed operation fails to compile
+/// here instead of greying an action out for a name nobody declares.
+pub fn needs(action: GuiAction) -> &'static [Need] {
+    match action {
+        GuiAction::NewSession => NEW_SESSION,
+        GuiAction::OpenSessions => OPEN_SESSIONS,
+        GuiAction::OpenTasks => OPEN_TASKS,
+        GuiAction::OpenOnboard(_) => OPEN_ONBOARD,
+        GuiAction::Text(TextCommand::Cd) => CD,
+        GuiAction::Evolve => EVOLVE,
+        _ => NO_NEEDS,
+    }
+}
+
+/// Why `action` is greyed out on the crab that answered `hello`, or `None`
+/// when it can run. With no handshake yet nothing is greyed out: the window
+/// behaves as it always has and a refusal still arrives as a notice.
+pub fn unavailable(action: GuiAction, hello: Option<&HelloReply>) -> Option<String> {
+    let hello = hello?;
+    cap::check(hello, needs(action))
+        .err()
+        .map(|why| why.reason())
 }
 
 /// The line the transcript shows for an outcome that does not act.
@@ -483,5 +524,75 @@ mod tests {
             unlisted.is_empty(),
             "reachable but missing from IMPLEMENTED: {unlisted:?}"
         );
+    }
+
+    fn remote_hello(scopes: &[opencrabs::backend::Scope]) -> HelloReply {
+        HelloReply::for_caller(scopes, false)
+    }
+
+    #[test]
+    fn every_needed_operation_is_declared_by_the_crab() {
+        let declared: Vec<&str> = opencrabs::backend::registry()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for name in commands::GUI_SUPPORTED {
+            let Some(Outcome::Run(action)) = parse_command(name) else {
+                panic!("{name} did not run in the window");
+            };
+            for need in needs(action) {
+                if let Need::Op(op) = need {
+                    assert!(declared.contains(op), "{name} needs undeclared {op}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_greyed_out_before_the_handshake_or_on_a_local_crab() {
+        let local = HelloReply::for_caller(opencrabs::backend::Scope::ALL, true);
+        for name in commands::GUI_SUPPORTED {
+            let Some(Outcome::Run(action)) = parse_command(name) else {
+                panic!("{name} did not run in the window");
+            };
+            assert_eq!(unavailable(action, None), None, "{name}");
+            assert_eq!(unavailable(action, Some(&local)), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_read_only_token_greys_out_a_new_session_and_says_why() {
+        use opencrabs::backend::Scope;
+        let hello = remote_hello(&[Scope::Read]);
+        let why = unavailable(GuiAction::NewSession, Some(&hello)).expect("needs manage");
+        assert!(why.contains("a2a:manage"), "{why}");
+        // Reading the rail and the tasks needs nothing more than read.
+        assert_eq!(unavailable(GuiAction::OpenSessions, Some(&hello)), None);
+        assert_eq!(unavailable(GuiAction::OpenTasks, Some(&hello)), None);
+    }
+
+    #[test]
+    fn evolve_without_admin_is_greyed_out_and_never_runs_here() {
+        use opencrabs::backend::Scope;
+        // A token that sends and manages still cannot replace the crab's
+        // binary, and the window must not fall back to updating its own.
+        let hello = remote_hello(&[Scope::Read, Scope::Send, Scope::Manage]);
+        let why = unavailable(GuiAction::Evolve, Some(&hello)).expect("needs admin");
+        assert!(why.contains("a2a:admin"), "{why}");
+        assert_eq!(
+            needs(GuiAction::Evolve),
+            &[Need::Op(<opencrabs::backend::update::Evolve as Op>::NAME)]
+        );
+    }
+
+    #[test]
+    fn an_older_crab_greys_out_what_it_does_not_declare() {
+        let mut hello = remote_hello(opencrabs::backend::Scope::ALL);
+        hello
+            .ops
+            .retain(|known| known.name != <tasks::TasksSnapshot as Op>::NAME);
+        let why = unavailable(GuiAction::OpenTasks, Some(&hello)).expect("not declared");
+        assert!(why.contains("older"), "{why}");
+        assert_eq!(unavailable(GuiAction::OpenSessions, Some(&hello)), None);
     }
 }

@@ -73,22 +73,21 @@ impl Dashboard {
         if self.sessions.rail_menu != Some(id) {
             return None;
         }
-        // A remote rail is not this window's rail. Its rows are the other
-        // crab's sessions, so every verb below (pin, rename, topics, split,
-        // delete) is a writer aimed at a database this window does not own:
-        // pressed on a remote row they wrote a remote id into local tables and
-        // changed nothing (#3133). The remote's menu is built where the remote's
-        // state lives, and offers only what the host answers.
-        if self.instance_remote_open() {
-            return self.remote_rail_menu(id, cx);
-        }
         let favorite = self.sessions.is_favorite(id);
         let topics_on = self.sessions.is_topic_enabled(id);
         let is_topic = self.sessions.parents.contains_key(&id);
+        let hello = self.hello.as_ref();
         let items = sessions::rail_menu_entries(favorite, topics_on, is_topic)
             .into_iter()
             .map(|entry| {
                 let kind = entry.kind;
+                // An action the crab will not run stays on the card, greyed
+                // out with its reason, and takes no click: the card keeps its
+                // shape and the refusal is read before it is asked for.
+                let unavailable = kind.unavailable(hello);
+                if unavailable.is_some() {
+                    return crate::menu::menu_item_gated(entry.label, unavailable);
+                }
                 let pick = cx.listener(move |this, _ev, _window, cx| {
                     cx.stop_propagation();
                     this.sessions.rail_menu = None;
@@ -118,7 +117,7 @@ impl Dashboard {
                         sessions::MenuKind::Delete => this.request_delete(id, cx),
                     }
                 });
-                sessions::menu_item(entry.label).on_click(pick)
+                crate::menu::menu_item_gated(entry.label, None).on_click(pick)
             })
             .collect::<Vec<_>>();
         // The press point is the anchor: the card opens under the pointer
@@ -127,68 +126,6 @@ impl Dashboard {
             .rail_menu_at
             .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
         Some(sessions::menu_popover("rail-context-menu", items, at))
-    }
-
-    /// The menu a remote rail row offers, and nothing else.
-    ///
-    /// A remote row is the other crab's session, and the rail's own menu is a
-    /// list of verbs that write to *this* window's database: pin, rename,
-    /// enable topics, delete. Pressed on a remote row they carried a remote id
-    /// into writers that had never heard of it, so the menu answered, the card
-    /// closed, and the session was exactly as it had been. That is the owner's
-    /// report: "as opcoes de enable topics etc nao funcionam".
-    ///
-    /// The honest menu offers what the host actually answers over A2A: open the
-    /// conversation, and take its id. Anything else would be a verb this window
-    /// cannot perform on that machine, and a menu row that does nothing is
-    /// worse than a menu row that is not there.
-    pub(crate) fn remote_rail_menu(
-        &self,
-        id: uuid::Uuid,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.sessions.rail_menu != Some(id) {
-            return None;
-        }
-        let session_id = id.to_string();
-        // The title the row is already showing, so opening from the menu lands
-        // on the same conversation the row names.
-        let title = self
-            .instance_remote
-            .as_ref()
-            .and_then(|remote| match &remote.state {
-                dashboard_instances::RemoteState::Ready(sessions) => sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .map(|s| s.title.clone())
-                    .filter(|t| !t.is_empty()),
-                _ => None,
-            })
-            .unwrap_or_else(|| session_id.clone());
-        let open_id = session_id.clone();
-        let open = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-            cx.stop_propagation();
-            this.sessions.rail_menu = None;
-            this.open_remote_session(open_id.clone(), title.clone(), cx);
-        });
-        let copy_id = session_id.clone();
-        let copy = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-            cx.stop_propagation();
-            this.sessions.rail_menu = None;
-            cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-            cx.notify();
-        });
-        let at = self
-            .rail_menu_at
-            .unwrap_or(gpui::point(gpui::px(0.0), gpui::px(0.0)));
-        Some(menu::menu_popover(
-            "remote-rail-context-menu",
-            vec![
-                menu::menu_item("abrir a conversa").on_click(open),
-                menu::menu_item("copiar o id da sessão").on_click(copy),
-            ],
-            at,
-        ))
     }
 
     /// Drop every composer's context menu: a press outside the card is the
@@ -214,10 +151,14 @@ impl Dashboard {
         // The sweep throttle reads a moving clock; the animations read the
         // window's fixed origin. Two different questions, two clocks.
         let now = std::time::Instant::now();
-        // One bridge lookup for the whole pass, not one per row: a detached
+        // One roster read for the whole pass, not one per row: a detached
         // command outlives its turn, so it is the only trace that session still
         // has work in flight (#762).
-        let manager = agent_bridge::bridge().and_then(|b| b.service.background_manager());
+        let running: std::collections::HashSet<Uuid> = self
+            .tasks_snapshot(rows.clone())
+            .into_iter()
+            .map(|entry| entry.session)
+            .collect();
         let mut map = HashMap::with_capacity(rows.len());
         for id in rows {
             let live = self.rail.is_live(
@@ -234,7 +175,7 @@ impl Dashboard {
                 self.pane_states
                     .get(&id)
                     .is_some_and(|pane| pane.read(cx).busy),
-                manager.as_ref().is_some_and(|mgr| mgr.running_for(id) > 0),
+                running.contains(&id),
             );
             let plan = self.rail_index.evidence(id, live, now);
             let seen = plan.is_some_and(|evidence| self.rail_seen.is_seen(id, evidence.stamp));
@@ -286,25 +227,22 @@ impl Dashboard {
     ///
     /// Shaped by [`opencrabs::tui::render::format_background_tasks`], the same
     /// formatter the composer strip and the terminal's footer use, so one
-    /// running task cannot read three different ways. One manager lookup for
+    /// running task cannot read three different ways. One roster read for
     /// the whole pass, never one per row.
     pub(crate) fn rail_running_map(&self) -> HashMap<Uuid, SharedString> {
-        let Some(manager) = agent_bridge::bridge().and_then(|b| b.service.background_manager())
-        else {
-            return HashMap::new();
-        };
+        let ids: Vec<Uuid> = self.sessions.ordered().map(|s| s.id).collect();
         let mut map = HashMap::new();
-        for id in self.sessions.ordered().map(|s| s.id) {
-            let tasks: Vec<(String, u64)> = manager
-                .running_tasks(id)
-                .into_iter()
-                .map(|t| (t.label, t.started.elapsed().as_secs()))
-                .collect();
+        for entry in self.tasks_snapshot(ids) {
+            let tasks: Vec<(String, u64)> =
+                entry.tasks.into_iter().map(|t| (t.label, t.secs)).collect();
             if let Some(line) = opencrabs::tui::render::format_background_tasks(
                 &tasks,
                 opencrabs::tui::render::LABEL_CHARS,
             ) {
-                map.insert(id, SharedString::from(format!("\u{23f3} {line}")));
+                map.insert(
+                    entry.session,
+                    SharedString::from(format!("\u{23f3} {line}")),
+                );
             }
         }
         map
@@ -313,18 +251,26 @@ impl Dashboard {
     /// Refetch the rail from the ledger. The pinned set rides along: pins come
     /// from a sidecar the TUI also writes, so a list refresh that skipped it
     /// would draw a row in the wrong slot until the next pin click.
+    ///
+    /// The rows are the crab's the request went to. A swap while the read was
+    /// out drops them, so a slow refetch of the crab the window left never
+    /// lands its rows, nor the layout they would bring back, on the new one.
     pub(crate) fn refresh_rail(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_sessions(db_path.clone()).await;
+            let result = sessions::load_sessions(backend.clone()).await;
             // One batched lookup per refresh pass, never per row per frame
             // (#2490): the topic store outranks the stored session name and a
             // rename has to reach the rail without a restart.
             let titles = match &result {
-                Ok(items) => sessions::load_telegram_topic_titles(db_path, items).await,
+                Ok(items) => sessions::load_telegram_topic_titles(backend, items).await,
                 Err(_) => Ok(HashMap::new()),
             };
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match titles {
                     Ok(pairs) => this.sessions.topic_titles = pairs,
                     Err(e) => logging::error(&format!("topic titles refresh: {e}")),
@@ -379,15 +325,20 @@ impl Dashboard {
             .set(self.previews_in_flight.get().saturating_add(1));
         let in_flight = self.previews_in_flight.clone();
         let dirty = self.previews_dirty.clone();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
             // Released on drop, so a task whose view went away still frees the
             // slot instead of wedging previews for the rest of the run.
             let _slot = PreviewSlot(in_flight.clone());
-            match sessions::load_previews(db_path, ids).await {
+            match sessions::load_previews(backend, ids).await {
                 Ok(pairs) => {
                     this.update(cx, |this, cx| {
-                        this.sessions.previews = pairs;
+                        // Lines read from the crab the window left are not
+                        // kept; the request queued behind them still runs.
+                        if this.instance_epoch == epoch {
+                            this.sessions.previews = pairs;
+                        }
                         // A request that arrived while this one ran is served
                         // now, from the same completion, never from a timer.
                         if dirty.replace(false) {
@@ -445,7 +396,7 @@ impl Dashboard {
             cx.notify();
             return;
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // A burst of keystrokes costs one query, not one per character.
             cx.background_executor()
@@ -459,7 +410,7 @@ impl Dashboard {
             if stale {
                 return;
             }
-            match sessions::load_content_matches(db_path, query).await {
+            match sessions::load_content_matches(backend, query).await {
                 Ok(rows) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.rail_find_gen == generation {
@@ -535,7 +486,7 @@ impl Dashboard {
         }
         self.seeker_find_gen = self.seeker_find_gen.wrapping_add(1);
         let generation = self.seeker_find_gen;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             // A burst of keystrokes costs one query, not one per character.
             cx.background_executor()
@@ -547,7 +498,7 @@ impl Dashboard {
             if stale {
                 return;
             }
-            match sessions::load_content_matches(db_path, query.clone()).await {
+            match sessions::load_content_matches(backend, query.clone()).await {
                 Ok(rows) => {
                     let _ = this.update(cx, |this, cx| {
                         if this.seeker_find_gen == generation {
@@ -857,13 +808,6 @@ impl Dashboard {
                 chips,
             });
         }
-        // A selected remote replaces the local list: the strip picked which
-        // crab, so the rail's job is that crab's sessions. The local rows are
-        // still resolved above and then dropped, one wasted pass while a
-        // remote is open, which keeps the two sources out of one loop.
-        if let Some(remote_rows) = self.remote_rail_rows() {
-            rows = remote_rows;
-        }
         // The channel chip (#2452): quiet notice plus the one action, drawn at
         // the end of the rail only while a configured channel has no live owner.
         // `Start daemon` runs the onboarding installer once; the probe loop
@@ -889,6 +833,12 @@ impl Dashboard {
             },
             rows,
             footer,
+            // The crabs under the logo (#3178): `None` with the flag off, so
+            // the rail is the one main draws.
+            crabs: self.crab_list_frame().map(|list| rail_view::CrabsFrame {
+                open: self.crabs_open,
+                list,
+            }),
             // The filter menu's own state (#2719, #2787), which lives on
             // `sessions` so it survives the repaint and resets when the rail
             // closes.
@@ -989,24 +939,6 @@ impl Dashboard {
         // The find field is a jump aid: picking a row is its exit, and the
         // keyboard goes back to the conversation.
         self.close_rail_filter(cx);
-        // While a remote is open the row names a session on THAT crab, so the
-        // pick is a fetch, not a local open: the same id would be a session
-        // this window has never seen.
-        if self.instance_remote_open() {
-            let title = self
-                .instance_remote
-                .as_ref()
-                .and_then(|r| match &r.state {
-                    dashboard_instances::RemoteState::Ready(list) => list
-                        .iter()
-                        .find(|s| uuid::Uuid::parse_str(&s.id).ok() == Some(id))
-                        .map(|s| s.title.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            self.open_remote_session(id.to_string(), title, cx);
-            return;
-        }
         // The pane holding the caret takes the pick (#2819).
         self.open_picked_in_focused_pane(id, true, cx);
     }

@@ -79,6 +79,36 @@ pub struct KnownInstance {
     /// a store written before this field existed still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glyph: Option<String>,
+    /// Every address the crab announced on `/a2a/routes` the last time it
+    /// answered with our token: lan, tailnet, tunnel, in its order.
+    ///
+    /// `url` is the one we use; these are where to look when it stops
+    /// answering. A quick tunnel's hostname dies with the tunnel, so a crab
+    /// that rebooted is gone from `url` but usually still on its LAN address,
+    /// and that address can tell us the new tunnel. Defaulted, so a store
+    /// written before this field existed still loads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<StoredRoute>,
+}
+
+/// One address a crab announced, as `(kind, url)` from `/a2a/routes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredRoute {
+    /// `lan`, `tailnet` or `tunnel`; kept as text so a kind a newer crab
+    /// announces still loads.
+    pub kind: String,
+    pub url: String,
+}
+
+impl StoredRoute {
+    /// From the `(kind, url)` pairs [`announce`] and
+    /// [`routes_from_announcement`] read off the wire.
+    pub fn from_pairs(pairs: Vec<(String, String)>) -> Vec<StoredRoute> {
+        pairs
+            .into_iter()
+            .map(|(kind, url)| StoredRoute { kind, url })
+            .collect()
+    }
 }
 
 /// On-disk shape of `state/remote/instances.json`.
@@ -191,6 +221,55 @@ impl InstanceStore {
             .instances
             .into_iter()
             .find(|i| i.host_id == host_id))
+    }
+
+    /// Keep what the crab announced last. Returns whether the row changed, so a
+    /// probe that hears the same routes every time does not rewrite the file.
+    pub fn record_routes(&self, host_id: &str, routes: &[StoredRoute]) -> Result<bool> {
+        if self
+            .find(host_id)?
+            .is_none_or(|known| known.routes.as_slice() == routes)
+        {
+            return Ok(false);
+        }
+        self.with_locked_store(|st| {
+            let Some(i) = st.instances.iter_mut().find(|i| i.host_id == host_id) else {
+                return Ok(false);
+            };
+            if i.routes.as_slice() == routes {
+                return Ok(false);
+            }
+            i.routes = routes.to_vec();
+            Ok(true)
+        })
+    }
+
+    /// Point a paired crab at a new address, rewriting the URL and nothing
+    /// else. The caller has already confirmed the move (see
+    /// [`super::instance_repoint`]); this is only the write.
+    ///
+    /// Not [`Self::replace_confirmed`]: that one swaps the whole row and puts
+    /// it last, which would move the badge in the strip and drop a `last_ok`
+    /// or a glyph written since the caller read the row. Here the row is
+    /// edited in place under the lock.
+    ///
+    /// `token` must still be the stored one: a re-pairing that landed
+    /// between the check and this write has a credential the check never
+    /// saw, so the move is refused (`Ok(false)`) rather than applied to it.
+    pub fn move_url(&self, host_id: &str, token: &str, new_url: &str) -> Result<bool> {
+        let new_url = new_url.trim().trim_end_matches('/');
+        anyhow::ensure!(!new_url.is_empty(), "the new address is empty");
+        self.with_locked_store(|st| {
+            let Some(i) = st
+                .instances
+                .iter_mut()
+                .find(|i| i.host_id == host_id && i.token == token)
+            else {
+                return Ok(false);
+            };
+            i.url = new_url.to_string();
+            Ok(true)
+        })
     }
 
     /// Stamp a successful call, which is what "last seen 2h ago" reads.
@@ -314,6 +393,12 @@ pub fn validate_host_id(id: &str) -> Result<()> {
     validate_announced_host_id(id)
 }
 
+/// Whether `id` is one this client derived from a URL because the remote
+/// announced none. Such a row has no announced identity to confirm a move by.
+pub fn is_derived_host_id(id: &str) -> bool {
+    id.starts_with(DERIVED_PREFIX)
+}
+
 /// What a remote is allowed to announce: never the reserved `url:` form, so a
 /// remote cannot impersonate a host we keyed by its URL.
 fn validate_announced_host_id(id: &str) -> Result<()> {
@@ -344,6 +429,9 @@ pub struct Paired {
     pub url: String,
     pub token: String,
     pub expires_at: u64,
+    /// What the crab announced, stored with the credential so a later
+    /// address change can be followed without a new code.
+    pub routes: Vec<StoredRoute>,
 }
 
 /// Exchange a one-time code for a scoped session token, then learn the host id
@@ -398,6 +486,7 @@ pub async fn pair(base_url: &str, code: &str, label: &str) -> Result<Paired> {
         url: base.to_string(),
         token,
         expires_at,
+        routes: StoredRoute::from_pairs(announcement.1),
     })
 }
 
@@ -523,6 +612,7 @@ mod tests {
             added_at: 1,
             last_ok: 0,
             glyph: None,
+            routes: Vec::new(),
         }
     }
 
@@ -694,5 +784,91 @@ mod tests {
         }));
         assert!(host.is_none());
         assert!(routes.is_empty());
+    }
+
+    /// A store written before routes were kept has no `routes` key at all; it
+    /// must still load, with every credential intact and no routes.
+    #[test]
+    fn a_store_written_before_routes_still_loads() {
+        let store = temp_store("pre-routes");
+        std::fs::write(
+            store.path(),
+            br#"{"version":1,"instances":[{"host_id":"h1","label":"server i7","url":"https://old.trycloudflare.com","token":"ocpair_kept","added_at":7,"last_ok":9}]}"#,
+        )
+        .expect("write the old file");
+        let file = store.load().expect("an old store loads");
+        assert_eq!(file.instances.len(), 1);
+        let h1 = &file.instances[0];
+        assert_eq!(h1.token, "ocpair_kept");
+        assert_eq!(h1.url, "https://old.trycloudflare.com");
+        assert!(h1.routes.is_empty());
+        // And a write that does not touch routes keeps the file free of them.
+        store.record_ok("h1", 10).expect("stamp");
+        let raw = std::fs::read_to_string(store.path()).expect("read back");
+        assert!(
+            !raw.contains("\"routes\""),
+            "an empty route list is not written"
+        );
+    }
+
+    #[test]
+    fn routes_round_trip_and_an_unchanged_list_writes_nothing() {
+        let store = temp_store("routes");
+        store.upsert(known("h1", "a", "t")).expect("upsert");
+        let routes = StoredRoute::from_pairs(vec![
+            ("lan".to_string(), "http://192.168.1.7:8080".to_string()),
+            (
+                "tunnel".to_string(),
+                "https://x.trycloudflare.com".to_string(),
+            ),
+        ]);
+        assert!(store.record_routes("h1", &routes).expect("first"));
+        assert!(!store.record_routes("h1", &routes).expect("second"));
+        assert!(
+            !store
+                .record_routes("nobody", &routes)
+                .expect("unknown host")
+        );
+        assert_eq!(store.find("h1").expect("find").expect("h1").routes, routes);
+    }
+
+    #[test]
+    fn move_url_rewrites_only_the_url_and_keeps_the_row_in_place() {
+        let store = temp_store("move");
+        let mut h1 = known("h1", "server i7", "ocpair_a");
+        h1.glyph = Some("S".to_string());
+        h1.last_ok = 55;
+        h1.routes = StoredRoute::from_pairs(vec![(
+            "lan".to_string(),
+            "http://192.168.1.7:8080".to_string(),
+        )]);
+        store.upsert(h1.clone()).expect("upsert h1");
+        store
+            .upsert(known("h2", "vps", "ocpair_b"))
+            .expect("upsert h2");
+
+        assert!(
+            store
+                .move_url("h1", "ocpair_a", "https://new.trycloudflare.com/")
+                .expect("move")
+        );
+        let file = store.load().expect("load");
+        assert_eq!(file.instances[0].host_id, "h1", "the badge does not move");
+        let moved = &file.instances[0];
+        assert_eq!(moved.url, "https://new.trycloudflare.com");
+        let mut expected = h1;
+        expected.url = "https://new.trycloudflare.com".to_string();
+        assert_eq!(*moved, expected, "only the url changed");
+
+        // A token that is no longer the stored one moves nothing.
+        assert!(
+            !store
+                .move_url("h1", "ocpair_stale", "http://10.0.0.66:8080")
+                .expect("stale")
+        );
+        assert_eq!(
+            store.find("h1").expect("find").expect("h1").url,
+            "https://new.trycloudflare.com"
+        );
     }
 }

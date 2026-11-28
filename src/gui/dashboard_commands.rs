@@ -7,6 +7,52 @@
 
 use super::*;
 
+/// The note a command leaves when it is refused before it runs, or `None`
+/// when it runs.
+///
+/// A capability is asked of the backend the window holds, not of the
+/// handshake: a remote crab lacks a local-only one before its `hello`
+/// lands, so `/onboard` typed by hand never runs the wizard on this machine
+/// for it. An operation is asked of the handshake, and with none yet it
+/// passes as it always has: the crab's own refusal arrives as a notice.
+///
+/// `/restart` cycles this process (`SelfUpdater`), so it asks the same
+/// capability the wizard does: with a crab elsewhere it would restart the
+/// window's own service instead of the crab the user is talking to.
+pub(crate) fn refused(
+    action: commands::GuiAction,
+    backend: &crate::backend_glue::Backend,
+    hello: Option<&opencrabs::backend::hello::HelloReply>,
+) -> Option<String> {
+    use opencrabs::backend::cap::{Cap, Need};
+    let this_process = match action {
+        commands::GuiAction::Text(text_commands::TextCommand::Restart) => backend.lacks(Cap::Setup),
+        _ => None,
+    };
+    let why = this_process
+        .or_else(|| {
+            commands::needs(action).iter().find_map(|need| match *need {
+                Need::Cap(cap) => backend.lacks(cap),
+                Need::Op(_) => None,
+            })
+        })
+        .or_else(|| commands::unavailable(action, hello))?;
+    Some(format!("{}: {why}", command_name(action)))
+}
+
+/// The name a refused command is called by in its note.
+fn command_name(action: commands::GuiAction) -> &'static str {
+    match action {
+        commands::GuiAction::OpenOnboard(name) => name,
+        commands::GuiAction::Text(command) => text_commands::name(command),
+        _ => slash::GUI_SUPPORTED
+            .iter()
+            .copied()
+            .find(|name| commands::parse_command(name) == Some(commands::Outcome::Run(action)))
+            .unwrap_or("this command"),
+    }
+}
+
 impl Dashboard {
     /// Run a submitted command, or say why it does not run here.
     ///
@@ -54,6 +100,12 @@ impl Dashboard {
                 return;
             }
         };
+        // What the palette greys out does not run when typed by hand either.
+        if let Some(line) = refused(action, &self.backend, self.hello.as_ref()) {
+            self.turn.live.notices.push(line);
+            cx.notify();
+            return;
+        }
         match action {
             commands::GuiAction::OpenThemes => {
                 // The toggle closes it, so ask first: `/theme` on the open
@@ -78,10 +130,9 @@ impl Dashboard {
                 }
             }
             commands::GuiAction::ToggleHelp => self.toggle_help(cx),
-            // `/new` follows the crab on screen: with a remote open it opens
-            // the conversation there, not a local session the panel is not
-            // drawing (#3133).
-            commands::GuiAction::NewSession => self.new_conversation(cx),
+            // `/new` follows the crab on screen: the window's backend is the
+            // crab it holds, so the row is created there (#3133).
+            commands::GuiAction::NewSession => self.new_session(cx),
             commands::GuiAction::StopTurn => self.stop_turn(cx),
             commands::GuiAction::OpenSessions => self.toggle_rail(cx),
             commands::GuiAction::OpenModels => self.open_models(arg, session, cx),
@@ -111,7 +162,7 @@ impl Dashboard {
                     .live
                     .notices
                     .push("Checking for a new release...".to_string());
-                agent_bridge::spawn_evolve(self.sink.clone(), session);
+                agent_bridge::spawn_evolve(self.backend.clone(), self.sink.clone(), session);
             }
         }
     }
@@ -186,7 +237,7 @@ impl Dashboard {
             C::Cd => {
                 // The picker owns bare `/cd` (#2527): a screen, not a text
                 // reply that also lights the thinking spinner. With a path
-                // the change applies locally on the bridge service, the same
+                // the change applies on the crab the window holds, the same
                 // applier the terminal uses, with no turn and no spinner.
                 if arg.is_empty() {
                     self.open_cd_picker(cx);
@@ -199,29 +250,29 @@ impl Dashboard {
                         cx.notify();
                         return;
                     };
-                    let expanded = opencrabs::brain::tools::error::expand_tilde(&arg);
-                    if !expanded.is_dir() {
-                        self.turn
-                            .live
-                            .notices
-                            .push(text_commands::cd_not_a_directory(&arg));
-                        cx.notify();
-                        return;
-                    }
+                    // The path is the crab's: `~` is its home and the folder
+                    // is checked on its disk, never on this machine's. A path
+                    // that is not a directory there comes back as the same
+                    // "Not a directory" line.
+                    let typed = std::path::PathBuf::from(&arg);
                     // The apply runs off the UI thread: its row write
                     // goes through `deadpool_sqlite`, which needs a Tokio
                     // reactor, and gpui's executor is not one. Awaiting it
                     // here aborted the window instead.
                     match agent_bridge::bridge() {
-                        Some(b) => agent_bridge::spawn_apply_operator_cd(
-                            b.service.clone(),
+                        Some(_) => agent_bridge::spawn_apply_operator_cd(
+                            self.backend.clone(),
                             session,
-                            expanded,
+                            typed,
                             self.sink.clone(),
                         ),
                         None => self.push_session_notice(
                             session,
-                            text_commands::cd_reply(&expanded.display().to_string()),
+                            text_commands::cd_reply(
+                                &opencrabs::brain::tools::error::expand_tilde(&arg)
+                                    .display()
+                                    .to_string(),
+                            ),
                             cx,
                         ),
                     }
@@ -238,7 +289,7 @@ impl Dashboard {
                     return;
                 };
                 agent_bridge::spawn_text_command(
-                    self.db_path.clone(),
+                    self.backend.clone(),
                     session,
                     text_commands::name(other).to_string(),
                     arg,

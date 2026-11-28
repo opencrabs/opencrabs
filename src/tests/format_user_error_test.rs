@@ -305,6 +305,7 @@ fn format_user_error_names_every_unreachable_shape() {
         "HTTP request failed: error trying to connect: dns error: no records found",
         "HTTP request failed: error trying to connect: Network is unreachable (os error 101)",
         "HTTP request failed: error trying to connect: No route to host (os error 65)",
+        "HTTP request failed: error trying to connect: dns resolution failed",
         "HTTP request failed: error trying to connect: failed to lookup address information: \
          nodename nor servname provided",
     ] {

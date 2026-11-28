@@ -2,7 +2,11 @@
 //!
 //! Serves:
 //! - `GET  /.well-known/agent.json` — Agent Card discovery
-//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped)
+//! - `POST /a2a/v1`                 — JSON-RPC 2.0 endpoint (scoped; `gui/call`
+//!   gates per backend operation)
+//! - `GET  /gui/events?session=<id>` — SSE of one session's backend events
+//! - `GET  /gui/events/ws?session=<id>`: the same events over a WebSocket
+//!   (scoped, `a2a:read`; fan-out to every surface watching the session)
 //! - `POST /a2a/pair`               — One-time code → scoped session token
 //! - `GET  /a2a/health`             — Health check
 
@@ -24,6 +28,11 @@ use futures::stream;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+
+// The SSE door for backend events. Its file sits with the other handlers;
+// it is declared here because this file is the one that routes it.
+#[path = "handler/gui_stream.rs"]
+pub mod gui_stream;
 
 /// Shared state for the A2A gateway.
 #[derive(Clone)]
@@ -49,8 +58,30 @@ pub struct A2aState {
 #[derive(Clone, Debug)]
 pub struct GrantedScopes(pub Vec<String>);
 
+/// Which credential a request presented, attached by `require_bearer` next
+/// to [`GrantedScopes`]. A remote caller is this principal: a pairing's
+/// stable id, [`OWNER_CREDENTIAL`] for the config api_key, or
+/// [`LOOPBACK_OPEN_CREDENTIAL`] for the posture with no key. Never the
+/// presented token itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialId(pub String);
+
+/// The principal of the config `[a2a].api_key`, the owner's credential.
+pub const OWNER_CREDENTIAL: &str = "api_key";
+
+/// The principal of every caller under the open loopback posture (no
+/// api_key configured): no credential was presented to tell them apart.
+pub const LOOPBACK_OPEN_CREDENTIAL: &str = "loopback-open";
+
 fn all_scopes() -> Vec<String> {
     ALL_SCOPES.iter().map(|s| s.to_string()).collect()
+}
+
+fn base_scopes() -> Vec<String> {
+    crate::remote::scopes::BASE_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Compare a presented bearer token against the configured one without a
@@ -77,19 +108,22 @@ pub(crate) fn tokens_match(presented: &str, expected: &str) -> bool {
 /// - A paired `ocpair_` session token → the scopes its code carried.
 ///
 /// When no api_key is configured the legacy loopback-open posture stands:
-/// everything through (`check_gate_authenticated` guarantees that posture
-/// can only bind loopback). Successful auth attaches [`GrantedScopes`] for
-/// the per-method check in `handle_jsonrpc`.
+/// every request through with the base scopes only, never an elevated one
+/// (`check_gate_authenticated` guarantees that posture can only bind
+/// loopback). Successful auth attaches [`GrantedScopes`] for
+/// the per-method check in `handle_jsonrpc`, and [`CredentialId`] for the
+/// doors that answer to one caller alone.
 async fn require_bearer(
     State(state): State<A2aState>,
     mut req: axum::http::Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
     let presented = bearer_from_headers(req.headers());
-    let Some(scopes) = credential_scopes(&state, presented) else {
+    let Some((credential, scopes)) = credential(&state, presented) else {
         return unauthorized_response();
     };
     req.extensions_mut().insert(GrantedScopes(scopes));
+    req.extensions_mut().insert(credential);
     next.run(req).await
 }
 
@@ -106,22 +140,46 @@ fn bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// `health_check` (the auth-gated routes block).
 ///
 /// - No api_key configured → legacy loopback-open posture: everyone gets
-///   all scopes (`check_gate_authenticated` keeps that posture loopback-only).
-/// - The api_key itself → all scopes (backward compatible).
+///   [`BASE_SCOPES`](crate::remote::scopes::BASE_SCOPES) and nothing
+///   elevated, since no credential was presented to earn more
+///   (`check_gate_authenticated` keeps that posture loopback-only).
+/// - The api_key itself → all wire scopes, elevated included: it is the
+///   owner's credential (backward compatible). `a2a:admin` is not a wire
+///   scope, so it never leaves here.
 /// - An `ocpair_` session token → the scopes its pairing code carried.
 pub(crate) fn credential_scopes(state: &A2aState, presented: Option<&str>) -> Option<Vec<String>> {
+    credential(state, presented).map(|(_, scopes)| scopes)
+}
+
+/// Resolve a presented credential to which credential it is and the scopes
+/// it grants, or `None` when it authenticates nothing. The scopes are those
+/// of [`credential_scopes`]; the [`CredentialId`] is the pairing's stable
+/// id for an `ocpair_` token, [`OWNER_CREDENTIAL`] for the api_key and
+/// [`LOOPBACK_OPEN_CREDENTIAL`] for the open posture. The token never
+/// becomes the id.
+pub(crate) fn credential(
+    state: &A2aState,
+    presented: Option<&str>,
+) -> Option<(CredentialId, Vec<String>)> {
     match (&state.api_key, presented) {
-        (None, _) => Some(all_scopes()),
-        (Some(expected), Some(token)) if tokens_match(token, expected) => Some(all_scopes()),
+        (None, _) => Some((
+            CredentialId(LOOPBACK_OPEN_CREDENTIAL.to_string()),
+            base_scopes(),
+        )),
+        (Some(expected), Some(token)) if tokens_match(token, expected) => {
+            Some((CredentialId(OWNER_CREDENTIAL.to_string()), all_scopes()))
+        }
         (Some(_), Some(token)) if token.starts_with(crate::remote::pairing::TOKEN_PREFIX) => {
             // Paired session. Small blocking JSON read per request: fine at
             // A2A rates, and the writer's atomic rename means never partial.
-            state.pairing.verify_token(token).map(|s| s.scopes)
+            state
+                .pairing
+                .verify_token(token)
+                .map(|s| (CredentialId(s.id), s.scopes))
         }
         _ => None,
     }
 }
-
 fn unauthorized_response() -> axum::response::Response {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -147,6 +205,8 @@ pub fn build_router(state: A2aState, allowed_origins: &[String]) -> Router {
     let protected = Router::new()
         .route("/a2a/v1", post(handle_jsonrpc))
         .route("/a2a/routes", get(routes_http::handle_routes))
+        .route("/gui/events", get(gui_stream::handle_events))
+        .route("/gui/events/ws", get(gui_stream::handle_events_ws))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -329,6 +389,7 @@ async fn get_agent_card(State(state): State<A2aState>) -> Json<AgentCard> {
 async fn handle_jsonrpc(
     State(state): State<A2aState>,
     Extension(granted): Extension<GrantedScopes>,
+    credential: Option<Extension<CredentialId>>,
     Json(req): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
     // An authenticated call is the definition of "this tunnel is in use", and
@@ -363,6 +424,23 @@ async fn handle_jsonrpc(
             )),
         )
             .into_response();
+    }
+
+    // gui/call carries its own per-operation scope gate, and a refusal there
+    // is an HTTP 403 rather than a 200 with an error body. It runs against
+    // the process's primary crab, not the gateway's own service.
+    if req.method == "gui/call" {
+        let ctx = crate::backend::primary();
+        let credential = credential.as_ref().map(|Extension(id)| id);
+        let (status, response) = handler::gui::handle_call_for(
+            ctx.as_deref(),
+            credential,
+            &granted.0,
+            req.id,
+            req.params,
+        )
+        .await;
+        return (status, Json(response)).into_response();
     }
 
     // message/stream returns SSE instead of JSON
@@ -435,4 +513,49 @@ async fn health_check(
         }
     }
     Json(body)
+}
+
+#[cfg(test)]
+mod credential_posture_tests {
+    use super::*;
+    use crate::remote::scopes::{ELEVATED_SCOPES, SCOPE_MANAGE};
+
+    async fn state_with(api_key: Option<&str>, dir: &std::path::Path) -> A2aState {
+        use crate::a2a::test_helpers::helpers;
+        A2aState {
+            task_store: handler::new_task_store(),
+            cancel_store: handler::new_cancel_store(),
+            host: "127.0.0.1".to_string(),
+            port: 18790,
+            agent_service: helpers::placeholder_agent_service().await,
+            service_context: helpers::placeholder_service_context().await,
+            api_key: api_key.map(str::to_string),
+            pairing: PairingStore::new(dir.join("pairing")),
+            pair_hits: pairing_http::new_pair_hits(),
+            remote_state_dir: dir.join("remote"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_open_loopback_posture_carries_no_elevated_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state_with(None, dir.path()).await;
+        for presented in [None, Some("anything"), Some("ocpair_whatever")] {
+            let scopes = credential_scopes(&state, presented).expect("open posture admits");
+            for elevated in ELEVATED_SCOPES {
+                assert!(
+                    !scopes.iter().any(|s| s == elevated),
+                    "open posture leaked {elevated} for {presented:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_api_key_carries_manage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state_with(Some("owner-key"), dir.path()).await;
+        let scopes = credential_scopes(&state, Some("owner-key")).expect("api_key admits");
+        assert!(scopes.iter().any(|s| s == SCOPE_MANAGE));
+    }
 }

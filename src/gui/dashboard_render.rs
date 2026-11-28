@@ -12,6 +12,9 @@ impl Render for Dashboard {
         // Advance from whatever repaint came in. The animation receipt is
         // cleared only by its own callback, not by an unrelated repaint.
         self.tick_middle_scroll(cx);
+        // A remote conversation reads its turn and its facts through an event
+        // stream; keep exactly one open on the one on screen.
+        self.sync_remote_watch();
         // The frame the window is showing, read where the window is in hand
         // (#3082). Cheap: one comparison unless a drag moved it.
         self.observe_window(window);
@@ -60,10 +63,8 @@ impl Render for Dashboard {
                 FocusTarget::Composer => {
                     // The keyboard follows the pane, not the window (#2610):
                     // a rotated caret that left focus on the chat leaf typed
-                    // into a field the split was not drawing. And it follows
-                    // the crab: while a remote is open the field drawn is the
-                    // remote's (#3133).
-                    let composer = self.keyboard_field(cx);
+                    // into a field the split was not drawing.
+                    let composer = self.composer_entity(cx);
                     let handle = composer.read(cx).focus_handle.clone();
                     // `before` is true when gpui turned the request into a
                     // no-op, because it returns early on the handle that is
@@ -94,7 +95,7 @@ impl Render for Dashboard {
         // composer. The transition above cannot see that, so the drift is read
         // off the window instead and repaired before the user types (#2741).
         if owner == KeyboardOwner::Composer {
-            let composer = self.keyboard_field(cx);
+            let composer = self.composer_entity(cx);
             let drifted = !composer.read(cx).focus_handle.is_focused(window)
                 && window.focused(cx).is_none_or(|handle| handle == self.focus);
             if drifted {
@@ -110,9 +111,8 @@ impl Render for Dashboard {
             // (#2767): an overlay or a screen took the keys while the composer
             // kept the caret, so everything typed into the prompt also landed
             // in the message field and Enter submitted it. A field the overlay
-            // owns is not this drift; only the composer is, and with a remote
-            // open the field on screen is the remote's (#3133).
-            let composer = self.keyboard_field(cx);
+            // owns is not this drift; only the composer is.
+            let composer = self.composer_entity(cx);
             let leaked = composer.read(cx).focus_handle.is_focused(window);
             if leaked {
                 window.focus(&self.focus);
@@ -170,7 +170,7 @@ impl Render for Dashboard {
                     // needs a Tokio reactor; the gpui executor is not one, so
                     // this never runs inline (smoke-panic receipt in the gate
                     // log, 2026-10-31). Same pattern as every bridge call.
-                    agent_bridge::spawn_plan_path(self.db_path.clone(), sid, self.sink.clone());
+                    agent_bridge::spawn_plan_path(self.backend.clone(), sid, self.sink.clone());
                 }
                 None => self.plan.set_path(None),
             }
@@ -579,10 +579,8 @@ impl Render for Dashboard {
                 // and the click did nothing.
                 let click_roots = self
                     .chat_session
-                    .and_then(|id| {
-                        agent_bridge::bridge()
-                            .map(|b| b.service.get_working_directory_for_session(id))
-                    })
+                    .and_then(|id| self.backend.facts(Some(id)))
+                    .map(|facts| facts.working_directory)
                     .into_iter()
                     .collect();
                 self.copy_drag.set_roots(click_roots);
@@ -605,6 +603,8 @@ impl Render for Dashboard {
                     fold_handlers,
                     transcript::ViewHooks {
                         attachments: attachment_handlers,
+                        // The crab whose files the tiles draw, localized on this machine.
+                        backend: Some(self.backend.clone()),
                         drag: Some(self.copy_drag.clone()),
                         wheel: Some(wheel),
                         middle_click: Some(middle_click),
@@ -699,17 +699,13 @@ impl Render for Dashboard {
                         // bootstrap provider: a pick pins the model per
                         // session, so the global slot never moves and this row
                         // kept naming the pair it started with (#2634).
-                        let (provider, model) = match agent_bridge::bridge() {
-                            Some(b) => match self.chat_session {
-                                Some(sid) => {
-                                    let (provider, model) =
-                                        b.service.provider_pair_for_session(sid);
-                                    let label =
-                                        model.rsplit('/').next().unwrap_or(&model).to_string();
-                                    (provider, label)
-                                }
-                                None => (b.service.provider_name(), b.service.provider_model()),
-                            },
+                        let (provider, model) = match self.backend.facts(self.chat_session) {
+                            Some(facts) if self.chat_session.is_some() => {
+                                let model = facts.served_model;
+                                let label = model.rsplit('/').next().unwrap_or(&model).to_string();
+                                (facts.provider, label)
+                            }
+                            Some(facts) => (facts.provider, facts.model),
                             None => ("-".to_string(), "-".to_string()),
                         };
                         // The session name leads, as in the TUI footer. The row
@@ -2907,12 +2903,12 @@ impl Render for Dashboard {
             .capture_any_mouse_up(cx.listener(|this, _ev: &MouseUpEvent, _window, _cx| {
                 this.rail_swipe = None;
             }));
-        // The instance strip is the outermost of the three columns: it picks
-        // the crab, the rail lists that crab's sessions, the panel shows one of
-        // them. Added first so it sits on the far left, and drawn on every
-        // screen, because which crab you are talking to is not a chat-only
-        // fact. Opt-in though (#3178): the gate is read once at window open,
-        // so a user who never turned the rail on keeps the width.
+        // The instance strip has no column (#3178): the crabs are listed in
+        // the rail under its logo. Its entity is mounted, with no box of its
+        // own, only so the card that is up (pair, share, a crab's own card)
+        // paints over the window, on every screen. Opt-in though (#3178): a
+        // user who never turned the rail on mounts nothing, not even the card
+        // layer.
         if self.instance_rail {
             root = root.child(self.instance_strip_element(cx));
         }
@@ -2936,14 +2932,9 @@ impl Render for Dashboard {
         // and the whole centring slack opened between the two. The strip and
         // the column are centred as one block instead, so the topics sit beside
         // the conversation they belong to and the slack falls outside both.
-        // A selected remote replaces the conversation column: same slot, same
-        // measure, different source. The strip picked the crab, so what sits
-        // here is that crab's transcript, not this window's.
-        let right = if self.instance_remote_open() && self.screen == Screen::Chat {
-            self.remote_panel_element(chat_measure_px, centred_chat, cx)
-        } else {
-            right.into_any_element()
-        };
+        // A picked crab does not replace this column: the window's backend is
+        // that crab's, so the conversation drawn here is already its own.
+        let right = right.into_any_element();
         match topic_side {
             Some((edge, strip)) => {
                 // The column pads itself with `px_4` on each side, so its own
@@ -3345,8 +3336,13 @@ impl Render for Dashboard {
             let viewport = (f32::from(window_size.width), f32::from(window_size.height));
             let document_height = (viewport.1 - 300.0).clamp(120.0, 620.0);
             let body = self.preview_body(&open, document_height, cx);
-            let detail =
-                preview::detail_line(&open, self.preview_zoom, self.preview_video.as_ref());
+            // The header states facts about the file on this machine: the
+            // crab's path goes through `localize` before anything stats it.
+            let detail = preview::detail_line(
+                &open.localized(&self.backend),
+                self.preview_zoom,
+                self.preview_video.as_ref(),
+            );
             let document_open = self.preview_document.is_some();
             root = root.child(preview::overlay(
                 &open,
@@ -3613,6 +3609,7 @@ impl Render for Dashboard {
                     view: cx.entity().downgrade(),
                     paint: self.finder_paint.clone(),
                     voice: self.seeker_voice_view(cx),
+                    hello: self.hello.as_ref(),
                 },
                 handlers,
                 chip,
@@ -3736,43 +3733,6 @@ impl Render for Dashboard {
         if self.themes_open {
             root = root.child(self.themes_modal(cx));
         }
-        // The pairing form is a modal for the same reason every other one is:
-        // it takes a code and a URL, and a half-typed code must not fall into
-        // whatever composer is underneath it.
-        if self.instance_pairing.is_some() {
-            root = root.child(self.instance_pair_modal(cx));
-        }
-        // The mark's menu is a window-level card, at the press point, for the
-        // reason #2690 gives: a child of the strip would have its coordinates
-        // translated by the strip's own frame and land far from the pointer.
-        if self.instance_menu_at.is_some() {
-            let at = self.instance_menu_at.unwrap_or_default();
-            let items = self.instance_mark_menu_items(cx);
-            let dismiss = cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
-                this.instance_menu_at = None;
-                this.instance_menu_for = None;
-                cx.notify();
-            });
-            root = root.child(
-                gpui::deferred(menu::dismissible_menu_popover(
-                    "instance-mark-menu",
-                    items,
-                    at,
-                    dismiss,
-                ))
-                .with_priority(2),
-            );
-        }
-        // The badge's mark editor, above the strip it changes.
-        if self.instance_glyph.is_some() {
-            root = root.child(self.instance_glyph_modal(cx));
-        }
-        // The sharing card is the mirror of the pairing form: it hands a code
-        // out instead of taking one in, and it must sit above the strip that
-        // opened it.
-        if self.instance_share.is_some() {
-            root = root.child(self.instance_share_modal(cx));
-        }
         // The settings modal follows the same rule (#2878).
         if self.settings_open {
             root = root.child(self.settings_modal(cx));
@@ -3847,9 +3807,16 @@ impl Dashboard {
         // schemas. Counting it tokenises every tool schema, so it is measured
         // only when the context rung is live: this runs on every frame, and
         // the other rungs never print the number.
-        if state.context_percent() >= CONTEXT_TIGHT {
-            state.clear_base = agent_bridge::bridge()
-                .map(|b| u64::from(b.service.base_context_tokens_raw()))
+        // Asked of the crab (`ContextBase`) synchronously, the way the task
+        // roster is: a crab still booting answers `NotReady`, which reads 0.
+        // A crab on another machine is not asked inside a frame: its floor
+        // reads 0 until its facts cache carries the number.
+        if state.context_percent() >= CONTEXT_TIGHT
+            && let crate::backend_glue::Backend::Local(ctx) = &self.backend
+        {
+            state.clear_base = opencrabs::backend::facts::ContextBase {}
+                .answer(ctx)
+                .map(u64::from)
                 .unwrap_or(0);
         }
         state
@@ -3881,6 +3848,11 @@ impl Dashboard {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(hint) = self.task_hint() {
             rows.push(hint_line(&hint, cx).into_any_element());
+        }
+        // A remote crab waiting for a yes or a no before it runs a tool
+        // (C8). Drawn in a split too: the crab is waiting either way.
+        if let Some(card) = self.approval_row(cx) {
+            rows.push(card);
         }
         // The offers and the plan card belong to the chrome in a split
         // (#3145). The chat leaf draws both from its pane chrome there, the

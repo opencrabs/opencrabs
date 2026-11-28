@@ -7,6 +7,9 @@
 //! (#2613). The move is mechanical: no behaviour, no ids, no styles changed.
 
 use crate::palette;
+use opencrabs::backend::cap::{self, Need};
+use opencrabs::backend::hello::HelloReply;
+use opencrabs::backend::{Op, session_ops, sessions};
 
 use gpui::{
     AnyElement, App, Div, Edges, InteractiveElement, MouseButton, MouseDownEvent, Pixels, Point,
@@ -31,6 +34,41 @@ pub enum MenuKind {
     GroupTopics,
     SplitSide,
     SplitStack,
+}
+
+const NO_NEEDS: &[Need] = &[];
+const PIN: &[Need] = &[Need::Op(<sessions::SetFavorite as Op>::NAME)];
+const RENAME: &[Need] = &[Need::Op(<sessions::RenameSession as Op>::NAME)];
+const DELETE: &[Need] = &[Need::Op(<session_ops::DeleteSession as Op>::NAME)];
+const ENABLE_TOPICS: &[Need] = &[Need::Op(<sessions::SetTopics as Op>::NAME)];
+const NEW_TOPIC: &[Need] = &[Need::Op(<sessions::CreateTopic as Op>::NAME)];
+const DISABLE_TOPICS: &[Need] = &[Need::Op(<sessions::MergeTopics as Op>::NAME)];
+const GROUP_TOPICS: &[Need] = &[Need::Op(<sessions::AttachTopic as Op>::NAME)];
+
+impl MenuKind {
+    /// The operations the row action runs on the crab. The splits are the
+    /// window's own layout and ask the crab for nothing.
+    pub fn needs(&self) -> &'static [Need] {
+        match self {
+            MenuKind::Pin => PIN,
+            MenuKind::Rename => RENAME,
+            MenuKind::AssignProject => NO_NEEDS,
+            MenuKind::Delete => DELETE,
+            MenuKind::EnableTopics => ENABLE_TOPICS,
+            MenuKind::NewTopic => NEW_TOPIC,
+            MenuKind::DisableTopics => DISABLE_TOPICS,
+            MenuKind::GroupTopics => GROUP_TOPICS,
+            MenuKind::SplitSide | MenuKind::SplitStack => NO_NEEDS,
+        }
+    }
+
+    /// Why the action is greyed out on the crab that answered `hello`, or
+    /// `None` when it can run. No handshake yet greys nothing out.
+    pub fn unavailable(&self, hello: Option<&HelloReply>) -> Option<String> {
+        cap::check(hello?, self.needs())
+            .err()
+            .map(|why| why.reason())
+    }
 }
 
 /// One item of a context menu. The labels are the interface: Pin flips to
@@ -75,6 +113,27 @@ pub fn menu_item_disabled(label: &'static str) -> Stateful<Div> {
         .text_sm()
         .text_color(rgb(palette::current().text_faint))
         .child(SharedString::from(label))
+}
+
+/// A row the crab will not run, with the reason under its label: a missing
+/// scope, an older crab, or an action that only works on this machine. Drawn
+/// like [`menu_item_disabled`], so the menu keeps its shape, and the reason
+/// says why instead of leaving the user to guess.
+pub fn menu_item_unavailable(label: &'static str, reason: String) -> Stateful<Div> {
+    menu_item_disabled(label).flex().flex_col().child(
+        div()
+            .text_xs()
+            .text_color(rgb(palette::current().text_faint))
+            .child(SharedString::from(reason)),
+    )
+}
+
+/// The row for `label`: pickable, or greyed out with its reason.
+pub fn menu_item_gated(label: &'static str, unavailable: Option<String>) -> Stateful<Div> {
+    match unavailable {
+        Some(reason) => menu_item_unavailable(label, reason),
+        None => menu_item(label),
+    }
 }
 
 /// A menu's card: the bordered, shadowed column every context menu is drawn

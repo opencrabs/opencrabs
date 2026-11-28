@@ -1,0 +1,12 @@
+{
+  "op": "turn.approval_answer",
+  "scope": "a2a:manage",
+  "params": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "request_id": "0c6f1d2e-3b4a-4f5e-8d7c-9a0b1c2d3e4f",
+    "approved": true,
+    "always": false
+  },
+  "reply": { "Ok": true },
+  "reply_expired": { "Ok": false }
+}

@@ -10,7 +10,8 @@
 //! `pane.busy` set. The behaviour of `race_turn` itself is pinned by the bin
 //! suite (`gui_cancel_race_*`); the wiring is the contract here.
 
-const AGENT_BRIDGE: &str = include_str!("../gui/agent_bridge.rs");
+/// The turn runners moved into the backend; the race lives with them.
+const TURN: &str = include_str!("../backend/turn.rs");
 /// The handler, the key reader and the settle arm moved into modules of their
 /// own (#2822), so each region below reads the file it lives in.
 const DASHBOARD_KEYS: &str = include_str!("../gui/dashboard_keys.rs");
@@ -131,7 +132,7 @@ fn gui_cancel_stop_and_esc_share_one_pane_stop() {
 
 #[test]
 fn gui_cancel_the_turn_races_its_stop_token() {
-    let shipped = AGENT_BRIDGE
+    let shipped = TURN
         .split("#[cfg(test)]")
         .next()
         .expect("the bridge ships its source");

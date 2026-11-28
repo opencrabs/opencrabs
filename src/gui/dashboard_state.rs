@@ -177,10 +177,11 @@ pub(crate) struct Dashboard {
     pub(crate) window_frame_seen: Option<layout_store::WindowState>,
     /// The frame already on disk, so a settled window costs no write at all.
     pub(crate) window_frame_saved: Option<layout_store::WindowState>,
-    /// Ledger path resolved once at startup, before the window opens.
-    /// Period fetches reuse it; they never re-read the config, because
-    /// tiny-stack background threads must not run `Config::load`.
-    pub(crate) db_path: std::path::PathBuf,
+    /// The crab this window talks to, built once at startup from the ledger
+    /// path resolved before the window opens. Period fetches reuse it; they
+    /// never re-read the config, because tiny-stack background threads must
+    /// not run `Config::load`.
+    pub(crate) backend: crate::backend_glue::Backend,
     /// The hint ids the reader has hidden, read once at startup and appended
     /// to on each dismissal (#3121).
     ///
@@ -726,54 +727,49 @@ pub(crate) struct Dashboard {
     /// replays its last prepaint instead of rebuilding every row (#2933).
     pub(crate) rail_view: Entity<rail_view::RailView>,
     /// The instance strip: the crabs this window can look at, and which one it
-    /// is looking at. Read once when the window opens and after a pairing; the
-    /// health of each one is the probe loop's business, not the render's.
+    /// is looking at. Read once when the window opens; the health of each one
+    /// is the probe loop's business, not the render's.
     pub(crate) instances: instances::Instances,
-    /// Whether the rail is on at all (#3178). Read once from the config when
-    /// the window opens, because the mount and the probe loop are both decided
-    /// there: the settings row therefore carries the restart chip.
+    /// `[gui] instance_rail` (#3178): whether the crabs are listed, their
+    /// cards mounted and their dots probed. Read from this machine's config
+    /// when the window opens and on every reload, because it is a window
+    /// preference, never the held crab's.
     pub(crate) instance_rail: bool,
+    /// Whether the probe loop has been started. With the rail off at open the
+    /// loop is not spawned; the first switch on starts it, once.
+    pub(crate) instance_probing: bool,
     /// The strip drawn as a cached view, the same way the rail is (#2933): a
     /// keystroke in the composer replays its last prepaint instead of
     /// rebuilding every badge.
     pub(crate) instance_strip: Entity<instance_strip::InstanceStrip>,
-    /// The pairing form, and with it whether the form is open at all.
-    pub(crate) instance_pairing: Option<dashboard_instances::PairingForm>,
-    /// What the selected remote answered, or why it did not.
-    pub(crate) instance_remote: Option<dashboard_instances::RemoteView>,
-    /// The remote session being read, when one was opened. Its own field
-    /// rather than a variant of the view above, because the list and the
-    /// transcript arrive from two different calls.
-    pub(crate) remote_transcript: Option<dashboard_instances::RemoteTranscript>,
-    /// The remote composer's field. Kept apart from the local draft: the two go
-    /// to different machines and must not leak into each other. A real
-    /// `Editor`, built beside the chat's own, because the panel used to paint
-    /// spans and a fake caret and a remote question could not be edited,
-    /// selected or wrapped the way a local one can (#3133).
-    pub(crate) remote_editor: Entity<editor::Editor>,
-    /// Whether the remote panel is showing a conversation that has not started
-    /// yet (`/new` on an open crab). Nothing exists on the host until the first
-    /// message goes out, so the panel says so rather than asking for a pick
-    /// that has already been made (#3133).
-    pub(crate) remote_new: bool,
-    /// The last instance error, said in one line at the bottom of the strip's
-    /// column. `None` is the normal state.
+    /// Whether one of the strip's cards is up. The strip writes it, the
+    /// overlay stack reads it, so the card owns the keyboard (#3133).
+    pub(crate) instance_card: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The rail's list of crabs is unfolded under its logo (#3178). Only
+    /// ever true with `instance_rail` on.
+    pub(crate) crabs_open: bool,
+    /// The last instance error, drawn as one mark at the bottom of the strip.
+    /// `None` is the normal state.
     pub(crate) instance_error: Option<SharedString>,
-    /// Where the workspace mark's context menu was asked for, in window
-    /// coordinates. `None` is the normal state.
-    pub(crate) instance_menu_at: Option<gpui::Point<gpui::Pixels>>,
-    /// Which crab the open menu belongs to. `None` means the workspace mark's
-    /// menu (share / pair / settings); `Some(host_id)` is that badge's own,
-    /// which today holds the one row that forgets it. Same card, same press
-    /// point, so the two never need two overlays.
-    pub(crate) instance_menu_for: Option<String>,
-    /// The sharing card: a fresh single-use code and the QR that carries it,
-    /// minted when the mark's menu asked for one and dropped when it closes.
-    pub(crate) instance_share: Option<dashboard_instances::ShareView>,
-    /// The badge's mark editor: which crab, and the one field. `None` is the
-    /// normal state. Kept beside the pairing form because it is the same kind
-    /// of surface (a modal that owns the keyboard) for a one-character job.
-    pub(crate) instance_glyph: Option<dashboard_instances::GlyphForm>,
+    /// Moves on every swap of `backend`, so an answer that comes back for a
+    /// crab the window has left is dropped instead of painted.
+    pub(crate) instance_epoch: u64,
+    /// This process's own crab, the one the window started with. A pick on
+    /// the strip replaces `backend`; going home puts this one back.
+    pub(crate) home_backend: crate::backend_glue::Backend,
+    /// The crab whose layout and drafts the window holds right now: the host
+    /// id of a picked remote, `None` for this window's own crab. It trails the
+    /// strip's pick until the picked crab's rows arrive (`follow_crab`), so a
+    /// layout written in between still goes to the file of the crab on screen.
+    pub(crate) layout_crab: Option<String>,
+    /// The layout and drafts of every crab the window has left in this run,
+    /// so picking a crab and coming back puts the split and the half-typed
+    /// text back where they were.
+    pub(crate) crab_windows: layout_store::CrabWindows,
+    /// What the crab in `backend` answered to the handshake: the scopes this
+    /// window holds there and the operations it declares. `None` until it
+    /// answers, which greys nothing out.
+    pub(crate) hello: Option<opencrabs::backend::hello::HelloReply>,
     /// The composer and the queue: the field the user types in, the drafts kept
     /// per conversation, the messages waiting behind the turn, and the flags
     /// the hint and the spinner read. One value, so the chat leaf inherits one
@@ -829,6 +825,13 @@ pub(crate) struct Dashboard {
     /// used to print the launch directory and a branch read once at startup,
     /// so a `/cd` moved the session and left the footer naming the old place.
     pub(crate) footer_dir: Option<FooterPlace>,
+    /// The event stream of the remote conversation on screen, opened by
+    /// [`Dashboard::sync_remote_watch`]. Without it a remote crab's turn
+    /// streams nothing and its facts (model, directory) are never read.
+    pub(crate) remote_watch: Option<crate::dashboard_instances::RemoteWatch>,
+    /// A remote crab's tool approvals waiting on the user, by session. Never
+    /// filled while the window holds the crab on this machine.
+    pub(crate) approvals: crate::remote_approval::Approvals,
 }
 
 /// Who asked for a send.

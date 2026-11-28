@@ -30,7 +30,7 @@ impl Dashboard {
         display_text: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: key it to the session it finished on, so it
             // resumes when the stack is ready (#2629).
             agent_bridge::queue_push(
@@ -38,7 +38,7 @@ impl Dashboard {
                 agent_bridge::PendingMessage::system(context_text, display_text),
             );
             return;
-        };
+        }
         self.turn.live.begin(display_text.clone());
         // A new turn re-arms the follow, the terminal's own rule (#2698).
         self.rearm_transcript_follow();
@@ -49,7 +49,7 @@ impl Dashboard {
         self.turn.cancel = Some(cancel.clone());
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session_id,
             context_text,
             Some(display_text.clone()),
@@ -60,7 +60,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session_id, attached);
         }
         cx.notify();
     }
@@ -104,7 +104,7 @@ impl Dashboard {
         display_text: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: key it to the session it finished on, so it
             // resumes when the stack is ready (#2629).
             agent_bridge::queue_push(
@@ -112,7 +112,7 @@ impl Dashboard {
                 agent_bridge::PendingMessage::system(context_text, display_text),
             );
             return;
-        };
+        }
         let mut live = transcript::LiveTurn::default();
         live.begin(display_text.clone());
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -124,7 +124,7 @@ impl Dashboard {
         );
         let attached = editor::marker_paths(&context_text);
         agent_bridge::spawn_turn(
-            bridge.service.clone(),
+            self.backend.clone(),
             session_id,
             context_text,
             Some(display_text.clone()),
@@ -135,7 +135,7 @@ impl Dashboard {
             cancel,
         );
         if !attached.is_empty() {
-            agent_bridge::spawn_track_files(self.db_path.clone(), session_id, attached);
+            agent_bridge::spawn_track_files(self.backend.clone(), session_id, attached);
         }
         // The rail says the session is working from the first frame, the same
         // signal a visible turn gives (#2666, #2636).
@@ -192,9 +192,9 @@ impl Dashboard {
         if !self.hint_dismissed.iter().any(|id| id == hint_id) {
             self.hint_dismissed.push(hint_id.to_string());
         }
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         let hint_id = hint_id.to_string();
-        crate::hint_dismiss::dismiss(db_path, hint_id);
+        crate::hint_dismiss::dismiss(backend, hint_id);
         cx.notify();
     }
 
@@ -362,12 +362,12 @@ impl Dashboard {
         if waiting.is_empty() {
             return;
         }
-        let Some(bridge) = agent_bridge::bridge() else {
+        if agent_bridge::bridge().is_none() {
             // Still booting: keep the text. Clearing it here dropped whatever
             // the user typed whenever the window polled before the stack came
             // up (#2629).
             return;
-        };
+        }
         // No open conversation: keep the queue and open one. The queue drains
         // again when that session lands (`SessionCreated`).
         let Some(sid) = self.chat_session else {
@@ -393,7 +393,7 @@ impl Dashboard {
             self.turn.cancel = Some(cancel.clone());
             let attached = editor::marker_paths(&joined.context_text);
             agent_bridge::spawn_turn(
-                bridge.service.clone(),
+                self.backend.clone(),
                 sid,
                 joined.context_text,
                 Some(joined.display_text),
@@ -403,7 +403,7 @@ impl Dashboard {
                 cancel,
             );
             if !attached.is_empty() {
-                agent_bridge::spawn_track_files(self.db_path.clone(), sid, attached);
+                agent_bridge::spawn_track_files(self.backend.clone(), sid, attached);
             }
         }
         cx.notify();
@@ -423,21 +423,12 @@ impl Dashboard {
         // reading it here started each new conversation on a provider the
         // user had already switched away from (#2643).
         let active = self.focused_pane();
-        let (provider, model) = match agent_bridge::bridge() {
-            Some(b) => match active {
-                Some(sid) => (
-                    Some(b.service.provider_name_for_session(sid)),
-                    Some(b.service.provider_model_for_session(sid)),
-                ),
-                None => (
-                    Some(b.service.provider_name()),
-                    Some(b.service.provider_model()),
-                ),
-            },
+        let (provider, model) = match self.backend.facts(active) {
+            Some(facts) => (Some(facts.provider), Some(facts.model)),
             None => (None, None),
         };
         agent_bridge::spawn_create_session(
-            self.db_path.clone(),
+            self.backend.clone(),
             self.sink.clone(),
             provider,
             model,
@@ -454,9 +445,9 @@ impl Dashboard {
     /// write, and the refetch replaces the guess with what was stored.
     pub(crate) fn toggle_favorite(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let pinned = self.sessions.is_favorite(id);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_favorite(db_path, id, !pinned).await {
+            if let Err(e) = sessions::set_favorite(backend, id, !pinned).await {
                 logging::error(&format!("favorite {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("favorite: {e}"));
@@ -489,9 +480,10 @@ impl Dashboard {
         after: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_topics(db_path.clone(), id, true).await {
+            if let Err(e) = sessions::set_topics(backend.clone(), id, true).await {
                 logging::error(&format!("enable topics {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("enable topics: {e}"));
@@ -500,8 +492,13 @@ impl Dashboard {
                 .ok();
                 return;
             }
-            let result = sessions::load_topics(db_path).await;
+            let result = sessions::load_topics(backend).await;
             this.update(cx, |this, cx| {
+                // A swap while the flag was out: the read-back and the
+                // conversation `after` would open are the crab's it left.
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match result {
                     Ok(ids) => {
                         this.sessions.topics = ids.into_iter().collect();
@@ -539,9 +536,9 @@ impl Dashboard {
         let open_was_topic = self
             .chat_session
             .is_some_and(|open| self.sessions.parents.get(&open) == Some(&id));
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(
-            async move |this, cx| match sessions::merge_topics(db_path, id).await {
+            async move |this, cx| match sessions::merge_topics(backend, id).await {
                 Ok(folded) => {
                     this.update(cx, |this, cx| {
                         logging::info(&format!("topics disabled on {id}: folded {folded}"));
@@ -570,11 +567,18 @@ impl Dashboard {
 
     /// Re-read the pinned ids. A separate fetch from the rows because the
     /// sidecar can change on its own (the TUI pins too).
+    ///
+    /// The pins are the crab's the read went to, so a swap while it was out
+    /// drops them.
     pub(crate) fn refresh_favorites(&mut self, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
+        let epoch = self.instance_epoch;
         cx.spawn(async move |this, cx| {
-            let result = sessions::load_favorites(db_path).await;
+            let result = sessions::load_favorites(backend).await;
             this.update(cx, |this, cx| {
+                if this.instance_epoch != epoch {
+                    return;
+                }
                 match result {
                     Ok(ids) => this.sessions.favorites = ids.into_iter().collect(),
                     Err(e) => logging::error(&format!("favorites refresh: {e}")),
@@ -603,8 +607,24 @@ impl Dashboard {
     ) {
         match target {
             opencrabs::ui_core::links::ClickTarget::File(path) => self.open_preview(path, cx),
+            // A remote crab's transcript is not trusted by this machine: the
+            // opener only gets what `openable_url` answers (any link of the
+            // local crab, as before; a remote crab's http, https or mailto),
+            // and a refused link is said in the reader instead.
             opencrabs::ui_core::links::ClickTarget::Url(url) => {
-                preview::launch(&preview::url_command(&url));
+                match self.backend.openable_url(&url) {
+                    Ok(_) => preview::launch(&preview::url_command(&url)),
+                    Err(notice) => {
+                        logging::warn(&format!("transcript link: {notice}: {url}"));
+                        let shown = url.replace('`', "");
+                        self.open_message_preview(
+                            Uuid::nil(),
+                            "link not opened".to_string(),
+                            format!("{notice}\n\n`{shown}`"),
+                            cx,
+                        );
+                    }
+                }
             }
         }
     }
@@ -624,6 +644,7 @@ impl Dashboard {
         // before. Document bytes and Markdown parsing use the async path below.
         self.preview_video = if open.kind == preview::PreviewKind::Video {
             Some(preview::VideoFacts::probe(
+                &self.backend,
                 &opencrabs::config::opencrabs_home(),
                 &open.path,
             ))
@@ -644,8 +665,12 @@ impl Dashboard {
         cx.notify();
 
         if let Some(kind) = document_kind {
+            // The document is read where `localize` says it is on this
+            // machine: the local crab's own path, or a remote crab's kept
+            // copy (asked for when there is none yet), never the crab's path
+            // read off this disk.
+            let load_path = self.backend.localize(&path);
             cx.spawn(async move |this, cx| {
-                let load_path = path.clone();
                 let result = cx
                     .background_executor()
                     .spawn(async move { preview_document::parse(&load_path, kind) })
@@ -695,6 +720,7 @@ impl Dashboard {
         self.preview_video = None;
         self.preview_zoom = 1.0;
         let path = self.prompt_docs.get(&id).cloned();
+        let path = path.map(|path| self.backend.localize(&path));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let parsed = cx
@@ -744,25 +770,50 @@ impl Dashboard {
         let actions = if open.kind == preview::PreviewKind::Message {
             None
         } else {
-            let path = open.path.clone();
-            let open_file = {
-                let path = path.clone();
-                cx.listener(move |_this, _ev, _window, _cx| {
-                    preview::launch(&preview::open_command(&path));
-                })
+            // A crab on another machine is not trusted by this one: the
+            // system opener only ever gets what `openable` answers (the
+            // local crab's own path, or a remote crab's kept copy of a kind
+            // that is shown rather than run). Reveal shows the folder of the
+            // path the window holds here, which for a remote crab is its
+            // cache directory, never a place the crab named.
+            let target = self.backend.openable(&open.path);
+            let exists = self.backend.localize(&open.path).exists();
+            let refused = match &target {
+                Err(notice) if exists => Some(*notice),
+                _ => None,
             };
+            let open_file = cx.listener(move |_this, _ev, _window, _cx| match &target {
+                Ok(path) => preview::launch(&preview::open_command(path)),
+                Err(notice) => logging::warn(&format!("preview: {notice}")),
+            });
             let reveal_file = {
-                let path = path.clone();
+                let path = self.backend.revealable(&open.path);
                 cx.listener(move |_this, _ev, _window, _cx| {
                     preview::launch(&preview::reveal_command(&path));
                 })
             };
-            Some(preview::actions_row(
+            let row = preview::actions_row(
                 open.open_label(),
-                open.path.exists(),
+                exists && refused.is_none(),
                 open_file,
                 reveal_file,
-            ))
+            );
+            Some(match refused {
+                Some(notice) => div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(palette::current().text_muted))
+                            .child(notice),
+                    )
+                    .child(row)
+                    .into_any_element(),
+                None => row,
+            })
         };
         let wheel = cx.listener(|this, ev: &ScrollWheelEvent, _window, cx| {
             let lines = match ev.delta {
@@ -788,6 +839,7 @@ impl Dashboard {
                 height: document_height,
             });
         preview::body(
+            &self.backend,
             open,
             actions,
             self.preview_zoom,
@@ -802,7 +854,7 @@ impl Dashboard {
     /// ledger. The row disappears because the row is gone, not because a
     /// local list was filtered.
     pub(crate) fn delete_session(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        agent_bridge::spawn_delete_session(self.db_path.clone(), id, self.sink.clone());
+        agent_bridge::spawn_delete_session(self.backend.clone(), id, self.sink.clone());
         // A deleted conversation must not keep a draft waiting for a composer
         // it can never reach. Its pane's editor leaves with the conversation.
         self.composer.drafts.remove(id);
@@ -844,9 +896,9 @@ impl Dashboard {
     /// Load the info panel for a session. The panel is read-only: it shows
     /// the id, the parent, the created time, and the message count.
     pub(crate) fn open_topic_info(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(
-            async move |this, cx| match sessions::load_topic_info(db_path, id).await {
+            async move |this, cx| match sessions::load_topic_info(backend, id).await {
                 Ok(Some(info)) => {
                     this.update(cx, |this, cx| {
                         this.topic_info = Some(info);
@@ -874,9 +926,9 @@ impl Dashboard {
     /// what was actually written.
     pub(crate) fn toggle_closed_topic(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let closed = self.sessions.is_closed(id);
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = sessions::set_closed(db_path, id, !closed).await {
+            if let Err(e) = sessions::set_closed(backend, id, !closed).await {
                 logging::error(&format!("close topic {id}: {e}"));
                 this.update(cx, |this, cx| {
                     this.turn.live.notices.push(format!("close topic: {e}"));

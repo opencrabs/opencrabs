@@ -1,0 +1,508 @@
+name: Fork remote-backend lane
+
+# Fork-only. The remote-backend branches have no CI of their own: ci.yml runs
+# on pull requests, pushes to main and dispatch, and nobody compiles this
+# crate on the laptop that writes it. This lane is that compiler. It never
+# reaches upstream main.
+#
+# Six jobs, no `needs` between them, so a type error is read off `check`
+# minutes before the test and build jobs finish. Cache keys follow the build
+# profiles (dev for check + clippy, citest for test + lib-suite, ci for the
+# build), one key per profile: clippy and lib-suite ride their sibling job's
+# compiled dependencies restore-only, and only the integration branch saves,
+# because a cache is only restorable from the branch it was saved on or the
+# repository default branch. Feature branches restore from it and never write,
+# or each branch's writes would evict the shared pool at the 10 GB repo cap.
+
+on:
+  push:
+    branches: ['feat/**', 'rb/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-remote-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  seam:
+    name: seam (ratchets + fmt)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+
+      # R1 to R7 on the GUI/backend seam. The self-test plants a violation
+      # per rule first, so a rule that stopped matching cannot pass green.
+      # Package branches (rb/*) may drop counts below the global baseline:
+      # they close doors only in their own files, the baseline comes down at
+      # the merge into the integration branch, which stays strict.
+      - name: Backend seam ratchet
+        run: |
+          python3 scripts/check-backend-seam.py --self-test
+          case "$GITHUB_REF_NAME" in
+            rb/*) python3 scripts/check-backend-seam.py --allow-below ;;
+            *) python3 scripts/check-backend-seam.py ;;
+          esac
+
+      - name: Format
+        run: cargo fmt --check
+
+  check:
+    name: check (lib, bins, tests; gui)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    # 60 was measured too tight: run 45161017128 reached the cap at exactly
+    # 60 min (10:59:21Z -> 11:59:35Z) with the check step still going, and a
+    # cancelled job never runs its post step, so its cache was never saved and
+    # the next lane paid the same cold compile. Only the first cold run is
+    # expensive; 180 leaves real headroom instead of guessing again.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # `shared-key` reproduces the segment this job's key always had
+          # (key + GITHUB_JOB), so the existing warm entry stays a full match.
+          # The lint job uses the same shared key: clippy runs the deps
+          # through plain rustc, so the check job's compiled dependencies are
+          # exactly what it needs, and lint's own artifacts change with the
+          # workspace anyway. Only check saves; the key is never written twice.
+          shared-key: fork-rb-check-check
+          cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # A locked dpkg (unattended-upgrades on the runner) held this step for
+          # 135 min on run 45165005854 until the job cap killed it. Wait for the
+          # lock, bound the network, and retry: the runner is not ours to fix.
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # Types and borrows of the library, both binaries and every test target,
+      # with no codegen and no link. This is the job to read first.
+      - name: Check
+        run: cargo check --locked --tests --features gui
+
+  lint:
+    name: lint (clippy + byte-slice ratchet)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    # 90 was measured too tight: run 45165005854 reached the cap at exactly
+    # 90 min (11:25:04Z -> 12:55:20Z) with clippy still going on a cold target
+    # dir, and a cancelled job saves no cache.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+          # clippy is not part of the default profile; without it the ratchet
+          # dies with "no such command: clippy" instead of linting.
+          components: clippy
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Same key as check (see that step): restore-only, so clippy rides
+          # the compiled dependency tree instead of paying for its own copy.
+          shared-key: fork-rb-check-check
+          cache-on-failure: true
+          save-if: false
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          # Same hardening as the check job: a locked dpkg must not burn the cap.
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # The touch is not cosmetic: on a restored cargo cache every unit is
+      # fresh, clippy emits nothing, and the ratchet would pass without
+      # checking. Touching our own crate keeps dependencies cached and the
+      # check real (see scripts/check-byte-slice-ratchet.py).
+      - name: Clippy, with the byte-slice ratchet
+        run: |
+          touch src/lib.rs
+          python3 scripts/check-byte-slice-ratchet.py
+
+  test:
+    name: test (citest; backend, a2a, remote, window)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    # Two cold citest compiles in series at one unit at a time: the library
+    # slices took 49 min and the window binary 57 min in run 45142864215,
+    # which the old 120 min cap cut off before the window tests ran.
+    timeout-minutes: 240
+    env:
+      # Same arrangement as the test-linux leg of ci.yml: clang drives mold.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # The citest note below: two concurrent units of this crate
+      # evict the 16 GB runner. One unit at a time, each fanning its codegen
+      # across every core.
+      CARGO_BUILD_JOBS: 1
+      # Upstream dropped `[profile.citest]` from Cargo.toml (2c1b0971c, #2934):
+      # on its runners `ci` measured faster. This lane's slices were tuned on
+      # it, so the fork defines the same profile here, in cargo's own config,
+      # instead of carrying a Cargo.toml hunk upstream removed on purpose.
+      CARGO_PROFILE_CITEST_INHERITS: dev
+      CARGO_PROFILE_CITEST_OPT_LEVEL: "1"
+      CARGO_PROFILE_CITEST_DEBUG: "0"
+      CARGO_PROFILE_CITEST_CODEGEN_UNITS: "256"
+      CARGO_PROFILE_CITEST_LTO: "false"
+      CARGO_PROFILE_CITEST_DEBUG_ASSERTIONS: "false"
+      CARGO_PROFILE_CITEST_OVERFLOW_CHECKS: "false"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # v2: the v1 entry was saved before the window step ever finished,
+          # and a full key match never saves again, so the gui dependencies
+          # were rebuilt cold on every run.
+          key: fork-rb-test-v2
+          cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Install mold + ALSA + X11 dev
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # One library compile, one filter per module, so a red test names the
+      # module it belongs to.
+      #
+      # A filter that matches nothing is a GREEN cargo run with zero tests
+      # behind it, so every module is judged on its own and a zero-match is a
+      # FAILURE. The one exception is `backend::`: the module does not exist
+      # until it is carved out, so while `src/backend` is absent its
+      # zero-match is a warning. Once the directory exists, a zero-match there
+      # fails like any other.
+      #
+      # Most library tests do not live inside their module: they sit in
+      # `src/tests/<module>_*_test.rs`, so their paths are
+      # `tests::remote_routes_test::...`, which `remote::` never matches. Each
+      # module therefore runs with two filters (libtest ORs them): `<m>::` for
+      # the in-module tests and `tests::<m>_` for the central ones.
+      #
+      # `src/gui/` is a separate binary, so there is no `gui::` filter here:
+      # `--lib gui::` matches nothing and exits 0. The window has its own step.
+      - name: Test the library modules
+        run: |
+          status=0
+          for m in backend a2a remote; do
+            set +e
+            out=$(cargo test --locked --profile citest --lib -- "${m}::" "tests::${m}_" 2>&1)
+            rc=$?
+            set -e
+            n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+            if [ $rc -ne 0 ]; then
+              echo "::error::library slice FAILS (rc=$rc): ${m}:: + tests::${m}_"
+              printf '%s\n' "$out" | tail -40
+              status=1
+            elif [ -z "$n" ] || [ "$n" -eq 0 ]; then
+              if [ "$m" = "backend" ] && ! test -d src/backend; then
+                echo "::warning::library slice ZERO-MATCH: ${m}:: + tests::${m}_ (src/backend does not exist yet)"
+              else
+                echo "::error::library slice ZERO-MATCH: ${m}:: + tests::${m}_ names no tests (renamed?)"
+                status=1
+              fi
+            else
+              echo "library slice PASS: ${m}:: + tests::${m}_ ($n tests)"
+            fi
+          done
+          exit $status
+
+      # The parity harness is the proof that one operation gives one answer
+      # through two doors: the local one and the remote one. It runs inside
+      # the `backend::` slice above, but that step captures the cargo output
+      # into a variable and prints only the count, so the harness itself
+      # never appears by name in this job's log. A harness that stopped
+      # matching would be a green run with zero parity tests behind it, so
+      # this step names every test it finds and a zero-match is a failure.
+      #
+      # The compile is already done by the slice above (same profile, same
+      # target dir), so this is a re-run of the binary, not a second build.
+      - name: The parity harness, by name
+        run: |
+          set +e
+          out=$(cargo test --locked --profile citest --lib -- backend::parity::tests 2>&1)
+          rc=$?
+          set -e
+          n=$(printf '%s\n' "$out" | sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' | head -n1)
+          printf '%s\n' "$out" | grep -E '^test backend::parity::tests::' || true
+          if [ $rc -ne 0 ]; then
+            echo "::error::parity harness FAILS (rc=$rc)"
+            printf '%s\n' "$out" | tail -40
+            exit 1
+          fi
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::parity harness ZERO-MATCH: backend::parity::tests names no test (renamed?)"
+            exit 1
+          fi
+          echo "parity harness PASS: backend::parity::tests ($n tests)"
+
+      # `mod tests;` sits at the root of the bin crate (`src/gui/main.rs`), so
+      # the test paths are `tests::<module>::...`. The module list is READ
+      # from `src/gui/tests/mod.rs`, so a new module is covered by the act of
+      # declaring it, and a module that lists no tests is a hard failure
+      # instead of a silent pass.
+      - name: Test every window test module
+        run: |
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui --no-run
+
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui -- --list > /tmp/window-tests.txt 2>&1 || {
+              echo "::error::the window test binary will not list its tests"
+              tail -25 /tmp/window-tests.txt
+              exit 1
+            }
+
+          status=0
+          n_mods=0
+          for m in $(sed -n 's/^mod \([a-z0-9_]*\);/\1/p' src/gui/tests/mod.rs); do
+            n_mods=$((n_mods + 1))
+            if ! grep -q "^tests::${m}::" /tmp/window-tests.txt; then
+              echo "::error::window module ZERO-MATCH: tests::${m} declares no tests (renamed? gated out?)"
+              status=1
+            fi
+          done
+          if [ "$n_mods" -eq 0 ]; then
+            echo "::error::no test modules were found in src/gui/tests/mod.rs; the sed no longer matches the file"
+            exit 1
+          fi
+          echo "window modules found: $n_mods"
+
+          cargo test --locked --profile citest --features gui \
+            --bin opencrabs-gui -- tests::
+          exit $status
+
+  # The `test` job runs three slices, because a red test should name its
+  # module. Three slices are not the library: src/tests/mod.rs declares 1340
+  # modules and the other 1337 never ran here.
+  #
+  # That is not hypothetical, it is how #3152 was almost lost. The fix shipped
+  # with a regression test in src/tests/format_user_error_test.rs, whose path
+  # is tests::format_user_error_test::..., which no slice filter matches: the
+  # lane went green without ever executing it. Upstream CI does run it, because
+  # ci.yml runs the whole suite with --all-features, so the test was covered by
+  # the layer above rather than by this lane. A lane that cannot say "no test
+  # ran" is not a gate.
+  #
+  # So this job runs the entire default-feature library suite in one
+  # invocation. One invocation and not one per module, for two reasons:
+  # ci.yml records that timing-sensitive tests (rate_limiter pacing) rely on
+  # cargo test's own threadpool, and 1340 processes would each pay startup.
+  #
+  # A separate job and not a step in `test`, measured: the slices spend 94 min
+  # (almost all of it the cold compile of the lib test binary) and the window
+  # step 76 min, so a third step of ~55 min would land on ~232 of the 240 min
+  # cap. That is luck, not headroom, and a cancelled job saves no cache, so the
+  # next lane pays the cold compile again. In parallel it costs one extra cold
+  # compile of runner minutes, which are unlimited on a public fork, and no
+  # wall clock at all.
+  #
+  # The slices are kept: they are the attribution, and this job is the
+  # coverage. Neither replaces the other.
+  lib-suite:
+    name: lib-suite (every module in src/tests)
+    if: github.repository != 'opencrabs/opencrabs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      # Same arrangement as the `test` job: clang drives mold.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # Two concurrent units of this crate evict the 16 GB runner.
+      CARGO_BUILD_JOBS: 1
+      # Upstream dropped `[profile.citest]` from Cargo.toml (2c1b0971c, #2934):
+      # on its runners `ci` measured faster. This lane's slices were tuned on
+      # it, so the fork defines the same profile here, in cargo's own config,
+      # instead of carrying a Cargo.toml hunk upstream removed on purpose.
+      CARGO_PROFILE_CITEST_INHERITS: dev
+      CARGO_PROFILE_CITEST_OPT_LEVEL: "1"
+      CARGO_PROFILE_CITEST_DEBUG: "0"
+      CARGO_PROFILE_CITEST_CODEGEN_UNITS: "256"
+      CARGO_PROFILE_CITEST_LTO: "false"
+      CARGO_PROFILE_CITEST_DEBUG_ASSERTIONS: "false"
+      CARGO_PROFILE_CITEST_OVERFLOW_CHECKS: "false"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Same cache entry as the `test` job, not its own. Measured on the
+          # fork (gh api repos/loonix/opencrabs/actions/caches): this job's own
+          # entry was v0-rust-fork-rb-libsuite-v1-lib-suite-Linux-x64-75856716-
+          # 978feb66 (1224 MB), a strict subset of the test job's
+          # v0-rust-fork-rb-test-v2-test-Linux-x64-75856716-978feb66 (2107 MB):
+          # same profile (citest), same env hash (identical env block), same
+          # lock hash (same Cargo.lock), only the GITHUB_JOB segment differed.
+          # rust-cache v2 composes the key as prefix + (shared-key OR key+job)
+          # + os/arch + env-hash + lock-hash, so `shared-key` here replaces
+          # `key + GITHUB_JOB` and lands this job on test's exact key: a FULL
+          # match restore (no pre-clean) of the 2.1 GB citest target instead of
+          # downloading and keeping a second 1.2 GB copy of a subset of it.
+          #
+          # The old "its own key" note feared the two jobs evicting each
+          # other's units. That race only exists when both jobs WRITE the same
+          # key. `save-if: false` removes it at the source: lib-suite's dep set
+          # is a subset of test's (default features only, no gui), so test
+          # stays the only writer and this job never saves. One entry instead
+          # of two also frees 1.2 GB of the 10 GB repo cache budget, which is
+          # eviction pressure that turns warm branches cold.
+          shared-key: fork-rb-test-v2-test
+          save-if: false
+          cache-on-failure: true
+
+      - name: Install mold + ALSA + X11 dev
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y mold clang libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # Wrapped in the stall watchdog: before it, a blocked test thread showed
+      # up as the runner killing the job at the cap with no stacks (#1936). The
+      # watchdog leaves the compile alone (its stall clock starts at the first
+      # result line) and exits 97 on a stall, so a hang names itself in
+      # minutes instead of at the wall.
+      - name: Every library test
+        shell: bash
+        run: |
+          set -uo pipefail
+          bash scripts/test-stall-watchdog.sh \
+            cargo test --locked --profile citest --lib 2>&1 | tee /tmp/lib-suite.log
+          rc=${PIPESTATUS[0]}
+          n=$(sed -n 's/^test result: [a-z]*\. \([0-9]*\) passed.*/\1/p' /tmp/lib-suite.log | head -n1)
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::the library suite fails (rc=$rc)"
+            tail -40 /tmp/lib-suite.log
+            exit 1
+          fi
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::the library suite reported no tests at all: the profile or the target is wrong, not the code"
+            tail -40 /tmp/lib-suite.log
+            exit 1
+          fi
+          echo "library suite PASS: $n tests passed (every module in src/tests, not only the rail slices)"
+
+  build:
+    name: build (opencrabs + opencrabs-gui)
+    if: github.repository != 'opencrabs/opencrabs'
+    # Pinned for the glibc floor (2.39), same reason as prerelease.yml (#2206).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.98.1
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: fork-rb-build
+          cache-on-failure: true
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          apt_get() {
+            sudo apt-get -o DPkg::Lock::Timeout=900 -o Acquire::http::Timeout=30 -o Acquire::Retries=3 "$@"
+          }
+          apt_get update
+          for attempt in 1 2 3; do
+            apt_get install -y libasound2-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev && break
+            echo "apt install failed (attempt $attempt); retrying in 30s"
+            sleep 30
+          done
+
+      # Two builds, not one. The `gui` feature is not inert for the daemon:
+      # `compiled_features()` in src/brain/prompt_builder.rs lists it in the
+      # "Built-in features" line of the system prompt, and src/ui_core plus
+      # src/channels/voice compile extra modules under it. A daemon built with
+      # `--features gui` is a different program from the one users run.
+      - name: Build daemon
+        run: cargo build --locked --profile ci --bin opencrabs
+
+      - name: Build GUI
+        run: cargo build --locked --profile ci --features gui --bin opencrabs-gui
+
+      - name: Record what was built
+        run: |
+          git rev-parse HEAD > target/ci/SOURCE-COMMIT.txt
+          sha256sum target/ci/opencrabs target/ci/opencrabs-gui | tee target/ci/opencrabs-gui.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opencrabs-linux-amd64
+          path: |
+            target/ci/opencrabs
+            target/ci/opencrabs-gui
+            target/ci/opencrabs-gui.sha256
+            target/ci/SOURCE-COMMIT.txt
+          retention-days: 7

@@ -2119,6 +2119,9 @@ async fn cmd_chat_inner(
     // Spawn A2A gateway if configured
     let a2a_ready = if config.a2a.enabled {
         let a2a_agent = channel_factory.create_agent_service().await;
+        // The gateway's `gui/*` door runs against the process's primary crab;
+        // without this a daemon answers every `gui/call` with `NotReady`.
+        crate::services::surface::adopt_gateway_service(config, db.pool(), &a2a_agent);
         let a2a_ctx = service_context.clone();
         let a2a_config = config.a2a.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

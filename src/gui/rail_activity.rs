@@ -216,6 +216,25 @@ pub struct SeenPlans {
     seen: HashMap<Uuid, u64>,
 }
 
+/// Where the read marks of one crab's plans are kept.
+///
+/// `None` is the window's own crab and keeps the `rail_seen.json` it always
+/// had. A remote crab's plans are its own, so its marks get a file of their own
+/// beside it, named the way its layout file is.
+pub fn seen_path_for(crab: Option<&str>) -> PathBuf {
+    let home = opencrabs::config::opencrabs_home();
+    match crab {
+        None => home.join("rail_seen.json"),
+        Some(id) => {
+            let layout = crate::layout_store::file_for(id);
+            let slug = layout
+                .strip_prefix("gui_layout.")
+                .unwrap_or(layout.as_str());
+            home.join(format!("rail_seen.{slug}"))
+        }
+    }
+}
+
 impl SeenPlans {
     /// Load from `path`, or hold nothing when there is no file yet. An
     /// unreadable or stale file is treated as empty: a lost "seen" mark costs

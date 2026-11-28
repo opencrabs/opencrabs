@@ -415,9 +415,21 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// A completed message as the editor hands it over: the text that goes on
+/// the wire and the files this send attached (the chips and a pasted image).
+///
+/// `files` is the only list of files to carry. The text is not read for
+/// paths: a quoted reply is the crab's own words, and a marker planted there
+/// must never make this machine read the file it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub text: String,
+    pub files: Vec<PathBuf>,
+}
+
 /// What the editor tells the window: a completed message ready to send.
 pub enum EditorEvent {
-    Sent(String),
+    Sent(Outgoing),
     /// A chip's thumbnail was clicked. The editor does not own a preview
     /// overlay, so it hands the path to whoever does instead of opening one.
     Preview(std::path::PathBuf),
@@ -644,8 +656,13 @@ pub struct Editor {
 pub(crate) struct VoiceDraft {
     /// What the microphone carried.
     pub(crate) text: String,
-    /// The saved clip the marker on the sent row points at.
+    /// The window's copy of the clip, what the preview plays: the crab's
+    /// own path for this process's crab, the blob cache's copy for one on
+    /// another machine.
     pub(crate) clip: PathBuf,
+    /// The clip as the crab kept it, the path the marker on the sent row
+    /// points at, so the crab's ledger only ever names its own disk.
+    pub(crate) on_crab: PathBuf,
     /// How long the take ran, for the preview's own line.
     pub(crate) seconds: f32,
     /// The take's own peaks, so the preview draws the shape that was recorded
@@ -1212,12 +1229,13 @@ impl Editor {
         crate::logging::info(&format!(
             "voice capture: previewing {} character(s) with {} ({:.1}s)",
             spoken.text.chars().count(),
-            clip.display(),
+            clip.on_crab.display(),
             spoken.seconds,
         ));
         self.voice_draft = Some(VoiceDraft {
             text: spoken.text,
-            clip,
+            clip: clip.here,
+            on_crab: clip.on_crab,
             seconds: spoken.seconds,
             levels,
         });
@@ -2045,7 +2063,10 @@ impl Editor {
         if let Some(name) = picked {
             self.remember(&name);
             self.clear_after_send(cx);
-            cx.emit(EditorEvent::Sent(name));
+            cx.emit(EditorEvent::Sent(Outgoing {
+                text: name,
+                files: Vec::new(),
+            }));
             return;
         }
         let text = self.content.trim().to_string();
@@ -2057,6 +2078,9 @@ impl Editor {
         if text.is_empty() && attachments.is_empty() && voice.is_none() {
             return;
         }
+        // The files this send carries come from the chips, never from the
+        // payload: the reply's quote below is the crab's text (P8).
+        let files: Vec<PathBuf> = attachments.iter().map(|a| a.path.clone()).collect();
         let mut payload = self.payload_with_reply(&text, &attachments);
         if let Some(draft) = voice {
             // The clip goes out as the same marker a recorded take always has,
@@ -2067,16 +2091,30 @@ impl Editor {
             }
             payload.push_str(&draft.text);
             payload.push(' ');
-            payload.push_str(&format!("<<AUD:{}>>", draft.clip.display()));
+            payload.push_str(&format!("<<AUD:{}>>", draft.on_crab.display()));
             crate::logging::info(&format!(
                 "voice capture: sent {:.1}s take, {}",
                 draft.seconds,
-                draft.clip.display(),
+                draft.on_crab.display(),
             ));
         }
         self.remember(&text);
         self.clear_after_send(cx);
-        cx.emit(EditorEvent::Sent(payload));
+        cx.emit(EditorEvent::Sent(Outgoing {
+            text: payload,
+            files,
+        }));
+    }
+
+    /// A send the crab could not take comes back (P8): its words in the field
+    /// when the field is still empty, its files back on their chips, and the
+    /// reason on the notice line. Nothing of it reached the crab.
+    pub fn give_back(&mut self, unsent: Outgoing, reason: String, cx: &mut Context<Self>) {
+        if self.content.trim().is_empty() {
+            self.restore_draft(strip_markers(&unsent.text).into_owned(), cx);
+        }
+        self.attach_paths(unsent.files);
+        self.show_notice(reason, cx);
     }
 
     /// The payload one send puts on the wire (#2827): the reply's quote, then

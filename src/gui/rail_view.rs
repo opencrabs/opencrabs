@@ -79,6 +79,18 @@ pub(crate) struct RailFrame {
     /// The filter menu's state (#2719, #2787).
     pub(crate) filter: sessions::RailFilter,
     pub(crate) filter_open: bool,
+    /// The crabs listed under the logo (#3178). `None` is `[gui]
+    /// instance_rail` off: the rail mounts nothing new, not even the arrow.
+    pub(crate) crabs: Option<CrabsFrame>,
+}
+
+/// The rail's list of crabs: this machine's own and every paired one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CrabsFrame {
+    /// The logo was clicked and the list is unfolded.
+    pub(crate) open: bool,
+    /// The crabs, the pick and the last error, as the window resolved them.
+    pub(crate) list: crate::instance_strip::StripFrame,
 }
 
 /// One card in the rail.
@@ -241,6 +253,200 @@ impl Link {
     }
 }
 
+/// The size of a crab's square in the rail's list, in rems.
+const CRAB_MARK_REM: f32 = 1.25;
+
+impl RailView {
+    /// The logo, made the door to the crabs (#3178): a click folds or
+    /// unfolds the list, and the arrow beside it says which way it goes.
+    fn crabs_toggle(&self, open: bool, cx: &mut Context<Self>) -> AnyElement {
+        let pal = palette::current();
+        let link = self.dashboard.clone();
+        let click = cx.listener(move |_rail, _ev: &ClickEvent, _window, cx| {
+            link.act(cx, |dash, cx| dash.toggle_crab_list(cx));
+        });
+        header_button(
+            "rail-crabs-toggle",
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_0p5()
+                .child(crate::icon::banner_logo())
+                .child(
+                    div()
+                        .text_size(rems(0.625))
+                        .text_color(rgb(pal.text_muted))
+                        .child(SharedString::from(if open {
+                            "\u{25be}"
+                        } else {
+                            "\u{25b8}"
+                        })),
+                ),
+        )
+        .on_click(click)
+        .into_any_element()
+    }
+
+    /// The unfolded list: this machine's crab, every paired one in the
+    /// store's order, the last error, and "emparelhar um crab". A click opens
+    /// a crab, a right-click its own card (abrir, esquecer, nova morada).
+    fn crabs_list(&self, crabs: &CrabsFrame, cx: &mut Context<Self>) -> AnyElement {
+        let pal = palette::current();
+        let selected = crabs.list.selected.clone();
+        let mut col = div()
+            .id("rail-crabs")
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_0p5()
+            .px_2()
+            .pb_2()
+            .border_b_1()
+            .border_color(rgb(pal.panel_hi));
+
+        let home = {
+            let link = self.dashboard.clone();
+            cx.listener(move |_rail, _ev: &ClickEvent, _window, cx| {
+                link.act(cx, |dash, cx| dash.instance_clear(cx));
+            })
+        };
+        col = col.child(
+            crab_row(
+                SharedString::from("rail-crab-home"),
+                crate::icon::banner_logo().into_any_element(),
+                SharedString::from("este crab"),
+                selected.is_none(),
+            )
+            .on_click(home),
+        );
+
+        for badge in &crabs.list.badges {
+            let is_selected = selected.as_deref() == Some(badge.host_id.as_str());
+            let pick = {
+                let link = self.dashboard.clone();
+                let host_id = badge.host_id.clone();
+                cx.listener(move |_rail, _ev: &ClickEvent, _window, cx| {
+                    let host_id = host_id.clone();
+                    link.act(cx, move |dash, cx| dash.instance_picked(&host_id, cx));
+                })
+            };
+            let manage = {
+                let link = self.dashboard.clone();
+                let badge = badge.clone();
+                cx.listener(move |_rail, _ev: &MouseDownEvent, _window, cx| {
+                    let badge = badge.clone();
+                    link.act(cx, move |dash, cx| dash.instance_manage(&badge, cx));
+                })
+            };
+            let title = badge.title.clone();
+            col = col.child(
+                crab_row(
+                    SharedString::from(format!("rail-crab-{}", badge.host_id)),
+                    crate::instance_strip::badge_mark(badge, is_selected, CRAB_MARK_REM),
+                    badge.label.clone(),
+                    is_selected,
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(rems(0.5625))
+                        .text_color(rgb(crate::instance_strip::health_dot(badge.health)))
+                        .child(SharedString::from(crate::instances::health_mark(
+                            badge.health,
+                        ))),
+                )
+                .tooltip(move |_window, cx| crate::hint::mic_tooltip(title.clone(), cx))
+                .on_click(pick)
+                .on_mouse_down(MouseButton::Right, manage),
+            );
+        }
+
+        if let Some(error) = crabs.list.error.clone() {
+            col = col.child(
+                div()
+                    .px_2()
+                    .text_xs()
+                    .text_color(rgb(pal.warn))
+                    .child(error),
+            );
+        }
+
+        let pair = {
+            let link = self.dashboard.clone();
+            cx.listener(move |_rail, _ev: &ClickEvent, _window, cx| {
+                link.act(cx, |dash, cx| dash.instance_pair(cx));
+            })
+        };
+        col = col.child(
+            crab_row(
+                SharedString::from("rail-crab-pair"),
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(rems(CRAB_MARK_REM))
+                    .h(rems(CRAB_MARK_REM))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(pal.track))
+                    .text_size(rems(0.75))
+                    .text_color(rgb(pal.text_muted))
+                    .child(SharedString::from("+"))
+                    .into_any_element(),
+                SharedString::from("emparelhar um crab"),
+                false,
+            )
+            .on_click(pair),
+        );
+        col.into_any_element()
+    }
+}
+
+/// One row of the crabs list: its square, its name, and room for a dot.
+fn crab_row(
+    id: SharedString,
+    mark: AnyElement,
+    label: SharedString,
+    selected: bool,
+) -> Stateful<Div> {
+    let pal = palette::current();
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .when(selected, |d| d.bg(rgb(pal.panel_hi)))
+        .hover(|d| d.bg(rgb(pal.panel_hi)))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .w(rems(CRAB_MARK_REM))
+                .h(rems(CRAB_MARK_REM))
+                .child(mark),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_sm()
+                .text_color(rgb(if selected { pal.accent } else { pal.text }))
+                .child(label),
+        )
+}
+
 /// One icon button in the rail header (#2969).
 ///
 /// The padding is the hit box: an icon alone is a 16px target, and the header
@@ -381,13 +587,26 @@ impl Render for RailView {
             .map(|footer| self.footer_chip(footer, cx));
         let control = self.filter_control(cx);
         let actions = self.header_buttons(cx);
+        // With the flag off both stay `None` and the brand row is main's.
+        let crabs = self.frame.crabs.clone();
+        let toggle = crabs
+            .as_ref()
+            .map(|crabs| self.crabs_toggle(crabs.open, cx));
+        let list = crabs
+            .as_ref()
+            .filter(|crabs| crabs.open)
+            .map(|crabs| self.crabs_list(crabs, cx));
         rail_root().child(sessions::rail(
             &self.frame.head,
             rows,
             self.frame.width_rem,
             &self.scroll,
             footer,
-            Some(actions),
+            sessions::RailBrand {
+                actions: Some(actions),
+                crabs_toggle: toggle,
+                crabs_list: list,
+            },
             control,
         ))
     }

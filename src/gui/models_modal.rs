@@ -24,17 +24,10 @@ impl Dashboard {
         {
             providers.push(pinned);
         }
-        let live =
-            agent_bridge::bridge().map(|bridge| match self.models_session.or(self.chat_session) {
-                Some(sid) => (
-                    bridge.service.provider_name_for_session(sid),
-                    bridge.service.provider_model_for_session(sid),
-                ),
-                None => (
-                    bridge.service.provider_name(),
-                    bridge.service.provider_model(),
-                ),
-            });
+        let live = self
+            .backend
+            .facts(self.models_session.or(self.chat_session))
+            .map(|facts| (facts.provider, facts.model));
         let pair = live
             .as_ref()
             .map(|(provider, model)| format!("{provider} / {model}"))

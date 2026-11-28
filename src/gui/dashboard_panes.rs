@@ -194,9 +194,13 @@ impl Dashboard {
     /// window's transcript (#2689), the frame goes with it too, so a restart
     /// does not re-centre a window the user placed (#3082), and the rail goes
     /// with it, so a sidebar closed before a restart opens closed (#3105).
+    ///
+    /// The file is the one of the crab whose panes are on screen
+    /// (`layout_crab`): the window's own crab keeps `gui_layout.json`, a
+    /// picked remote writes its own.
     pub(crate) fn persist_layout(&self) {
         layout_store::save(
-            &layout_store::path(),
+            &layout_store::path_for(self.layout_crab.as_deref()),
             self.panes.as_ref(),
             self.pane_focus,
             self.chat_session,
@@ -319,22 +323,6 @@ impl Dashboard {
         }
     }
 
-    /// The field the keyboard belongs to while the chat is on screen (#3133).
-    ///
-    /// Normally the focused pane's composer. While a remote crab is open the
-    /// only field drawn is the remote's, so the caret has to go there: leaving
-    /// it in the local composer types this window's words into a field nobody
-    /// can see, and Enter would send them to this machine's own agent instead
-    /// of to the crab on screen. That is exactly what the remote panel's old
-    /// hand-written keyboard was patching around, and it is why the field has
-    /// to be the one the frame puts focus in.
-    pub(crate) fn keyboard_field(&self, cx: &App) -> Entity<editor::Editor> {
-        if self.screen == Screen::Chat && self.instance_remote_open() {
-            return self.remote_editor.clone();
-        }
-        self.composer_entity(cx)
-    }
-
     /// Name the element the window gives the keys to, for the caret receipt
     /// (#2741). Three answers: the composer that is drawn, the window root
     /// that owns overlays and non-chat screens, or a field the dashboard does
@@ -343,7 +331,7 @@ impl Dashboard {
         let Some(handle) = window.focused(cx) else {
             return "none";
         };
-        if handle == self.keyboard_field(cx).read(cx).focus_handle {
+        if handle == self.composer_entity(cx).read(cx).focus_handle {
             "composer"
         } else if handle == self.focus {
             "root"
@@ -440,9 +428,113 @@ impl Dashboard {
     /// rail's refetch and the topic refresh, have to tell the panes that draw
     /// from it. A rename or an icon change that leaves every count the same
     /// would otherwise sit behind a stale strip until something else moved it.
+    ///
+    /// The rail's refetch is also the first moment the window holds the rows
+    /// of a crab it was just handed, so the swap of layout and drafts that a
+    /// pick asks for runs here first (`follow_crab`). It is a comparison when
+    /// the crab did not change.
     pub(crate) fn notify_panes(&mut self, cx: &mut Context<Self>) {
+        self.follow_crab(cx);
         for pane in self.pane_states.values() {
             pane.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    /// Give the window the layout and drafts of the crab the strip picked,
+    /// keeping those of the crab it leaves (C7).
+    ///
+    /// Runs once the picked crab's rows are in `sessions`, because the layout
+    /// it brings back names that crab's conversations and a leaf the rail
+    /// does not hold is pruned. Nothing happens while the crab on screen is
+    /// still the one picked.
+    ///
+    /// Leaving: every pane's draft and the chat's own are filed under their
+    /// conversations, the layout is written to the leaving crab's file, and
+    /// both are parked under that crab. The split goes with them, so a pane of
+    /// one crab is never drawn through another crab's backend.
+    ///
+    /// Arriving: the parked drafts and layout come back, or the crab's layout
+    /// file on a first visit. The conversation the layout was showing opens
+    /// and the split is put back through `restore_layout`, the same door a
+    /// launch uses.
+    pub(crate) fn follow_crab(&mut self, cx: &mut Context<Self>) {
+        let crab = self.instances.selected_host_id().map(str::to_owned);
+        if crab == self.layout_crab {
+            return;
+        }
+
+        self.stash_all_pane_drafts(cx);
+        if let Some(chat) = self.chat_session {
+            let draft = self.composer.editor.update(cx, |ed, cx| ed.take_draft(cx));
+            self.composer.drafts.store(chat, draft);
+        }
+        self.persist_layout();
+        let leaving = layout_store::ParkedCrab {
+            layout: Some(self.layout_snapshot()),
+            drafts: std::mem::take(&mut self.composer.drafts),
+        };
+        // Moved before anything below can write the layout, so every write
+        // from here on lands in the arriving crab's file.
+        let left = std::mem::replace(&mut self.layout_crab, crab.clone());
+        self.crab_windows.park(left, leaving);
+        self.pane_states.clear();
+        self.parked_panes.clear();
+        self.pane_focus = None;
+        self.panes = self.chat_session.map(PaneTree::leaf);
+
+        let arriving = self
+            .crab_windows
+            .unpark_or_load(crab.as_deref(), &layout_store::path_for(crab.as_deref()));
+        self.composer.drafts = arriving.drafts;
+        self.rail_seen =
+            rail_activity::SeenPlans::load(Some(rail_activity::seen_path_for(crab.as_deref())));
+        if let Some(chat) = self.chat_session
+            && let Some(draft) = self.composer.drafts.take(chat)
+        {
+            self.composer
+                .editor
+                .update(cx, |ed, cx| ed.restore_state(draft, cx));
+        }
+        self.sync_composer_session(cx);
+        logging::info(&format!(
+            "gui layout: crab {:?}, layout {}",
+            self.layout_crab,
+            if arriving.layout.is_some() {
+                "back"
+            } else {
+                "none"
+            }
+        ));
+        let Some(layout) = arriving.layout else {
+            cx.notify();
+            return;
+        };
+        let known: std::collections::HashSet<Uuid> =
+            self.sessions.items.iter().map(|item| item.id).collect();
+        let chat = layout
+            .chat
+            .filter(|id| known.contains(id))
+            .or_else(|| layout_store::boot_session(&layout, &known));
+        if let Some(chat) = chat
+            && self.chat_session != Some(chat)
+        {
+            self.open_session_handing_back(chat, false, cx);
+        }
+        self.restore_layout(Some(layout), cx);
+        cx.notify();
+    }
+
+    /// The layout the window is showing, as the snapshot `follow_crab` parks.
+    /// The tree is kept as it is, one leaf included: `restore_layout` reads a
+    /// single leaf as the plain chat.
+    pub(crate) fn layout_snapshot(&self) -> layout_store::SavedLayout {
+        layout_store::SavedLayout {
+            version: layout_store::VERSION,
+            panes: self.panes.clone(),
+            focus: self.pane_focus,
+            chat: self.chat_session,
+            window: self.window_frame,
+            rail_open: Some(self.rail_open),
         }
     }
 
@@ -609,9 +701,16 @@ impl Dashboard {
         if let Some(draft) = self.composer.drafts.take(id) {
             pane_editor.update(cx, |ed, cx| ed.restore_state(draft, cx));
         }
-        cx.subscribe(&pane_editor, move |this, _editor, event, cx| match event {
-            editor::EditorEvent::Sent(text) => {
-                this.send_from_pane(id, text.clone(), None, SendOrigin::Composer, cx);
+        cx.subscribe(&pane_editor, move |this, field, event, cx| match event {
+            editor::EditorEvent::Sent(outgoing) => {
+                this.send_carried(
+                    outgoing.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| {
+                        this.send_from_pane(id, text, None, SendOrigin::Composer, cx)
+                    },
+                    cx,
+                );
             }
             editor::EditorEvent::Preview(path) => this.open_preview(path.clone(), cx),
             editor::EditorEvent::Below => this.focus_tasks(id, cx),
@@ -641,7 +740,7 @@ impl Dashboard {
         }
         // The pane's plan lives wherever its session is bound, which is a DB
         // read; the same lookup the window's strip uses, resolved once here.
-        agent_bridge::spawn_plan_path(self.db_path.clone(), id, self.sink.clone());
+        agent_bridge::spawn_plan_path(self.backend.clone(), id, self.sink.clone());
         // The leaf's state is its own type now (#2805). It opens at the
         // width the window last painted the wall at, and the walk corrects it
         // the first frame the pane has a box of its own.
@@ -658,9 +757,12 @@ impl Dashboard {
         // The leaf's own context window, read for ITS session (#2854): a pane
         // can run a different provider from the window, so borrowing the
         // window's number would print another conversation's budget.
-        let pane_ctx_max = agent_bridge::bridge()
-            .map(|b| b.service.context_limit_for_session(id))
+        let pane_ctx_max = self
+            .backend
+            .facts(Some(id))
+            .map(|facts| facts.context_limit)
             .unwrap_or(0);
+        let pane_backend = self.backend.clone();
         let pane = cx.new(|_| {
             PaneView::new(
                 id,
@@ -670,6 +772,7 @@ impl Dashboard {
                 pane_width,
                 pane_ctx_max,
                 window,
+                pane_backend,
             )
         });
         self.pane_states.insert(id, pane);
@@ -677,9 +780,9 @@ impl Dashboard {
         // transcript load to come back: an empty pane that appears at once
         // reads as a split, where a silent wait reads as nothing (#2438).
         cx.notify();
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, id).await;
+            let result = transcript::load_recent(backend, id).await;
             this.update(cx, |this, cx| {
                 // The rows are measured against the window's metrics, read
                 // before the leaf is borrowed: a pane's own context cannot
@@ -981,28 +1084,37 @@ impl Dashboard {
     ///
     /// The branch is cached beside the directory it was read from: `git` is a
     /// subprocess, so it runs when the directory changes and never per frame.
+    /// It runs on the crab the window holds, which owns that directory: the
+    /// question goes out by `self.backend` and the frame never waits for it.
+    /// Until the answer lands the branch reads as unknown, and the answer
+    /// repaints the footer when it does.
     /// With no conversation open there is nothing to name, and the launch
     /// directory is the honest answer for a window that has not been pointed
     /// anywhere yet.
     pub(crate) fn footer_place(&mut self) -> (String, String) {
         let session = self.chat_session;
-        let dir = match agent_bridge::bridge() {
-            Some(bridge) => match session {
-                Some(id) => bridge.service.get_working_directory_for_session(id),
-                None => opencrabs::utils::cwd::launch_cwd(),
-            },
-            None => opencrabs::utils::cwd::launch_cwd(),
-        };
+        // With no session the facts already name the launch directory.
+        let dir = self
+            .backend
+            .facts(session)
+            .map(|facts| facts.working_directory)
+            .unwrap_or_else(opencrabs::utils::cwd::launch_cwd);
         let stale = self
             .footer_dir
             .as_ref()
             .is_none_or(|place| place.session != session || place.dir != dir);
         if stale {
+            crate::status::ask_git_branch(&self.backend, dir.clone(), self.sink.clone());
             self.footer_dir = Some(FooterPlace {
                 session,
-                branch: git_branch(&dir),
+                branch: None,
                 dir: dir.clone(),
             });
+        }
+        if let Some(place) = self.footer_dir.as_mut()
+            && place.branch.is_none()
+        {
+            place.branch = git_branch(&dir);
         }
         let branch = self
             .footer_dir
@@ -1028,14 +1140,13 @@ impl Dashboard {
             // can be mid-turn is the open one.
             parts.push("⠙ working".to_string());
         }
-        if let Some(bridge) = agent_bridge::bridge() {
+        if let Some(facts) = self.backend.facts(Some(session)) {
             // Each pane names the directory its own conversation works in, so
             // a `/cd` in one leaf never reads as a move of its neighbour
             // (#3036). Only the directory: the branch would run `git` per pane
             // per frame, and the window footer above already names it.
-            let dir = bridge.service.get_working_directory_for_session(session);
-            parts.push(tilde_path(&dir));
-            let (provider, model) = bridge.service.provider_pair_for_session(session);
+            parts.push(tilde_path(&facts.working_directory));
+            let (provider, model) = (facts.provider, facts.served_model);
             if !model.is_empty() {
                 let label = model.rsplit('/').next().unwrap_or(&model).to_string();
                 parts.push(format!("{provider} / {label}"));

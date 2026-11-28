@@ -221,6 +221,7 @@ fn is_unreachable(raw: &str) -> bool {
         "network is unreachable",
         "no route to host",
         "temporary failure in name resolution",
+        "dns resolution failed",
     ]
     .iter()
     .any(|needle| lower.contains(needle))

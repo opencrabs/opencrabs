@@ -192,7 +192,7 @@ fn the_compaction_and_goal_turns_carry_the_pane_session() {
     let cd = between(src, "C::Cd =>", "other =>");
     let compact: String = cd.split_whitespace().collect();
     assert!(
-        compact.contains("spawn_apply_operator_cd(b.service.clone(),session,"),
+        compact.contains("spawn_apply_operator_cd(self.backend.clone(),session,"),
         "the /cd handoff must carry the session it changes (#2672)"
     );
     assert!(

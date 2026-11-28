@@ -324,6 +324,125 @@ pub fn start(spec: &TunnelSpec) -> Result<TunnelState> {
     }
 }
 
+/// Refuse to publish a gateway that would be useless or dangerous on the
+/// internet: one that is switched off, or one with no `[a2a] api_key`.
+///
+/// Shared by `opencrabs connect` and the window's share card, so the two
+/// doors into a public tunnel apply the same rule and cannot drift.
+pub fn gateway_gate(a2a: &crate::config::A2aConfig) -> Result<()> {
+    if !a2a.enabled {
+        anyhow::bail!(
+            "the A2A gateway is disabled ([a2a].enabled = false); a tunnel to a closed door helps nobody. Enable it first."
+        );
+    }
+    if a2a.api_key.as_deref().unwrap_or("").trim().is_empty() {
+        anyhow::bail!(
+            "refusing to open a tunnel to a KEYLESS gateway: set [a2a].api_key first. \
+             Without it, anyone who learns the tunnel URL gets the agent's full tool \
+             surface (the #1473 open-gate posture), and route announcement stays suppressed."
+        );
+    }
+    Ok(())
+}
+
+/// The running tunnel `open` would reuse for `port`, or `None` when nothing
+/// runs. A tunnel bound to a different port is a conflict the caller must
+/// resolve, not something to reuse or replace.
+pub fn reusable(state_dir: &Path, port: u16) -> Result<Option<TunnelState>> {
+    let existing = status(state_dir)?;
+    if let Some(st) = &existing
+        && st.port != port
+    {
+        anyhow::bail!(
+            "a tunnel for port {} is already running ({}); use --port {}, or --stop first",
+            st.port,
+            st.url,
+            st.port
+        );
+    }
+    Ok(existing)
+}
+
+/// What [`open`] found or did.
+#[derive(Debug, Clone)]
+pub enum Opened {
+    /// A tunnel for this port was already up; somebody else started it.
+    Reused(TunnelState),
+    /// This call spawned cloudflared; the caller decides who stops it.
+    Started(TunnelState),
+}
+
+impl Opened {
+    pub fn state(&self) -> &TunnelState {
+        match self {
+            Opened::Reused(st) | Opened::Started(st) => st,
+        }
+    }
+}
+
+/// The one way into a public tunnel: gate the gateway, reuse a tunnel already
+/// up for this port, otherwise [`start`] one.
+///
+/// `opencrabs connect` and the window's share card both call this, so there
+/// is a single place that decides whether cloudflared gets spawned. Blocking
+/// (it may download cloudflared and waits for the URL): never call it on a
+/// UI thread.
+pub fn open(a2a: &crate::config::A2aConfig, spec: &TunnelSpec) -> Result<Opened> {
+    gateway_gate(a2a)?;
+    if let Some(st) = reusable(&spec.state_dir, spec.port)? {
+        return Ok(Opened::Reused(st));
+    }
+    start(spec).map(Opened::Started)
+}
+
+/// Stop the recorded tunnel only if it is still the one with `pid`.
+///
+/// A caller that started a tunnel owns that tunnel and no other: if it died
+/// and something else (a later `connect`) recorded a new one, stopping by
+/// state file alone would kill a tunnel this caller never owned.
+pub fn stop_owned(state_dir: &Path, pid: u32) -> Result<bool> {
+    match status(state_dir)? {
+        Some(st) if st.pid == pid => stop(state_dir),
+        _ => Ok(false),
+    }
+}
+
+/// A tunnel this process started and must not leave behind.
+///
+/// Dropping it stops cloudflared (via [`stop_owned`], so a tunnel recorded
+/// by someone else since is left alone). The stop can wait the full grace
+/// period, so a UI should move the guard to a worker thread before dropping
+/// it; on exit, blocking briefly is the price of not orphaning the process.
+#[derive(Debug)]
+pub struct OwnedTunnel {
+    state_dir: PathBuf,
+    pid: u32,
+}
+
+impl OwnedTunnel {
+    /// Take ownership of a tunnel [`open`] reported as `Started`.
+    pub fn adopt(state_dir: &Path, state: &TunnelState) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            pid: state.pid,
+        }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl Drop for OwnedTunnel {
+    fn drop(&mut self) {
+        match stop_owned(&self.state_dir, self.pid) {
+            Ok(true) => tracing::info!(pid = self.pid, "owned quick tunnel stopped"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(pid = self.pid, "owned quick tunnel not stopped: {e:#}"),
+        }
+    }
+}
+
 /// Read the recorded tunnel, verifying the pid still belongs to
 /// cloudflared (not merely that *some* process owns the number — pids are
 /// recycled). A dead or stolen tunnel's state file is removed as a side

@@ -1,0 +1,17 @@
+{
+  "op": "sessions.telegram_topic_titles",
+  "scope": "a2a:read",
+  "request": {
+    "titles": [
+      [
+        "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e02",
+        "Group [chat:-100:topic:7]"
+      ]
+    ]
+  },
+  "response": {
+    "Ok": {
+      "0b6f3c1e-9a3d-4c1f-8f60-2d3b7c4a5e02": "Renamed"
+    }
+  }
+}

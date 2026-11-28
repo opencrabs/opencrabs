@@ -19,6 +19,11 @@
 
 use opencrabs::remote::instance_store::{InstanceFile, KnownInstance};
 
+/// Longest label the strip will draw before cutting it. Chosen against the
+/// 56 px strip: ten characters plus an ellipsis is what fits without the
+/// badge growing and shoving its neighbours.
+pub const STRIP_LABEL_MAX: usize = 10;
+
 /// What the last probe of a remote told us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
@@ -64,6 +69,11 @@ impl InstanceEntry {
 
     pub fn url(&self) -> &str {
         &self.known.url
+    }
+
+    /// What the strip draws under the crab.
+    pub fn strip_label(&self) -> String {
+        strip_label(self.label())
     }
 
     /// What the badge draws: the owner's mark when they set one, otherwise the
@@ -125,7 +135,9 @@ impl Instances {
 
     /// Insert or replace a record, keeping its position when it already
     /// exists. Health survives a replace: re-pairing a crab that is up must
-    /// not blank its dot until the next probe.
+    /// not blank its dot until the next probe. Test-only: a pairing hands
+    /// the window the store as it now reads (`instance_paired`).
+    #[cfg(test)]
     pub fn upsert(&mut self, known: KnownInstance) {
         if let Some(existing) = self
             .entries
@@ -142,7 +154,9 @@ impl Instances {
     }
 
     /// Drop a crab. If it was the selected one the selection is cleared, so
-    /// the window never renders a panel for an instance that is gone.
+    /// the window never holds a crab that is gone. Test-only: a forget hands
+    /// the window the store as it now reads (`instance_forgotten`).
+    #[cfg(test)]
     pub fn remove(&mut self, host_id: &str) -> bool {
         let before = self.entries.len();
         self.entries.retain(|e| e.host_id() != host_id);
@@ -154,7 +168,7 @@ impl Instances {
     }
 
     /// Record a probe result. An id we no longer hold is ignored: the probe
-    /// was in flight when the crab was removed.
+    /// was in flight when the store was read again.
     pub fn record_probe(&mut self, host_id: &str, result: Result<u64, ()>, now: u64) {
         let Some(entry) = self.entries.iter_mut().find(|e| e.host_id() == host_id) else {
             return;
@@ -204,6 +218,38 @@ impl Instances {
         self.selected = Some(id);
         self.selected.as_deref()
     }
+
+    /// A crab was followed to a new address: take its new record in place.
+    /// Its position, its health and the selection stay; only what the store
+    /// now says about it changes. An id we no longer hold is ignored.
+    pub fn repoint(&mut self, known: &KnownInstance) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.host_id() == known.host_id)
+        else {
+            return false;
+        };
+        entry.known = known.clone();
+        true
+    }
+}
+
+/// Cut a label to what the strip can draw, on a character boundary, with a
+/// single ellipsis. Whitespace is collapsed first: a label pasted from a
+/// hostname list can carry a tab and the strip would draw a gap.
+pub fn strip_label(label: &str) -> String {
+    let collapsed: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = collapsed.chars().count();
+    if count <= STRIP_LABEL_MAX {
+        return collapsed;
+    }
+    let mut out: String = collapsed
+        .chars()
+        .take(STRIP_LABEL_MAX.saturating_sub(1))
+        .collect();
+    out.push('…');
+    out
 }
 
 /// The single character a badge wears.
@@ -311,7 +357,7 @@ pub fn badge_tint(host_id: &str) -> usize {
     (hash % BADGE_TINTS as u64) as usize
 }
 
-/// "last seen" in the panel, from a pair of unix timestamps.
+/// "last seen" for the badge's title, from a pair of unix timestamps.
 pub fn age_label(now: u64, ts: u64) -> String {
     if ts == 0 {
         return "nunca".to_string();

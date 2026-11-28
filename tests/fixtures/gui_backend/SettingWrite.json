@@ -1,0 +1,38 @@
+{
+  "op": "settings.write",
+  "scope": "a2a:admin",
+  "request": {
+    "section": "agent",
+    "key": "lazy_tools",
+    "write": {
+      "Set": "false"
+    }
+  },
+  "response": {
+    "Ok": "false"
+  },
+  "request_string": {
+    "section": "agent",
+    "key": "approval_policy",
+    "write": {
+      "SetString": "ask"
+    }
+  },
+  "response_string": {
+    "Ok": ""
+  },
+  "request_remove": {
+    "section": "agent",
+    "key": "redact_group",
+    "write": "Remove"
+  },
+  "response_remove": {
+    "Ok": ""
+  },
+  "response_not_settable": {
+    "Err": {
+      "kind": "bad_params",
+      "detail": "settings.write: providers.anthropic.api_key is not a setting"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "op": "session_ops.pin_fallback_provider",
+  "scope": "a2a:admin",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77",
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v3.2"
+  },
+  "response": {
+    "Ok": []
+  },
+  "response_partial": {
+    "Ok": ["rebuild provider openrouter: config: no config.toml"]
+  }
+}

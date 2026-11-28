@@ -440,9 +440,9 @@ impl Dashboard {
         // picked there would paint on a row that is not on screen.
         let leaf = self.msg_menu_leaf.take();
         self.msg_menu_row = None;
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
-            let result = transcript::toggle_reaction(db_path, id, name.clone()).await;
+            let result = transcript::toggle_reaction(backend, id, name.clone()).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(reacted) => {
@@ -520,9 +520,14 @@ impl Dashboard {
         };
         let editor = self.new_inline_editor(text, cx);
         // Enter in the row's field is the same confirm as the check under it.
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.msg_edit_confirm(text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    |this, text, cx| this.msg_edit_confirm(text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -561,9 +566,14 @@ impl Dashboard {
         let sequence =
             transcript::live_slot_sequence(&self.turn.live, &self.chat_state.transcript.rows, slot);
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.msg_edit_confirm(text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    |this, text, cx| this.msg_edit_confirm(text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -658,9 +668,14 @@ impl Dashboard {
             return;
         };
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.pane_edit_confirm(session, text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| this.pane_edit_confirm(session, text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -710,9 +725,14 @@ impl Dashboard {
             transcript::live_slot_sequence(&pane.live, &pane.transcript.rows, slot)
         };
         let editor = self.new_inline_editor(text, cx);
-        cx.subscribe(&editor, move |this, _editor, event, cx| {
+        cx.subscribe(&editor, move |this, field, event, cx| {
             if let editor::EditorEvent::Sent(text) = event {
-                this.pane_edit_confirm(session, text.clone(), cx);
+                this.send_carried(
+                    text.clone(),
+                    field.downgrade(),
+                    move |this, text, cx| this.pane_edit_confirm(session, text, cx),
+                    cx,
+                );
             }
         })
         .detach();
@@ -1195,7 +1215,7 @@ impl Dashboard {
     /// turn is the only thing keeping a silent or slow turn visible, so it
     /// stays until the fetch returns a transcript that includes it.
     pub(crate) fn reload_transcript(&mut self, sid: Uuid, cx: &mut Context<Self>) {
-        let db_path = self.db_path.clone();
+        let backend = self.backend.clone();
         // The turn that just finished should add at least one row to the
         // session. A reload that comes back short is a write that has not
         // landed yet. The count is the session's own row total, so a
@@ -1211,7 +1231,7 @@ impl Dashboard {
             .deadline
             .get_or_insert_with(|| std::time::Instant::now() + SETTLE_BUDGET);
         cx.spawn(async move |this, cx| {
-            let result = transcript::load_recent(db_path, sid).await;
+            let result = transcript::load_recent(backend, sid).await;
             this.update(cx, |this, cx| {
                 if this.chat_state.session() != Some(sid) {
                     return;

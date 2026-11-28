@@ -29,7 +29,6 @@ use opencrabs::ui_core::local_document::DocumentKind;
 use opencrabs::ui_core::scroll::vertical_scroll_thumb;
 use uuid::Uuid;
 
-use crate::agent_bridge;
 use crate::logging;
 use crate::markdown::{self, MdBlock};
 use crate::modal_shell;
@@ -208,6 +207,17 @@ pub(crate) fn write_file(path: &Path, text: &str) -> Result<(), String> {
 }
 
 impl super::Dashboard {
+    /// The folder a relative path in `!vi` resolves against: the session's
+    /// own working directory, read from the crab's facts, the same value the
+    /// footer names. The editor opens only on this machine's crab (the bang
+    /// runner checks `Cap::OpenTerminal`), so the folder is on this disk.
+    fn session_cwd(&self, session: Uuid) -> PathBuf {
+        self.backend
+            .facts(Some(session))
+            .map(|facts| facts.working_directory)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     /// Open the built-in editor for the conversation that asked for it
     /// (#3163). The id travels on the request, so a split shows the buffer of
     /// the pane that ran `!vi`, and the file is read against that pane's own
@@ -229,9 +239,7 @@ impl super::Dashboard {
         // The session's own directory decides where a relative path points.
         // The process's start directory is a guess that has nothing to do
         // with the conversation the user cd'd around in.
-        let cwd = agent_bridge::bridge()
-            .map(|b| b.service.get_working_directory_for_session(id))
-            .unwrap_or_else(std::env::temp_dir);
+        let cwd = self.session_cwd(id);
         let path = command.path.as_ref().map(|raw| {
             let raw = Path::new(raw.as_str());
             if raw.is_absolute() {
@@ -524,6 +532,9 @@ impl super::Dashboard {
     /// session's own directory and save there (#3163).
     fn save_editor_as(&mut self, session: &Uuid, name: &str, cx: &mut Context<Self>) {
         let trimmed = name.trim().to_string();
+        // Read before the dialog is borrowed: the lookup goes through the
+        // window's backend, which needs `self` whole.
+        let cwd = self.session_cwd(*session);
         let Some(dialog) = self.editor_dialogs.get_mut(session) else {
             return;
         };
@@ -533,9 +544,6 @@ impl super::Dashboard {
             cx.notify();
             return;
         }
-        let cwd = agent_bridge::bridge()
-            .map(|b| b.service.get_working_directory_for_session(*session))
-            .unwrap_or_else(std::env::temp_dir);
         let raw = Path::new(&trimmed);
         let resolved = if raw.is_absolute() {
             raw.to_path_buf()

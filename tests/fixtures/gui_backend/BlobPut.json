@@ -1,0 +1,11 @@
+{
+  "name": "blob.put",
+  "scope": "a2a:send",
+  "params": { "name": "note.txt", "base64": "YXR0YWNoZWQ=" },
+  "reply": {
+    "Ok": {
+      "path": "/home/crab/.opencrabs/tmp/gui-uploads/55d9067ef2bfacd4-note.txt",
+      "size": 8
+    }
+  }
+}

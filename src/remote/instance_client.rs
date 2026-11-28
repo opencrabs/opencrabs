@@ -385,12 +385,6 @@ fn send_params(text: &str, context_id: Option<&str>) -> serde_json::Value {
     serde_json::json!({ "message": message })
 }
 
-/// Poll one task's state and answer.
-pub async fn task(target: &Target<'_>, task_id: &str) -> Result<TaskSnapshot> {
-    let result = call(target, "tasks/get", serde_json::json!({ "id": task_id })).await?;
-    Ok(parse_task(&result))
-}
-
 // ─── Pure parsers: the wire shapes, tested without a socket ──────────────
 //
 // These read what `a2a::handler::sessions` actually writes, not a sketch of it.

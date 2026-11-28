@@ -10,21 +10,28 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::remote::pairing::{GUEST_TTL_SECS, PairingStore, TOKEN_TTL_SECS, parse_ttl};
-use crate::remote::scopes::{SCOPE_READ, SCOPE_SEND};
+use crate::remote::routes::{
+    AnnouncedRoute, collect_interfaces, reachable_through_bind, select_advertised_routes,
+};
+use crate::remote::scopes::{SCOPE_MANAGE, SCOPE_READ, SCOPE_SEND};
 use crate::remote::tunnel::{self, TunnelSpec};
 
-/// Parse the `--scopes` flag: "read", "send", "read,send" (order-free).
+/// Parse the `--scopes` flag: "read", "send", "manage" in any combination
+/// (order-free). `manage` is elevated: it is never in the default, so a code
+/// carries it only when the operator types it here. Without it a paired GUI
+/// cannot create a session on the remote crab.
 fn parse_scopes(raw: &str) -> Result<Vec<String>> {
     let mut scopes = Vec::new();
     for part in raw.split(',') {
         match part.trim().to_ascii_lowercase().as_str() {
             "read" | "a2a:read" => push_unique(&mut scopes, SCOPE_READ),
             "send" | "a2a:send" => push_unique(&mut scopes, SCOPE_SEND),
-            other => anyhow::bail!("unknown scope {other:?} (expected: read, send)"),
+            "manage" | "a2a:manage" => push_unique(&mut scopes, SCOPE_MANAGE),
+            other => anyhow::bail!("unknown scope {other:?} (expected: read, send, manage)"),
         }
     }
     if scopes.is_empty() {
-        anyhow::bail!("--scopes needs at least one of: read, send");
+        anyhow::bail!("--scopes needs at least one of: read, send, manage");
     }
     Ok(scopes)
 }
@@ -46,6 +53,7 @@ pub fn cmd_connect(
     stop: bool,
     list_sessions: bool,
     revoke: Option<&str>,
+    no_tunnel: bool,
 ) -> Result<()> {
     let state_dir = tunnel::default_state_dir();
     let store = PairingStore::new(PairingStore::default_path());
@@ -123,18 +131,10 @@ pub fn cmd_connect(
     }
 
     // ── main flow: mint code + start tunnel ──────────────────────────────
-    if !config.a2a.enabled {
-        anyhow::bail!(
-            "the A2A gateway is disabled ([a2a].enabled = false); a tunnel to a closed door helps nobody. Enable it first."
-        );
-    }
-    if config.a2a.api_key.as_deref().unwrap_or("").is_empty() {
-        anyhow::bail!(
-            "refusing to open a tunnel to a KEYLESS gateway: set [a2a].api_key first. \
-             Without it, anyone who learns the tunnel URL gets the agent's full tool \
-             surface (the #1473 open-gate posture), and route announcement stays suppressed."
-        );
-    }
+    // The same gate the window's share card applies: both doors into a
+    // public tunnel go through `tunnel::open`, and this early call only makes
+    // the refusal land before a code is minted.
+    tunnel::gateway_gate(&config.a2a)?;
     let port = port.unwrap_or(config.a2a.port);
     let scope_list = parse_scopes(scopes)?;
     // Session lifetime for whatever this code redeems into. Absent means the
@@ -145,20 +145,36 @@ pub fn cmd_connect(
         None => TOKEN_TTL_SECS,
     };
 
-    // A running tunnel for THIS port is reused — `connect` means "make me
-    // reachable and give me a code", not "start a second tunnel". A tunnel
-    // bound to a different port is a conflict the caller must resolve.
-    let existing = tunnel::status(&state_dir)?;
-    if let Some(st) = &existing
-        && st.port != port
-    {
-        anyhow::bail!(
-            "a tunnel for port {} is already running ({}); use --port {}, or --stop first",
-            st.port,
-            st.url,
-            st.port
-        );
+    // Direct addresses first: a lan or tailnet address the gateway is bound
+    // to survives a restart, a quick tunnel URL does not. Pairing at a fixed
+    // address is what saves the client from pasting a new URL every time
+    // cloudflared comes back up with another hostname.
+    let direct = direct_routes(&collect_interfaces(), &config.a2a.bind, port);
+
+    if no_tunnel {
+        if direct.is_empty() {
+            anyhow::bail!(
+                "--no-tunnel needs an address another machine can reach, and the gateway \
+                 is bound to '{}'. Bind [a2a].bind to a LAN or tailnet address (or 0.0.0.0), \
+                 or drop --no-tunnel to open a quick tunnel.",
+                config.a2a.bind
+            );
+        }
+        let code = store
+            .mint_code_with_ttl(&scope_list, session_ttl)
+            .context("mint pairing code")?;
+        println!("Pair at a fixed address (no tunnel started):");
+        print_direct(&direct);
+        println!();
+        print_code(&code, &scope_list, ttl, session_ttl);
+        return Ok(());
     }
+
+    // A running tunnel for THIS port is reused: `connect` means "make me
+    // reachable and give me a code", not "start a second tunnel". A tunnel
+    // bound to a different port is a conflict the caller must resolve, and
+    // checking here makes it fail before a code is minted.
+    let existing = tunnel::reusable(&state_dir, port)?;
 
     // Mint BEFORE the tunnel so the code's 5-minute TTL covers the
     // (up to 60 s) URL wait, not just the moment it's printed.
@@ -166,47 +182,40 @@ pub fn cmd_connect(
         .mint_code_with_ttl(&scope_list, session_ttl)
         .context("mint pairing code")?;
 
-    let state = match existing {
-        Some(st) => {
+    let spec = TunnelSpec::on(port, &config.a2a.bind);
+    if existing.is_none() {
+        println!("Starting cloudflared quick tunnel → {} …", spec.origin());
+    }
+    // The one tunnel path, shared with the window's share card.
+    let state = match tunnel::open(&config.a2a, &spec) {
+        Ok(tunnel::Opened::Reused(st)) => {
             println!("Reusing running tunnel (pid {}): {}", st.pid, st.url);
             st
         }
-        None => {
-            let spec = TunnelSpec::on(port, &config.a2a.bind);
-            println!("Starting cloudflared quick tunnel → {} …", spec.origin());
-            match tunnel::start(&spec) {
-                Ok(st) => st,
-                Err(e) => {
-                    eprintln!("Tunnel failed: {e:#}");
-                    eprintln!("Log: {}", state_dir.join("tunnel.log").display());
-                    eprintln!("The minted pairing code was NOT consumed; it expires in 5 minutes.");
-                    return Err(e);
-                }
-            }
+        Ok(tunnel::Opened::Started(st)) => st,
+        Err(e) => {
+            eprintln!("Tunnel failed: {e:#}");
+            eprintln!("Log: {}", state_dir.join("tunnel.log").display());
+            eprintln!("The minted pairing code was NOT consumed; it expires in 5 minutes.");
+            return Err(e);
         }
     };
 
     let url = state.url.trim_end_matches('/');
     println!();
+    if !direct.is_empty() {
+        println!("Pair at a fixed address when the other machine can reach it (preferred):");
+        print_direct(&direct);
+        println!();
+    }
     println!("✔ Tunnel up (pid {})", state.pid);
     // The recorded host, like `--status`: the arrow says where cloudflared
     // dials, and a literal here named loopback for a tunnel pointed at a
     // tailnet address (2026-11-21).
     println!("  URL:   {url}  →  {}:{port}", state.origin_host);
+    println!("  (a quick tunnel gets a new hostname every time it restarts)");
     println!();
-    println!("Pairing code (single use, 5 min):  {code}");
-    println!("Scopes granted: {}", scope_list.join(" "));
-    match ttl {
-        Some(_) => println!(
-            "Token lifetime: {} (revocable with --revoke)",
-            human_ttl(session_ttl)
-        ),
-        None => println!(
-            "Token lifetime: {} (revocable with --revoke; --ttl {} for a guest)",
-            human_ttl(session_ttl),
-            human_ttl(GUEST_TTL_SECS)
-        ),
-    }
+    print_code(&code, &scope_list, ttl, session_ttl);
     println!();
     println!("From the remote machine, pair with:");
     println!(
@@ -223,6 +232,42 @@ pub fn cmd_connect(
     );
     println!("Log:     {}", state_dir.join("tunnel.log").display());
     Ok(())
+}
+
+/// The lan and tailnet routes a gateway bound to `bind` on `port` answers
+/// at, most local first. Empty for a loopback bind.
+fn direct_routes(
+    ifaces: &[crate::remote::routes::Iface],
+    bind: &str,
+    port: u16,
+) -> Vec<AnnouncedRoute> {
+    select_advertised_routes(&reachable_through_bind(ifaces, bind), port, None)
+}
+
+fn print_direct(routes: &[AnnouncedRoute]) {
+    for r in routes {
+        let kind = serde_json::to_value(r.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        println!("  {:<8} {}", kind, r.url);
+    }
+}
+
+fn print_code(code: &str, scope_list: &[String], ttl: Option<&str>, session_ttl: u64) {
+    println!("Pairing code (single use, 5 min):  {code}");
+    println!("Scopes granted: {}", scope_list.join(" "));
+    match ttl {
+        Some(_) => println!(
+            "Token lifetime: {} (revocable with --revoke)",
+            human_ttl(session_ttl)
+        ),
+        None => println!(
+            "Token lifetime: {} (revocable with --revoke; --ttl {} for a guest)",
+            human_ttl(session_ttl),
+            human_ttl(GUEST_TTL_SECS)
+        ),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -263,10 +308,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_scopes_names_every_mintable_scope() {
+        // Every scope the pairing store accepts must be nameable here, or
+        // an op gated on it is unreachable over a paired link.
+        for scope in crate::remote::scopes::ALL_SCOPES {
+            let short = scope.trim_start_matches("a2a:");
+            assert_eq!(parse_scopes(short).unwrap(), vec![scope.to_string()]);
+            assert_eq!(parse_scopes(scope).unwrap(), vec![scope.to_string()]);
+        }
+    }
+
+    #[test]
+    fn parse_scopes_default_stays_unelevated() {
+        let default = parse_scopes("read,send").unwrap();
+        for elevated in crate::remote::scopes::ELEVATED_SCOPES {
+            assert!(!default.iter().any(|s| s == elevated));
+        }
+    }
+
+    #[test]
     fn parse_scopes_rejects_unknown_and_empty() {
         assert!(parse_scopes("admin").is_err());
         assert!(parse_scopes("").is_err());
         assert!(parse_scopes("read,delete-everything").is_err());
+    }
+
+    #[test]
+    fn direct_routes_are_empty_for_a_loopback_gateway() {
+        use crate::remote::routes::Iface;
+        let machine = vec![
+            Iface {
+                name: "eth0".into(),
+                ipv4: std::net::Ipv4Addr::new(192, 168, 1, 185),
+            },
+            Iface {
+                name: "tailscale0".into(),
+                ipv4: std::net::Ipv4Addr::new(100, 118, 255, 80),
+            },
+        ];
+        assert!(direct_routes(&machine, "127.0.0.1", 18799).is_empty());
+        let tailnet: Vec<String> = direct_routes(&machine, "100.118.255.80", 18799)
+            .into_iter()
+            .map(|r| r.url)
+            .collect();
+        assert_eq!(tailnet, vec!["http://100.118.255.80:18799"]);
     }
 
     #[test]

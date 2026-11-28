@@ -1,0 +1,199 @@
+{
+  "op": "settings.load",
+  "scope": "a2a:admin",
+  "request": {},
+  "response": {
+    "Ok": {
+      "values": [
+        {
+          "section": "agent",
+          "key": "approval_policy",
+          "value": {
+            "Choice": "auto-always"
+          }
+        },
+        {
+          "section": "agent",
+          "key": "notify_on_plan_completed",
+          "value": {
+            "Bool": true
+          }
+        },
+        {
+          "section": "agent",
+          "key": "notify_on_turn_failed",
+          "value": {
+            "Bool": true
+          }
+        },
+        {
+          "section": "agent",
+          "key": "redact_sensitive_data",
+          "value": {
+            "Bool": true
+          }
+        },
+        {
+          "section": "agent",
+          "key": "redact_group",
+          "value": {
+            "OptBool": null
+          }
+        },
+        {
+          "section": "agent",
+          "key": "redact_dm",
+          "value": {
+            "OptBool": null
+          }
+        },
+        {
+          "section": "agent",
+          "key": "lazy_tools",
+          "value": {
+            "Bool": true
+          }
+        },
+        {
+          "section": "agent",
+          "key": "thinking_loop_timeout_secs",
+          "value": {
+            "Number": 600
+          }
+        },
+        {
+          "section": "agent",
+          "key": "time_marker_interval_secs",
+          "value": {
+            "Number": 600
+          }
+        },
+        {
+          "section": "agent",
+          "key": "debug_logs",
+          "value": {
+            "Bool": false
+          }
+        },
+        {
+          "section": "memory",
+          "key": "vector_enabled",
+          "value": {
+            "Bool": false
+          }
+        },
+        {
+          "section": "memory",
+          "key": "sweep_interval_secs",
+          "value": {
+            "Number": 300
+          }
+        },
+        {
+          "section": "memory",
+          "key": "backfill_interval_secs",
+          "value": {
+            "Number": 300
+          }
+        },
+        {
+          "section": "memory",
+          "key": "external_allowed_in_shared",
+          "value": {
+            "Bool": false
+          }
+        },
+        {
+          "section": "memory",
+          "key": "internal_allowed_in_shared",
+          "value": {
+            "Bool": false
+          }
+        }
+      ],
+      "credentials": [
+        {
+          "section": "providers.anthropic",
+          "label": "Anthropic",
+          "configured": true
+        },
+        {
+          "section": "providers.openai",
+          "label": "OpenAI",
+          "configured": false
+        },
+        {
+          "section": "providers.openrouter",
+          "label": "OpenRouter",
+          "configured": false
+        },
+        {
+          "section": "providers.minimax",
+          "label": "MiniMax",
+          "configured": false
+        },
+        {
+          "section": "providers.zai",
+          "label": "z.ai (GLM)",
+          "configured": false
+        },
+        {
+          "section": "providers.moonshot",
+          "label": "Moonshot AI",
+          "configured": false
+        },
+        {
+          "section": "providers.xiaomi",
+          "label": "Xiaomi MiMo",
+          "configured": false
+        },
+        {
+          "section": "providers.gemini",
+          "label": "Google Gemini",
+          "configured": false
+        },
+        {
+          "section": "providers.github",
+          "label": "GitHub Copilot",
+          "configured": false
+        },
+        {
+          "section": "providers.bedrock",
+          "label": "AWS Bedrock",
+          "configured": false
+        },
+        {
+          "section": "providers.vertex",
+          "label": "Google Vertex",
+          "configured": false
+        },
+        {
+          "section": "providers.opencrabs",
+          "label": "OpenCrabs (built-in)",
+          "configured": false
+        },
+        {
+          "section": "providers.qwen",
+          "label": "Qwen",
+          "configured": false
+        },
+        {
+          "section": "providers.ollama",
+          "label": "Ollama",
+          "configured": false
+        },
+        {
+          "section": "providers.opencode",
+          "label": "OpenCode API",
+          "configured": false
+        }
+      ]
+    }
+  },
+  "response_config_unreadable": {
+    "Err": {
+      "kind": "failed",
+      "detail": "TOML parse error at line 1, column 1"
+    }
+  }
+}

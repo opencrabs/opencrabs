@@ -1,0 +1,15 @@
+{
+  "op": "session_ops.plan_path",
+  "scope": "a2a:read",
+  "request": {
+    "session_id": "5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77"
+  },
+  "response": {
+    "Ok": {
+      "plan": {
+        "path": "/home/crab/.opencrabs/session/.opencrabs_plan_5b3a0f0e-8a51-4c49-9d39-3f1f4a1c2b77.json"
+      },
+      "db_error": null
+    }
+  }
+}

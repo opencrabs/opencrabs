@@ -4,7 +4,7 @@
 //! the card's shape: it is which address wins when the machine publishes more
 //! than one, and that rule was wrong in a way only a real machine showed.
 
-use crate::dashboard_instances::share_address;
+use crate::instance_strip::share_address;
 use opencrabs::config::A2aConfig;
 use opencrabs::remote::tunnel::TunnelState;
 

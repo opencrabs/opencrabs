@@ -1,47 +1,51 @@
-//! The instance strip: 56 px of column on the far left that says *which crab*
-//! this window is looking at.
+//! The instance strip: which crab this window is looking at, and the cards
+//! that pair, share, forget or move one.
 //!
-//! Three nested scopes, one per column, and this is the outermost: the strip
-//! picks the instance, the rail lists that instance's sessions, the panel shows
-//! the selected session. Only the first is new; the other two already existed
-//! and are reused untouched, which is the whole reason the strip is a strip and
-//! not a redesign.
+//! Three nested scopes, and this is the outermost: the strip picks the
+//! instance, the rail lists that instance's sessions, the panes show the
+//! selected session. A pick swaps the backend the other two read from rather
+//! than drawing a second rail.
 //!
-//! Like the rail (#2933) this is a cached view: the window resolves a
-//! [`StripFrame`] of plain data and hands it over, and a frame that compares
-//! equal replays the last prepaint instead of rebuilding badges for a keystroke
-//! typed in the composer.
+//! It has no column of its own (#3178). With `[gui] instance_rail` on, the
+//! rail's logo unfolds a list of the crabs (`rail_view.rs`), and the list
+//! reads the [`StripFrame`] the window resolves here. The strip entity keeps
+//! the cards and paints only the one that is up, over the whole window.
 //!
-//! Two rules the paint follows, both from the mockup that was approved:
+//! Two rules the list follows, both from the mockup that was approved:
 //!
-//! 1. **The accent belongs to the selection alone.** Ring, number and the edge
-//!    bar are the only orange in the column; a crab that is merely online gets a
-//!    green dot, not a glow.
-//! 2. **Health never moves a crab.** Order is the store's, so the badge under
+//! 1. **The accent belongs to the selection alone.** A crab that is merely
+//!    online gets a green dot, not a glow.
+//! 2. **Health never moves a crab.** Order is the store's, so the row under
 //!    the pointer cannot slide away between the press and the release.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, IntoElement, MouseButton, MouseDownEvent, Render,
-    SharedString, StyleRefinement, WeakEntity, Window, div, prelude::*, rems, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Div, IntoElement, Keystroke, Render,
+    SharedString, Subscription, WeakEntity, Window, anchored, deferred, div, point, prelude::*, px,
+    rems, rgb,
 };
+use opencrabs::config::{A2aConfig, Config, gui_theme};
+use opencrabs::remote::instance_client;
+use opencrabs::remote::instance_repoint;
+use opencrabs::remote::instance_store::{self, InstanceFile, InstanceStore, KnownInstance, now};
+use opencrabs::remote::pairing::{CODE_TTL_SECS, PairingStore};
+use opencrabs::remote::scopes::BASE_SCOPES;
+use opencrabs::remote::tunnel;
+use opencrabs::ui_core::palette::{CrabPick, PaletteAction, PaletteItem, PaletteKind};
+use opencrabs::ui_core::text_field::{self, TextField};
 
-use crate::instances::{Health, InstanceEntry, badge_tint, badge_title, health_mark};
-use crate::palette;
-use opencrabs::config::gui_theme;
-
-/// The strip's width in rems. 56 px at the window's 16 px root, which is the
-/// mockup's number and the same axis the badges are centred on.
-pub(crate) const STRIP_REM: f32 = 3.5;
-
-/// A badge's diameter in rems (32 px), and the smaller chip below it (24 px).
-const BADGE_REM: f32 = 2.0;
-const CHIP_REM: f32 = 1.5;
+use crate::instances::{Health, InstanceEntry, Instances, badge_tint, badge_title};
+use crate::{modal_shell, palette};
 
 /// One crab, resolved to what the paint reads.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StripBadge {
     pub(crate) host_id: String,
     pub(crate) label: SharedString,
+    /// What the badge itself draws: one initial, an emoji, or a picture name.
+    pub(crate) glyph: SharedString,
     /// The full label, URL and probe state, for the hover title.
     pub(crate) title: SharedString,
     pub(crate) health: Health,
@@ -51,9 +55,11 @@ impl StripBadge {
     fn from_entry(entry: &InstanceEntry, now: u64) -> Self {
         Self {
             host_id: entry.host_id().to_string(),
-            // One initial, not a cut label: the badge is 32 px and the full
-            // name lives in `title` below, where the hover can show it whole.
-            label: SharedString::from(entry.glyph()),
+            label: SharedString::from(entry.strip_label()),
+            // One initial or a picture, not a cut label: the badge is 32 px
+            // and the full name lives in `title`, where the hover shows it
+            // whole. `label` stays for the cards, which name the crab.
+            glyph: SharedString::from(entry.glyph()),
             title: SharedString::from(badge_title(entry, now)),
             health: entry.health,
         }
@@ -68,14 +74,16 @@ impl StripBadge {
 pub(crate) struct StripFrame {
     pub(crate) badges: Vec<StripBadge>,
     pub(crate) selected: Option<String>,
-    /// The pairing modal is open, so the add chip draws pressed.
-    pub(crate) pairing: bool,
+    /// The last thing about the crabs that went wrong, drawn as one warning
+    /// mark under the badges with the text on hover. `None` is the normal
+    /// state.
+    pub(crate) error: Option<SharedString>,
 }
 
 impl StripFrame {
-    /// Build from the window's model. `now` is the same clock the panel prints,
-    /// so "offline há 5 min" cannot disagree between the two.
-    pub(crate) fn from_model(model: &crate::instances::Instances, now: u64, pairing: bool) -> Self {
+    /// Build from the window's model. `now` is the clock the hover title
+    /// prints "offline há 5 min" against.
+    pub(crate) fn from_model(model: &Instances, now: u64, error: Option<SharedString>) -> Self {
         Self {
             badges: model
                 .entries()
@@ -83,22 +91,151 @@ impl StripFrame {
                 .map(|entry| StripBadge::from_entry(entry, now))
                 .collect(),
             selected: model.selected_host_id().map(str::to_string),
-            pairing,
+            error,
         }
     }
+}
+
+/// The Seeker's rows for the crabs, read from the same frame the rail's list
+/// reads.
+///
+/// `None` is `[gui] instance_rail` off, and then there is not one row: the
+/// Seeker must not offer a feature the window does not draw. With it on there
+/// is a "trocar para" row for this crab and one per paired crab, the pairing
+/// row, and per crab the "esquecer" and "nova morada" rows, which open that
+/// crab's own card, the one its right-click opens.
+pub(crate) fn seeker_items(frame: Option<&StripFrame>) -> Vec<PaletteItem> {
+    let Some(frame) = frame else {
+        return Vec::new();
+    };
+    let crab = |title: String, subtitle: String, keywords: &str, pick: CrabPick| {
+        PaletteItem::new(
+            title,
+            subtitle,
+            PaletteKind::Action,
+            PaletteAction::Crab(pick),
+        )
+        .with_keywords(keywords)
+    };
+    let mut items = vec![crab(
+        "trocar para este crab".to_string(),
+        "volta ao crab desta janela".to_string(),
+        "crab instance remote switch home local troca casa",
+        CrabPick::Switch(None),
+    )];
+    for badge in &frame.badges {
+        items.push(crab(
+            format!("trocar para {}", badge.label),
+            badge.title.to_string(),
+            "crab instance remote switch open troca abrir",
+            CrabPick::Switch(Some(badge.host_id.clone())),
+        ));
+    }
+    items.push(crab(
+        "emparelhar um crab".to_string(),
+        "liga esta janela a um crab noutra máquina".to_string(),
+        "crab instance remote pair add connect emparelhar novo",
+        CrabPick::Pair,
+    ));
+    for badge in &frame.badges {
+        items.push(crab(
+            format!("esquecer {}", badge.label),
+            "abre o cartão do crab, onde esquecer é um botão".to_string(),
+            "crab instance remote forget remove unpair esquecer apagar",
+            CrabPick::Forget(badge.host_id.clone()),
+        ));
+        items.push(crab(
+            format!("nova morada de {}", badge.label),
+            "abre o cartão do crab, onde se cola o endereço novo".to_string(),
+            "crab instance remote address url repoint moved endereço morada",
+            CrabPick::Repoint(badge.host_id.clone()),
+        ));
+    }
+    items
 }
 
 /// The strip as an entity, so a cached frame can replay it.
 pub(crate) struct InstanceStrip {
     dashboard: WeakEntity<crate::Dashboard>,
     frame: StripFrame,
+    /// The card the `+` opened, if any. It lives on the strip and not on the
+    /// window because it belongs to the column that opened it, and because it
+    /// never enters a [`StripFrame`]: a keystroke typed into it repaints this
+    /// view alone, never the window around it.
+    card: Option<StripCard>,
+    /// What the last pairing or minting said went wrong, printed in the card.
+    card_error: Option<SharedString>,
+    /// Moves on every open and close, so an answer for a card the owner has
+    /// already closed does not reopen it or overwrite the one that replaced it.
+    card_epoch: u64,
+    /// Whether a card is up, shared with the window. The window's overlay
+    /// stack reads it without a `cx`, so a card counts as a modal there and
+    /// focus leaves the hidden composer: otherwise a character typed into the
+    /// card reaches the editor nobody can see (#3133).
+    card_up: Rc<Cell<bool>>,
+    /// The gateway config the share card was minted against, read off the UI
+    /// thread with the code. The tunnel button opens against it, so a click
+    /// never reads the disk on the UI thread.
+    share_gateway: Option<A2aConfig>,
+    /// The public tunnel this window started from the share card. Only a
+    /// tunnel the card spawned is held here: one that `opencrabs connect`
+    /// left running is reused but never stopped by the window. It is stopped
+    /// when the share card goes away and when the app quits; dropping the
+    /// guard is the stop, so even a strip torn down with the window does not
+    /// leave cloudflared behind.
+    owned_tunnel: Option<tunnel::OwnedTunnel>,
+    /// A tunnel open is in flight. A second click, or a fresh share card
+    /// opened meanwhile, waits for it instead of racing it.
+    tunnel_busy: bool,
+    /// The app-quit hook that stops [`Self::owned_tunnel`].
+    _quit: Subscription,
 }
 
 impl InstanceStrip {
-    pub(crate) fn new(dashboard: WeakEntity<crate::Dashboard>, _cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        dashboard: WeakEntity<crate::Dashboard>,
+        card_up: Rc<Cell<bool>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Quitting stops the tunnel this window owns. The stop is synchronous
+        // here on purpose: the process is going away, and a stop handed to a
+        // worker thread could be cut off with it.
+        let quit = cx.on_app_quit(|strip: &mut Self, _cx| {
+            drop(strip.owned_tunnel.take());
+            async {}
+        });
         Self {
             dashboard,
             frame: StripFrame::default(),
+            card: None,
+            card_error: None,
+            card_epoch: 0,
+            card_up,
+            share_gateway: None,
+            owned_tunnel: None,
+            tunnel_busy: false,
+            _quit: quit,
+        }
+    }
+
+    /// The one writer of `card`, so the cell the window reads never disagrees
+    /// with it. The window repaints on the next turn of the loop, which is
+    /// when it moves the keyboard to or from the card.
+    ///
+    /// Any card that is not the share card (or the share card being minted
+    /// again) releases the public tunnel the share card opened: the tunnel
+    /// lives exactly as long as the card that published it.
+    fn set_card(&mut self, card: Option<StripCard>, cx: &mut Context<Self>) {
+        if !matches!(card, Some(StripCard::Share(_) | StripCard::Minting)) {
+            self.release_tunnel(cx);
+        }
+        let up = card.is_some();
+        self.card = card;
+        if self.card_up.replace(up) != up {
+            let dashboard = self.dashboard.clone();
+            cx.defer(move |cx| {
+                dashboard.update(cx, |_, cx| cx.notify()).ok();
+            });
         }
     }
 
@@ -113,272 +250,1807 @@ impl InstanceStrip {
     }
 
     fn pick(&self, host_id: SharedString, cx: &mut Context<Self>) {
-        let dashboard = self.dashboard.clone();
-        dashboard
+        self.dashboard
             .update(cx, |dash, cx| dash.instance_picked(host_id.as_ref(), cx))
             .ok();
-    }
-
-    fn add(&self, cx: &mut Context<Self>) {
-        let dashboard = self.dashboard.clone();
-        dashboard
-            .update(cx, |dash, cx| dash.instance_add_clicked(cx))
-            .ok();
-    }
-
-    /// Back to this window's own crab.
-    ///
-    /// The mark is the door out of a remote: it is where the column starts, so
-    /// a click on it means "eu", the same way the badges below mean "aquele".
-    /// Without it the only way back was Esc, which nobody could guess.
-    fn clear(&self, cx: &mut Context<Self>) {
-        let dashboard = self.dashboard.clone();
-        dashboard
-            .update(cx, |dash, cx| dash.instance_clear(cx))
-            .ok();
-    }
-
-    /// The window's mark at the top of the column. It is not an instance: it
-    /// selects nothing, and a click on it goes back to this machine's own crab.
-    /// It is there so the column has a head and the badges below it read as a
-    /// list rather than a floating stack.
-    ///
-    /// It is also the door to this machine: right-clicking it offers a pairing
-    /// code for another crab, the pairing form, and this machine's settings.
-    fn workspace_mark(&self, remote: bool, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let ask = cx.listener(|this, ev: &MouseDownEvent, _window, cx| {
-            let at = ev.position;
-            let dashboard = this.dashboard.clone();
-            dashboard
-                .update(cx, |dash, cx| dash.instance_mark_menu(at, cx))
-                .ok();
-        });
-        let home = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.clear(cx));
-        div()
-            .id("instance-workspace-mark")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w(rems(BADGE_REM))
-            .h(rems(1.75))
-            // A rounded square, like the rail's session marks and the topic
-            // tabs: the strip is part of the same chrome, and a circle in a
-            // column of squares read as a different widget (#3133).
-            .rounded_md()
-            .bg(rgb(p.panel_hi))
-            .border_1()
-            // While a remote is showing, the way home is the one thing on this
-            // column that is not the remote, so it wears the accent.
-            .border_color(rgb(if remote { p.accent } else { p.track }))
-            .cursor_pointer()
-            .on_click(home)
-            .on_mouse_down(MouseButton::Right, ask)
-            .child(
-                div()
-                    .text_size(rems(0.6875))
-                    .text_color(rgb(p.text_title))
-                    .child(SharedString::from("C")),
-            )
-            .into_any_element()
-    }
-
-    fn badge(&self, badge: &StripBadge, selected: bool, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let dot = match badge.health {
-            Health::Up { .. } => p.green,
-            Health::Down { .. } => p.red,
-            Health::Unknown => p.text_faint,
-        };
-        // Each crab wears its own hue, derived from its host id, so the column
-        // is recognisable before any label is read. The wash and the ring are
-        // the same hue at two strengths; the glyph mixes with the palette's own
-        // text colour, which keeps it legible in the light theme too.
-        let hue = tint_hue(badge_tint(&badge.host_id), &p);
-        let wash = gui_theme::mix(p.panel, hue, 30, 100);
-        let ring = gui_theme::mix(p.panel, hue, 62, 100);
-        let glyph = gui_theme::mix(hue, p.text, 40, 100);
-        let text = if selected { p.accent } else { glyph };
-        let host_id = SharedString::from(badge.host_id.clone());
-        let click = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-            this.pick(host_id.clone(), cx);
-        });
-        // Right-click is the badge's own menu, which today holds one row: the
-        // one that forgets the crab. It sits here, and not on the panel's
-        // "desligar", because closing the view must not cost the pairing: a
-        // code is a fresh round trip to the other machine and nobody expects a
-        // "desligar" to make them do it again.
-        let menu_host = SharedString::from(badge.host_id.clone());
-        let ask = cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-            let dashboard = this.dashboard.clone();
-            dashboard
-                .update(cx, |dash, cx| {
-                    dash.instance_badge_menu(menu_host.as_ref(), ev.position, cx)
-                })
-                .ok();
-        });
-
-        let mut cell = div()
-            // A click needs an element id in this gpui: `on_click` lives on
-            // `StatefulInteractiveElement`, which is only reachable through
-            // `.id()`. The badge's own host id keeps it stable across frames.
-            .id(SharedString::from(format!(
-                "instance-badge-{}",
-                badge.host_id
-            )))
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w_full()
-            .h(rems(BADGE_REM))
-            .cursor_pointer()
-            .on_click(click)
-            .on_mouse_down(MouseButton::Right, ask)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w(rems(BADGE_REM))
-                    .h(rems(BADGE_REM))
-                    // A rounded square, the shape the rail's session marks and
-                    // the topic tabs wear. The column is the same chrome, and
-                    // a circle among squares read as a widget from another
-                    // window (#3133).
-                    .rounded_md()
-                    .bg(rgb(wash))
-                    .border_1()
-                    .border_color(rgb(if selected { p.accent } else { ring }))
-                    .child(mark(badge, text, selected)),
-            )
-            // The dot is the only thing health changes, and it sits on the
-            // badge's shoulder so it never widens the cell.
-            .child(
-                div()
-                    .absolute()
-                    .bottom(rems(0.0625))
-                    .right(rems(0.5))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w(rems(0.5))
-                    .h(rems(0.5))
-                    .rounded_full()
-                    .bg(rgb(dot))
-                    .child(
-                        div()
-                            .text_size(rems(0.4375))
-                            .text_color(rgb(p.bg))
-                            .child(SharedString::from(health_mark(badge.health))),
-                    ),
-            );
-
-        // The selection bar is flush with the column's left edge, which is what
-        // makes "you are here" readable at a glance without a glow.
-        if selected {
-            cell = cell.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(rems(0.5))
-                    .w(rems(0.125))
-                    .h(rems(1.0))
-                    .rounded_full()
-                    .bg(rgb(p.accent)),
-            );
-        }
-
-        cell.into_any_element()
-    }
-
-    fn add_chip(&self, pressed: bool, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette::current();
-        let click = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.add(cx));
-        div()
-            .id("instance-strip-add")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .w_full()
-            .h(rems(CHIP_REM))
-            .cursor_pointer()
-            .on_click(click)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w(rems(CHIP_REM))
-                    .h(rems(CHIP_REM))
-                    .rounded_md()
-                    .bg(rgb(if pressed { p.panel_hi } else { p.bg }))
-                    .border_1()
-                    .border_color(rgb(p.track))
-                    .child(
-                        div()
-                            .text_size(rems(0.75))
-                            .text_color(rgb(if pressed { p.text_muted } else { p.text_faint }))
-                            .child(SharedString::from("+")),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// The column. Deliberately a `flex_col` of fixed-size cells with no
-    /// horizontal growth: the strip is the one column that never resizes.
-    fn column(&self, cx: &mut Context<Self>) -> Div {
-        let p = palette::current();
-        let selected = self.frame.selected.clone();
-        let mut children: Vec<AnyElement> = Vec::with_capacity(self.frame.badges.len() + 3);
-        children.push(self.workspace_mark(selected.is_some(), cx));
-        children.push(div().h(rems(0.625)).into_any_element());
-        for badge in &self.frame.badges {
-            let is_selected = selected.as_deref() == Some(badge.host_id.as_str());
-            children.push(self.badge(badge, is_selected, cx));
-            children.push(div().h(rems(0.5)).into_any_element());
-        }
-        children.push(self.add_chip(self.frame.pairing, cx));
-
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .w_full()
-            .h_full()
-            .pt(rems(0.625))
-            .bg(rgb(p.bg))
-            .border_r_1()
-            .border_color(rgb(p.track))
-            .children(children)
     }
 }
 
 impl Render for InstanceStrip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.column(cx)
+    /// No column of its own (#3178): the crabs are listed in the rail, under
+    /// its logo. The strip keeps the cards (pair, share, a crab's own card)
+    /// and their logic, and paints only the card that is up, over the whole
+    /// window. With no card it is an empty box of no size.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let host = div().w(px(0.0)).h(px(0.0));
+        match self.card_overlay(window, cx) {
+            Some(card) => host.child(card),
+            None => host,
+        }
     }
 }
 
-/// The box the cached view is laid out in. A cached view is laid out as a ROOT,
-/// where `flex_1` sizes nothing, so the width is spelled out here and nowhere
-/// else: the reserved box and the drawn one cannot drift (#2805).
-pub(crate) fn strip_root_style() -> StyleRefinement {
-    let mut boxed = div()
+/// The square a crab wears in the rail's list, `box_rem` on a side.
+///
+/// Each crab wears its own hue, derived from its host id, so the list is
+/// recognisable before any label is read (upstream 6472af7b5). The wash and
+/// the ring are the same hue at two strengths; the glyph mixes with the
+/// palette's own text colour, which keeps it legible in the light theme too.
+/// A rounded square, the shape of the rail's session marks and the topic tabs
+/// (#3133). The accent belongs to the selection alone.
+pub(crate) fn badge_mark(badge: &StripBadge, selected: bool, box_rem: f32) -> AnyElement {
+    let p = palette::current();
+    let hue = tint_hue(badge_tint(&badge.host_id), &p);
+    let wash = gui_theme::mix(p.panel, hue, 30, 100);
+    let ring = gui_theme::mix(p.panel, hue, 62, 100);
+    let glyph = gui_theme::mix(hue, p.text, 40, 100);
+    let text = if selected { p.accent } else { glyph };
+    div()
+        .flex()
+        .flex_row()
         .flex_none()
-        .w(rems(STRIP_REM))
-        .h_full()
-        .min_w_0()
-        .min_h_0();
-    boxed.style().clone()
+        .items_center()
+        .justify_center()
+        .w(rems(box_rem))
+        .h(rems(box_rem))
+        .rounded_md()
+        .bg(rgb(wash))
+        .border_1()
+        .border_color(rgb(if selected { p.accent } else { ring }))
+        .child(mark(badge, text, selected, box_rem))
+        .into_any_element()
 }
 
+/// The colour of a crab's health dot: green up, red down, faint unknown.
+pub(crate) fn health_dot(health: Health) -> u32 {
+    let p = palette::current();
+    match health {
+        Health::Up { .. } => p.green,
+        Health::Down { .. } => p.red,
+        Health::Unknown => p.text_faint,
+    }
+}
+
+// ── The `+` card: pair a crab into this window, or hand this one out ────────
+
+/// Which card the `+` opened.
+///
+/// No `Debug`, no `Clone`: two of the three states carry a pairing code, and a
+/// derive is how a code ends up in a log line nobody meant to write.
+pub(crate) enum StripCard {
+    /// The other crab's address and code, typed or pasted.
+    Pair(PairingForm),
+    /// A code is being minted and the address read, off the UI thread.
+    Minting,
+    /// This crab's address, a fresh code and the QR that carries both.
+    Share(ShareView),
+    /// A badge was right-clicked: open that crab, or forget it.
+    Manage(ManageView),
+}
+
+/// The crab a right-click asked about, held by value so the card still names
+/// it while the store is being rewritten.
+pub(crate) struct ManageView {
+    pub(crate) host_id: String,
+    pub(crate) label: SharedString,
+    pub(crate) title: SharedString,
+    /// A forget is in flight; the buttons stop answering until it lands.
+    pub(crate) busy: bool,
+    /// A new address for this crab, pasted when its tunnel came back
+    /// somewhere else. No code: the crab's own token confirms the move.
+    pub(crate) address: TextField,
+    /// A move to that address is being confirmed.
+    pub(crate) moving: bool,
+}
+
+impl InstanceStrip {
+    /// Whether a card is up. While it is, it owns the keyboard.
+    pub(crate) fn card_open(&self) -> bool {
+        self.card.is_some()
+    }
+
+    /// The `+` was clicked: the pairing form. Nothing touches the network
+    /// until it is submitted with an address and a code.
+    pub(crate) fn open_pair(&mut self, cx: &mut Context<Self>) {
+        self.card_epoch = self.card_epoch.wrapping_add(1);
+        self.set_card(Some(StripCard::Pair(PairingForm::default())), cx);
+        self.card_error = None;
+        cx.notify();
+    }
+
+    /// Close whichever card is up. Closing the share card is not a revoke: the
+    /// code stays valid until it expires, and saying otherwise would be a
+    /// promise the pairing store cannot keep.
+    pub(crate) fn close_card(&mut self, cx: &mut Context<Self>) {
+        self.card_epoch = self.card_epoch.wrapping_add(1);
+        self.set_card(None, cx);
+        self.card_error = None;
+        cx.notify();
+    }
+
+    /// A badge was right-clicked: the card that opens or forgets that crab.
+    ///
+    /// Forgetting lives behind the right-click and a second, named button,
+    /// never on the left-click: the left-click is the pick, and a slip of the
+    /// hand there must not cost a pairing.
+    pub(crate) fn open_manage(&mut self, badge: &StripBadge, cx: &mut Context<Self>) {
+        self.card_epoch = self.card_epoch.wrapping_add(1);
+        self.set_card(
+            Some(StripCard::Manage(ManageView {
+                host_id: badge.host_id.clone(),
+                label: badge.label.clone(),
+                title: badge.title.clone(),
+                busy: false,
+                address: TextField::new(),
+                moving: false,
+            })),
+            cx,
+        );
+        self.card_error = None;
+        cx.notify();
+    }
+
+    /// The managed crab's "abrir": the same pick a left-click makes.
+    fn manage_open(&mut self, cx: &mut Context<Self>) {
+        let Some(StripCard::Manage(view)) = self.card.as_ref() else {
+            return;
+        };
+        let host_id = SharedString::from(view.host_id.clone());
+        self.close_card(cx);
+        if self.frame.selected.as_deref() != Some(host_id.as_ref()) {
+            self.pick(host_id, cx);
+        }
+    }
+
+    /// The managed crab's "esquecer": drop its row from the store off the UI
+    /// thread, then hand the window the store as it now reads.
+    fn manage_forget(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.card_epoch;
+        let host_id = match self.card.as_mut() {
+            Some(StripCard::Manage(view)) if !view.busy && !view.moving => {
+                view.busy = true;
+                view.host_id.clone()
+            }
+            _ => return,
+        };
+        self.card_error = None;
+        cx.notify();
+        let forget = host_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { forget_instance(&forget) })
+                .await;
+            this.update(cx, |strip, cx| match result {
+                Ok(file) => {
+                    if strip.card_epoch == epoch {
+                        strip.close_card(cx);
+                    }
+                    strip
+                        .dashboard
+                        .update(cx, |dash, cx| dash.instance_forgotten(&file, &host_id, cx))
+                        .ok();
+                }
+                Err(e) => {
+                    if strip.card_epoch != epoch {
+                        return;
+                    }
+                    if let Some(StripCard::Manage(view)) = strip.card.as_mut() {
+                        view.busy = false;
+                    }
+                    strip.card_error = Some(SharedString::from(format!("esquecer: {e:#}")));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn manage_view(&mut self) -> Option<&mut ManageView> {
+        match self.card.as_mut() {
+            Some(StripCard::Manage(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The right-click card's keyboard: its one field takes the typing, Enter
+    /// moves the crab to the address in it, Esc closes.
+    fn manage_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
+        if self
+            .manage_view()
+            .is_some_and(|view| view.busy || view.moving)
+        {
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => self.close_card(cx),
+            "enter" => self.manage_repoint(cx),
+            _ => {
+                if let Some(edit) = text_field::editing_chord(
+                    ks.key.as_str(),
+                    ks.modifiers.control,
+                    ks.modifiers.platform,
+                    ks.modifiers.alt,
+                    ks.modifiers.shift,
+                ) {
+                    let Some(view) = self.manage_view() else {
+                        return;
+                    };
+                    match text_field::apply(&mut view.address, edit) {
+                        Some(text_field::ClipboardRequest::Write(text)) => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        }
+                        Some(text_field::ClipboardRequest::Read) => {
+                            if let Some(text) =
+                                cx.read_from_clipboard().and_then(|item| item.text())
+                                && let Some(view) = self.manage_view()
+                            {
+                                view.address.insert_text(text.trim());
+                            }
+                        }
+                        None => {}
+                    }
+                    cx.notify();
+                    return;
+                }
+                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    return;
+                }
+                let typed = ks.key_char.as_ref().and_then(|s| s.chars().next());
+                if let Some(ch) = typed
+                    && !ch.is_whitespace()
+                    && let Some(view) = self.manage_view()
+                {
+                    view.address.insert_text(&ch.to_string());
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// The managed crab's "mudar endereço": ask the pasted address who it is
+    /// with this crab's own token, off the UI thread, and move the crab there
+    /// only if it is the same crab. A refusal is printed in the card and
+    /// changes nothing.
+    fn manage_repoint(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.card_epoch;
+        let Some(view) = self.manage_view() else {
+            return;
+        };
+        if view.busy || view.moving {
+            return;
+        }
+        let host_id = view.host_id.clone();
+        let address = view.address.trimmed().to_string();
+        if address.is_empty() {
+            self.card_error = Some(SharedString::from(
+                "endereço: cola primeiro o endereço novo deste crab",
+            ));
+            cx.notify();
+            return;
+        }
+        if let Some(view) = self.manage_view() {
+            view.moving = true;
+        }
+        self.card_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { repoint_instance(&host_id, &address) })
+                .await;
+            this.update(cx, |strip, cx| {
+                match result {
+                    Ok(known) => {
+                        if strip.card_epoch == epoch {
+                            strip.close_card(cx);
+                        }
+                        strip
+                            .dashboard
+                            .update(cx, |dash, cx| dash.instance_repointed(&known, cx))
+                            .ok();
+                    }
+                    Err(e) => {
+                        if strip.card_epoch != epoch {
+                            return;
+                        }
+                        if let Some(view) = strip.manage_view() {
+                            view.moving = false;
+                        }
+                        strip.card_error =
+                            Some(SharedString::from(format!("endereço recusado: {e:#}")));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Mint a code for this crab and build the card that carries it.
+    ///
+    /// The code is minted in this process by the same [`PairingStore`] the
+    /// A2A gateway reads, so no terminal and no `opencrabs connect` is needed.
+    /// The config read and the store write both happen on the background
+    /// executor: the disk is not touched on the UI thread.
+    pub(crate) fn open_share(&mut self, cx: &mut Context<Self>) {
+        self.card_epoch = self.card_epoch.wrapping_add(1);
+        let epoch = self.card_epoch;
+        self.set_card(Some(StripCard::Minting), cx);
+        self.card_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let minted = cx
+                .background_executor()
+                .spawn(async move { mint_share() })
+                .await;
+            this.update(cx, |strip, cx| {
+                if strip.card_epoch != epoch {
+                    return;
+                }
+                match minted {
+                    Ok((share, gateway)) => {
+                        strip.share_gateway = gateway;
+                        strip.set_card(Some(StripCard::Share(share)), cx);
+                    }
+                    Err(e) => {
+                        strip.card_error = Some(SharedString::from(format!("código: {e:#}")));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The share card's "abrir túnel público" was clicked: open a public
+    /// tunnel through [`tunnel::open`], the path `opencrabs connect` takes,
+    /// and repoint the card's link and QR at it.
+    ///
+    /// Only a click lands here: minting a code never opens a tunnel, because
+    /// a quick tunnel publishes this crab on the internet. The open runs on
+    /// the background executor (it may download cloudflared and waits up to
+    /// a minute for the URL).
+    pub(crate) fn open_tunnel(&mut self, cx: &mut Context<Self>) {
+        if self.tunnel_busy {
+            return;
+        }
+        let Some(StripCard::Share(share)) = self.card.as_mut() else {
+            return;
+        };
+        let Some(a2a) = self.share_gateway.clone() else {
+            share.tunnel = ShareTunnel::Failed(
+                "não consegui ler a config desta máquina; fecha e volta a abrir o cartão"
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        if !share.tunnel.click() {
+            return;
+        }
+        self.tunnel_busy = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { open_public_tunnel(&a2a) })
+                .await;
+            // A strip that is gone drops `opened` with this closure, and with
+            // it any tunnel this click started: the guard's drop stops it.
+            this.update(cx, |strip, cx| strip.tunnel_landed(opened, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The tunnel open came back. A share card still up takes the address;
+    /// a card that was closed meanwhile leaves nothing running behind it.
+    fn tunnel_landed(&mut self, opened: Result<PublicTunnel, String>, cx: &mut Context<Self>) {
+        self.tunnel_busy = false;
+        let label = this_host_label();
+        let keep = match self.card.as_mut() {
+            Some(StripCard::Share(share)) => match opened {
+                Ok(public) => {
+                    apply_tunnel(share, public.url, label.as_deref());
+                    public.owned
+                }
+                Err(why) => {
+                    share.tunnel = ShareTunnel::Failed(why);
+                    None
+                }
+            },
+            // A fresh code is being minted: the tunnel stays, and the new
+            // card reads it back as the address to hand out.
+            Some(StripCard::Minting) => opened.ok().and_then(|public| public.owned),
+            // The share card is gone: whatever this click started goes too.
+            _ => {
+                if let Ok(PublicTunnel {
+                    owned: Some(owned), ..
+                }) = opened
+                {
+                    Self::stop_off_thread(owned, cx);
+                }
+                None
+            }
+        };
+        if let Some(owned) = keep {
+            self.adopt_tunnel(owned, cx);
+        }
+        cx.notify();
+    }
+
+    fn adopt_tunnel(&mut self, owned: tunnel::OwnedTunnel, cx: &mut Context<Self>) {
+        if let Some(previous) = self.owned_tunnel.replace(owned) {
+            Self::stop_off_thread(previous, cx);
+        }
+    }
+
+    /// Stop the tunnel the share card opened, if it opened one.
+    fn release_tunnel(&mut self, cx: &mut Context<Self>) {
+        if let Some(owned) = self.owned_tunnel.take() {
+            Self::stop_off_thread(owned, cx);
+        }
+    }
+
+    /// Dropping the guard stops cloudflared, which can wait out a grace
+    /// period: it happens on the background executor, never on the UI thread.
+    fn stop_off_thread(owned: tunnel::OwnedTunnel, cx: &mut Context<Self>) {
+        cx.background_executor()
+            .spawn(async move { drop(owned) })
+            .detach();
+    }
+
+    fn pair_form(&mut self) -> Option<&mut PairingForm> {
+        match self.card.as_mut() {
+            Some(StripCard::Pair(form)) => Some(form),
+            _ => None,
+        }
+    }
+
+    /// The card's keyboard: Tab walks the three fields, Enter pairs, Esc
+    /// closes. Every key is the card's while it is up, so a character typed
+    /// here can never land in the composer underneath.
+    pub(crate) fn card_key(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
+        if matches!(self.card, Some(StripCard::Manage(_))) {
+            self.manage_key(ks, cx);
+            return;
+        }
+        if self.pair_form().is_some_and(|form| form.busy) {
+            // A submit in flight owns nothing: the answer comes back into the
+            // form, and typing into a request already sent would lie.
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => self.close_card(cx),
+            "enter" => self.pair_submit(cx),
+            "tab" => {
+                if let Some(form) = self.pair_form() {
+                    form.field = if ks.modifiers.shift {
+                        (form.field + 2) % 3
+                    } else {
+                        (form.field + 1) % 3
+                    };
+                    cx.notify();
+                }
+            }
+            _ => {
+                if let Some(edit) = text_field::editing_chord(
+                    ks.key.as_str(),
+                    ks.modifiers.control,
+                    ks.modifiers.platform,
+                    ks.modifiers.alt,
+                    ks.modifiers.shift,
+                ) {
+                    self.apply_pair_edit(edit, cx);
+                    return;
+                }
+                if ks.modifiers.control || ks.modifiers.platform || ks.modifiers.alt {
+                    return;
+                }
+                let typed = if ks.key == "space" {
+                    Some(' ')
+                } else {
+                    ks.key_char.as_ref().and_then(|s| s.chars().next())
+                };
+                if let Some(ch) = typed
+                    && let Some(form) = self.pair_form()
+                {
+                    form.focused().insert_text(&ch.to_string());
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// One editing chord on the focused field, clipboard included, exactly as
+    /// the composer does it. A pasted pairing link fills all three fields.
+    fn apply_pair_edit(&mut self, edit: text_field::TextFieldEdit, cx: &mut Context<Self>) {
+        let Some(form) = self.pair_form() else {
+            return;
+        };
+        let in_url = form.field == 0;
+        match text_field::apply(form.focused(), edit) {
+            Some(text_field::ClipboardRequest::Write(text)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            Some(text_field::ClipboardRequest::Read) => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                    && let Some(form) = self.pair_form()
+                    && !(in_url && form.absorb_link(&text))
+                {
+                    form.focused().insert_text(&text);
+                }
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// Pair a crab: POST the code, store the token, hand the window the file.
+    ///
+    /// The exchange and both disk writes run on the background executor, on
+    /// the remote client's runtime (`reqwest` panics outside a Tokio reactor,
+    /// and gpui's executor is not one). Only the host id and the store as it
+    /// now reads come back, and the window picks the new crab from those.
+    pub(crate) fn pair_submit(&mut self, cx: &mut Context<Self>) {
+        let epoch = self.card_epoch;
+        let Some(form) = self.pair_form() else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        let url = form.url.trimmed().to_string();
+        let code = form.code.trimmed().to_string();
+        let label = form.label.trimmed().to_string();
+        if url.is_empty() || code.is_empty() {
+            self.card_error = Some(SharedString::from(
+                "emparelhar: preciso do endereço e do código",
+            ));
+            cx.notify();
+            return;
+        }
+        form.busy = true;
+        self.card_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { pair_and_store(&url, &code, &label) })
+                .await;
+            this.update(cx, |strip, cx| {
+                let current = strip.card_epoch == epoch;
+                match result {
+                    Ok((host_id, file)) => {
+                        // A pairing that went through is kept even when its
+                        // card was closed meanwhile: the token is already on
+                        // disk, and a strip that hid it would be lying.
+                        if current {
+                            strip.set_card(None, cx);
+                            strip.card_error = None;
+                        }
+                        strip
+                            .dashboard
+                            .update(cx, |dash, cx| dash.instance_paired(&file, &host_id, cx))
+                            .ok();
+                    }
+                    Err(e) => {
+                        if current && let Some(form) = strip.pair_form() {
+                            // The code is single use either way: clear it so
+                            // the retry asks for a fresh one.
+                            form.busy = false;
+                            form.code = TextField::new();
+                            form.field = 1;
+                            strip.card_error =
+                                Some(SharedString::from(format!("emparelhar: {e:#}")));
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The card, painted over the whole window.
+    ///
+    /// The strip has no box of its own, and the card must not need one: it is
+    /// deferred and anchored at the window's origin in a box the size of the
+    /// viewport, so the shared modal's scrim covers what it covers when the
+    /// window mounts it at the root, without the window holding its state.
+    fn card_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, title, subtitle, footer, body) = match self.card.as_ref()? {
+            StripCard::Pair(form) => {
+                let form = form.clone();
+                (
+                    "instance-pair-modal",
+                    "Emparelhar um crab",
+                    "o outro crab mostra o endereço e um código de uso único",
+                    "tab campos · enter emparelha · esc fecha",
+                    self.pair_body(&form, cx),
+                )
+            }
+            StripCard::Minting => (
+                "instance-share-modal",
+                "Partilhar este crab",
+                "a gerar um código de uso único",
+                "esc fecha",
+                self.minting_body(cx),
+            ),
+            StripCard::Manage(view) => {
+                let body = self.manage_body(view, cx);
+                (
+                    "instance-manage-modal",
+                    "Este crab",
+                    "abrir mostra as sessões dele; esquecer apaga o emparelhamento",
+                    "enter muda o endereço · esc fecha",
+                    body,
+                )
+            }
+            StripCard::Share(share) => {
+                let share = share.clone();
+                (
+                    "instance-share-modal",
+                    "Partilhar este crab",
+                    "o outro crab lê o QR ou cola o link",
+                    "esc fecha · fechar não revoga o código",
+                    self.share_body(&share, cx),
+                )
+            }
+        };
+        let rem = f32::from(window.rem_size());
+        let dismiss = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.close_card(cx));
+        let modal = modal_shell::render(
+            modal_shell::ModalView {
+                id,
+                title: title.to_string(),
+                subtitle: subtitle.to_string(),
+                actions: None,
+                header_close: true,
+                body,
+                footer: Some(modal_shell::footer(footer.to_string()).into_any_element()),
+                width: 26.0 * rem,
+                max_height: 36.0 * rem,
+            },
+            dismiss,
+        );
+        let viewport = window.viewport_size();
+        Some(
+            deferred(
+                anchored().position(point(px(0.0), px(0.0))).child(
+                    div()
+                        .relative()
+                        .w(viewport.width)
+                        .h(viewport.height)
+                        .child(modal),
+                ),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+
+    fn card_button(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        accent: bool,
+    ) -> gpui::Stateful<Div> {
+        let p = palette::current();
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(rgb(if accent { p.accent } else { p.panel_hi }))
+            .text_size(rems(0.75))
+            .text_color(rgb(if accent { p.bg } else { p.text }))
+            .child(label.into())
+    }
+
+    fn card_error_line(&self) -> Option<AnyElement> {
+        let p = palette::current();
+        self.card_error.clone().map(|err| {
+            div()
+                .text_size(rems(0.75))
+                .text_color(rgb(p.warn))
+                .child(err)
+                .into_any_element()
+        })
+    }
+
+    /// The pairing form: address, code, and an optional name for the strip.
+    fn pair_body(&self, form: &PairingForm, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let mut body: Vec<AnyElement> = Vec::new();
+        for (index, (label, field)) in form.fields().iter().enumerate() {
+            let here = form.field == index;
+            // The same span split the composer uses: the window never slices
+            // a string, the core does.
+            let (before, selected, after) = field.render_spans();
+            // A click moves the caret to the row, the same state Tab sets: a
+            // field only Tab can reach is a field half the owners never find.
+            let focus_here = cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                if let Some(form) = this.pair_form() {
+                    form.field = index;
+                }
+                cx.notify();
+            });
+            body.push(
+                div()
+                    .id(SharedString::from(format!("instance-pair-field-{index}")))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .cursor_pointer()
+                    .on_click(focus_here)
+                    .child(
+                        div()
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(if here { p.text_normal } else { p.text_faint }))
+                            .child(SharedString::from(*label)),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            // A pasted address is longer than the card is
+                            // wide: one line, clipped at the border, never
+                            // drawn past it.
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(p.panel))
+                            .border_1()
+                            .border_color(rgb(if here { p.accent } else { p.track }))
+                            .text_size(rems(0.8125))
+                            .text_color(rgb(if field.is_empty() {
+                                p.text_faint
+                            } else {
+                                p.text
+                            }))
+                            .when(field.is_empty() && !here, |d| {
+                                d.child(SharedString::from(match index {
+                                    0 => "https://… ou o link opencrabs://pair",
+                                    1 => "8 caracteres",
+                                    _ => "o nome do outro crab",
+                                }))
+                            })
+                            .child(SharedString::from(before.to_string()))
+                            .when(!selected.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .bg(rgb(p.selection))
+                                        .child(SharedString::from(selected.to_string())),
+                                )
+                            })
+                            .when(here, |d| {
+                                d.child(div().flex_none().w(px(1.5)).h(rems(1.0)).bg(rgb(p.accent)))
+                            })
+                            .child(SharedString::from(after.to_string())),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some(err) = self.card_error_line() {
+            body.push(err);
+        }
+        let submit = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.pair_submit(cx));
+        let share = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_share(cx));
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    Self::card_button(
+                        "instance-pair-submit",
+                        if form.busy {
+                            "a emparelhar…"
+                        } else {
+                            "emparelhar"
+                        },
+                        true,
+                    )
+                    .when(form.busy, |d| d.opacity(0.6))
+                    .on_click(submit),
+                )
+                .child(
+                    Self::card_button("instance-pair-share", "partilhar este crab", false)
+                        .on_click(share),
+                )
+                .into_any_element(),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(body)
+            .into_any_element()
+    }
+
+    /// The share card while the code is being minted, or why it was not.
+    /// The right-click card: who the crab is, "abrir", and "esquecer" named
+    /// after the crab so nobody forgets the wrong one.
+    fn manage_body(&self, view: &ManageView, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let mut body: Vec<AnyElement> = vec![
+            div()
+                .text_size(rems(0.75))
+                .text_color(rgb(p.text_muted))
+                .child(view.title.clone())
+                .into_any_element(),
+        ];
+        body.push(self.manage_address_field(view, cx));
+        if let Some(err) = self.card_error_line() {
+            body.push(err);
+        }
+        let open = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_open(cx));
+        let forget = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_forget(cx));
+        let forget_label = if view.busy {
+            SharedString::from("a esquecer…")
+        } else {
+            SharedString::from(format!("esquecer {}", view.label))
+        };
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(Self::card_button("instance-manage-open", "abrir", true).on_click(open))
+                .child(
+                    Self::card_button("instance-manage-forget", forget_label, false)
+                        .on_click(forget),
+                )
+                .into_any_element(),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(body)
+            .into_any_element()
+    }
+
+    /// The new-address field and its button. Clipped at its border the way
+    /// the pairing field is: a tunnel URL is longer than the card is wide.
+    fn manage_address_field(&self, view: &ManageView, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let field = &view.address;
+        let (before, selected, after) = field.render_spans();
+        let repoint = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.manage_repoint(cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(p.text_faint))
+                    .child(SharedString::from(
+                        "mudou de endereço? cola o novo (sem código)",
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(p.panel))
+                    .border_1()
+                    .border_color(rgb(p.accent))
+                    .text_size(rems(0.8125))
+                    .text_color(rgb(if field.is_empty() {
+                        p.text_faint
+                    } else {
+                        p.text
+                    }))
+                    .child(SharedString::from(before.to_string()))
+                    .when(!selected.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .bg(rgb(p.selection))
+                                .child(SharedString::from(selected.to_string())),
+                        )
+                    })
+                    .child(div().flex_none().w(px(1.5)).h(rems(1.0)).bg(rgb(p.accent)))
+                    .child(SharedString::from(after.to_string()))
+                    .when(field.is_empty(), |d| {
+                        d.child(SharedString::from("https://….trycloudflare.com"))
+                    }),
+            )
+            .child(
+                div().flex().flex_row().child(
+                    Self::card_button(
+                        "instance-manage-repoint",
+                        if view.moving {
+                            "a confirmar…"
+                        } else {
+                            "mudar endereço"
+                        },
+                        false,
+                    )
+                    .when(view.moving, |d| d.opacity(0.6))
+                    .on_click(repoint),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn minting_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let mut body: Vec<AnyElement> = Vec::new();
+        match self.card_error_line() {
+            Some(err) => {
+                body.push(err);
+                let again = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_share(cx));
+                body.push(
+                    Self::card_button("instance-share-retry", "tentar outra vez", true)
+                        .on_click(again)
+                        .into_any_element(),
+                );
+            }
+            None => body.push(
+                div()
+                    .text_size(rems(0.75))
+                    .text_color(rgb(p.text_muted))
+                    .child(SharedString::from("a gerar o código…"))
+                    .into_any_element(),
+            ),
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(body)
+            .into_any_element()
+    }
+
+    /// The share card: the QR, the address, the code, and one copy for all.
+    fn share_body(&self, share: &ShareView, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let mut body: Vec<AnyElement> = Vec::new();
+        body.push(qr_element(share));
+        body.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(p.text_faint))
+                        .child(SharedString::from("endereço deste crab")),
+                )
+                .child(
+                    div()
+                        .text_size(rems(0.8125))
+                        .text_color(rgb(p.text))
+                        .child(SharedString::from(share.url.clone())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(rems(0.6875))
+                                .text_color(rgb(p.text_faint))
+                                .child(SharedString::from("código")),
+                        )
+                        .child(
+                            div()
+                                .text_size(rems(1.1))
+                                .text_color(rgb(p.accent))
+                                .child(SharedString::from(share.code.clone())),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(rems(0.6875))
+                        .text_color(rgb(p.text_faint))
+                        .child(SharedString::from(format!(
+                            "vale {} minutos e só serve uma vez",
+                            CODE_TTL_SECS / 60
+                        ))),
+                )
+                .into_any_element(),
+        );
+        if let Some(warning) = share.warning.clone() {
+            body.push(
+                div()
+                    .text_size(rems(0.75))
+                    .text_color(rgb(p.warn))
+                    .child(SharedString::from(warning))
+                    .into_any_element(),
+            );
+        }
+        // The block that opens this machine, printed whole so the owner
+        // pastes it instead of assembling keys from the warning (upstream
+        // 05cd8a6de). One line per key, in the card's own faint text.
+        if let Some(snippet) = share.snippet.clone() {
+            let copy_snippet = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                if let Some(StripCard::Share(share)) = this.card.as_ref()
+                    && let Some(snippet) = share.snippet.clone()
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(snippet));
+                }
+            });
+            body.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(p.panel))
+                    .border_1()
+                    .border_color(rgb(p.track))
+                    .children(snippet.lines().map(|line| {
+                        div()
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(p.text_muted))
+                            .child(SharedString::from(line.to_string()))
+                            .into_any_element()
+                    }))
+                    .child(
+                        div()
+                            .id("instance-share-copy-snippet")
+                            .text_size(rems(0.6875))
+                            .text_color(rgb(p.accent))
+                            .cursor_pointer()
+                            .on_click(copy_snippet)
+                            .child(SharedString::from("copiar o bloco")),
+                    )
+                    .into_any_element(),
+            );
+        }
+        body.push(self.tunnel_block(&share.tunnel, cx));
+        // One click, one paste, whole pairing: the link carries address, code
+        // and name together, and the far side's form fills all three from it.
+        let copy_all = cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+            if let Some(StripCard::Share(share)) = this.card.as_ref() {
+                cx.write_to_clipboard(ClipboardItem::new_string(share.link.clone()));
+            }
+        });
+        let fresh = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_share(cx));
+        let back = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_pair(cx));
+        body.push(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    Self::card_button("instance-share-copy-all", "copiar tudo", true)
+                        .on_click(copy_all),
+                )
+                .child(
+                    Self::card_button("instance-share-fresh", "novo código", false).on_click(fresh),
+                )
+                .child(
+                    Self::card_button("instance-share-pair", "emparelhar um crab", false)
+                        .on_click(back),
+                )
+                .into_any_element(),
+        );
+        body.push(Self::share_guide());
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .children(body)
+            .into_any_element()
+    }
+
+    /// The public tunnel, and the only way to get one from this window. It is
+    /// its own click because it publishes this crab on the internet; a
+    /// failure keeps the direct address on the card and says why.
+    fn tunnel_block(&self, state: &ShareTunnel, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette::current();
+        let open = cx.listener(|this, _ev: &ClickEvent, _window, cx| this.open_tunnel(cx));
+        let line = |text: String, color: u32| {
+            div()
+                .text_size(rems(0.6875))
+                .text_color(rgb(color))
+                .child(SharedString::from(text))
+        };
+        let block = div().flex().flex_col().gap_1();
+        let block = match state {
+            ShareTunnel::Idle => block
+                .child(line(
+                    "noutra rede (ou fora de casa) o endereço acima não chega lá".to_string(),
+                    p.text_faint,
+                ))
+                .child(
+                    Self::card_button("instance-share-tunnel", "abrir túnel público", false)
+                        .on_click(open),
+                ),
+            ShareTunnel::Starting => block.child(line(
+                "a abrir o túnel público… (o primeiro arranque descarrega o cloudflared)"
+                    .to_string(),
+                p.text,
+            )),
+            ShareTunnel::Up(_) => block
+                .child(line(
+                    "túnel público ativo: o link e o QR já usam este endereço".to_string(),
+                    p.green,
+                ))
+                .child(line(
+                    if self.owned_tunnel.is_some() {
+                        "fecha quando fechares este cartão ou a janela".to_string()
+                    } else {
+                        "já estava aberto por `opencrabs connect`; desliga-o com `opencrabs connect --stop`"
+                            .to_string()
+                    },
+                    p.text_faint,
+                )),
+            ShareTunnel::Failed(why) => block
+                .child(line(format!("túnel: {why}"), p.warn))
+                .child(
+                    Self::card_button("instance-share-tunnel-retry", "tentar outra vez", false)
+                        .on_click(open),
+                ),
+        };
+        block.into_any_element()
+    }
+
+    /// The three steps on the other crab, and the footnote. The instructions
+    /// are the point of the card: a code with no "what do I do with this" is a
+    /// number the owner has to reverse-engineer.
+    fn share_guide() -> AnyElement {
+        let p = palette::current();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(p.track))
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(p.text_faint))
+                    .child(SharedString::from("como ligar o outro crab")),
+            )
+            .children(share_steps().iter().enumerate().map(|(i, step)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(rems(0.75))
+                            .text_color(rgb(p.accent))
+                            .child(SharedString::from(format!("{}.", i + 1))),
+                    )
+                    .child(
+                        div()
+                            .text_size(rems(0.75))
+                            .text_color(rgb(p.text))
+                            .child(SharedString::from(*step)),
+                    )
+                    .into_any_element()
+            }))
+            .child(
+                div()
+                    .text_size(rems(0.6875))
+                    .text_color(rgb(p.text_faint))
+                    .child(SharedString::from(SHARE_FOOTNOTE)),
+            )
+            .into_any_element()
+    }
+}
+
+/// One QR module's side in pixels. 4 px over a 33-module code is 132 px: it
+/// fits the card and a phone camera still locks on.
+const QR_MODULE_PX: f32 = 4.0;
+
+/// The QR, white on black whatever the theme is: a scanner needs contrast,
+/// and dark modules on a dark card are a square no camera reads.
+fn qr_element(share: &ShareView) -> AnyElement {
+    if share.width == 0 {
+        let p = palette::current();
+        return div()
+            .text_size(rems(0.75))
+            .text_color(rgb(p.warn))
+            .child(SharedString::from(
+                "não consegui desenhar o QR: usa «copiar tudo»",
+            ))
+            .into_any_element();
+    }
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(share.width);
+    for y in 0..share.width {
+        let mut cells: Vec<AnyElement> = Vec::with_capacity(share.width);
+        for x in 0..share.width {
+            let dark = share.qr.get(y * share.width + x).copied().unwrap_or(false);
+            cells.push(
+                div()
+                    .w(px(QR_MODULE_PX))
+                    .h(px(QR_MODULE_PX))
+                    .bg(rgb(if dark { 0x000000 } else { 0xffffff }))
+                    .into_any_element(),
+            );
+        }
+        rows.push(div().flex().flex_row().children(cells).into_any_element());
+    }
+    div()
+        .flex()
+        .flex_row()
+        .justify_center()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(0xffffff))
+                .children(rows),
+        )
+        .into_any_element()
+}
+
+/// The pairing form's state. The three fields are real [`TextField`]s, so a
+/// typo can be fixed and a paste replaces a selection.
+///
+/// `Debug` is written by hand: the code field holds a single-use credential,
+/// and it prints as its length, never as itself.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct PairingForm {
+    pub(crate) url: TextField,
+    pub(crate) code: TextField,
+    pub(crate) label: TextField,
+    /// A submit is in flight; the button says so and refuses a second one.
+    pub(crate) busy: bool,
+    /// Which field the keyboard is in: 0 address, 1 code, 2 name.
+    pub(crate) field: usize,
+}
+
+impl std::fmt::Debug for PairingForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = format!("<{} chars>", self.code.text().chars().count());
+        f.debug_struct("PairingForm")
+            .field("url", &self.url.text())
+            .field("code", &code)
+            .field("label", &self.label.text())
+            .field("busy", &self.busy)
+            .field("field", &self.field)
+            .finish()
+    }
+}
+
+impl PairingForm {
+    /// The three fields, in the order Tab walks them.
+    pub(crate) fn fields(&self) -> [(&'static str, &TextField); 3] {
+        [
+            ("endereço do crab", &self.url),
+            ("código de emparelhamento", &self.code),
+            ("nome (opcional)", &self.label),
+        ]
+    }
+
+    /// The field the keyboard is in.
+    pub(crate) fn focused(&mut self) -> &mut TextField {
+        match self.field {
+            0 => &mut self.url,
+            1 => &mut self.code,
+            _ => &mut self.label,
+        }
+    }
+
+    /// Fill the form from a pairing link, which is what the other crab's card
+    /// copies and its QR carries. Returns whether the text was one.
+    pub(crate) fn absorb_link(&mut self, text: &str) -> bool {
+        let Some((url, code, label)) = parse_pair_link(text) else {
+            return false;
+        };
+        self.url.set_text(&url);
+        self.code.set_text(&code);
+        if let Some(label) = label {
+            self.label.set_text(&label);
+        }
+        self.field = 2;
+        true
+    }
+}
+
+/// The share card's model, built once when the code is minted. The code exists
+/// in plaintext only here and as a hash in the store, so the card is rebuilt
+/// for a new code rather than re-read.
+///
+/// `Debug` by hand, for the same reason as [`PairingForm`]: neither the code
+/// nor the link that carries it is ever printed.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ShareView {
+    /// The address another crab should dial.
+    pub(crate) url: String,
+    /// The single-use code.
+    pub(crate) code: String,
+    /// `opencrabs://pair?…`, which is what the QR carries.
+    pub(crate) link: String,
+    /// Row-major modules, `width` per side. Empty when the link did not fit.
+    pub(crate) qr: Vec<bool>,
+    pub(crate) width: usize,
+    /// Why this address will not work from another machine, when it will not.
+    pub(crate) warning: Option<String>,
+    /// The `[a2a]` block that makes this machine reachable, for the owner to
+    /// paste into `config.toml`. `None` when nothing is missing.
+    pub(crate) snippet: Option<String>,
+    /// The public tunnel, which only a click on the card ever opens.
+    pub(crate) tunnel: ShareTunnel,
+}
+
+impl std::fmt::Debug for ShareView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShareView")
+            .field("url", &self.url)
+            .field("code", &"<redacted>")
+            .field("link", &"<redacted>")
+            .field("width", &self.width)
+            .field("warning", &self.warning)
+            .field("snippet", &self.snippet)
+            .field("tunnel", &self.tunnel)
+            .finish()
+    }
+}
+
+impl ShareView {
+    pub(crate) fn new(
+        url: String,
+        code: String,
+        label: Option<&str>,
+        warning: Option<String>,
+    ) -> Self {
+        let link = pair_link(&url, &code, label);
+        let (qr, width) = qr_modules(&link);
+        Self {
+            url,
+            code,
+            link,
+            qr,
+            width,
+            warning,
+            snippet: None,
+            tunnel: ShareTunnel::Idle,
+        }
+    }
+
+    /// The card with the config block it should print under the warning.
+    pub(crate) fn with_snippet(mut self, snippet: Option<String>) -> Self {
+        self.snippet = snippet;
+        self
+    }
+}
+
+/// Mint a code and read the address to hand out. Runs off the UI thread.
+///
+/// Also hands back the gateway config it read, for the tunnel button: the
+/// click opens against it instead of reading the disk on the UI thread.
+fn mint_share() -> anyhow::Result<(ShareView, Option<A2aConfig>)> {
+    let scopes: Vec<String> = BASE_SCOPES.iter().map(|s| (*s).to_string()).collect();
+    let code = PairingStore::new(PairingStore::default_path()).mint_code(&scopes)?;
+    // A tunnel that is already running is the truth about how another crab
+    // reaches this one: its public URL beats the bind address it forwards.
+    let running = tunnel::status(&tunnel::default_state_dir()).ok().flatten();
+    let (url, warning, snippet, gateway) = match Config::load() {
+        Ok(config) => {
+            let (url, warning, snippet) = share_address(&config.a2a, running.as_ref());
+            (url, warning, snippet, Some(config.a2a))
+        }
+        Err(e) => (
+            format!("http://127.0.0.1:{}", A2aConfig::default().port),
+            Some(format!("não consegui ler a config: {e}")),
+            None,
+            None,
+        ),
+    };
+    let label = this_host_label();
+    let mut view = ShareView::new(url, code, label.as_deref(), warning).with_snippet(snippet);
+    // The card says a tunnel is up only when the address it hands out is
+    // that tunnel's, which is the case exactly when the config was read.
+    if gateway.is_some()
+        && let Some(state) = running
+    {
+        view.tunnel = ShareTunnel::Up(state.url);
+    }
+    Ok((view, gateway))
+}
+
+/// A public tunnel the card can hand out: its URL, and the guard that stops
+/// it when this window started it (`None` when it was already running).
+pub(crate) struct PublicTunnel {
+    pub(crate) url: String,
+    pub(crate) owned: Option<tunnel::OwnedTunnel>,
+}
+
+/// Open the public tunnel for the share card. Runs off the UI thread.
+///
+/// [`tunnel::open`] is the path `opencrabs connect` takes: the same gate on
+/// the gateway, the same reuse of a tunnel already up, the same single spawn
+/// of cloudflared. Only a tunnel this call started comes back owned.
+fn open_public_tunnel(a2a: &A2aConfig) -> Result<PublicTunnel, String> {
+    let spec = tunnel::TunnelSpec::on(a2a.port, &a2a.bind);
+    match tunnel::open(a2a, &spec) {
+        Ok(tunnel::Opened::Started(state)) => Ok(PublicTunnel {
+            owned: Some(tunnel::OwnedTunnel::adopt(&spec.state_dir, &state)),
+            url: state.url,
+        }),
+        Ok(tunnel::Opened::Reused(state)) => Ok(PublicTunnel {
+            url: state.url,
+            owned: None,
+        }),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+/// The public tunnel on the share card.
+///
+/// The bind address is the right answer for a machine on the same network
+/// (LAN or tailnet), and the wrong one for a machine somewhere else. `opencrabs
+/// connect` answers that with a cloudflared quick tunnel, so the card offers
+/// the same path behind its own button instead of sending the owner to edit
+/// TOML and restart the window.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ShareTunnel {
+    /// Nothing asked for: the card hands out the direct address.
+    Idle,
+    /// cloudflared is being resolved, downloaded or started.
+    Starting,
+    /// A quick tunnel is up, and the card hands out this URL.
+    Up(String),
+    /// The tunnel could not be opened; the direct address stays on the card.
+    Failed(String),
+}
+
+impl ShareTunnel {
+    /// The button was clicked. Returns whether a tunnel open should start:
+    /// from `Idle` and `Failed` (the retry) it moves to `Starting`; while
+    /// starting or up a click is a no-op, so a double click never opens two.
+    pub(crate) fn click(&mut self) -> bool {
+        match self {
+            ShareTunnel::Idle | ShareTunnel::Failed(_) => {
+                *self = ShareTunnel::Starting;
+                true
+            }
+            ShareTunnel::Starting | ShareTunnel::Up(_) => false,
+        }
+    }
+}
+
+/// Point the card at a public tunnel URL.
+///
+/// Everything downstream follows from the address: the link, the QR, and the
+/// two blocks that only existed because the direct address was unreachable.
+/// Clearing them here (rather than in the caller) keeps "túnel ativo" and
+/// "esta máquina só aceita ligações locais" off the screen at the same time.
+/// The code is untouched, so a code already read out loud stays valid.
+pub(crate) fn apply_tunnel(share: &mut ShareView, url: String, label: Option<&str>) {
+    share.tunnel = ShareTunnel::Up(url.clone());
+    share.url = url;
+    share.warning = None;
+    share.snippet = None;
+    share.link = pair_link(&share.url, &share.code, label);
+    let (qr, width) = qr_modules(&share.link);
+    share.qr = qr;
+    share.width = width;
+}
+
+/// The steps the card prints, in the order the other crab needs them.
+///
+/// Pure and fixed so a test can pin them: the card's value is the
+/// instruction, and an instruction that drifts from the flow the other crab
+/// actually has is worse than none. Each one names the control the owner
+/// presses on the far side: the rail's logo (#3178), the list's
+/// "emparelhar um crab" row, the pairing card's "emparelhar" button.
+pub(crate) fn share_steps() -> [&'static str; 3] {
+    [
+        "no outro crab (com [gui] instance_rail ligado): clica no logótipo no topo da barra lateral e escolhe «emparelhar um crab»",
+        "cola o link copiado: preenche o endereço, o código e o nome de uma vez",
+        "carrega em «emparelhar»: o crab novo aparece na lista e as sessões dele abrem",
+    ]
+}
+
+/// What the card says about which address to use and what it cannot do.
+///
+/// Direct first, like `opencrabs connect`: a LAN or tailnet address survives a
+/// restart, a quick tunnel's hostname does not. The tunnel is for machines on
+/// different networks. A restarted tunnel has a new hostname, and re-pointing
+/// the paired crab at it (the badge's card, checked by `host_id` in
+/// `instance_repoint`) costs no new code. The QR needs a client that
+/// reads codes; two desktops paste the link.
+pub(crate) const SHARE_FOOTNOTE: &str = "na mesma rede (LAN ou Tailscale) usa o endereço direto; o túnel público é para quando as máquinas estão em redes diferentes. o endereço de um túnel rápido muda sempre que ele reinicia: cola o novo no cartão do crab (botão direito na lista) e o host_id confirma que é o mesmo, sem novo código. entre dois PCs o caminho é o link colado; o QR serve um cliente que saiba ler códigos.";
+
+/// The address to hand out, why it may not work, and the config block that
+/// would make it work.
+///
+/// Pure on purpose (upstream `share_address`): a tunnel that is up is an
+/// address another machine can actually dial, and the bind address it
+/// forwards is not. The warning and the block exist only for the case where
+/// nothing is published, so a live tunnel clears both instead of leaving two
+/// stale paragraphs on the card.
+pub(crate) fn share_address(
+    a2a: &A2aConfig,
+    tunnel: Option<&tunnel::TunnelState>,
+) -> (String, Option<String>, Option<String>) {
+    if let Some(state) = tunnel {
+        return (state.url.clone(), None, None);
+    }
+    let (url, warning) = share_target(a2a);
+    (url, warning, share_config_snippet(a2a))
+}
+
+/// The `[a2a]` block this machine needs before another crab can reach it, as
+/// text the owner can paste into `config.toml`.
+///
+/// A warning that names two keys still leaves the owner to assemble them in
+/// the right section with the right quotes, and a typo there is a window that
+/// will not start. What is missing is filled in with this machine's real
+/// address, what is already right is left alone, and a machine that needs
+/// nothing gets `None`.
+pub(crate) fn share_config_snippet(a2a: &A2aConfig) -> Option<String> {
+    let host = lan_ip().unwrap_or_else(|| "o-ip-desta-maquina".to_string());
+    let loopback = matches!(a2a.bind.as_str(), "127.0.0.1" | "localhost" | "::1");
+    let no_key = a2a
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty();
+    if a2a.enabled && !loopback && !no_key {
+        return None;
+    }
+    let mut lines = vec!["[a2a]".to_string()];
+    if !a2a.enabled {
+        lines.push("enabled = true".to_string());
+    }
+    if loopback {
+        lines.push("bind = \"0.0.0.0\"".to_string());
+    }
+    if a2a
+        .advertise_url
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        lines.push(format!("advertise_url = \"http://{host}:{}\"", a2a.port));
+    }
+    if no_key {
+        lines.push("api_key = \"<uma-chave-longa-que-so-tu-sabes>\"".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
+/// Exchange the code, store the token, and read the store back. Runs off the
+/// UI thread; the token never leaves this function except into the store.
+fn pair_and_store(url: &str, code: &str, label: &str) -> anyhow::Result<(String, InstanceFile)> {
+    let paired = instance_client::block_on(instance_store::pair(url, code, label))?;
+    let store = InstanceStore::new(InstanceStore::default_path());
+    // A crab paired again keeps the mark its owner chose for it.
+    let glyph = store.find(&paired.host_id)?.and_then(|known| known.glyph);
+    store.upsert(KnownInstance {
+        host_id: paired.host_id.clone(),
+        label: paired.label,
+        url: paired.url,
+        token: paired.token,
+        added_at: now(),
+        last_ok: 0,
+        glyph,
+        routes: paired.routes,
+    })?;
+    Ok((paired.host_id, store.load()?))
+}
+
+/// The address to hand out, and the reason it may be useless.
+///
+/// `advertise_url` wins because it is the owner's explicit answer to "how do I
+/// reach this box". Without it the bind decides: a loopback gateway cannot be
+/// reached from anywhere else, and handing out a code while the listener is on
+/// 127.0.0.1 is a pairing that could never have worked.
+pub(crate) fn share_target(a2a: &A2aConfig) -> (String, Option<String>) {
+    if !a2a.enabled {
+        return (
+            format!("http://127.0.0.1:{}", a2a.port),
+            Some(
+                "o gateway A2A está desligado nesta máquina: põe [a2a] enabled = true e volta a abrir a janela."
+                    .to_string(),
+            ),
+        );
+    }
+    if let Some(url) = a2a
+        .advertise_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        return (url.trim_end_matches('/').to_string(), None);
+    }
+    if matches!(a2a.bind.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        return (
+            format!("http://127.0.0.1:{}", a2a.port),
+            Some(format!(
+                "esta máquina só aceita ligações locais, por isso outro crab não chega aqui. Para abrir à rede: [a2a] bind = \"0.0.0.0\" e advertise_url = \"http://{}:{}\", depois fecha e reabre a janela.",
+                lan_ip().unwrap_or_else(|| "o-ip-desta-máquina".to_string()),
+                a2a.port
+            )),
+        );
+    }
+    let host = lan_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+    let no_key = a2a
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty();
+    let warning = no_key.then(|| {
+        "sem api_key, qualquer crab na tua rede pode chamar /a2a/v1. Põe uma em [a2a] api_key."
+            .to_string()
+    });
+    (format!("http://{host}:{}", a2a.port), warning)
+}
+
+/// This machine's address on the LAN. A UDP socket that never sends a packet:
+/// `connect` only picks the route, and the local address it reports is the
+/// interface the kernel would use.
+fn lan_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+/// What this crab calls itself in the link. `None` leaves the name to the far
+/// side, which then uses this crab's agent-card name.
+fn this_host_label() -> Option<String> {
+    ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|h| h.trim().to_string())
+        .find(|h| !h.is_empty())
+}
+
+/// The link as QR modules, row-major, and the side length. A link that does
+/// not fit comes back empty rather than as a half-drawn square.
+pub(crate) fn qr_modules(link: &str) -> (Vec<bool>, usize) {
+    match qrcode::QrCode::new(link.as_bytes()) {
+        Ok(code) => {
+            let width = code.width();
+            let dark = code
+                .to_colors()
+                .into_iter()
+                .map(|color| color == qrcode::Color::Dark)
+                .collect();
+            (dark, width)
+        }
+        Err(_) => (Vec::new(), 0),
+    }
+}
+
+/// `opencrabs://pair?url=…&code=…&label=…`, the link the share card copies and
+/// its QR carries. [`parse_pair_link`] is its inverse.
+pub(crate) fn pair_link(url: &str, code: &str, label: Option<&str>) -> String {
+    let mut link = format!(
+        "opencrabs://pair?url={}&code={}",
+        percent_encode(url),
+        percent_encode(code)
+    );
+    if let Some(label) = label.filter(|l| !l.is_empty()) {
+        link.push_str("&label=");
+        link.push_str(&percent_encode(label));
+    }
+    link
+}
+
+/// Read a pairing link back into `(url, code, label)`.
+pub(crate) fn parse_pair_link(text: &str) -> Option<(String, String, Option<String>)> {
+    let rest = text.trim().strip_prefix("opencrabs://pair?")?;
+    let mut url = None;
+    let mut code = None;
+    let mut label = None;
+    for pair in rest.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        let value = percent_decode(value);
+        match key {
+            "url" => url = Some(value),
+            "code" => code = Some(value),
+            "label" => label = Some(value),
+            _ => {}
+        }
+    }
+    Some((url?, code?, label.filter(|l| !l.is_empty())))
+}
+
+/// Percent-encode everything outside the unreserved set.
+pub(crate) fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Percent-decode a query value, byte by byte, without slicing the string.
+fn percent_decode(value: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        char::from(byte)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    }
+    let bytes: Vec<u8> = value.bytes().collect();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&byte) = bytes.get(i) {
+        let escaped = if byte == b'%' {
+            let hi = bytes.get(i + 1).copied().and_then(hex);
+            let lo = bytes.get(i + 2).copied().and_then(hex);
+            hi.zip(lo)
+        } else {
+            None
+        };
+        match (byte, escaped) {
+            (_, Some((hi, lo))) => {
+                out.push(hi * 16 + lo);
+                i += 3;
+            }
+            (b'+', None) => {
+                out.push(b' ');
+                i += 1;
+            }
+            (other, None) => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Drop one crab from the store and read the store back, the pair a forget
+/// hands the window. A host that was already gone is not an error: the strip
+/// still reloads, so a stale badge left by another window disappears too.
+fn forget_instance(host_id: &str) -> anyhow::Result<InstanceFile> {
+    let store = InstanceStore::new(InstanceStore::default_path());
+    store.remove(host_id)?;
+    store.load()
+}
+
+/// Move one crab to the address the owner pasted, and hand back its row as it
+/// now reads. Runs off the UI thread. The check is
+/// [`instance_repoint::repoint_to`]'s: the address must answer this crab's
+/// own token and announce its host id, or nothing is written.
+fn repoint_instance(host_id: &str, address: &str) -> anyhow::Result<KnownInstance> {
+    let store = InstanceStore::new(InstanceStore::default_path());
+    instance_client::block_on(instance_repoint::repoint_to(&store, host_id, address))
+}
 /// The hue a badge's colour slot wears in the live palette.
 ///
 /// The slots are palette colours rather than computed hues, so every crab's
@@ -402,14 +2074,14 @@ fn tint_hue(slot: usize, p: &palette::Palette) -> u32 {
 /// tabs pick from (`topic:`/`img:` names). Resolving it here, instead of
 /// storing two kinds of value, keeps one field in the store and one column on
 /// screen: a crab's icon and a topic's icon are the same pick (#3133).
-fn mark(badge: &StripBadge, text: u32, selected: bool) -> AnyElement {
-    if let Some(picture) = crate::topic_icons::tab_icon(&badge.label, BADGE_REM * 0.62) {
+fn mark(badge: &StripBadge, text: u32, selected: bool, box_rem: f32) -> AnyElement {
+    if let Some(picture) = crate::topic_icons::tab_icon(&badge.glyph, box_rem * 0.62) {
         return picture;
     }
     div()
-        .text_size(rems(0.6875))
+        .text_size(rems(box_rem * 0.34))
         .when(selected, |d| d.font_weight(gpui::FontWeight::BOLD))
         .text_color(rgb(text))
-        .child(badge.label.clone())
+        .child(badge.glyph.clone())
         .into_any_element()
 }

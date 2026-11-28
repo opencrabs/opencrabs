@@ -71,6 +71,7 @@
 //! | [`services`] | Session, message, and file services |
 
 pub mod app;
+pub mod backend;
 pub mod brain;
 pub mod cli;
 pub mod config;

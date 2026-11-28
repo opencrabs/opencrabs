@@ -1,0 +1,35 @@
+{
+  "op": "transcript.load_recent",
+  "scope": "read",
+  "request": {
+    "session_id": "00000000-0000-0000-0000-00005e551000"
+  },
+  "response": {
+    "Ok": {
+      "rows": [
+        {
+          "id": "00000000-0000-0000-0000-00000000a001",
+          "session_id": "00000000-0000-0000-0000-00005e551000",
+          "role": "user",
+          "content": "hello",
+          "sequence": 1,
+          "created_at": "2026-11-18T11:06:41Z",
+          "token_count": null,
+          "cost": null,
+          "input_tokens": null,
+          "cache_creation_tokens": null,
+          "cache_read_tokens": null,
+          "thinking": null,
+          "duration_secs": null,
+          "ctx_window": null,
+          "tokens_per_sec": null,
+          "tool_calls": null,
+          "continuation": false,
+          "forward": null
+        }
+      ],
+      "total": 1,
+      "origins": {}
+    }
+  }
+}
