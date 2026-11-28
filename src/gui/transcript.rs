@@ -759,7 +759,7 @@ impl LiveTurn {
             let held = self
                 .stream
                 .rfind("<!--")
-                .filter(|at| self.stream.rfind("-->").map_or(true, |close| close < at));
+                .filter(|at| self.stream.rfind("-->").is_none_or(|close| close < *at));
             let (strippable, pending) = match held {
                 // `get` over byte offsets: a cut that cannot land
                 // mid-character leaves the buffer alone (byte-slice ratchet).
