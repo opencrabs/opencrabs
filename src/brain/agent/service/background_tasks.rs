@@ -1109,11 +1109,12 @@ pub(crate) fn transcript_line(record: &str) -> Option<String> {
 /// else, or reached through a symlink, is skipped, and the match must be a
 /// regular file. Otherwise anyone could plant a `claude-x` tree whose
 /// "output" is a link to a file only we can read, or a pipe that never ends.
+#[cfg(test)]
 pub fn claude_task_output(temp: &std::path::Path, id: &str) -> Option<PathBuf> {
     claude_task_output_in(temp, None, id)
 }
 
-/// [`claude_task_output`], plus the sub-agent case.
+/// The lookup `claude_task_output` documents, plus the sub-agent case.
 ///
 /// For a task the `Agent` tool spawned, the CLI's `tasks/<id>.output` is not
 /// a file but a link to the sub-agent's transcript,
