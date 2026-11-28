@@ -769,8 +769,8 @@ impl LiveTurn {
                 },
                 None => (self.stream.as_str(), None),
             };
-            let clean = opencrabs::utils::sanitize::strip_phantom_blocked(
-                &opencrabs::utils::sanitize::strip_comment_markers(strippable),
+            let clean = opencrabs::utils::sanitize::strip_comment_markers(
+                &opencrabs::utils::sanitize::strip_phantom_blocked(strippable),
             );
             match pending {
                 Some(pending) => self.stream = format!("{clean}{pending}"),
