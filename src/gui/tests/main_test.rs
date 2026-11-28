@@ -4164,9 +4164,15 @@ fn a_streamed_spoken_block_is_painted_nowhere_on_the_live_card() {
     for cut in 0..=FULL.len() {
         let mut live = LiveTurn::default();
         live.begin("ship it".into());
-        live.note_chunk_at(FULL.get(..cut).unwrap_or_default(), std::time::Instant::now());
+        live.note_chunk_at(
+            FULL.get(..cut).unwrap_or_default(),
+            std::time::Instant::now(),
+        );
 
-        let pending = live.pending().map(|text| text.into_owned()).unwrap_or_default();
+        let pending = live
+            .pending()
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
         assert!(
             !pending.contains("<<") && !pending.contains("SPOKEN"),
             "the pending line leaked the block at cut {cut}: {pending:?}"
@@ -4200,7 +4206,10 @@ fn a_streamed_spoken_block_is_painted_nowhere_on_the_live_card() {
     live.push_narration("Shipped it.\n<<SPOKEN:Shipped it.>>");
     for (_, line) in live_card_lines(&live) {
         if let LiveCardLine::Narration(text) = line {
-            assert!(!text.contains("SPOKEN"), "narration leaked the block: {text:?}");
+            assert!(
+                !text.contains("SPOKEN"),
+                "narration leaked the block: {text:?}"
+            );
         }
     }
 }
