@@ -9,6 +9,7 @@
 //! - **Exa** (free MCP endpoint or direct API with `EXA_API_KEY`)
 //! - **Brave** (requires `BRAVE_API_KEY`, registered only when configured)
 //! - **Serper** (Google SERP, requires configured key, #1731)
+//! - **Keenable** (optional, keyless public endpoint or keyed API, #2939)
 //!
 //! DDG captcha detection (HTTP 202 + structural form heuristic) silently
 //! drops DDG from the result pool instead of surfacing an error.
@@ -16,6 +17,7 @@
 use super::brave_search::BraveSearchTool;
 use super::error::{Result, ToolError};
 use super::exa_search::ExaSearchTool;
+use super::keenable_search::KeenableSearchTool;
 use super::serper_search::SerperSearchTool;
 use super::r#trait::{Tool, ToolCapability, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
@@ -23,13 +25,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Unified web search tool. Fans out to DDG + Exa (+ Brave, + Serper when
-/// configured) in parallel and merges results.
+/// Unified web search tool. Fans out to DDG + Exa (+ Brave, + Serper,
+/// + Keenable when configured) in parallel and merges results.
 #[derive(Default)]
 pub struct WebSearchTool {
     exa: Option<Arc<ExaSearchTool>>,
     brave: Option<Arc<BraveSearchTool>>,
     serper: Option<Arc<SerperSearchTool>>,
+    keenable: Option<Arc<KeenableSearchTool>>,
+    /// Test seam so fan-out tests can mock DuckDuckGo Lite without a network call.
+    #[cfg(test)]
+    ddg_base_url: Option<String>,
 }
 
 impl WebSearchTool {
@@ -39,16 +45,27 @@ impl WebSearchTool {
         exa: Option<Arc<ExaSearchTool>>,
         brave: Option<Arc<BraveSearchTool>>,
         serper: Option<Arc<SerperSearchTool>>,
+        keenable: Option<Arc<KeenableSearchTool>>,
     ) -> Self {
-        Self { exa, brave, serper }
+        Self {
+            exa,
+            brave,
+            serper,
+            keenable,
+            #[cfg(test)]
+            ddg_base_url: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_ddg_base_url(mut self, url: impl Into<String>) -> Self {
+        self.ddg_base_url = Some(url.into());
+        self
     }
 
     /// DuckDuckGo search (extracted for parallel fan-out).
     async fn search_ddg(&self, query: &str, max_results: usize) -> Result<ToolResult> {
-        let url = format!(
-            "https://lite.duckduckgo.com/lite/?q={}",
-            urlencoding::encode(query)
-        );
+        let url = ddg_url(self, query);
 
         let mut last_err = String::new();
         for (attempt, ua) in DDG_USER_AGENTS.iter().enumerate() {
@@ -119,6 +136,17 @@ impl WebSearchTool {
     }
 }
 
+fn ddg_url(tool: &WebSearchTool, query: &str) -> String {
+    let encoded = urlencoding::encode(query);
+    #[cfg(test)]
+    if let Some(base) = &tool.ddg_base_url {
+        return format!("{}/lite/?q={encoded}", base.trim_end_matches('/'));
+    }
+    #[cfg(not(test))]
+    let _ = tool;
+    format!("https://lite.duckduckgo.com/lite/?q={encoded}")
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct SearchInput {
     /// Search query
@@ -148,7 +176,7 @@ impl Tool for WebSearchTool {
 
     fn description(&self) -> &str {
         "Search the internet for real-time information. Fans out to \
-         DuckDuckGo, Exa, Brave, and Serper (Google, when configured) in \
+         DuckDuckGo, Exa, Brave, Serper (Google, when configured), and Keenable in \
          parallel and returns merged, deduplicated results. \
          \n\nDEFAULT web-research tool — use this for any \"find me info \
          about X\" / \"what's the latest Y\" / \"check the docs for Z\" \
@@ -209,7 +237,11 @@ impl Tool for WebSearchTool {
 
         // No extra engines configured: DDG-only (backward compat with
         // tool_setup.rs registration before config is loaded).
-        if self.exa.is_none() && self.brave.is_none() && self.serper.is_none() {
+        if self.exa.is_none()
+            && self.brave.is_none()
+            && self.serper.is_none()
+            && self.keenable.is_none()
+        {
             return self.search_ddg(&parsed.query, parsed.max_results).await;
         }
 
@@ -242,8 +274,16 @@ impl Tool for WebSearchTool {
             }
         };
 
-        let (ddg_res, exa_res, brave_res, serper_res) =
-            tokio::join!(ddg_fut, exa_fut, brave_fut, serper_fut);
+        let keenable_input = input.clone();
+        let keenable_fut = async {
+            match &self.keenable {
+                Some(keenable) => Some(keenable.execute(keenable_input, context).await),
+                None => None,
+            }
+        };
+
+        let (ddg_res, exa_res, brave_res, serper_res, keenable_res) =
+            tokio::join!(ddg_fut, exa_fut, brave_fut, serper_fut, keenable_fut);
 
         // Collect successful outputs. DDG errors (captcha, rate limit)
         // are silently dropped; the other engines fill the gap.
@@ -272,6 +312,12 @@ impl Tool for WebSearchTool {
         }
 
         if let Some(Ok(r)) = serper_res
+            && r.success
+        {
+            sections.push(r.output);
+        }
+
+        if let Some(Ok(r)) = keenable_res
             && r.success
         {
             sections.push(r.output);

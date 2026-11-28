@@ -132,6 +132,7 @@ pub mod brain_tools_expand_tilde_test;
 pub mod brain_tools_fuzzy_test;
 pub mod brain_tools_hashline_hash_test;
 pub mod brain_tools_hashline_types_test;
+pub mod brain_tools_keenable_search_test;
 pub mod brain_tools_load_brain_file_tests;
 pub mod brain_tools_memory_search_test;
 pub mod brain_tools_profile_list_test;
