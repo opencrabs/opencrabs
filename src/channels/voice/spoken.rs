@@ -237,6 +237,11 @@ fn join_block(head: &str, tail: &str) -> String {
         // Nothing came before the block, so there is no paragraph to rejoin and
         // no space of its own to keep.
         tail.trim_start().to_string()
+    } else if tail.is_empty() {
+        // The block ended the reply, so the answer ends where the block began.
+        // The blank lines that separated the two are not part of the answer, and
+        // a card that kept them drew a hole under its last line.
+        head.trim_end().to_string()
     } else if head.ends_with('\n') || tail.starts_with('\n') {
         format!("{head}\n{tail}")
     } else {
