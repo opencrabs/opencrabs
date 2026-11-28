@@ -320,6 +320,10 @@ impl Drop for ClaudeMirrorExitGuard<'_> {
                 self.session_id,
             );
         }
+        // #3219: whatever a tool of this process detached outlives it with
+        // nobody watching. Adopt it, so it gets a row and its end is
+        // delivered, instead of the user finding out by asking.
+        super::detached_watch::adopt_after_exit(mgr, self.session_id);
     }
 }
 
