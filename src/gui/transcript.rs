@@ -739,11 +739,47 @@ impl LiveTurn {
         // marker arrives split across chunks, and a per-chunk pass would leave
         // a half of it behind on either side. The same pass drops the
         // `<!-- phantom_blocked=1 -->` iterations the service discarded.
-        let clean = opencrabs::utils::sanitize::strip_phantom_blocked(
-            &opencrabs::utils::sanitize::strip_comment_markers(&self.stream),
-        );
-        if clean != self.stream {
-            self.stream = clean;
+        //
+        // Three streaming rules keep the pass honest with the buffer it
+        // replaces (CI 46098029217, transcript tests):
+        // 1. The pass only runs when a `<!--` is in the buffer. The strip
+        //    trims, and a plain chunk like " Done." would get that trim
+        //    rubbed onto the answer through the replace below.
+        // 2. phantom_blocked runs BEFORE the comment sweep: the sweep eats
+        //    the marker lines themselves, and the blocked-section walk would
+        //    then find no markers and keep the discarded body.
+        // 3. A trailing unclosed `<!--` is held back verbatim. The sweep
+        //    strips an unclosed comment to the end of the buffer, so a
+        //    ledger split across chunks would lose its head on this chunk
+        //    and leak its tail on the next one. Held back, it completes on
+        //    a later chunk and strips whole.
+        if self.stream.contains("<!--") {
+            // The last `<!--` with no `-->` after it is an unclosed trailing
+            // comment: held back, never sliced.
+            let held = self
+                .stream
+                .rfind("<!--")
+                .filter(|at| self.stream.rfind("-->").map_or(true, |close| close < at));
+            let (strippable, pending) = match held {
+                // `get` over byte offsets: a cut that cannot land
+                // mid-character leaves the buffer alone (byte-slice ratchet).
+                Some(at) => match (self.stream.get(..at), self.stream.get(at..)) {
+                    (Some(head), Some(tail)) => (head, Some(tail)),
+                    _ => (self.stream.as_str(), None),
+                },
+                None => (self.stream.as_str(), None),
+            };
+            let clean = opencrabs::utils::sanitize::strip_phantom_blocked(
+                &opencrabs::utils::sanitize::strip_comment_markers(strippable),
+            );
+            match pending {
+                Some(pending) => self.stream = format!("{clean}{pending}"),
+                None => {
+                    if clean != self.stream {
+                        self.stream = clean;
+                    }
+                }
+            }
         }
         // The provider reports the same narration twice: once as intermediate
         // text and once as streamed chunks. `push_narration` drains the
